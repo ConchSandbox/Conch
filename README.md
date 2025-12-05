@@ -1,37 +1,42 @@
 # Conch
 
-#### 介绍
-Conch, a container infrastructure designed for agent-based services, centered around new ecosystems, new images, new semantics, and supernodes
+## 介绍
 
-#### 软件架构
-软件架构说明
+Conch是面向人工智能时代的沙箱引擎，Docker（集装箱）装载和分发货物，Conch（海螺）装载和分发智能体。
+Conch围绕AI时代出现的AI推理、Agent应用等新业务，超节点、新总线、异构算力等新硬件构建更加高弹性、高性价比和高性能的容器底座。
+
+## 软件架构
+
+北向支持对接云原生平台（K8S）、AI原生平台和极简单机部署模式。
+
+南向支持Rack级资源共享，构建容器镜像懒加载、原生快照镜像、共享内存文件系统等特性实现高弹性和高密部署。
+
+## 安装使用
+
+使用yum安装：
+```shell
+yum install conch-0.1.xx.rpm
+```
+
+构建快照镜像：
+```shell
+conch build Dockerfile -t agent-sandbox-template:v1
+```
+
+从快照启动沙箱：
+```shell
+conch restore agent-sandbox-template:v1
+```
 
 
-#### 安装教程
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 使用说明
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 参与贡献
+## 参与贡献
 
 1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
+2.  新建特性分支
 3.  提交代码
-4.  新建 Pull Request
+4.  发起 Pull Request
 
 
-#### 特技
+## 许可证
 
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+木兰宽松许可证， 第2版
