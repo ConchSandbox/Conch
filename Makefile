@@ -14,6 +14,9 @@ GOMOD := $(GOCMD) mod
 # binary output directory
 BIN_DIR := bin
 
+# conch-agent config
+CONCH_AGENT_PROTO_DIR := ./cmd/conch-agent/pb
+
 # get all cmd directory subdirectories as binary names
 CMDS := $(shell find cmd -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
 
@@ -23,6 +26,9 @@ help:
 
 build:
 	@echo "building all binaries..."
+	@go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	@cd $(CONCH_AGENT_PROTO_DIR) && protoc --go_out=. --go-grpc_out=require_unimplemented_servers=false:. *.proto; 
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
 		echo "building cmd/$$cmd..."; \
