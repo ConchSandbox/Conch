@@ -36,4 +36,5 @@ build/
 # Logs
 *.log
 
-
+# Protobuf
+*.pb.go
