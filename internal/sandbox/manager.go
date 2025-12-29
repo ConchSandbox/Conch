@@ -3,17 +3,17 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"conch/internal/sandbox/network"
-	"conch/internal/snapshot"
+	"conch/core/sandbox/network"
+	"conch/core/snapshot"
 )
 
 const (
 	requestTimeout = 60 * time.Second
+	defaultNamespace = "default"
 )
 
 type Manager struct {
@@ -55,8 +55,8 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	defer cancel()
 
 	var sbx *Sandbox
-	var slotKey string
-	var namespace = "default"
+	var peerIP string
+	var namespace = defaultNamespace
 	if req.SnapshotId != "" {
 		// debug
 		fmt.Println("Creating sandbox by snapshotId...")
@@ -82,7 +82,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			}
 		}()
 
-		sbx, slotKey, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath,req.DiskPath, m.pool)
+		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath,req.DiskPath, m.pool)
 		if err != nil {
 			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}
@@ -90,15 +90,10 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 		// debug
 		fmt.Printf("Creating sandbox by ImageId %s\n", req.ImageId)
 		var key = req.SandboxId
-		// TODO: Image to Snapshot
+		// Temp: ImageId is SnapshotId now
+		// TODO: replace with image.GetSnapshot
 		// parent, err := image.GetSnapshot(imageId)
 		var parent = req.ImageId
-		// var parent = "sha256:9864188ae7e73d7d0e5e4f52441721380a1564c262a0fbf5795a594c281bf737"
-		// var parent = "sha256:40ceed822137bb5130aa99f5bf8162633206a588573bebd64b2e1d14fcdd77de" // sh image
-		// var parent = "sha256:6a58dd84acaf6438346ea907a1131f15e8d085e576f6203415e43d067cf174a3" // systemd ubuntu
-
-		// TODO: delete this code "Remove" when failed clean code ready
-		snapshot.Remove(context.Background(), namespace, key)
 
 		snapshotConf, err := snapshot.Prepare(context.Background(), namespace, key, parent,
 			func(info *snapshot.SnapshotConfig) error {
@@ -119,11 +114,13 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			}
 		}()
 
-		sbx, slotKey, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath, req.DiskPath, m.pool)
+		sbx, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath, req.DiskPath, m.pool)
 		if err != nil {
 			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}
 	}
+
+    peerIP = sbx.slot.VpeerIPString()
 
 	m.sandboxes.Store(req.SandboxId, sbx)
 	go func() {
@@ -147,7 +144,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	//debug
 	fmt.Println("Created sandbox in manager...")
 
-	return slotKey, nil
+	return peerIP, nil
 }
 
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
@@ -170,7 +167,7 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 		if err != nil {
 			fmt.Printf("sandbox %s stop error: %v\n", req.SandboxId, err)
 		}
-		var namespace = "default"
+		var namespace = defaultNamespace
 		err = snapshot.Remove(context.Background(), namespace, req.SandboxId)
 		if err != nil {
 			fmt.Printf("sandbox %s Remove error: %v\n", req.SandboxId, err)
@@ -202,7 +199,7 @@ func (m *Manager) Pause(req SandboxPauseRequest) error {
 		if err := sbx.Close(ctx); err != nil {
 			fmt.Printf("sandbox %s close error after pause: %v\n", req.SandboxId, err)
 		}
-		var namespace = "default"
+		var namespace = defaultNamespace
 		if err := snapshot.Remove(context.Background(), namespace, req.SandboxId); err != nil {
 			fmt.Printf("sandbox %s Remove error after pause: %v\n", req.SandboxId, err)
 		}
@@ -218,38 +215,10 @@ func (m *Manager) Pause(req SandboxPauseRequest) error {
 	// pause create need new name
 	var name = req.SnapshotId
 	var key = req.SandboxId
-	var namespace = "default"
+	var namespace = defaultNamespace
 	err := snapshot.Commit(context.Background(), namespace, name, key)
 	if err != nil {
 		return fmt.Errorf("error adding snapshot %s : %v", req.SandboxId, err)
 	}
 	return nil
-}
-
-func (m *Manager) RunCode(code string) map[string]interface{} {
-	fmt.Println("Starting virtual machine...")
-	time.Sleep(100 * time.Millisecond)
-
-	fmt.Printf("Executing code: %s\n", code)
-
-	logs := executeCode(code)
-
-	fmt.Println("Destroying virtual machine...")
-	time.Sleep(50 * time.Millisecond)
-
-	return map[string]interface{}{
-		"logs": logs,
-	}
-}
-
-func executeCode(code string) string {
-	if strings.Contains(code, "print(") {
-		contentStart := strings.Index(code, "('") + 2
-		contentEnd := strings.Index(code, "')")
-		if contentEnd > contentStart {
-			content := code[contentStart:contentEnd]
-			return fmt.Sprintf("From Sandbox: %s", content)
-		}
-	}
-	return "Code executed successfully (simulated)"
 }

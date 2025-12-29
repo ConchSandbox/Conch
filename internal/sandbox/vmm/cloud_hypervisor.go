@@ -29,14 +29,13 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --seccomp false`
 
 // -vv use for printing log when test
-// 当前vm生命周期和conch绑定，conch退出导致vm进程退出，后续需要detache
+// Current VM lifecycle is bound to Conch; Conch exit causes VM process termination. Detachment needed for follow-up.
 
 const resumeScriptCLH = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} --api-socket \
 {{ .VmmSocket }} \
 -vv \
 --seccomp false`
-
 
 type StartScriptCLHArgs struct {
 	VmmBinaryPath string
@@ -91,9 +90,6 @@ func buildRequest(method, fullCommand, requestBody string) string {
 }
 
 func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, rootfsSock, kernelPath string, diskPath string, isResume bool) (string, error) {
-	// TODO:
-	// test defaultCLHArgs for now, other options should be implemented later
-
 	clhArgs := StartScriptCLHArgs{
 		VmmBinaryPath: defaultVmmBinary,
 		CPUBoot:       args.CPUBoot,

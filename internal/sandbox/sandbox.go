@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"conch/internal/sandbox/network"
-	"conch/internal/sandbox/vmm"
-	"conch/internal/snapshot"
+	"conch/core/sandbox/network"
+	"conch/core/sandbox/vmm"
+	"conch/core/snapshot"
 )
 
 type Execution struct {
@@ -19,6 +19,7 @@ type Sandbox struct {
 	process      *vmm.Process
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
+	slot         *network.Slot
 }
 
 func ResumeSandbox(
@@ -26,7 +27,7 @@ func ResumeSandbox(
 	snapshotConf *snapshot.SnapshotConfig,
 	vmmName, sandboxId, kernelPath string,
 	DiskPath string, pool *network.Pool,
-) (s *Sandbox, slotKey string, e error) {
+) (s *Sandbox, e error) {
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
@@ -35,15 +36,12 @@ func ResumeSandbox(
 		}
 	}()
 
-	//TODO: network
-	// 1. network.Get to init network
-	// 2. cleanup.Add network.Return to clean net source when sandbox del
 	slot, err := pool.Get(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to init network")
+		return nil, fmt.Errorf("failed to init network")
 	}
+
 	fmt.Printf("get slot %s\n", slot.Key)
-	slotKey = slot.Key
 
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
@@ -68,19 +66,20 @@ func ResumeSandbox(
 		memSize, true,
 	)
 	if vmmErr != nil {
-		return nil, "", fmt.Errorf("failed to init VMM: %w", vmmErr)
+		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
 	snapfilePath := snapshotConf.FullRootDir()
 	err = vmmHandle.Resume(ctx, snapfilePath)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create VMM: %w", err)
+		return nil, fmt.Errorf("failed to create VMM: %w", err)
 	}
 
 	sbx := &Sandbox{
 		snapshotConf: snapshotConf,
 		process:      vmmHandle,
 		cleanup:      cleanup,
+		slot:         slot,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -96,7 +95,7 @@ func ResumeSandbox(
 		return sbx.Stop(ctx)
 	})
 
-	return sbx, slotKey, nil
+	return sbx, nil
 }
 
 func CreateSandbox(
@@ -104,7 +103,7 @@ func CreateSandbox(
 	snapshotConf *snapshot.SnapshotConfig,
 	vmmName, sandboxId, kernelPath string,
 	DiskPath string, pool *network.Pool,
-) (s *Sandbox, slotKey string, e error) {
+) (s *Sandbox, e error) {
 	// debug
 	fmt.Printf("Creating sandbox: vmmName %s, sandboxId %s, kernelPath %s...\n",
 		vmmName, sandboxId, kernelPath)
@@ -117,15 +116,12 @@ func CreateSandbox(
 		}
 	}()
 
-	//TODO: network
-	// 1. network.Get to init network
-	// 2. cleanup.Add network.Return to clean net source when sandbox del
 	slot, err := pool.Get(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to init network")
+		return nil, fmt.Errorf("failed to init network")
 	}
+
 	fmt.Printf("get slot %s\n", slot.Key)
-	slotKey = slot.Key
 
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
@@ -150,18 +146,19 @@ func CreateSandbox(
 		memSize, false,
 	)
 	if vmmErr != nil {
-		return nil, "", fmt.Errorf("failed to init VMM: %w", vmmErr)
+		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
 	err = vmmHandle.Create(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create VMM: %w", err)
+		return nil, fmt.Errorf("failed to create VMM: %w", err)
 	}
 
 	sbx := &Sandbox{
 		snapshotConf: snapshotConf,
 		process:      vmmHandle,
 		cleanup:      cleanup,
+		slot:         slot,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -177,17 +174,10 @@ func CreateSandbox(
 		return sbx.Stop(ctx)
 	})
 
-	// go func() {
-	// 	// If the process exists, stop the sandbox properly
-	// 	vmmErr := vmmHandle.Exit.Wait()
-	// 	err := sbx.Stop(context.WithoutCancel(ctx))
-	// }()
-
-	return sbx, slotKey, nil
+	return sbx, nil
 }
 
 func (s *Sandbox) Wait(ctx context.Context) error {
-	// TODO: wait for vmm exit
 	s.process.Wait()
 	return nil
 }
@@ -197,8 +187,6 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 	if vmmStopErr != nil {
 		return fmt.Errorf("failed to stop VMM: %w", vmmStopErr)
 	}
-
-	// TODO: wait for vmm.Exit done
 
 	return nil
 }
@@ -212,7 +200,6 @@ func (s *Sandbox) Close(ctx context.Context) error {
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {
-
 	if err := s.process.Pause(ctx); err != nil {
 		return fmt.Errorf("failed to pause VM: %w", err)
 	}
@@ -222,9 +209,5 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 		return fmt.Errorf("error creating snapshot: %w", err)
 	}
 
-	return nil
-}
-
-func (s *Sandbox) WaitForConchd(ctx context.Context) error {
 	return nil
 }

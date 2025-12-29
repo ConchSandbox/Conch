@@ -11,9 +11,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"conch/internal/sandbox"
-	"conch/internal/sandbox/network"
-	"conch/internal/snapshot"
+	"conch/core/sandbox"
+	"conch/core/sandbox/network"
+	"conch/core/snapshot"
 )
 
 const (
@@ -31,8 +31,6 @@ type sandboxManager interface {
 	Create(req sandbox.SandboxCreateRequest) (string, error)
 	Delete(req sandbox.SandboxDeleteRequest) error
 	Pause(req sandbox.SandboxPauseRequest) error
-
-	RunCode(code string) map[string]interface{}
 }
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, pool *network.Pool) {
@@ -69,7 +67,7 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, pool *network
 	return
 }
 
-func NewServer() *Server {
+func NewServer() (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
@@ -77,18 +75,20 @@ func NewServer() *Server {
 	}
 	s.routes()
 
-	pool := network.NewPool()
-	go pool.Populate(ctx)
-
-	s.SetSandboxManager(sandbox.NewManager(pool))
 	err := s.SetSnapshotManager()
 	if err != nil {
 		fmt.Printf("Failed to init snapshot manager: %v", err)
-		// TODO return err
+		cancel()
+		return nil, fmt.Errorf("failed to init snapshot manager: %w", err)
 	}
 
+	pool := network.NewPool()
+	s.SetSandboxManager(sandbox.NewManager(pool))
+
+	go pool.Populate(ctx)
 	handleSignals(ctx, cancel, pool)
-	return s
+
+	return s, nil
 }
 
 func (s *Server) SetSandboxManager(manager sandboxManager) {
@@ -110,11 +110,7 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/sandbox/create", s.handleCreateSandbox)
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/pause", s.handlePauseSandbox)
-	s.router.HandleFunc("/api/sandbox/run", s.handleRunCode)
-
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
-
-	s.router.HandleFunc("/health", s.handleHealthCheck)
 }
 
 func (s *Server) Start(addr string) error {
@@ -137,7 +133,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slotKey, err := s.sandboxManager.Create(req)
+	peerIP, err := s.sandboxManager.Create(req)
 	if err != nil {
 		// debug
 		fmt.Printf("Failed to create sandbox: %s \n", err)
@@ -149,7 +145,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
-		"slotkey": slotKey,
+		"ip": peerIP,
 	})
 }
 
@@ -205,35 +201,5 @@ func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// TODO return available snapshot_id
 func (s *Server) handleListSnapshot(w http.ResponseWriter, r *http.Request) {}
-
-func (s *Server) handleRunCode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Code string `json:"code"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	execution := s.sandboxManager.RunCode(req.Code)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(execution)
-}
-
-func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
