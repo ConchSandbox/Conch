@@ -11,9 +11,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"conch/core/sandbox"
-	"conch/core/sandbox/network"
-	"conch/core/snapshot"
+	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandbox/network"
+	"github.com/openeuler/Conch/internal/snapshot"
 )
 
 const (

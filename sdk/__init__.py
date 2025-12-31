@@ -1,5 +1,5 @@
 from client import AgentClient
-from sandbox import Sandbox
+from conch import Sandbox
 
 __all__ = [
     "AgentClient",
