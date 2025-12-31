@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"sync"
 
-	"conch/core/snapshot/common"
-	"conch/core/snapshot/rootfs"
-	"conch/core/snapshot/snapshotter"
+	"github.com/openeuler/Conch/internal/snapshot/common"
+	"github.com/openeuler/Conch/internal/snapshot/rootfs"
+	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
 
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/snapshots"

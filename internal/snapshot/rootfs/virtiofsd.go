@@ -1,7 +1,7 @@
 package rootfs
 
 import (
-	"conch/core/snapshot/common"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 	"encoding/json"
 	"errors"
 	"fmt"

@@ -1,7 +1,7 @@
 package snapshotter
 
 import (
-	"conch/core/snapshot/common"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 	"context"
 	"fmt"
 	"strings"
