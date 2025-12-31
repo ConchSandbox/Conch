@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"conch/core/sandbox/network"
-	"conch/core/sandbox/vmm"
-	"conch/core/snapshot"
+	"github.com/openeuler/Conch/internal/sandbox/network"
+	"github.com/openeuler/Conch/internal/sandbox/vmm"
+	"github.com/openeuler/Conch/internal/snapshot"
 )
 
 type Execution struct {
