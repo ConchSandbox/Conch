@@ -9,6 +9,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/utils"
 )
 
 const (
@@ -43,8 +44,7 @@ type SandboxDeleteRequest struct {
 }
 
 type SandboxPauseRequest struct {
-	SandboxId  string `json:"sandbox_id"`
-	SnapshotId string `json:"snapshot_id"`
+	SandboxId string `json:"sandbox_id"`
 }
 
 func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
@@ -176,18 +176,18 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	return nil
 }
 
-func (m *Manager) Pause(req SandboxPauseRequest) error {
+func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	sbxVal, exists := m.sandboxes.Load(req.SandboxId)
 	if !exists {
-		return fmt.Errorf("sandbox %s not found", req.SandboxId)
+		return "", fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
 
 	sbx, ok := sbxVal.(*Sandbox)
 	if !ok {
-		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
+		return "", fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
 
 	m.sandboxes.Delete(req.SandboxId)
@@ -206,21 +206,31 @@ func (m *Manager) Pause(req SandboxPauseRequest) error {
 	}()
 
 	if err := sbx.Pause(ctx); err != nil {
-		return fmt.Errorf("sandbox %s pause failed: %w", req.SandboxId, err)
+		return "", fmt.Errorf("sandbox %s pause failed: %w", req.SandboxId, err)
 	}
 
 	// TODO: system sync, too large
 	syscall.Sync()
 
-	// pause create need new name
-	var name = req.SnapshotId
 	var key = req.SandboxId
 	var namespace = defaultNamespace
-	err := snapshot.Commit(context.Background(), namespace, name, key)
+
+	info, err := snapshot.Stat(ctx, namespace, key)
 	if err != nil {
-		return fmt.Errorf("error adding snapshot %s : %v", req.SandboxId, err)
+		return "", fmt.Errorf("failed to stat snapshot %s: %w", key, err)
 	}
-	return nil
+	parent := info.Parent
+	snapshotId, err := utils.CalculateSnapshotName(namespace, key, parent)
+	if err != nil {
+		return "", fmt.Errorf("failed to calculate snapshot name: %w", err)
+	}
+
+	err = snapshot.Commit(context.Background(), namespace, snapshotId, key)
+	if err != nil {
+		return "", fmt.Errorf("error committing snapshot %s: %v", req.SandboxId, err)
+	}
+
+	return snapshotId, nil
 }
 
 func (m *Manager) CleanupPool() error {
