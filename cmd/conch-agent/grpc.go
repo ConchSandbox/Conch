@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/openeuler/Conch/cmd/conch-agent/pb"
+	pb "github.com/openeuler/Conch/api/go_proto"
 )
 
 const DirPerm = 0755

@@ -1,11 +1,29 @@
 import grpc
 from typing import Dict, Any, Optional
 import os
-from proto import agent_pb2
-from proto import agent_pb2_grpc
+import sys
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(PROJECT_ROOT) 
+sys.path.insert(0, PROJECT_ROOT)
+
+from api.py_proto import agent_pb2
+from api.py_proto import agent_pb2_grpc
 
 class AgentClient:
-    def __init__(self, host: str, port: int = 4046):
+    DEFAULT_GRPC_PORT = 4064
+    STATUS_SUCCESS = 0
+    STATUS_FAILED = -1
+    DEFAULT_SCRIPT_NAMES = {
+        ("python", "python3", "python2"): "main.py",
+        ("node", "nodejs"): "main.js",
+        ("bash", "sh", "zsh"): "main.sh",
+        ("lua",): "main.lua",
+        ("ruby", "rb"): "main.rb",
+    }
+    FALLBACK_SCRIPT_NAME = "main.py"
+
+    def __init__(self, host: str, port: int = DEFAULT_GRPC_PORT):
         self.host = host
         self.port = port
         self.address = f"{host}:{port}"
@@ -59,7 +77,7 @@ class AgentClient:
 
         try:
             response = self.stub.StartProcess(request)
-            status = 0 if response.exit_code == 0 and not response.error else -1
+            status = self.STATUS_SUCCESS if response.exit_code == 0 and not response.error else self.STATUS_FAILED
             return {
                 "status": status,
                 "message": response.error or "OK",
@@ -140,8 +158,9 @@ class AgentClient:
 
         try:
             response = self.stub.PostFiles(request)
+            status = self.STATUS_SUCCESS if not response.error else self.STATUS_FAILED
             return {
-                "status": 0 if not response.error else -1,
+                "status": status,
                 "uploaded_count": response.uploaded_count,
                 "message": response.error or f"uploaded {response.uploaded_count} files",
                 "error": response.error,
@@ -162,7 +181,7 @@ class AgentClient:
                 f.write(response.content)
 
             return {
-                "status": 0,
+                "status": self.STATUS_SUCCESS,
                 "size": len(response.content),
                 "message": "OK",
             }
@@ -180,9 +199,10 @@ class AgentClient:
                 downloaded += 1
             except Exception as e:
                 failed.append({"remote": item["remote"], "local": item["local"], "error": str(e)})
-
+        
+        status = self.STATUS_SUCCESS if not failed else self.STATUS_FAILED
         return {
-            "status": 0 if not failed else -1,
+            "status": status,
             "downloaded_count": downloaded,
             "failed": failed,
             "message": f"Downloaded {downloaded}, failed {len(failed)}"
@@ -202,15 +222,7 @@ class AgentClient:
     def _infer_script_name(self, cmd: str) -> str:
         # Infer default script name by command
         cmd = cmd.lower()
-        if cmd in ("python", "python3", "python2"):
-            return "main.py"
-        elif cmd in ("node", "nodejs"):
-            return "main.js"
-        elif cmd in ("bash", "sh", "zsh"):
-            return "main.sh"
-        elif cmd == "lua":
-            return "main.lua"
-        elif cmd in ("ruby", "rb"):
-            return "main.rb"
-        else:
-            return "main.py"
+        for cmd_set, script_name in self.DEFAULT_SCRIPT_NAMES.items():
+            if cmd in cmd_set:
+                return script_name
+        return self.FALLBACK_SCRIPT_NAME
