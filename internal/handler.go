@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -17,12 +18,15 @@ import (
 )
 
 const (
-	workDir = "/tmp/snapshot"
+	workDir         = "/tmp/snapshot"
+	shutdownTimeout = 30 * time.Second
 )
 
 type Server struct {
 	router         *http.ServeMux
 	sandboxManager sandboxManager
+	httpServer     *http.Server
+	cleanupOnce    sync.Once
 
 	// TODO: need ListCachedBuilds()
 }
@@ -33,9 +37,9 @@ type sandboxManager interface {
 	Pause(req sandbox.SandboxPauseRequest) error
 }
 
-func handleSignals(ctx context.Context, cancel context.CancelFunc, pool *network.Pool) {
+func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
 	go func() {
-		var s os.Signal
+		var sig os.Signal
 		var handledSignals = []os.Signal{
 			unix.SIGTERM,
 			unix.SIGINT,
@@ -52,14 +56,11 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, pool *network
 			select {
 			case <-ctx.Done():
 				fmt.Printf("receive error: %v\n", ctx.Err())
-			case s = <-signalChannel:
-				fmt.Printf("interrupted by a %v signal, process exiting\n", s)
+			case sig = <-signalChannel:
+				fmt.Printf("interrupted by a %v signal, process exiting\n", sig)
 				cancel()
-				err := pool.Cleanup()
-				if err != nil {
-					fmt.Printf("Failed to cleanup pool: %v\n", err)
-				}
-				fmt.Println("cleanup pool finish")
+				s.Cleanup()
+
 				return
 			}
 		}
@@ -86,7 +87,7 @@ func NewServer() (*Server, error) {
 	s.SetSandboxManager(sandbox.NewManager(pool))
 
 	go pool.Populate(ctx)
-	handleSignals(ctx, cancel, pool)
+	handleSignals(ctx, cancel, s)
 
 	return s, nil
 }
@@ -114,8 +115,33 @@ func (s *Server) routes() {
 }
 
 func (s *Server) Start(addr string) error {
-	fmt.Printf("Server listening on %s\n", addr)
-	return http.ListenAndServe(addr, s.router)
+	s.httpServer = &http.Server{Addr: addr, Handler: s.router}
+
+	err := s.httpServer.ListenAndServe()
+	if err == http.ErrServerClosed {
+		// debug
+		fmt.Println("main server gracefully stopped.")
+		err = nil
+	}
+	return err
+}
+
+func (s *Server) Cleanup() {
+	s.cleanupOnce.Do(func() {
+		// stop httpServer
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer shutdownCancel()
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			fmt.Printf("HTTP server Shutdown error: %v\n", err)
+		} else {
+			// debug
+			fmt.Println("HTTP server gracefully stopped.")
+		}
+
+		if err := s.sandboxManager.(*sandbox.Manager).CleanupPool(); err != nil {
+			fmt.Printf("Server cleanup error: %v\n", err)
+		}
+	})
 }
 
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +171,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
-		"ip": peerIP,
+		"ip":     peerIP,
 	})
 }
 

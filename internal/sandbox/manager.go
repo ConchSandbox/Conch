@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	requestTimeout = 60 * time.Second
+	requestTimeout   = 60 * time.Second
 	defaultNamespace = "default"
 )
 
@@ -43,7 +43,7 @@ type SandboxDeleteRequest struct {
 }
 
 type SandboxPauseRequest struct {
-	SandboxId string `json:"sandbox_id"`
+	SandboxId  string `json:"sandbox_id"`
 	SnapshotId string `json:"snapshot_id"`
 }
 
@@ -82,7 +82,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			}
 		}()
 
-		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath,req.DiskPath, m.pool)
+		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath, req.DiskPath, m.pool)
 		if err != nil {
 			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}
@@ -120,7 +120,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 		}
 	}
 
-    peerIP = sbx.slot.VpeerIPString()
+	peerIP = sbx.slot.VpeerIPString()
 
 	m.sandboxes.Store(req.SandboxId, sbx)
 	go func() {
@@ -220,5 +220,17 @@ func (m *Manager) Pause(req SandboxPauseRequest) error {
 	if err != nil {
 		return fmt.Errorf("error adding snapshot %s : %v", req.SandboxId, err)
 	}
+	return nil
+}
+
+func (m *Manager) CleanupPool() error {
+	// debug
+	fmt.Println("cleanup pool begin, wait for a few seconds")
+	err := m.pool.Cleanup()
+	if err != nil {
+		return fmt.Errorf("failed to cleanup pool: %v", err)
+	}
+	fmt.Println("cleanup pool finish")
+
 	return nil
 }
