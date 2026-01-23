@@ -157,7 +157,7 @@ func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
 	}
 
 	if isServerError(resp.StatusCode) {
-		return fmt.Errorf("server returned error: %s", resp.Status)
+		return fmt.Errorf("server returned error: %s, body: %s", resp.Status, string(body))
 	}
 
 	fmt.Printf("%s\n", string(body))
