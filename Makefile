@@ -14,22 +14,22 @@ GOMOD := $(GOCMD) mod
 # binary output directory
 BIN_DIR := bin
 
-# conch-agent config
 CONCH_AGENT_PROTO_DIR := ./api
 CONCH_AGENT_GEN_DIR := ./api/go_proto
+CLEANSCRIPT := ./scripts/cleancode.sh
 
 # get all cmd directory subdirectories as binary names
 CMDS := $(shell find cmd -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
 
-help:
+help: ## Show this help message
 	@echo "available commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-gen-proto:
+gen-proto: ## Generate protobuf code
 	@echo "installing proto tools (if not exist)..."
 	@which protoc-gen-go >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 	@which protoc-gen-go-grpc >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-	
+
 	@echo "generating proto code..."
 	@mkdir -p $(CONCH_AGENT_GEN_DIR)
 	@protoc \
@@ -41,7 +41,7 @@ gen-proto:
 		$(CONCH_AGENT_PROTO_DIR)/*.proto;
 	@echo "proto code generated to $(CONCH_AGENT_GEN_DIR)"
 
-build: gen-proto mod-tidy
+build: fmt gen-proto mod-tidy ## Build all binaries
 	@echo "building all binaries..."
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
@@ -50,48 +50,62 @@ build: gen-proto mod-tidy
 	done
 	@echo "building completed, binaries located in $(BIN_DIR)/ directory"
 
-build-%:
+build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $(BIN_DIR)/$* ./cmd/$*
 
-clean:
+clean: ## Clean build artifacts
 	@echo "cleaning build artifacts..."
 	$(GOCLEAN)
 	rm -rf $(BIN_DIR)
 	rm -rf $(CONCH_AGENT_GEN_DIR)
 	@echo "cleaning completed"
 
-test:
+test: ## Run all tests
 	@echo "running tests..."
 	$(GOTEST) -v ./...
 
-test-coverage:
+test-coverage: ## Run tests with coverage report
 	@echo "running tests and generating coverage report..."
 	$(GOTEST) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "coverage report generated: coverage.html"
 
-fmt:
-	@echo "formatting code..."
+fmt: cleancode ## Format code (go fmt + cleancode)
+	@echo "formatting code with go fmt..."
 	$(GOCMD) fmt ./...
+	@echo "code formatting completed"
 
-vet:
+vet: ## Run go vet
 	@echo "running go vet..."
 	$(GOCMD) vet ./...
 
-lint: fmt vet
+lint: fmt vet ## Tidy go modules
 
-mod-tidy:
+mod-tidy: ## Tidy go modules
 	@echo "tidying dependencies..."
 	$(GOMOD) tidy
 
-mod-vendor:
+mod-vendor: ## Download dependencies to vendor directory
 	@echo "downloading dependencies to vendor directory..."
 	$(GOMOD) vendor
 
-install: build
+install: build ## Install binaries to GOPATH/bin
 	@echo "building and installing to $(shell go env GOPATH)/bin..."
 	@for cmd in $(CMDS); do \
 		cp $(BIN_DIR)/$$cmd $(shell go env GOPATH)/bin/$$cmd || true; \
 	done
+
+cleancode: ## Clean code (remove trailing spaces/CR)
+	@echo "cleaning code..."
+	@if [ ! -f $(CLEANSCRIPT) ]; then \
+		echo "Error: cleancode script not found at $(CLEANSCRIPT)"; \
+		exit 1; \
+	fi
+	@if [ ! -x $(CLEANSCRIPT) ]; then \
+		chmod +x $(CLEANSCRIPT); \
+	fi
+	@$(CLEANSCRIPT) > /dev/null 2>&1
+	@echo "code cleaning completed"
+	
