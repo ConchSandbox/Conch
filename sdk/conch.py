@@ -24,12 +24,14 @@ class Execution:
 class Sandbox:
     def __init__(
             self,
+            use_snapshot: bool = False,
             api_url: Optional[str] = None,
             client: Optional["AgentClient"] = None,
             workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
             snapshot_id: Optional[str] = None,
-            use_snapshot: bool = False
+            vcpu_num: Optional[int] = None,
+            ram_mb: Optional[int] = None,
     ):
         # Init core sandbox config (URL/workdir/IDs)
         self.api_url = api_url.rstrip('/') if api_url else config["sandbox"]["api_url"].rstrip('/')
@@ -44,12 +46,14 @@ class Sandbox:
 
         self.vm_ip = None
         self.client = client
+        self.vcpu_num = vcpu_num
+        self.ram_mb = ram_mb
 
         # Create sandbox and Update client(snapshot or normal mode)
         if use_snapshot:
-            self._update_client_from_result(self.create_by_snapshot())
+            self.create_by_snapshot()
         else:
-            self._update_client_from_result(self.create())
+            self.create()
 
     def _generate_workdir(self) -> str:
         return f"{config['sandbox']['workdir_prefix']}{uuid.uuid4().hex[:8]}"
@@ -83,8 +87,8 @@ class Sandbox:
             "sandbox_id": self.sandbox_id,
             "kernel_path": snap_config["kernel_path"],
             "disk_image_path": snap_config["disk_image_path"],
-            "vcpu_num": snap_config["vcpu_num"],
-            "ram_mb": snap_config["ram_mb"],
+            "vcpu_num": self.vcpu_num or snap_config["vcpu_num"],
+            "ram_mb": self.ram_mb or snap_config["ram_mb"],
         }
 
         try:
@@ -95,7 +99,9 @@ class Sandbox:
             result["snapshot_id"] = self.snapshot_id
             print(f"Create Sandbox by Snapshot !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
-            return result
+
+            self._update_client_from_result(result)
+
         except requests.exceptions.RequestException as e:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to create sandbox by snapshot !")
@@ -117,8 +123,8 @@ class Sandbox:
             "sandbox_id": self.sandbox_id,
             "kernel_path": img_config["kernel_path"],
             "disk_image_path": img_config["disk_image_path"],
-            "vcpu_num": img_config["vcpu_num"],
-            "ram_mb": img_config["ram_mb"],
+            "vcpu_num": self.vcpu_num or img_config["vcpu_num"],
+            "ram_mb": self.ram_mb or img_config["ram_mb"],
         }
 
         try:
@@ -128,7 +134,9 @@ class Sandbox:
             result["sandbox_id"] = self.sandbox_id
             print(f"Sandbox Created !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
-            return result
+
+            self._update_client_from_result(result)
+
         except requests.exceptions.RequestException as e:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to create sandbox !")
@@ -150,6 +158,7 @@ class Sandbox:
             result["sandbox_id"] = self.sandbox_id
             print(f"Sandbox Deleted !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
+
         except requests.exceptions.RequestException as e:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to delete sandbox !")
@@ -172,8 +181,10 @@ class Sandbox:
             response.raise_for_status()
             result = response.json()
             result["sandbox_id"] = self.sandbox_id
+            result["snapshot_id"] = self.snapshot_id
             print(f"Sandbox Paused !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
+
         except requests.exceptions.RequestException as e:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to pause sandbox !")
@@ -247,6 +258,7 @@ class Sandbox:
             with open(local_path, "rb") as f:
                 content = f.read()
             files.append({"filepath": full_remote, "content": content})
+
         elif len(args) == 1 and isinstance(args[0], (list, tuple)):
             file_specs = args[0]
             for item in file_specs:
@@ -256,6 +268,7 @@ class Sandbox:
                 content = item["content"]
                 full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
                 files.append({"filepath": full_remote, "content": content})
+                
         else:
             return {"status": -1, "message": "Invalid call. Usage: upload(local, remote) or upload([spec, ...])"}
 
@@ -276,7 +289,7 @@ class Sandbox:
         if exit_code != 0:
             print(f"list_files: failed (exit_code={exit_code})")
             if stderr:
-                print(f"    stderr: {stderr}")
+                print(f"stderr: {stderr}")
             return []
 
         files = [line.strip() for line in stdout.splitlines() if line.strip()]

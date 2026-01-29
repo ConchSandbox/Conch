@@ -37,4 +37,5 @@ build/
 *.log
 
 # Protobuf
-*.pb.go
+api/go_proto/
+api/py_proto/

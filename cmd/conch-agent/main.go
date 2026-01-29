@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/openeuler/Conch/cmd/conch-agent/pb"
+	pb "github.com/openeuler/Conch/api/go_proto"
 )
 
 const ServerPort = ":4064"
