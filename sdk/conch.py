@@ -41,8 +41,8 @@ class Sandbox:
         config_sandbox_id = config["sandbox"].get("sandbox_id", "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id(prefix="sandbox_")
 
-        config_snapshot_id = config["snapshot"]["snapshot_id"]
-        self.snapshot_id = snapshot_id or config_snapshot_id or generate_random_id(prefix="snapshot_")
+        config_snapshot_id = config["snapshot"].get("snapshot_id", "")
+        self.snapshot_id = snapshot_id or config_snapshot_id
 
         self.vm_ip = None
         self.client = client
@@ -173,7 +173,6 @@ class Sandbox:
         url = f"{self.api_url}/api/sandbox/pause"
         payload = {
             "sandbox_id": self.sandbox_id,
-            "snapshot_id": self.snapshot_id,
         }
 
         try:
@@ -181,7 +180,7 @@ class Sandbox:
             response.raise_for_status()
             result = response.json()
             result["sandbox_id"] = self.sandbox_id
-            result["snapshot_id"] = self.snapshot_id
+            self.snapshot_id = result.get("snapshotId")
             print(f"Sandbox Paused !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
 
