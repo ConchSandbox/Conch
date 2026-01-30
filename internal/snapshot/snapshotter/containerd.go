@@ -1,11 +1,12 @@
 package snapshotter
 
 import (
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"context"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/openeuler/Conch/internal/snapshot/common"
 
 	"golang.org/x/sys/unix"
 
@@ -31,7 +32,7 @@ func NewContainerdSnap() (Snapshotter, error) {
 	cs := &ContainerdSnap{
 		sessions: make(map[string]*session),
 	}
-	client, err := initContainerdClient(common.CONTAINERD_SOCK)
+	client, err := initContainerdClient(common.ContainerdSock)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +82,23 @@ func (c *ContainerdSnap) Prepare(ctx context.Context, ns, key, parent string, op
 		}
 	}
 	return session.sn.Prepare(session.ctx, key, parent, opts...)
+}
+
+func (c *ContainerdSnap) View(ctx context.Context, ns, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session, ok := c.sessions[ns]
+	if !ok {
+		_, err := c.addSnapshotter(ctx, ns)
+		if err != nil {
+			return nil, fmt.Errorf("add snapshotter failed: %v", err)
+		}
+		session, ok = c.sessions[ns]
+		if !ok {
+			return nil, fmt.Errorf("fatal: add snapshotter for %s failed", ns)
+		}
+	}
+	return session.sn.View(session.ctx, key, parent, opts...)
 }
 
 func (c *ContainerdSnap) Commit(ctx context.Context, ns, key, name string, opts ...snapshots.Opt) error {

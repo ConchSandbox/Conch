@@ -34,7 +34,7 @@ type Server struct {
 type sandboxManager interface {
 	Create(req sandbox.SandboxCreateRequest) (string, error)
 	Delete(req sandbox.SandboxDeleteRequest) error
-	Pause(req sandbox.SandboxPauseRequest) error
+	Pause(req sandbox.SandboxPauseRequest) (string, error)
 }
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
@@ -216,7 +216,7 @@ func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.sandboxManager.Pause(req)
+	snapshotId, err := s.sandboxManager.Pause(req)
 	if err != nil {
 		fmt.Printf("Failed to pause sandbox %s: %v\n", req.SandboxId, err)
 		http.Error(w, "Failed to pause sandbox: "+err.Error(), http.StatusInternalServerError)
@@ -224,7 +224,10 @@ func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":     "ok",
+		"snapshotId": snapshotId,
+	})
 }
 
 // TODO return available snapshot_id
