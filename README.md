@@ -1,3 +1,6 @@
+
+<img src="./logo/Conch-logo.jpg" alt="Conch logo" style="width:600px;" />
+
 # Conch
 
 ## 介绍
