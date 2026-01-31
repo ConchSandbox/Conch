@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"text/template"
 )
 
@@ -17,12 +18,13 @@ const defaultVmmBinary = "/usr/local/bin/cloud-hypervisor"
 
 const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} \
---cpus boot={{ .CPUBoot }},max={{ .CPUMax }} \
+--cpus boot={{ .CPUBoot }},max={{ .CPUMax }},max_phys_bits=42 \
 --kernel {{ .KernelPath }} \
---disk path={{ .DiskPath }} \
+--initramfs {{ .InitrdPath }} \
+--pmem file={{ .PmemPath }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
---cmdline "console=hvc0 root=/dev/vda1 rw debug" \
+--cmdline "console=hvc0 root=/dev/ram0 rw debug" \
 --api-socket {{ .VmmSocket }} \
 --console off \
 --net "tap={{ .TapName }}" \
@@ -34,7 +36,6 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 const resumeScriptCLH = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} --api-socket \
 {{ .VmmSocket }} \
--vv \
 --seccomp false`
 
 type StartScriptCLHArgs struct {
@@ -44,7 +45,8 @@ type StartScriptCLHArgs struct {
 	MemorySize    string
 	MemoryPath    string
 	KernelPath    string
-	DiskPath      string
+	InitrdPath    string
+	PmemPath      string
 	NamespaceID   string
 	TapName       string
 	VmmSocket     string
@@ -89,15 +91,16 @@ func buildRequest(method, fullCommand, requestBody string) string {
 	return request
 }
 
-func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, rootfsSock, kernelPath string, diskPath string, isResume bool) (string, error) {
+func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, error) {
 	clhArgs := StartScriptCLHArgs{
 		VmmBinaryPath: defaultVmmBinary,
 		CPUBoot:       args.CPUBoot,
 		CPUMax:        args.CPUMax,
 		MemorySize:    strconv.FormatInt(args.MemorySize, 10) + "M",
 		MemoryPath:    args.MemoryPath,
-		KernelPath:    kernelPath,
-		DiskPath:      diskPath,
+		KernelPath:    args.KernelPath,
+		InitrdPath:    args.InitrdPath,
+		PmemPath:      strings.Join(args.PmemPaths, " file="),
 		NamespaceID:   args.NamespaceID,
 		TapName:       args.TapName,
 		VmmSocket:     clh.socketPath,

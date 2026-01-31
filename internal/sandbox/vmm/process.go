@@ -17,9 +17,9 @@ const waitInterval = 10 * time.Millisecond
 type Process struct {
 	cmd           *exec.Cmd
 	VmmSocketPath string
-	rootfsPath    string
+	rootfsPaths   []string
 	kernelPath    string
-	diskPath    string
+	initrdPath    string
 	// Exit *utils.SetOnce[struct{}]
 	client vmmClient
 }
@@ -29,9 +29,8 @@ func SandboxVmmSocketPath(sandboxId string) string {
 }
 
 func NewProcess(
-	rootfsPaths, memFile, rootfsSock, kernelPath, diskPath,
-	vmmName, sandboxId, namespaceID, tapName string,
-	memSize int64, isResume bool,
+	vmmName, sandboxId string,
+	vmmResourceArgs *ResourceArgs, isResume bool,
 ) (*Process, error) {
 	// debug
 	fmt.Println("New process...")
@@ -47,22 +46,13 @@ func NewProcess(
 	}
 	p := Process{
 		VmmSocketPath: vmmSocketPath,
-		rootfsPath: rootfsPaths,
-		kernelPath: kernelPath,
-		diskPath: diskPath,
-		client: client,
+		rootfsPaths:   vmmResourceArgs.PmemPaths,
+		kernelPath:    vmmResourceArgs.KernelPath,
+		initrdPath:    vmmResourceArgs.InitrdPath,
+		client:        client,
 	}
 
-	vmmResourceArgs := &ResourceArgs {
-		CPUBoot: 1,
-		CPUMax: 1,
-		MemorySize: memSize,
-		MemoryPath: memFile,
-		NamespaceID: namespaceID,
-		TapName: tapName,
-	}
-
-	startScript, err := client.BuildStartCmd(vmmResourceArgs, rootfsSock, kernelPath, diskPath, isResume)
+	startScript, err := client.BuildStartCmd(vmmResourceArgs, isResume)
 	if err != nil {
 		return nil, fmt.Errorf("failed to Build Start Cmd: %w", err)
 	}
@@ -72,7 +62,7 @@ func NewProcess(
 		return nil, fmt.Errorf("error stating kernel file: %w", err)
 	}
 
-	_, err = os.Stat(p.diskPath)
+	_, err = os.Stat(p.initrdPath)
 	if err != nil {
 		return nil, fmt.Errorf("error stating disk file: %w", err)
 	}
