@@ -1,5 +1,5 @@
 # Core rule: All text files convert to local line endings on checkout, and to LF on commit
-* text=auto
+* text=auto eol=lf
 
 # text file types
 *.txt text
@@ -47,7 +47,7 @@
 *.cmd text eol=crlf
 
 # Unix/Linux scripts
-*.sh text eol=lf
+*.sh text
 
 # Git related files
 .gitignore text
