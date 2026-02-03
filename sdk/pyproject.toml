@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=42.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conch"
+version = "0.1.0"
+description = "SDK for conch service"
+requires-python = ">=3.8"
+authors = [
+    { name = "Conch Team" }
+]
+keywords = ["conch", "sdk", "sandbox", "grpc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "requests>=2.25.0",
+    "grpcio>=1.57.0",
+    "protobuf>=4.21.0",
+    "PyYAML>=5.4.0",
+    "grpcio-tools>=1.57.0",
+]
+
+[project.urls]
+Homepage = "https://atomgit.com/openeuler/Conch"
+Repository = "https://atomgit.com/openeuler/Conch"
+
+[tool.setuptools]
+packages = ["conch"]
+package-dir = { "conch" = "." }
+zip-safe = false

@@ -3,8 +3,8 @@ import os
 from typing import Optional, Dict, Any, List
 import requests
 import json
-from client import AgentClient
-from config_loader import config
+from .client import AgentClient
+from .config_loader import config
 
 def generate_random_id(prefix: str, length: int = 8) -> str:
     random_part = uuid.uuid4().hex[:length]
