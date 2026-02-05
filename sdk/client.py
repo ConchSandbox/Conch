@@ -4,7 +4,7 @@ import os
 import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(PROJECT_ROOT) 
+PROJECT_ROOT = os.path.dirname(PROJECT_ROOT)
 sys.path.insert(0, PROJECT_ROOT)
 
 from api.py_proto import agent_pb2
@@ -57,21 +57,22 @@ class AgentClient:
         env: Optional[Dict[str, str]] = None,
         content: Optional[str] = None,
         filename: Optional[str] = None,
-        args: Optional[list] = None, 
+        args: Optional[list] = None,
     ) -> Dict[str, Any]:
         request_kwargs = {
             "cmd": cmd,
             "cwd": cwd,
             "env": env or {},
+            "args": args or [],
         }
         
         if filename is None:
-            filename = self._infer_script_name(cmd)  
+            filename = self._infer_script_name(cmd)
 
         if content is not None:
             request_kwargs["content"] = content
             if args is None:
-                args = [filename]  
+                request_kwargs["args"] = filename  
 
         request = agent_pb2.StartProcessRequest(**request_kwargs)
 
