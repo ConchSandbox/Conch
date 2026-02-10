@@ -1,40 +1,66 @@
+<img src="./docs/assets/Conch-logo.jpg" alt="Conch logo" style="width:200px;" />
 
-<img src="./logo/Conch-logo.jpg" alt="Conch logo" style="width:600px;" />
+<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.23+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
 
-# Conch
+# Conch - Agent Sandbox Engine
 
-#### 介绍
-Conch, a container infrastructure designed for agent-based services, centered around new ecosystems, new images, new semantics, and supernodes
+Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对沙箱的高启动性能、高弹性、高 I/O 性能和高密度部署的诉求。
+项目围绕以下 Agent 对沙箱新需求展开：
+1. 新生态：相比传统命令行和K8S云原生生态，提供 Agent 原生的沙箱管理 API 和 SDK；
+2. 新镜像：相对传统 OCI v1 容器镜像格式，提供 EROFS 镜像格式，统一管理容器镜像和快照；
+3. 新硬件（超节点）：相比传统单机管理容器镜像，利用超节点高速互联能力，提供跨级镜像共享和管理机制。
 
-#### 软件架构
-软件架构说明
+## 核心特性
 
+- 轻量安全隔离 -- 支持虚拟沙箱，对 Agent 任务进行安全隔离。支持完整的生命周期管理，包括创建、暂停、恢复和删除等操作。
+- 快照启动加速 -- 支持虚拟机内存和根文件系统的快照功能。通过快照机制，可以实现秒级的沙箱启动，显著提升大规模部署场景下的资源利用效率。快照采用写时复制（Copy-on-Write）技术，最小化存储开销。
+- 精简容器网络 -- 通过 veth 设备和 NAT 规则实现网络隔离和地址转换，支持容器网络池化复用，降低启动时延。
 
-#### 安装教程
+## 快速开始
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+### 环境要求
 
-#### 使用说明
+- Go 1.23+
+- Containerd 2.2.1+
+- Cloud-Hypervisor v48.0+
+- Iptables 网络配置工具
+- Linux 5.10+
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+### 一键编译安装
 
-#### 参与贡献
+```bash
+# 克隆代码仓库
+git clone https://atomgit.com/openeuler/Conch.git
+cd Conch
+git checkout demo
 
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
+# 一键执行全流程
+./scripts/conch-env-setup.sh all
 
+pip install -e ./sdk
+```
 
-#### 特技
+### 运行服务
 
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+编译完成后，二进制文件位于 `bin/` 目录下，通过以下命令启动conchd服务：
+
+```bash
+./bin/conchd
+```
+
+### Python SDK 示例
+```python
+from conch import Sandbox
+sandbox = Sandbox()
+result = sandbox.execute(cmd="python3",content="print('hello Conch！')")
+print(result)
+sandbox.delete()
+```
+
+## 许可证
+
+木兰宽松许可证， 第2版
+
+## 贡献指南
+
+欢迎社区贡献代码和文档。
