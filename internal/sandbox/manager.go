@@ -33,8 +33,6 @@ type SandboxCreateRequest struct {
 	ImageId    string `json:"image_id"`
 	VmmName    string `json:"vmm_name"`
 	SandboxId  string `json:"sandbox_id"`
-	KernelPath string `json:"kernel_path"`
-	DiskPath   string `json:"disk_image_path"`
 	VcpuNum    int64  `json:"vcpu_num"`
 	RamMB      int64  `json:"ram_mb"`
 }
@@ -82,7 +80,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			}
 		}()
 
-		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath, req.DiskPath, m.pool)
+		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
 		if err != nil {
 			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}
@@ -114,7 +112,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			}
 		}()
 
-		sbx, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.KernelPath, req.DiskPath, m.pool)
+		sbx, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
 		if err != nil {
 			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}

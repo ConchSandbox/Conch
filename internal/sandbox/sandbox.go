@@ -10,6 +10,10 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot"
 )
 
+const (
+	defaultCPUBoot = 1
+)
+
 type Execution struct {
 	Logs string `json:"logs"`
 }
@@ -25,8 +29,7 @@ type Sandbox struct {
 func ResumeSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	vmmName, sandboxId, kernelPath string,
-	DiskPath string, pool *network.Pool,
+	vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
 ) (s *Sandbox, e error) {
 	cleanup := NewCleanup()
 	defer func() {
@@ -51,25 +54,28 @@ func ResumeSandbox(
 		return nil
 	})
 
-	namespaceID := slot.NamespaceID()
-	tapName := slot.TapName()
-	rootfs := snapshotConf.Rootfs
-	rootfsSock := snapshotConf.RootfsSock
-	memSize := snapshotConf.MemSize
-	memFile := snapshotConf.SnapshotMemFile()
+	snapfilePath := snapshotConf.SnapDir()
+
+	vmmResourceArgs := &vmm.ResourceArgs{
+		CPUBoot:      defaultCPUBoot,
+		CPUMax:       vcpuNum,
+		MemorySize:   snapshotConf.MemSize,
+		MemoryPath:   snapshotConf.SnapshotMemFile(),
+		NamespaceID:  slot.NamespaceID(),
+		TapName:      slot.TapName(),
+		KernelPath:   snapshotConf.KernelFile(),
+		SnapfilePath: snapfilePath,
+		InitrdPath:   snapshotConf.InitrdFile(),
+		PmemPaths:    snapshotConf.PmemFiles(),
+	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		rootfs, memFile,
-		rootfsSock, kernelPath, DiskPath,
-		vmmName, sandboxId,
-		namespaceID, tapName,
-		memSize, true,
+		vmmName, sandboxId, vmmResourceArgs, true,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
-	snapfilePath := snapshotConf.FullRootDir()
 	err = vmmHandle.Resume(ctx, snapfilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VMM: %w", err)
@@ -83,7 +89,7 @@ func ResumeSandbox(
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(rootfsSock, sbx.process.VmmSocketPath)
+		filesErr := cleanupFiles(sbx.process.VmmSocketPath)
 		if filesErr != nil {
 			return fmt.Errorf("failed to cleanup files: %w", filesErr)
 		}
@@ -101,12 +107,11 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	vmmName, sandboxId, kernelPath string,
-	DiskPath string, pool *network.Pool,
+	vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
 ) (s *Sandbox, e error) {
 	// debug
-	fmt.Printf("Creating sandbox: vmmName %s, sandboxId %s, kernelPath %s...\n",
-		vmmName, sandboxId, kernelPath)
+	fmt.Printf("Creating sandbox: vmmName %s, sandboxId %s...\n",
+		vmmName, sandboxId)
 
 	cleanup := NewCleanup()
 	defer func() {
@@ -130,20 +135,21 @@ func CreateSandbox(
 		}
 		return nil
 	})
-	namespaceID := slot.NamespaceID()
-	tapName := slot.TapName()
 
-	rootfs := snapshotConf.Rootfs
-	rootfsSock := snapshotConf.RootfsSock
-	memSize := snapshotConf.MemSize
-	memFile := snapshotConf.SnapshotMemFile()
+	vmmResourceArgs := &vmm.ResourceArgs{
+		CPUBoot:     defaultCPUBoot,
+		CPUMax:      vcpuNum,
+		MemorySize:  snapshotConf.MemSize,
+		MemoryPath:  snapshotConf.SnapshotMemFile(),
+		NamespaceID: slot.NamespaceID(),
+		TapName:     slot.TapName(),
+		KernelPath:  snapshotConf.KernelFile(),
+		InitrdPath:  snapshotConf.InitrdFile(),
+		PmemPaths:   snapshotConf.PmemFiles(),
+	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		rootfs, memFile,
-		rootfsSock, kernelPath, DiskPath,
-		vmmName, sandboxId,
-		namespaceID, tapName,
-		memSize, false,
+		vmmName, sandboxId, vmmResourceArgs, false,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
@@ -162,7 +168,7 @@ func CreateSandbox(
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(rootfsSock, sbx.process.VmmSocketPath)
+		filesErr := cleanupFiles(sbx.process.VmmSocketPath)
 		if filesErr != nil {
 			return fmt.Errorf("failed to cleanup files: %w", filesErr)
 		}
