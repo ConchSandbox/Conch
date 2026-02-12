@@ -68,6 +68,18 @@ build: fmt gen-proto mod-tidy ## Build all binaries
 	done
 	@echo "building completed, binaries located in $(BIN_DIR)/ directory"
 
+build-offline: gen-proto
+	@echo "syncing dependency manifests from image backup..."
+	@cp /go/go.mod.backup ./go.mod
+	@cp /go/go.sum.backup ./go.sum
+	@echo "building binaries using image cache..."
+	@mkdir -p $(BIN_DIR)
+	@for cmd in $(CMDS); do \
+		echo "building cmd/$$cmd..."; \
+		$(GOBUILD) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
+	done
+	@git checkout go.mod go.sum 2>/dev/null || true
+
 build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
