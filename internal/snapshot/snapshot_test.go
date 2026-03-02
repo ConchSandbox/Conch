@@ -4,11 +4,19 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 func TestPrepare(t *testing.T) {
 	workDir := "/tmp/snapshot"
-	err := NewServer(workDir)
+	daemonClient, err := daemon.New(common.ContainerdSock)
+	if err != nil {
+		t.Fatalf("init daemon client: %v", err)
+	}
+	defer daemonClient.Close()
+	err = NewServer(workDir, daemonClient)
 	if err != nil {
 		t.Fatalf("init server with: %s, get err: %v", workDir, err)
 	}

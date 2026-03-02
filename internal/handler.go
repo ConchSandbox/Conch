@@ -12,9 +12,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 const (
@@ -25,6 +27,7 @@ const (
 type Server struct {
 	router         *http.ServeMux
 	sandboxManager sandboxManager
+	daemonClient   *daemon.Client
 	httpServer     *http.Server
 	cleanupOnce    sync.Once
 
@@ -76,15 +79,25 @@ func NewServer() (*Server, error) {
 	}
 	s.routes()
 
-	err := s.SetSnapshotManager()
+	daemonClient, err := daemon.New(common.ContainerdSock)
 	if err != nil {
-		fmt.Printf("Failed to init snapshot manager: %v", err)
+		fmt.Printf("Failed to init containerd manager: %v", err)
+		cancel()
+		return nil, fmt.Errorf("failed to init containerd manager: %w", err)
+	}
+	s.daemonClient = daemonClient
+
+	// Initialize snapshot server
+	err = snapshot.NewServer(workDir, daemonClient)
+	if err != nil {
+		_ = daemonClient.Close()
 		cancel()
 		return nil, fmt.Errorf("failed to init snapshot manager: %w", err)
 	}
 
+	// Initialize sandbox manager
 	pool := network.NewPool()
-	s.SetSandboxManager(sandbox.NewManager(pool))
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient))
 
 	go pool.Populate(ctx)
 	handleSignals(ctx, cancel, s)
@@ -94,16 +107,6 @@ func NewServer() (*Server, error) {
 
 func (s *Server) SetSandboxManager(manager sandboxManager) {
 	s.sandboxManager = manager
-}
-
-func (s *Server) SetSnapshotManager() error {
-	err := snapshot.NewServer(workDir)
-	if err != nil {
-		fmt.Printf("init server with: %s, get err: %v", workDir, err)
-
-		return err
-	}
-	return nil
 }
 
 func (s *Server) routes() {
@@ -140,6 +143,10 @@ func (s *Server) Cleanup() {
 
 		if err := s.sandboxManager.(*sandbox.Manager).CleanupPool(); err != nil {
 			fmt.Printf("Server cleanup error: %v\n", err)
+		}
+		snapshot.CleanupAllViews()
+		if err := s.daemonClient.Close(); err != nil {
+			fmt.Printf("Containerd cleanup error: %v\n", err)
 		}
 	})
 }

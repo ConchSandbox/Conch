@@ -210,7 +210,7 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 		return fmt.Errorf("failed to pause VM: %w", err)
 	}
 
-	err := s.process.CreateSnapshot(ctx, s.snapshotConf.FullRootDir())
+	err := s.process.CreateSnapshot(ctx, s.snapshotConf.SnapDir())
 	if err != nil {
 		return fmt.Errorf("error creating snapshot: %w", err)
 	}

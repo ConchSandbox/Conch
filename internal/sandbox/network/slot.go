@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/vishvananda/netlink"
+
 	netutils "k8s.io/utils/net"
 )
 

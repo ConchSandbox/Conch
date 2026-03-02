@@ -94,6 +94,7 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 			}
 
 			slotIdx++
+
 			slotName := getSlotName(slotIdx)
 			// check if the netns  is already created in host
 			if _, found := s.hostNs[slotName]; found {

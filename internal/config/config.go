@@ -15,4 +15,3 @@ func DefaultConfig() *Config {
 		LogLevel: "info",
 	}
 }
-
