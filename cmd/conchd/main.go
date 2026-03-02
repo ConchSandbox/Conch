@@ -14,7 +14,7 @@ func main() {
 	defer server.Cleanup()
 
 	log.Println("starting conchd server")
-	if err := server.Start(":8080"); err != nil {
+	if err := server.Start(":4063"); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

@@ -1,14 +1,14 @@
-import uuid
 import os
 from typing import Optional, Dict, Any, List
 import requests
 import json
+import uuid
+import secrets
 from client import AgentClient
 from config_loader import config
 
-def generate_random_id(prefix: str, length: int = 8) -> str:
-    random_part = uuid.uuid4().hex[:length]
-    return f"{prefix}{random_part}"
+def generate_random_id(prefix: str = "sandbox_") -> str:
+    return prefix + secrets.token_hex(12)
 
 class Execution:
     # Store execution output/exit code
@@ -39,7 +39,7 @@ class Sandbox:
         self.use_snapshot = use_snapshot if use_snapshot is not None else config["sandbox"]["use_snapshot"]
 
         config_sandbox_id = config["sandbox"].get("sandbox_id", "")
-        self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id(prefix="sandbox_")
+        self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
 
         config_snapshot_id = config["snapshot"].get("snapshot_id", "")
         self.snapshot_id = snapshot_id or config_snapshot_id
@@ -82,7 +82,7 @@ class Sandbox:
         snap_config = config["snapshot"]
         payload = {
             "snapshot_id": self.snapshot_id,
-            "image_id": "",
+            "image_name": "",
             "vmm_name": snap_config["vmm_name"],
             "sandbox_id": self.sandbox_id,
             "kernel_path": snap_config["kernel_path"],
@@ -118,7 +118,7 @@ class Sandbox:
         img_config = config["image"]
         payload = {
             "snapshot_id": "",
-            "image_id": img_config["image_id"],
+            "image_name": img_config["image_name"],
             "vmm_name": img_config["vmm_name"],
             "sandbox_id": self.sandbox_id,
             "kernel_path": img_config["kernel_path"],
@@ -267,7 +267,7 @@ class Sandbox:
                 content = item["content"]
                 full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
                 files.append({"filepath": full_remote, "content": content})
-                
+
         else:
             return {"status": -1, "message": "Invalid call. Usage: upload(local, remote) or upload([spec, ...])"}
 
