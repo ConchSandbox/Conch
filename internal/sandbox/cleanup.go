@@ -22,17 +22,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
-
-	"go.uber.org/zap"
 )
 
 type Cleanup struct {
 	cleanup         []func(ctx context.Context) error
 	priorityCleanup []func(ctx context.Context) error
-	err           error
+	err             error
 	once            sync.Once
 
 	hasRun atomic.Bool
@@ -45,7 +44,7 @@ func NewCleanup() *Cleanup {
 
 func (c *Cleanup) Add(f func(ctx context.Context) error) {
 	if c.hasRun.Load() {
-		zap.L().Error("Add called after cleanup has run, ignoring function")
+		slog.Error("Add called after cleanup has run, ignoring function")
 		return
 	}
 
@@ -57,7 +56,7 @@ func (c *Cleanup) Add(f func(ctx context.Context) error) {
 
 func (c *Cleanup) AddPriority(f func(ctx context.Context) error) {
 	if c.hasRun.Load() {
-		zap.L().Error("AddPriority called after cleanup has run, ignoring function")
+		slog.Error("AddPriority called after cleanup has run, ignoring function")
 		return
 	}
 

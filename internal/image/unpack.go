@@ -17,10 +17,10 @@ const (
 	SnapshotLabelMemSnapshot = "conch/snapshotter/mem-snapshot"
 	SnapshotLabelVMSnapshot  = "conch/snapshotter/vm-snapshot"
 
-	KindRootfs          = "rootfs"
-	KindVirtualMachine  = "virtual-machine"
-	KindSnapshot        = "snapshot"
-	KindUnknown         = "unknown"
+	KindRootfs         = "rootfs"
+	KindVirtualMachine = "virtual-machine"
+	KindSnapshot       = "snapshot"
+	KindUnknown        = "unknown"
 )
 
 // UnpackAllSubImages parses OCI Image Index, unpacks all child manifests,

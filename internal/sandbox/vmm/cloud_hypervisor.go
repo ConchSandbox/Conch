@@ -26,7 +26,7 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
 --cmdline "console=hvc0 root=/dev/ram0 rw debug" \
 --api-socket {{ .VmmSocket }} \
---console off \
+--console null \
 --net "tap={{ .TapName }}" \
 --seccomp false`
 

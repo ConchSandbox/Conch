@@ -2,40 +2,58 @@ package snapshot
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"os"
 
+	"github.com/containerd/containerd/mount"
 	"golang.org/x/sys/unix"
 
-	"github.com/containerd/containerd/mount"
+	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
 )
 
+// snapshotCleaner handles cleanup of snapshot resources.
 type snapshotCleaner struct {
 	ctx        context.Context
 	server     *server
+	viewMgr    *viewManager
+	snt        snapshotter.Snapshotter
 	namespace  string
 	key        string
 	mountPoint string
 
 	prepared   bool
+	viewed     bool
 	dirCreated bool
 	mounted    bool
+
+	parentSnapshotID string
 }
 
+// Cleanup releases all resources held by the snapshot.
 func (sc *snapshotCleaner) Cleanup() {
+	if sc.viewed {
+		if sc.viewMgr != nil {
+			sc.viewMgr.removeViewAlias(sc.namespace, sc.key)
+			sc.viewMgr.releaseViewMount(sc.snt, sc.namespace, sc.parentSnapshotID)
+		}
+		return
+	}
+
 	if sc.mounted {
 		if unmountErr := mount.Unmount(sc.mountPoint, unix.MNT_FORCE); unmountErr != nil {
-			fmt.Printf("failed to unmount %v: %v \n", sc.mountPoint, unmountErr)
+			slog.Warn("failed to unmount", "mountPoint", sc.mountPoint, "err", unmountErr)
 		}
 	}
 	if sc.dirCreated {
 		if removeDirErr := os.RemoveAll(sc.mountPoint); removeDirErr != nil {
-			fmt.Printf("failed to delete dir %v: %v \n", sc.mountPoint, removeDirErr)
+			slog.Warn("failed to delete dir", "mountPoint", sc.mountPoint, "err", removeDirErr)
 		}
 	}
 	if sc.prepared {
-		if removeErr := sc.server.snt.Remove(sc.ctx, sc.namespace, sc.key); removeErr != nil {
-			fmt.Printf("failed to remove snapshot %v: %v \n", sc.key, removeErr)
+		if sc.snt != nil {
+			if removeErr := sc.snt.Remove(sc.ctx, sc.namespace, sc.key); removeErr != nil {
+				slog.Warn("failed to remove snapshot", "key", sc.key, "err", removeErr)
+			}
 		}
 	}
 }

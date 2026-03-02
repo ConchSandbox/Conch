@@ -1,7 +1,6 @@
 package rootfs
 
 import (
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type State struct {
@@ -163,7 +164,7 @@ func (i *Instance) Stop() error {
 	defer i.mutex.Unlock()
 
 	if i.Pid == 0 {
-		return errors.New("进程未在运行")
+		return errors.New("process is not running")
 	}
 
 	// send signal to process group

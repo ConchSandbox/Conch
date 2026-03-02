@@ -3,34 +3,33 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"syscall"
-	"time"
 
+	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/utils"
-)
-
-const (
-	requestTimeout   = 60 * time.Second
-	defaultNamespace = "default"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type Manager struct {
-	sandboxes sync.Map
-	pool      *network.Pool
+	sandboxes     sync.Map
+	pool          *network.Pool
+	daemonClient  *daemon.Client
 }
 
-func NewManager(p *network.Pool) *Manager {
+func NewManager(p *network.Pool, daemonClient *daemon.Client) *Manager {
 	return &Manager{
-		pool: p,
+		pool:         p,
+		daemonClient: daemonClient,
 	}
 }
 
 type SandboxCreateRequest struct {
 	SnapshotId string `json:"snapshot_id"`
-	ImageId    string `json:"image_id"`
+	ImageName  string `json:"image_name"`
 	VmmName    string `json:"vmm_name"`
 	SandboxId  string `json:"sandbox_id"`
 	VcpuNum    int64  `json:"vcpu_num"`
@@ -46,76 +45,60 @@ type SandboxPauseRequest struct {
 }
 
 func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
-	// debug
-	fmt.Println("Creating sandbox in manager...")
+	slog.Debug("creating sandbox in manager")
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), requestTimeout, fmt.Errorf("request timed out"))
+	ctx, cancel := context.WithTimeoutCause(context.Background(), common.RequestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	var sbx *Sandbox
 	var peerIP string
-	var namespace = defaultNamespace
-	if req.SnapshotId != "" {
-		// debug
-		fmt.Println("Creating sandbox by snapshotId...")
+	var namespace = common.DefaultNamespace
 
-		var key = req.SandboxId
-		var parent = req.SnapshotId // snapshot.Commit name
-		snapshotConf, err := snapshot.Prepare(context.Background(), namespace, key, parent,
-			func(info *snapshot.SnapshotConfig) error {
-				info.MemSize = req.RamMB
-				// info.RootDir = "/tmp"
-				return nil
-			})
-		if err != nil {
-			return "", fmt.Errorf("failed to prepare snapshot: %w", err)
-		}
-		defer func() {
-			if err != nil {
-				err = snapshot.Remove(context.Background(), namespace, key)
-				if err != nil {
-					fmt.Printf("failed to remove snapshot: %v", err)
-				}
-				fmt.Printf("removed snapshot: %s\n", key)
-			}
-		}()
+	parentIDs, err := m.resolveParentSnapshotIDs(context.Background(), namespace, req)
+	if err != nil {
+		return "", err
+	}
 
-		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
-		if err != nil {
-			return "", fmt.Errorf("failed to create sandbox: %w", err)
-		}
+	var key = req.SandboxId
+	resume := req.SnapshotId != ""
+
+	memOpt := func(info *snapshot.SnapshotConfig) error {
+		info.MemSize = req.RamMB
+		return nil
+	}
+
+	var snapshotConf *snapshot.SnapshotConfig
+
+	if resume {
+		slog.Debug("creating sandbox by snapshotId")
+		snapshotConf, err = snapshot.AcquireView(context.Background(), namespace, key, parentIDs, memOpt)
 	} else {
-		// debug
-		fmt.Printf("Creating sandbox by ImageId %s\n", req.ImageId)
-		var key = req.SandboxId
-		// Temp: ImageId is SnapshotId now
-		// TODO: replace with image.GetSnapshot
-		// parent, err := image.GetSnapshot(imageId)
-		var parent = req.ImageId
+		slog.Debug("creating sandbox by image", "imageName", req.ImageName)
+		snapshotConf, err = snapshot.Prepare(context.Background(), namespace, key, parentIDs, memOpt)
+	}
 
-		snapshotConf, err := snapshot.Prepare(context.Background(), namespace, key, parent,
-			func(info *snapshot.SnapshotConfig) error {
-				info.MemSize = req.RamMB
-				// info.Rootfs = "/tmp"
-				return nil
-			})
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare/acquire snapshot: %w", err)
+	}
+	defer func() {
 		if err != nil {
-			return "", fmt.Errorf("failed to prepare snapshot: %w", err)
-		}
-		defer func() {
-			if err != nil {
-				err = snapshot.Remove(context.Background(), namespace, key)
-				if err != nil {
-					fmt.Printf("failed to remove snapshot: %v", err)
-				}
-				fmt.Printf("removed snapshot: %s\n", key)
+			rmErr := snapshot.Remove(context.Background(), namespace, key)
+			if rmErr != nil {
+				slog.Error("failed to remove snapshot", "key", key, "err", rmErr)
+			} else {
+				slog.Info("removed snapshot due to error", "key", key)
 			}
-		}()
-
-		sbx, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
-		if err != nil {
-			return "", fmt.Errorf("failed to create sandbox: %w", err)
 		}
+	}()
+
+	if resume {
+		sbx, err = ResumeSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
+	} else {
+		sbx, err = CreateSandbox(ctx, snapshotConf, req.VmmName, req.SandboxId, req.VcpuNum, m.pool)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to create sandbox: %w", err)
 	}
 
 	peerIP = sbx.slot.VpeerIPString()
@@ -124,29 +107,56 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	go func() {
 		waitErr := sbx.Wait(ctx)
 		if waitErr != nil {
-			fmt.Printf("failed to wait for sandbox, %s, cleaning up\n", waitErr)
+			slog.Warn("failed to wait for sandbox, cleaning up", "err", waitErr)
 		}
 
 		cleanupErr := sbx.Close(ctx)
 		if cleanupErr != nil {
-			fmt.Printf("failed to cleanup sandbox, %s, will remove from cache\n", cleanupErr)
+			slog.Warn("failed to cleanup sandbox, will remove from cache", "err", cleanupErr)
 		}
 
 		snapshot.Remove(context.Background(), namespace, req.SandboxId)
 
 		m.sandboxes.Delete(req.SandboxId)
-
-		// fmt.Printf("Sandbox %s killed\n", req.SandboxId)
 	}()
 
-	//debug
-	fmt.Println("Created sandbox in manager...")
+	slog.Debug("created sandbox in manager")
 
 	return peerIP, nil
 }
 
+func (m *Manager) resolveParentSnapshotIDs(
+	ctx context.Context,
+	namespace string,
+	req SandboxCreateRequest,
+) (snapshot.ParentSnapshotIDs, error) {
+	if req.SnapshotId != "" {
+		// snapshot-based startup
+		parents, err := snapshot.ResolveParentSnapshotIDs(namespace, req.SnapshotId)
+		if err != nil {
+			return snapshot.ParentSnapshotIDs{}, err
+		}
+		return parents, nil
+	}
+	// image-based startup
+	if req.ImageName == "" {
+		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("imageName or snapshotID is required")
+	}
+
+	rootfsSnapshotID, err := image.GetSnapshotID(ctx, m.daemonClient, namespace, req.ImageName)
+	if err != nil {
+		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
+	}
+	parents, err := snapshot.ResolveParentSnapshotIDs(namespace, rootfsSnapshotID)
+	if err != nil {
+		return snapshot.ParentSnapshotIDs{}, err
+	}
+	parents.Rootfs = rootfsSnapshotID
+	return parents, nil
+}
+
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
-	ctx, cancel := context.WithTimeoutCause(context.Background(), requestTimeout, fmt.Errorf("request timed out"))
+	ctx, cancel := context.WithTimeoutCause(context.Background(), common.RequestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	sbxVal, exists := m.sandboxes.Load(req.SandboxId)
@@ -163,19 +173,19 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	go func() {
 		err := sbx.Stop(ctx)
 		if err != nil {
-			fmt.Printf("sandbox %s stop error: %v\n", req.SandboxId, err)
+			slog.Error("sandbox stop error", "sandboxId", req.SandboxId, "err", err)
 		}
-		var namespace = defaultNamespace
+		var namespace = common.DefaultNamespace
 		err = snapshot.Remove(context.Background(), namespace, req.SandboxId)
 		if err != nil {
-			fmt.Printf("sandbox %s Remove error: %v\n", req.SandboxId, err)
+			slog.Error("sandbox remove error", "sandboxId", req.SandboxId, "err", err)
 		}
 	}()
 	return nil
 }
 
 func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
-	ctx, cancel := context.WithTimeoutCause(context.Background(), requestTimeout, fmt.Errorf("request timed out"))
+	ctx, cancel := context.WithTimeoutCause(context.Background(), common.RequestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	sbxVal, exists := m.sandboxes.Load(req.SandboxId)
@@ -190,16 +200,16 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 
 	m.sandboxes.Delete(req.SandboxId)
 	defer func() {
-		fmt.Printf("sandbox %s stop in pause\n", req.SandboxId)
+		slog.Info("sandbox stop in pause", "sandboxId", req.SandboxId)
 		if err := sbx.Stop(ctx); err != nil {
-			fmt.Printf("sandbox %s stop error after pause: %v\n", req.SandboxId, err)
+			slog.Error("sandbox stop error after pause", "sandboxId", req.SandboxId, "err", err)
 		}
 		if err := sbx.Close(ctx); err != nil {
-			fmt.Printf("sandbox %s close error after pause: %v\n", req.SandboxId, err)
+			slog.Error("sandbox close error after pause", "sandboxId", req.SandboxId, "err", err)
 		}
-		var namespace = defaultNamespace
+		var namespace = common.DefaultNamespace
 		if err := snapshot.Remove(context.Background(), namespace, req.SandboxId); err != nil {
-			fmt.Printf("sandbox %s Remove error after pause: %v\n", req.SandboxId, err)
+			slog.Error("sandbox remove error after pause", "sandboxId", req.SandboxId, "err", err)
 		}
 	}()
 
@@ -211,16 +221,16 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	syscall.Sync()
 
 	var key = req.SandboxId
-	var namespace = defaultNamespace
+	var namespace = common.DefaultNamespace
 
 	info, err := snapshot.Stat(ctx, namespace, key)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat snapshot %s: %w", key, err)
 	}
 	parent := info.Parent
-	snapshotId, err := utils.CalculateSnapshotName(namespace, key, parent)
+	snapshotId, err := snapshot.CalculateSnapshotID(namespace, key, parent)
 	if err != nil {
-		return "", fmt.Errorf("failed to calculate snapshot name: %w", err)
+		return "", fmt.Errorf("failed to calculate snapshot id: %w", err)
 	}
 
 	err = snapshot.Commit(context.Background(), namespace, snapshotId, key)
@@ -232,13 +242,12 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 }
 
 func (m *Manager) CleanupPool() error {
-	// debug
-	fmt.Println("cleanup pool begin, wait for a few seconds")
+	slog.Debug("cleanup pool begin")
 	err := m.pool.Cleanup()
 	if err != nil {
 		return fmt.Errorf("failed to cleanup pool: %v", err)
 	}
-	fmt.Println("cleanup pool finish")
+	slog.Debug("cleanup pool finish")
 
 	return nil
 }

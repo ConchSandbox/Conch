@@ -1,0 +1,90 @@
+package snapshot
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+)
+
+// configUpdater handles snapshot configuration file updates.
+type configUpdater struct{}
+
+// updateSnapshotConfig updates the snapshot configuration file with new paths.
+func (cu *configUpdater) updateSnapshotConfig(configFilePath, kernelPath, initrdPath, memoryPath string, pmemPaths []string) error {
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return fmt.Errorf("error open snapshot config file %s : %w", configFilePath, err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("error unmarshal snapshot config file %s : %w", configFilePath, err)
+	}
+
+	cu.updatePayloadPaths(config, kernelPath, initrdPath)
+	cu.updateMemoryZone(config, memoryPath)
+	cu.updatePmemDevices(config, pmemPaths)
+
+	updatedData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error marshal config: %w", err)
+	}
+	if err := os.WriteFile(configFilePath, updatedData, 0600); err != nil {
+		return fmt.Errorf("error write snapshot config file %s : %w", configFilePath, err)
+	}
+
+	return nil
+}
+
+// updatePayloadPaths updates kernel and initramfs paths in payload section.
+func (cu *configUpdater) updatePayloadPaths(config map[string]interface{}, kernelPath, initrdPath string) {
+	payload, ok := config["payload"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if oldKernel, ok := payload["kernel"].(string); ok && oldKernel != "" {
+		payload["kernel"] = kernelPath
+	}
+	if oldInitrd, ok := payload["initramfs"].(string); ok && oldInitrd != "" {
+		payload["initramfs"] = initrdPath
+	}
+}
+
+// updateMemoryZone updates the first memory zone's file path and shared flag.
+func (cu *configUpdater) updateMemoryZone(config map[string]interface{}, memoryPath string) {
+	memory, ok := config["memory"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	zones, ok := memory["zones"].([]interface{})
+	if !ok || len(zones) == 0 {
+		return
+	}
+	zoneMap, ok := zones[0].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if oldMemoryPath, ok := zoneMap["file"].(string); ok && oldMemoryPath != "" {
+		zoneMap["file"] = memoryPath
+	}
+	if _, ok := zoneMap["shared"].(bool); ok {
+		zoneMap["shared"] = false
+	}
+}
+
+// updatePmemDevices updates pmem devices array with new paths.
+func (cu *configUpdater) updatePmemDevices(config map[string]interface{}, pmemPaths []string) {
+	if len(pmemPaths) == 0 {
+		return
+	}
+	pmemArray := make([]interface{}, 0, len(pmemPaths))
+	for _, pmemFile := range pmemPaths {
+		pmemArray = append(pmemArray, map[string]interface{}{
+			"file":           pmemFile,
+			"discard_writes": true,
+		})
+	}
+	slog.Debug("update pmem", "paths", pmemPaths)
+	config["pmem"] = pmemArray
+}
