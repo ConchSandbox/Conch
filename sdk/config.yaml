@@ -1,5 +1,5 @@
 sandbox:
-  api_url: "http://localhost:8080"                # *Sandbox service API endpoint
+  api_url: "http://localhost:4063"                # *Sandbox service API endpoint
   workdir_prefix: "/tmp/sandbox_"                 # *Prefix for sandbox working directory
   use_snapshot: false                             # *Whether to use snapshot for sandbox creation (default:false)
   sandbox_id: ""                                  # Optional: sandbox ID (default:auto generate)
@@ -13,7 +13,7 @@ snapshot:
   ram_mb: 1024                                    # *Memory size in MB
 
 image:
-  image_id: ""                                    # *Image ID 
+  image_name: ""                                    # *Image ID
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
   kernel_path: ""                                 # *Kernel binary path
   disk_image_path: ""                             # *Raw disk image path
