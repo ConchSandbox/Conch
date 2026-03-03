@@ -104,6 +104,17 @@ func (w *writeSyncer) Sync() error {
 	return w.file.Sync()
 }
 
+// stdoutWriter writes only to stdout
+type stdoutWriter struct{}
+
+func (w *stdoutWriter) Write(p []byte) (n int, err error) {
+	return os.Stdout.Write(p)
+}
+
+func (w *stdoutWriter) Sync() error {
+	return nil // stdout doesn't need sync
+}
+
 // Config holds the configuration for the logger
 type Config struct {
 	Level       LogLevel // Minimum log level to output
@@ -127,9 +138,6 @@ var (
 
 // Init initializes the global logger with the given config
 func Init(config Config) error {
-	if config.OutputPath == "" {
-		config.OutputPath = defaultConfig.OutputPath
-	}
 	if config.Level == 0 {
 		config.Level = defaultConfig.Level
 	}
@@ -137,41 +145,87 @@ func Init(config Config) error {
 		config.MaxFileSize = defaultConfig.MaxFileSize
 	}
 
-	// Create log directory if it doesn't exist
-	if err := os.MkdirAll(config.OutputPath, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	// Create log file with datetime in filename
-	now := time.Now()
-	datetime := now.Format("20060102-150405")
-	logFileName := fmt.Sprintf("%s.log", datetime)
-	logFilePath := filepath.Join(config.OutputPath, logFileName)
-
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create log file: %w", err)
-	}
-
 	logger := &ulog{
-		level:       config.Level,
-		output:      logFile,
-		filePath:    logFilePath,
-		writer:      &writeSyncer{file: logFile},
-		maxFileSize:  config.MaxFileSize,
-		rotation:    0,
+		level:    config.Level,
+		maxFileSize: config.MaxFileSize,
+		rotation: 0,
 	}
 
-	// If stdout is enabled, wrap the writer to write to both file and stdout
-	if config.Stdout {
-		logger.writer = &multiWriter{
-			file:       logFile,
-			stdout:     os.Stdout,
-			filePath:   logFilePath,
-			maxFileSize: config.MaxFileSize,
-			baseName:   logFileName,
-			outputPath: config.OutputPath,
-			rotation:   &logger.rotation,
+	// Determine output mode based on OutputPath and Stdout
+	// Mode 1: Only stdout (OutputPath is empty, Stdout is true)
+	// Mode 2: Only file (OutputPath is set, Stdout is false)
+	// Mode 3: Both stdout and file (OutputPath is set, Stdout is true)
+	onlyStdout := (config.OutputPath == "" && config.Stdout)
+	fileMode := (config.OutputPath != "")
+	bothMode := (config.OutputPath != "" && config.Stdout)
+
+	if onlyStdout {
+		// Pure stdout mode - no file creation
+		logger.output = nil
+		logger.filePath = ""
+		logger.writer = &stdoutWriter{}
+	} else if fileMode {
+		// File mode or both mode - create log directory and file
+		// Create log directory if it doesn't exist
+		if err := os.MkdirAll(config.OutputPath, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory: %w", err)
+		}
+
+		// Create log file with datetime in filename
+		now := time.Now()
+		datetime := now.Format("20060102-150405")
+		logFileName := fmt.Sprintf("%s.log", datetime)
+		logFilePath := filepath.Join(config.OutputPath, logFileName)
+
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to create log file: %w", err)
+		}
+
+		logger.output = logFile
+		logger.filePath = logFilePath
+
+		if bothMode {
+			// Both mode - write to file and stdout
+			logger.writer = &multiWriter{
+				file:       logFile,
+				stdout:     os.Stdout,
+				filePath:   logFilePath,
+				maxFileSize: config.MaxFileSize,
+				baseName:   logFileName,
+				outputPath: config.OutputPath,
+				rotation:   &logger.rotation,
+			}
+		} else {
+			// File mode - write only to file
+			logger.writer = &writeSyncer{file: logFile}
+		}
+	} else {
+		// Fallback: OutputPath is empty but Stdout is false - use default file mode
+		config.OutputPath = defaultConfig.OutputPath
+		if err := os.MkdirAll(config.OutputPath, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory: %w", err)
+		}
+
+		now := time.Now()
+		datetime := now.Format("20060102-150405")
+		logFileName := fmt.Sprintf("%s.log", datetime)
+		logFilePath := filepath.Join(config.OutputPath, logFileName)
+
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to create log file: %w", err)
+		}
+
+		logger.output = logFile
+		logger.filePath = logFilePath
+		logger.writer = &writeSyncer{file: logFile}
+	}
+
+	// Close old logger's file if it exists
+	if defaultLogger != nil {
+		if oldLogger, ok := defaultLogger.(*ulog); ok && oldLogger.output != nil {
+			_ = oldLogger.output.Close()
 		}
 	}
 
@@ -259,6 +313,11 @@ func GetLogger() Logger {
 		_ = Init(defaultConfig)
 	}
 	return defaultLogger
+}
+
+// SetLogger sets the global logger instance (for testing or advanced usage)
+func SetLogger(logger Logger) {
+	defaultLogger = logger
 }
 
 // Package-level logging functions for convenience
@@ -472,6 +531,9 @@ func caller(skip int) (uintptr, string, int, bool) {
 func (l *ulog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.output == nil {
+		return nil // Nothing to close in pure stdout mode
+	}
 	return l.output.Close()
 }
 
