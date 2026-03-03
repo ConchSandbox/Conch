@@ -187,7 +187,7 @@ run_unpack() {
 install_sdk() {
     echo "--- Installing Python SDK ---"
     if [ -d "./sdk" ]; then
-        pip install -e ./sdk
+        pip install -e ./sdk --break-system-packages
         if [ $? -ne 0 ]; then
             echo "Error: Failed to install SDK with pip."
             return 1
@@ -195,8 +195,8 @@ install_sdk() {
         
         # Setup config
         [ ! -d "/etc/conch" ] && mkdir -p /etc/conch
-        if [ ! -f "/etc/conch/sdk-config.yaml" ] && [ -f "./configs/sdk-config.yaml" ]; then
-            cp ./configs/sdk-config.yaml /etc/conch/sdk-config.yaml
+        if [ ! -f "/etc/conch/sdk-config.yaml" ] && [ -f "./config/sdk-config.yaml" ]; then
+            cp ./config/sdk-config.yaml /etc/conch/sdk-config.yaml
             echo "Config file copied to /etc/conch/sdk-config.yaml"
         else
             echo "Skipping config copy (/etc/conch/sdk-config.yaml already exists or source missing)"

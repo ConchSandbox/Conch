@@ -61,7 +61,7 @@
 逻辑：
 - 在本地执行 `pip install -e ./sdk`（可编辑模式安装）。
 - 自动创建 `/etc/conch/` 目录。
-- 将 `./configs/sdk-config.yaml` 配置文件备份至 `/etc/conch/`（若目标文件已存在则跳过）。
+- 将 `./config/sdk-config.yaml` 配置文件备份至 `/etc/conch/`（若目标文件已存在则跳过）。
 
 使用示例：
 ```bash
