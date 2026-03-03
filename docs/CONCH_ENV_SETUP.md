@@ -30,89 +30,67 @@
 
 脚本支持 6 个核心命令，可根据实际需求选择「分步执行」或「全流程执行」，各命令功能、使用示例如下：
 
-#### 1. install 命令
-功能：检查并安装 Conch 项目运行所需的核心依赖（containerd + cloud-hypervisor），若依赖已安装则自动跳过，避免重复安装。
-
-依赖版本：
-- containerd：默认安装 v2.2.1（自动配置系统服务，设置开机自启）
-- cloud-hypervisor：默认安装 v48.0（静态二进制文件，安装至 /usr/local/bin）
+#### 1. provisioning 命令
+功能：初始化基础运行环境。仅安装 Conch 项目运行所需的核心二进制依赖（containerd + cloud-hypervisor）。
 
 使用示例：
+```bash
+./scripts/conch-env-setup.sh provisioning
 ```
-./scripts/conch-env-setup.sh install
-```
-
-执行逻辑：
-- 先检测系统是否已安装 cloud-hypervisor，未安装则自动下载并配置执行权限
-- 再检测系统是否已安装 containerd，未安装则下载压缩包、解压安装、配置系统服务、启动并设置开机自启
-- 依赖安装完成后，更新系统命令哈希表，确保后续命令可正常调用
 
 #### 2. pull 命令
-功能：拉取 Conch 项目所需的构建镜像和功能镜像。
-默认镜像：
-- 构建镜像（build_image）：hub.oepkgs.net/conch/conch-builder:v0.1
-- 功能镜像（main_image）：hub.oepkgs.net/conch/conch-index:v0.1
+功能：拉取功能镜像并执行解包。
+逻辑：拉取 `main_image` -> 调用 `conch-unpack`。
 
-使用示例（默认镜像）：
-```
+使用示例：
+```bash
 ./scripts/conch-env-setup.sh pull
 ```
 
-执行逻辑：
-- 自动解析镜像地址中的域名，为每个域名创建 containerd 证书配置目录（/etc/containerd/certs.d/[域名]）
-- 生成 hosts.toml 配置文件，支持镜像拉取和解析功能
-- 使用 ctr 命令拉取指定的构建镜像和功能镜像
-
 #### 3. build 命令
-
-功能：在容器内执行 Conch 项目的离线编译，避免污染宿主机环境，编译完成后会在项目根目录的 `./bin` 目录下生成可执行工具（如 conch-unpack）。
-核心特性：容器化编译，宿主机仅需提供项目目录挂载，无需安装 Go 等编译依赖。
+功能：执行项目编译。
+逻辑：安装 containerd -> 拉取 `build_image` -> 并在容器内通过 `make build-offline` 完成编译。编译产物输出至宿主机的 `./bin` 目录。
 
 使用示例：
-```
+```bash
 ./scripts/conch-env-setup.sh build
 ```
-执行逻辑：
-- 使用 ctr 命令启动构建容器，将宿主机的 Conch 项目根目录挂载至容器内的 /build 目录（读写权限）
-- 设置容器内的 GOPATH 环境变量，确保编译正常执行
-- 在容器内执行 `make build-offline` 命令完成离线编译，编译产物输出至宿主机的 ./bin 目录
-- 编译完成后自动删除容器，避免残留临时容器
 
-#### 4. process 命令
-
-功能：使用 `build` 命令编译生成的 `./bin/conch-unpack` 工具，对指定的功能镜像进行解包和初步分析。
-
-前置条件：必须先执行 `build` 命令完成编译，否则会提示 `./bin/conch-unpack` 不存在。
+#### 4. sdk 命令
+功能：安装 Conch Python SDK。
+逻辑：
+- 在本地执行 `pip install -e ./sdk`（可编辑模式安装）。
+- 自动创建 `/etc/conch/` 目录。
+- 将 `./configs/sdk-config.yaml` 配置文件备份至 `/etc/conch/`（若目标文件已存在则跳过）。
 
 使用示例：
+```bash
+./scripts/conch-env-setup.sh sdk
 ```
-./scripts/conch-env-setup.sh process
-```
-执行逻辑：
-- 检测项目根目录下的 ./bin/conch-unpack 是否存在且具备执行权限
-- 若存在则调用该工具，传入功能镜像（main_image）地址进行解包分析
-- 若不存在则输出错误提示，引导用户先执行 build 命令
 
-#### 5. all 命令（推荐）
-
-功能：一键执行全流程操作，按顺序自动运行 `install → pull → build → process` 四个命令，无需手动分步执行，适合首次搭建环境或快速部署场景。
-
-核心优势：全程自动化，无需人工干预，减少操作步骤和失误概率。
+#### 5. install 命令（快速上手）
+功能：一键完成环境底座与应用准备。
+逻辑：依次执行 `provisioning` → `pull` → `sdk`。适合不需要重新编译项目，只需运行环境和 SDK 的用户。
 
 使用示例：
+```bash
+./scripts/conch-env-setup.sh install
 ```
+
+#### 6. all 命令（全流程执行）
+功能：一键执行全流程操作。
+逻辑：按顺序自动运行 `provisioning → pull → build → sdk`。
+适合首次从源码搭建环境并需要完整编译流程的场景。
+
+使用示例：
+```bash
 ./scripts/conch-env-setup.sh all
 ```
-执行逻辑：
 
-- 依次执行 install（安装依赖）→ pull（拉取镜像）→ build（容器化编译）→ process（镜像解包）
-- 前一个步骤执行成功后才会进入下一个步骤，若某一步骤失败则终止后续执行，并输出错误提示
-
-#### 6. help 命令
+#### 7. help 命令
 
 功能：查看脚本的核心命令、使用语法和自定义参数说明，适合忘记命令或参数时快速查询。
 
-使用示例：
 ```
 ./scripts/conch-env-setup.sh help
 ```
@@ -175,8 +153,8 @@
 - 检查网络是否正常，能否访问 GitHub（可通过 ping github.com 测试）
 - 若网络受限，可手动下载对应版本的依赖包至 Conch 项目根目录，重新执行脚本（脚本会检测本地文件，跳过下载步骤）
 - 手动下载地址：
-  - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
-  - cloud-hypervisor v48.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v48.0/cloud-hypervisor-static
+  - x86环境 containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
+  - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
 
 问题 2：执行 process 命令提示「./bin/conch-unpack 不存在」
 

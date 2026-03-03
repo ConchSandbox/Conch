@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"text/template"
@@ -92,8 +93,12 @@ func buildRequest(method, fullCommand, requestBody string) string {
 }
 
 func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, error) {
+	vmmBinaryPath := defaultVmmBinary
+	if path, err := exec.LookPath("cloud-hypervisor"); err == nil{
+		vmmBinaryPath = path
+	}
 	clhArgs := StartScriptCLHArgs{
-		VmmBinaryPath: defaultVmmBinary,
+		VmmBinaryPath: vmmBinaryPath,
 		CPUBoot:       args.CPUBoot,
 		CPUMax:        args.CPUMax,
 		MemorySize:    strconv.FormatInt(args.MemorySize, 10) + "M",

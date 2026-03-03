@@ -39,9 +39,6 @@ type ResourceArgs struct {
 }
 
 func GetVmmType(vmmName string) (int, bool) {
-	// debug
-	fmt.Printf("try vmm type %s \n", vmmName)
-
 	vmmType, exists := vmmTypeMap[vmmName]
 	return vmmType, exists
 }
@@ -59,9 +56,6 @@ type vmmClient interface {
 func newVmmClient(vmmType int, vmmSocketPath string) (vmmClient, error) {
 	switch vmmType {
 	case CLHVmmType:
-		// debug
-		fmt.Println("New CLH Client...")
-
 		return NewCLHClient(vmmType, vmmSocketPath), nil
 	case StratovirtVmmType:
 		return nil, fmt.Errorf("not support vmm type: %d", vmmType)
