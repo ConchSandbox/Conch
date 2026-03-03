@@ -1,45 +1,69 @@
+<img src="./docs/assets/Conch-logo.jpg" alt="Conch logo" style="width:200px;" />
 
-<img src="./logo/Conch-logo.jpg" alt="Conch logo" style="width:600px;" />
+<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.23+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
 
-# Conch
+# Conch - Agent Sandbox Engine
 
-## 介绍
 
-Conch是面向人工智能时代的沙箱引擎，Docker（集装箱）装载和分发货物，Conch（海螺）装载和分发智能体。
-Conch围绕AI时代出现的AI推理、Agent应用等新业务，超节点、新总线、异构算力等新硬件构建更加高弹性、高性价比和高性能的容器底座。
+Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对沙箱的高启动性能、高弹性、高 I/O 性能和高密度部署的诉求。
+项目围绕以下 Agent 对沙箱新需求展开：
+1. 新生态：相比传统命令行和K8S云原生生态，提供 Agent 原生的沙箱管理 API 和 SDK；
+2. 新镜像：相对传统 OCI v1 容器镜像格式，提供 EROFS 镜像格式，统一管理容器镜像和快照；
+3. 新硬件（超节点）：相比传统单机管理容器镜像，利用超节点高速互联能力，提供跨级镜像共享和管理机制。
 
-## 软件架构
+## 核心特性
 
-北向支持对接云原生平台（K8S）、AI原生平台和极简单机部署模式。
+- 轻量安全隔离 -- 支持虚拟沙箱，对 Agent 任务进行安全隔离。支持完整的生命周期管理，包括创建、暂停、恢复和删除等操作。
+- 快照启动加速 -- 支持虚拟机内存和根文件系统的快照功能。通过快照机制，可以实现秒级的沙箱启动，显著提升大规模部署场景下的资源利用效率。快照采用写时复制（Copy-on-Write）技术，最小化存储开销。
+- 精简容器网络 -- 通过 veth 设备和 NAT 规则实现网络隔离和地址转换，支持容器网络池化复用，降低启动时延。
 
-南向支持Rack级资源共享，构建容器镜像懒加载、原生快照镜像、共享内存文件系统等特性实现高弹性和高密部署。
+## 快速开始
 
-## 安装使用
+### 环境要求
 
-使用yum安装：
-```shell
-yum install conch-0.1.xx.rpm
+- Go 1.23+
+- Containerd 2.2.1+
+- Cloud-Hypervisor v48.0+
+- Iptables 网络配置工具
+- Linux 5.10+
+
+### 一键编译安装
+
+
+```bash
+# 克隆代码仓库
+git clone https://atomgit.com/openeuler/Conch.git
+cd Conch
+git checkout demo
+
+# 一键执行全流程
+./scripts/conch-env-setup.sh all
+
+pip install -e ./sdk
 ```
 
-构建快照镜像：
-```shell
-conch build Dockerfile -t agent-sandbox-template:v1
+### 运行服务
+
+编译完成后，二进制文件位于 `bin/` 目录下，通过以下命令启动conchd服务：
+
+```bash
+./bin/conchd
 ```
 
-从快照启动沙箱：
-```shell
-conch restore agent-sandbox-template:v1
+### Python SDK 示例
+```python
+from conch import Sandbox
+sandbox = Sandbox()
+result = sandbox.execute(cmd="python3",content="print('hello Conch！')")
+print(result)
+sandbox.delete()
 ```
-
-
-## 参与贡献
-
-1.  Fork 本仓库
-2.  新建特性分支
-3.  提交代码
-4.  发起 Pull Request
-
 
 ## 许可证
 
 木兰宽松许可证， 第2版
+
+## 贡献指南
+
+欢迎社区贡献代码和文档。
+

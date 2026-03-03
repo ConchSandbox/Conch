@@ -1,0 +1,174 @@
+package snapshot
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/containerd/containerd/snapshots"
+	"github.com/opencontainers/go-digest"
+
+	"github.com/openeuler/Conch/internal/snapshot/common"
+)
+
+const chainIDPrefix = "sha256:"
+
+// CalculateSnapshotID calculates a snapshot ID from namespace, key, and parent.
+// If parent is empty, returns a digest of namespace/key.
+// If parent is set, returns a chain ID computed from parent and current layer.
+func CalculateSnapshotID(namespace, key, parent string) (string, error) {
+	if parent == "" {
+		dgst := digest.FromString(fmt.Sprintf("%s/%s", namespace, key))
+		return dgst.String(), nil
+	}
+
+	diffID := digest.FromString(fmt.Sprintf("%s/%s", namespace, key))
+	chainID := calculateChainID(parent, diffID.String())
+	return chainID, nil
+}
+
+// calculateChainID computes the chain ID for layer stacking.
+func calculateChainID(parentChainID, diffID string) string {
+	data := parentChainID + " " + diffID
+	hash := sha256.Sum256([]byte(data))
+	return chainIDPrefix + hex.EncodeToString(hash[:])
+}
+
+// prepareSnapshotFiles creates the snapshot directory structure.
+func prepareSnapshotFiles(conf *SnapshotConfig) error {
+	return os.MkdirAll(conf.SnapDir(), common.DirMode)
+}
+
+// listRootfsLayerErofs scans rootfs mount point for layer files in pattern "layer<N>.erofs".
+// Returns sorted layer filenames by numeric index.
+func listRootfsLayerErofs(rootfsMount string) ([]string, error) {
+	entries, err := os.ReadDir(rootfsMount)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", rootfsMount, err)
+	}
+
+	const (
+		layerPrefix = "layer"
+		layerSuffix = ".erofs"
+	)
+
+	type layerEntry struct {
+		name  string
+		index int
+	}
+	layers := make([]layerEntry, 0, len(entries))
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+
+		// Check prefix and suffix
+		if !strings.HasPrefix(name, layerPrefix) || !strings.HasSuffix(name, layerSuffix) {
+			continue
+		}
+
+		// Extract numeric part: "layer123.erofs" -> "123"
+		numPart := strings.TrimPrefix(name, layerPrefix)
+		numPart = strings.TrimSuffix(numPart, layerSuffix)
+
+		// Validate that the extracted part is a valid number
+		idx, err := strconv.Atoi(numPart)
+		if err != nil {
+			// Skip files with non-numeric index (e.g., "layerX.erofs")
+			continue
+		}
+		if idx < 0 {
+			continue
+		}
+
+		layers = append(layers, layerEntry{name: name, index: idx})
+	}
+
+	if len(layers) == 0 {
+		return []string{}, nil
+	}
+
+	// Sort by numeric index
+	sort.Slice(layers, func(i, j int) bool {
+		return layers[i].index < layers[j].index
+	})
+
+	result := make([]string, len(layers))
+	for i, layer := range layers {
+		result[i] = layer.name
+	}
+	return result, nil
+}
+
+// prepareSparseMemfile creates a sparse memory file of the specified size.
+func prepareSparseMemfile(conf *SnapshotConfig, targetDir string) error {
+	memFile := filepath.Join(targetDir, common.MemFileName)
+	if err := os.MkdirAll(filepath.Dir(memFile), common.DirMode); err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(memFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, common.FileMode)
+	if err != nil {
+		return fmt.Errorf("open memfile: %w", err)
+	}
+	defer f.Close()
+
+	if err := f.Truncate(conf.MemSize * common.MemMB); err != nil {
+		return fmt.Errorf("truncate memfile: %w", err)
+	}
+
+	return nil
+}
+
+// ensureMemFile checks for mem.img existence; creates a sparse file if createIfMissing is true.
+func ensureMemFile(conf *SnapshotConfig, memDir string, createIfMissing bool) error {
+	memFile := filepath.Join(memDir, common.MemFileName)
+	if _, err := os.Stat(memFile); err == nil {
+		return nil
+	}
+	if !createIfMissing {
+		return fmt.Errorf("mem.img not found at %s", memFile)
+	}
+	return prepareSparseMemfile(conf, memDir)
+}
+
+// getMountPath constructs the mount path for a snapshot.
+func getMountPath(workDir, namespace, mountKey string) string {
+	return filepath.Join(workDir, namespace, mountKey)
+}
+
+// getMemKeyFromRootfs derives the mem snapshot key from rootfs key.
+func getMemKeyFromRootfs(rootfsKey string) string {
+	return rootfsKey + common.MemKeySuffix
+}
+
+// getVMKeyFromRootfs derives the VM snapshot key from rootfs key.
+func getVMKeyFromRootfs(rootfsKey string) string {
+	return rootfsKey + common.VmKeySuffix
+}
+
+// mergeLabels merges snapshot info labels into config.
+func mergeLabels(info *snapshots.Info, conf *SnapshotConfig) {
+	for k, v := range info.Labels {
+		switch k {
+		case common.SnapshotLabelMemSize:
+			mSize, err := strconv.ParseInt(v, 10, 64)
+			if err == nil {
+				conf.MemSize = mSize
+			}
+		case common.SnapshotLabelRootfs:
+			conf.Rootfs = v
+		case common.SnapshotLabelSnapshotDir:
+			conf.RootDir = v
+		default:
+			conf.Labels[k] = v
+		}
+	}
+}
