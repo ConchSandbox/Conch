@@ -22,6 +22,7 @@ type Process struct {
 	initrdPath    string
 	// Exit *utils.SetOnce[struct{}]
 	client vmmClient
+	exitSignal chan error
 }
 
 func SandboxVmmSocketPath(sandboxId string) string {
@@ -32,9 +33,6 @@ func NewProcess(
 	vmmName, sandboxId string,
 	vmmResourceArgs *ResourceArgs, isResume bool,
 ) (*Process, error) {
-	// debug
-	fmt.Println("New process...")
-
 	vmmType, exists := GetVmmType(vmmName)
 	if !exists {
 		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
@@ -50,6 +48,7 @@ func NewProcess(
 		kernelPath:    vmmResourceArgs.KernelPath,
 		initrdPath:    vmmResourceArgs.InitrdPath,
 		client:        client,
+		exitSignal:    make(chan error, 1),
 	}
 
 	startScript, err := client.BuildStartCmd(vmmResourceArgs, isResume)
@@ -110,8 +109,6 @@ func (p *Process) startCmd(
 	p.cmd.Stdout = os.Stdout
 	p.cmd.Stderr = os.Stderr
 
-	// debug
-	fmt.Printf("begin Start vm *** %d ***\n", time.Now().UnixNano()/int64(time.Millisecond))
 	err := p.cmd.Start()
 	if err != nil {
 		return fmt.Errorf("error starting vmm process: %w", err)
@@ -130,27 +127,26 @@ func (p *Process) startCmd(
 				// Check if the process was killed by a signal
 				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() && (status.Signal() == syscall.SIGKILL || status.Signal() == syscall.SIGTERM) {
 					fmt.Println("process was killed by a signal")
+					p.exitSignal <- nil
+					close(p.exitSignal)
 					return
 				}
 			}
 
 			errMsg := fmt.Errorf("error waiting for vmm process: %w", waitErr)
-			fmt.Println(errMsg)
-			cancelStart(errMsg)
-
+			p.exitSignal <- errMsg
+			close(p.exitSignal)
 			return
 		}
+		p.exitSignal <- nil
+		close(p.exitSignal)
 	}()
 
-	// debug
-	fmt.Println("Waiting vmm socket...")
 	// Wait for the VMM process to start
 	err = waitFile(startCtx, p.VmmSocketPath)
 	if err != nil {
 		errMsg := fmt.Errorf("error waiting for vmm socket: %w", err)
-
 		vmmStopErr := p.Stop()
-
 		return errors.Join(errMsg, vmmStopErr)
 	}
 
@@ -158,9 +154,6 @@ func (p *Process) startCmd(
 }
 
 func (p *Process) Create(ctx context.Context) error {
-	// debug
-	fmt.Println("Creating vmm...")
-
 	err := p.startCmd(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
@@ -219,6 +212,13 @@ func getProcessState(pid int) (string, error) {
 }
 
 func (p *Process) Stop() error {
+	select {
+	case <-p.exitSignal:
+		// Already exited
+		return nil
+	default:
+	}
+
 	if p.cmd.Process == nil {
 		return fmt.Errorf("vmm process not started")
 	}
@@ -235,13 +235,7 @@ func (p *Process) Stop() error {
 		return fmt.Errorf("failed to send SIGTERM to vmm process, %s", err)
 	}
 
-	// TODO: goroutine Wait 10 sec for the VMM process to exit, if it doesn't, send SIGKILL.
-	_, err = p.cmd.Process.Wait()
-	if err != nil {
-		// debug log
-		fmt.Printf("Wait process: %s", err)
-	}
-
+	<-p.exitSignal
 	return nil
 }
 
@@ -263,10 +257,12 @@ func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error
 }
 
 func (p *Process) Wait() error {
-	_, err := p.cmd.Process.Wait()
-	if err != nil {
-		// debug log
-		fmt.Printf("Wait process: %s", err)
+	// Blocks until the single reaper goroutine (in startCmd) sends the result.
+	// This ensures only one part of the code calls the OS wait syscall.
+	err, ok := <-p.exitSignal
+	if !ok {
+		// Channel closed, process already reaped.
+		return nil
 	}
-	return nil
+	return err
 }

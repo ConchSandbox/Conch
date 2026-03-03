@@ -44,8 +44,6 @@ func ResumeSandbox(
 		return nil, fmt.Errorf("failed to init network")
 	}
 
-	fmt.Printf("get slot %s\n", slot.Key)
-
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
 		if err != nil {
@@ -109,9 +107,6 @@ func CreateSandbox(
 	snapshotConf *snapshot.SnapshotConfig,
 	vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
 ) (s *Sandbox, e error) {
-	// debug
-	fmt.Printf("Creating sandbox: vmmName %s, sandboxId %s...\n",
-		vmmName, sandboxId)
 
 	cleanup := NewCleanup()
 	defer func() {
@@ -125,8 +120,6 @@ func CreateSandbox(
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network")
 	}
-
-	fmt.Printf("get slot %s\n", slot.Key)
 
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)

@@ -77,18 +77,18 @@ func (s *AgentServer) writeScript(workDir, cmd, content string) (string, error) 
 	}
 
 	scriptExtMap := map[string]string{
-		"python": "main.py",
+		"python":  "main.py",
 		"python3": "main.py",
 		"python2": "main.py",
-		"node": "main.js",
-		"nodejs": "main.js",
-		"bash": "main.sh",
-		"sh": "main.sh",
-		"zsh": "main.sh",
-		"fish": "main.sh",
-		"lua": "main.lua",
-		"ruby": "main.rb",
-		"rb": "main.rb",
+		"node":    "main.js",
+		"nodejs":  "main.js",
+		"bash":    "main.sh",
+		"sh":      "main.sh",
+		"zsh":     "main.sh",
+		"fish":    "main.sh",
+		"lua":     "main.lua",
+		"ruby":    "main.rb",
+		"rb":      "main.rb",
 	}
 
 	scriptName := "main.py"
@@ -197,7 +197,7 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (*pb.PostFilesResponse, error) {
 	if len(req.Files) == 0 {
 		errMsg := "no files provided for upload"
-		log.Printf("WARN: %s", errMsg) 
+		log.Printf("WARN: %s", errMsg)
 		return &pb.PostFilesResponse{
 			UploadedCount: 0,
 			Error:         errMsg,

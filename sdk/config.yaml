@@ -13,7 +13,7 @@ snapshot:
   ram_mb: 1024                                    # *Memory size in MB
 
 image:
-  image_name: ""                                    # *Image ID
+  image_name: ""                                  # *Image name
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
   kernel_path: ""                                 # *Kernel binary path
   disk_image_path: ""                             # *Raw disk image path

@@ -175,11 +175,6 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 		if err != nil {
 			slog.Error("sandbox stop error", "sandboxId", req.SandboxId, "err", err)
 		}
-		var namespace = common.DefaultNamespace
-		err = snapshot.Remove(context.Background(), namespace, req.SandboxId)
-		if err != nil {
-			slog.Error("sandbox remove error", "sandboxId", req.SandboxId, "err", err)
-		}
 	}()
 	return nil
 }

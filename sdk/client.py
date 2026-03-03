@@ -65,14 +65,14 @@ class AgentClient:
             "env": env or {},
             "args": args or [],
         }
-        
+
         if filename is None:
             filename = self._infer_script_name(cmd)
 
         if content is not None:
             request_kwargs["content"] = content
             if args is None:
-                request_kwargs["args"] = filename  
+                request_kwargs["args"] = filename
 
         request = agent_pb2.StartProcessRequest(**request_kwargs)
 
@@ -200,7 +200,7 @@ class AgentClient:
                 downloaded += 1
             except Exception as e:
                 failed.append({"remote": item["remote"], "local": item["local"], "error": str(e)})
-        
+
         status = self.STATUS_SUCCESS if not failed else self.STATUS_FAILED
         return {
             "status": status,

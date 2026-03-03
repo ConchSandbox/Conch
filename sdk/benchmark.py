@@ -21,7 +21,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=n) as executor:
         futures = {executor.submit(run_sandbox_task, i, sandbox_id): i for i in range(1, n + 1)}
-        
+
         for future in as_completed(futures):
             future.result()
 

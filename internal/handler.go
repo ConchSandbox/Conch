@@ -122,7 +122,6 @@ func (s *Server) Start(addr string) error {
 
 	err := s.httpServer.ListenAndServe()
 	if err == http.ErrServerClosed {
-		// debug
 		fmt.Println("main server gracefully stopped.")
 		err = nil
 	}
@@ -137,7 +136,6 @@ func (s *Server) Cleanup() {
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
 			fmt.Printf("HTTP server Shutdown error: %v\n", err)
 		} else {
-			// debug
 			fmt.Println("HTTP server gracefully stopped.")
 		}
 
@@ -152,8 +150,7 @@ func (s *Server) Cleanup() {
 }
 
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	// debug
-	fmt.Printf("begin CreateSandbox *** %d ***\n", time.Now().UnixNano()/int64(time.Millisecond))
+	fmt.Printf("begin CreateSandbox \n")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -168,7 +165,6 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	peerIP, err := s.sandboxManager.Create(req)
 	if err != nil {
-		// debug
 		fmt.Printf("Failed to create sandbox: %s \n", err)
 
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -183,8 +179,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
-	// debug
-	fmt.Printf("begin DeleteSandbox *** %d ***\n", time.Now().UnixNano()/int64(time.Millisecond))
+	fmt.Printf("begin DeleteSandbox \n")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -209,8 +204,7 @@ func (s *Server) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
-	// debug
-	fmt.Printf("begin PauseSandbox *** %d ***\n", time.Now().UnixNano()/int64(time.Millisecond))
+	fmt.Printf("begin PauseSandbox \n")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
