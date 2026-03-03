@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+option go_package = "./go_proto;go_proto";
+
+package pb;
+
+message Empty {}
+
+// AgentService provides process/command management and file transfer capabilities
+service AgentService {
+  rpc HealthCheck (Empty) returns (CheckReply);
+  rpc ExecuteCommand(CommandRequest) returns (CommandResponse);
+  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
+  rpc PostFiles(PostFilesRequest) returns (PostFilesResponse);
+  rpc GetFile(GetFileRequest) returns (GetFileResponse);
+}
+
+message CheckReply {
+  string message = 1;
+}
+
+message CommandRequest {
+  string command = 1;
+  repeated string args = 2;
+}
+
+message CommandResponse {
+  string stdout = 1;
+}
+
+message StartProcessRequest {
+  string cmd = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string cwd = 4;
+  string content = 5;
+}
+
+message StartProcessResponse {
+  string stdout = 1;
+  string stderr = 2;
+  int32 exit_code = 3;
+  string error = 4;
+}
+
+message PostFilesRequest {
+  repeated File files = 1;
+}
+
+message File {
+  string filepath = 1;
+  bytes content = 2;
+}
+
+message PostFilesResponse {
+  int32 uploaded_count = 1;
+  string error = 2;
+}
+
+message GetFileRequest {
+  string filepath = 1;
+}
+
+message GetFileResponse {
+  bytes content = 1;
+  string error = 2;
+}

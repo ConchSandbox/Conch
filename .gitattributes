@@ -1,0 +1,54 @@
+# Core rule: All text files convert to local line endings on checkout, and to LF on commit
+* text=auto eol=lf
+
+# text file types
+*.txt text
+*.md text
+*.json text
+*.xml text
+*.yml text
+*.yaml text
+*.ini text
+*.conf text
+*.properties text
+
+# Programming language related files
+*.java text
+*.cpp text
+*.c text
+*.h text
+*.hpp text
+*.cs text
+*.js text
+*.ts text
+*.py text
+*.php text
+*.rb text
+*.go text
+*.scala text
+*.kotlin text
+*.swift text
+
+# Binary files
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.rar binary
+*.7z binary
+*.tar.gz binary
+*.dll binary
+
+# Windows related files
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix/Linux scripts
+*.sh text
+
+# Git related files
+.gitignore text
+.gitattributes text
