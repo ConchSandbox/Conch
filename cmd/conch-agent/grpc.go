@@ -4,13 +4,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	pb "github.com/openeuler/Conch/api/go_proto"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const DirPerm = 0755
@@ -22,17 +23,17 @@ type AgentServer struct {
 }
 
 func (s *AgentServer) HealthCheck(ctx context.Context, in *pb.Empty) (*pb.CheckReply, error) {
-	log.Println("Received health check request")
+	ulog.Debug("Received health check request")
 	return &pb.CheckReply{Message: HealthMsgOK}, nil
 }
 
 func (s *AgentServer) ExecuteCommand(ctx context.Context, req *pb.CommandRequest) (*pb.CommandResponse, error) {
-	log.Printf("Received command execution request: %s %v", req.Command, req.Args)
+	ulog.Debug("Received command execution request", ulog.F("command", req.Command), ulog.F("args", fmt.Sprintf("%v", req.Args)))
 
 	cmd := exec.Command(req.Command, req.Args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Command execution failed: %v", err)
+		ulog.Error("Command execution failed", ulog.F("error", err))
 		return &pb.CommandResponse{
 			Stdout: err.Error(),
 		}, err
@@ -46,7 +47,7 @@ func (s *AgentServer) ExecuteCommand(ctx context.Context, req *pb.CommandRequest
 // buildErrorResponse creates a unified StartProcessResponse with error information
 // This function eliminates duplicate error response construction logic
 func buildErrorResponse(errMsg string) *pb.StartProcessResponse {
-	log.Printf("ERROR: %s", errMsg)
+	ulog.Error("Process error", ulog.F("message", errMsg))
 	return &pb.StartProcessResponse{
 		Stdout:   "",
 		Stderr:   "",
@@ -133,7 +134,7 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 	errBytes, _ := io.ReadAll(stderrPipe)
 
 	if err := cmd.Wait(); err != nil {
-		log.Printf("Process exited with error: %v", err)
+		ulog.Error("Process exited with error", ulog.F("error", err))
 	}
 
 	exitCode := 0
@@ -146,10 +147,11 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 
 // Starts a process with custom working dir, environment, and script content
 func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequest) (*pb.StartProcessResponse, error) {
-	log.Printf(
-		"Received start process request: cmd=%s, args=%v, cwd=%s, has_content=%t",
-		req.Cmd, req.Args, req.Cwd, req.Content != "",
-	)
+	ulog.Debug("Received start process request",
+		ulog.F("cmd", req.Cmd),
+		ulog.F("args", fmt.Sprintf("%v", req.Args)),
+		ulog.F("cwd", req.Cwd),
+		ulog.F("has_content", req.Content != ""))
 
 	// Prepare work dir
 	workDir, isTempDir, err := s.prepareWorkDir(req.Cwd)
@@ -192,12 +194,12 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 	}, nil
 }
 
-// Uploads multiple files to specified paths on the server
+// Uploads multiple files to specified paths on server
 // TODO: Use stream mode for file upload in the future.
 func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (*pb.PostFilesResponse, error) {
 	if len(req.Files) == 0 {
 		errMsg := "no files provided for upload"
-		log.Printf("WARN: %s", errMsg)
+		ulog.Warn("PostFiles", ulog.F("message", errMsg))
 		return &pb.PostFilesResponse{
 			UploadedCount: 0,
 			Error:         errMsg,
@@ -210,7 +212,7 @@ func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (
 
 		if cleanedFilepath == "" {
 			errMsg := "empty filepath for upload"
-			log.Printf("ERROR: %s", errMsg)
+			ulog.Error("PostFiles", ulog.F("message", errMsg))
 			return &pb.PostFilesResponse{
 				UploadedCount: uploadedCount,
 				Error:         errMsg,
@@ -221,7 +223,7 @@ func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (
 		targetDir := filepath.Dir(cleanedFilepath)
 		if err := os.MkdirAll(targetDir, DirPerm); err != nil {
 			errMsg := "failed to create parent directory for " + cleanedFilepath + ": " + err.Error()
-			log.Printf("ERROR: %s", errMsg)
+			ulog.Error("PostFiles", ulog.F("message", errMsg))
 			return &pb.PostFilesResponse{
 				UploadedCount: uploadedCount,
 				Error:         errMsg,
@@ -231,14 +233,16 @@ func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (
 		// Write file content to target path
 		if err := os.WriteFile(cleanedFilepath, file.Content, FilePerm); err != nil {
 			errMsg := "failed to write file " + cleanedFilepath + ": " + err.Error()
-			log.Printf("ERROR: %s", errMsg)
+			ulog.Error("PostFiles", ulog.F("message", errMsg))
 			return &pb.PostFilesResponse{
 				UploadedCount: uploadedCount,
 				Error:         errMsg,
 			}, nil
 		}
 
-		log.Printf("Successfully uploaded file: %s (size: %d bytes)", cleanedFilepath, len(file.Content))
+		ulog.Debug("Successfully uploaded file",
+			ulog.F("file", cleanedFilepath),
+			ulog.F("size", len(file.Content)))
 		uploadedCount++
 	}
 
@@ -252,7 +256,7 @@ func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (
 func (s *AgentServer) GetFile(ctx context.Context, req *pb.GetFileRequest) (*pb.GetFileResponse, error) {
 	if req.Filepath == "" {
 		errMsg := "filepath is required for file retrieval"
-		log.Printf("WARN: %s", errMsg)
+		ulog.Warn("GetFile", ulog.F("message", errMsg))
 		return &pb.GetFileResponse{Error: errMsg}, nil
 	}
 
@@ -261,14 +265,16 @@ func (s *AgentServer) GetFile(ctx context.Context, req *pb.GetFileRequest) (*pb.
 		var errMsg string
 		if os.IsNotExist(err) {
 			errMsg = "file not found: " + req.Filepath
-			log.Printf("WARN: %s", errMsg)
+			ulog.Warn("GetFile", ulog.F("message", errMsg))
 		} else {
 			errMsg = "failed to read file " + req.Filepath + ": " + err.Error()
-			log.Printf("WARN: %s", errMsg)
+			ulog.Warn("GetFile", ulog.F("message", errMsg))
 		}
 		return &pb.GetFileResponse{Error: errMsg}, nil
 	}
 
-	log.Printf("Successfully read file: %s (size: %d bytes)", req.Filepath, len(content))
+	ulog.Debug("Successfully read file",
+		ulog.F("file", req.Filepath),
+		ulog.F("size", len(content)))
 	return &pb.GetFileResponse{Content: content}, nil
 }

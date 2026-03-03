@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 )
 
@@ -46,6 +47,7 @@ func initBridge() (retErr error) {
 		},
 	}
 	if err := netlink.LinkAdd(bridge); err != nil {
+		ulog.Error("failed to create bridge", ulog.F("error", err))
 		return fmt.Errorf("error create bridge: %w", err)
 	}
 	defer func() {
@@ -56,10 +58,12 @@ func initBridge() (retErr error) {
 
 	bridgeLink, err := netlink.LinkByName(bridgeName)
 	if err != nil {
+		ulog.Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
 		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
 	}
 	err = netlink.LinkSetUp(bridgeLink)
 	if err != nil {
+		ulog.Error("failed to set vpeer device up", ulog.F("error", err))
 		return fmt.Errorf("error setting vpeer device up: %w", err)
 	}
 
@@ -69,10 +73,12 @@ func initBridge() (retErr error) {
 func deleteBridge() error {
 	veth, err := netlink.LinkByName(bridgeName)
 	if err != nil {
+		ulog.Error("failed to find bridge", ulog.F("error", err))
 		return fmt.Errorf("error finding bridge: %w", err)
 	}
 	err = netlink.LinkDel(veth)
 	if err != nil {
+		ulog.Error("failed to delete bridge device", ulog.F("error", err))
 		return fmt.Errorf("error delete bridge device: %w", err)
 	}
 	return nil
@@ -82,11 +88,11 @@ func NewPool() *Pool {
 	newSlots := make(chan *Slot, newSlotsPoolSize-1)
 	slotStorage, err := NewStorage(maxVrtSlotsSize)
 	if err != nil {
-		fmt.Printf("failed to new storage, %v\n", err)
+		ulog.Debug("failed to create new storage", ulog.F("error", err))
 		return nil
 	}
 	if err := initBridge(); err != nil {
-		fmt.Printf("failed to init bridge, %v\n", err)
+		ulog.Debug("failed to init bridge", ulog.F("error", err))
 		return nil
 	}
 	return &Pool{
@@ -99,6 +105,7 @@ func NewPool() *Pool {
 func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 	ips, err := p.slotStorage.Acquire(ctx)
 	if err != nil {
+		ulog.Error("failed to acquire network slot", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
 	}
 
@@ -106,7 +113,7 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 	if err != nil {
 		releaseErr := p.slotStorage.Release(ips)
 		err = errors.Join(err, releaseErr)
-
+		ulog.Error("failed to create network", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
 	return ips, nil
@@ -124,7 +131,7 @@ func (p *Pool) Populate(ctx context.Context) {
 		default:
 			slot, err := p.createNetworkSlot(ctx)
 			if err != nil {
-				fmt.Printf("pool: failed to create netwrok, %w\n", err)
+				ulog.Debug("pool: failed to create network", ulog.F("error", err))
 				continue
 			}
 			p.newSlots <- slot
@@ -149,10 +156,12 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		if slot != nil {
 			err := slot.RemoveNetwork()
 			if err != nil {
+				ulog.Error("failed to remove network", ulog.F("error", err))
 				return fmt.Errorf("failed to remove network: %w", err)
 			}
 			err = p.slotStorage.Release(slot)
 			if err != nil {
+				ulog.Error("failed to release network slot", ulog.F("error", err))
 				return fmt.Errorf("failed to release network slot: %w", err)
 			}
 		}
@@ -166,11 +175,13 @@ func (p *Pool) Cleanup() error {
 		if slot != nil {
 			err := slot.RemoveNetwork()
 			if err != nil {
+				ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("error", err))
 				errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 				continue
 			}
 			err = p.slotStorage.Release(slot)
 			if err != nil {
+				ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("error", err))
 				errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 				continue
 			}

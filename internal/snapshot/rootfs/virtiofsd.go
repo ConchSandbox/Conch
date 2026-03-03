@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/snapshot/common"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type State struct {
@@ -60,6 +62,7 @@ func (m *Manager) NewInstance(config *Config) (*Instance, error) {
 	defer m.mutex.Unlock()
 
 	if _, exists := m.instances[config.Key]; exists {
+		ulog.GetLogger().Error(ulog.F("instance_key", config.Key), "instance already exists")
 		return nil, fmt.Errorf("instance %s has exist", config.Key)
 	}
 	if err := os.MkdirAll(filepath.Join(gWorkDir, config.Key), common.DirMode); err != nil {
@@ -99,7 +102,7 @@ func (m *Manager) LoadInstances() error {
 		}
 		// TODO: check instance pid is running, if not, just ignore it
 		m.instances[d.Name()] = instance
-		fmt.Printf("get instance: %v\n", instance.State)
+		ulog.GetLogger().Debug(ulog.F("instance_state", instance.State), "loaded instance")
 		return nil
 	})
 }
@@ -110,6 +113,7 @@ func (m *Manager) RemoveInstance(id string) error {
 
 	instance, exists := m.instances[id]
 	if !exists {
+		ulog.GetLogger().Error(ulog.F("instance_id", id), "instance not found")
 		return fmt.Errorf("no found instance: %s", id)
 	}
 
@@ -137,6 +141,7 @@ func (i *Instance) Start() error {
 	}
 
 	if err := cmd.Start(); err != nil {
+		ulog.GetLogger().Error(ulog.F("error", err), "process startup failed")
 		return fmt.Errorf("process startup failed: %w", err)
 	}
 	go cmd.Wait()
@@ -171,6 +176,7 @@ func (i *Instance) Stop() error {
 	if err := syscall.Kill(-i.Pid, syscall.SIGTERM); err != nil {
 		_ = syscall.Kill(-i.Pid, syscall.SIGKILL)
 		if !errors.Is(err, syscall.ESRCH) {
+			ulog.GetLogger().Error(ulog.F("error", err), "send signal failed")
 			return fmt.Errorf("send signal failed: %v", err)
 		}
 	}

@@ -11,6 +11,8 @@ import (
 	"github.com/containerd/containerd/snapshots"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
@@ -44,7 +46,8 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 		return nil, err
 	}
 
-	fmt.Printf("Found %d manifests in index, starting unpack...\n", len(index.Manifests))
+	ulog.Info("Found manifests in index, starting unpack",
+		ulog.F("count", len(index.Manifests)))
 
 	for _, manifestDesc := range index.Manifests {
 		kind := getKind(manifestDesc)
@@ -53,7 +56,9 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 			return nil, err
 		}
 		snapshotMap[kind] = snapshotID
-		fmt.Printf("    Generated SnapshotID: %s\n", snapshotID)
+		ulog.Info("Generated SnapshotID",
+			ulog.F("kind", kind),
+			ulog.F("snapshot_id", snapshotID))
 	}
 
 	if err = linkSnapshotLabels(ctx, snapshotter, snapshotMap); err != nil {
@@ -65,7 +70,9 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 func cleanupSnapshots(createdSnapshotIDs []string, snapshotter snapshots.Snapshotter, ctx context.Context) {
 	for _, sid := range createdSnapshotIDs {
 		if removeErr := snapshotter.Remove(ctx, sid); removeErr != nil {
-			fmt.Printf("warning: cleanup snapshot %s on error: %v\n", sid, removeErr)
+			ulog.Warn("Cleanup snapshot on error",
+				ulog.F("snapshot_id", sid),
+				ulog.F("error", removeErr))
 		}
 	}
 }

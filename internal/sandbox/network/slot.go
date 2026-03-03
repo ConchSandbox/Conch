@@ -24,6 +24,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/openeuler/Conch/pkg/ulog"
 	netutils "k8s.io/utils/net"
 )
 
@@ -201,6 +202,6 @@ func GetVrtSlotsSize() int {
 	totalIPs := 1 << (32 - ones)
 	totalSlots := (totalIPs / vrtAddressPerSlot) - vrtAddressPerSlot
 
-	fmt.Printf("Using network slot size: %d\n", totalSlots)
+	ulog.Info("Using network slot size", ulog.F("total_slots", totalSlots))
 	return totalSlots
 }

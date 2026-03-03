@@ -17,6 +17,7 @@ import (
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
@@ -58,9 +59,13 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Printf("receive error: %v\n", ctx.Err())
+				ulog.Warn("Context done",
+					ulog.F("error", ctx.Err()),
+				)
 			case sig = <-signalChannel:
-				fmt.Printf("interrupted by a %v signal, process exiting\n", sig)
+				ulog.Info("Interrupted by signal, process exiting",
+					ulog.F("signal", sig),
+				)
 				cancel()
 				s.Cleanup()
 
@@ -79,9 +84,11 @@ func NewServer() (*Server, error) {
 	}
 	s.routes()
 
+	logger := ulog.GetLogger()
+
 	daemonClient, err := daemon.New(common.ContainerdSock)
 	if err != nil {
-		fmt.Printf("Failed to init containerd manager: %v", err)
+		logger.Error("Failed to init containerd manager", ulog.F("error", err))
 		cancel()
 		return nil, fmt.Errorf("failed to init containerd manager: %w", err)
 	}
@@ -92,6 +99,7 @@ func NewServer() (*Server, error) {
 	if err != nil {
 		_ = daemonClient.Close()
 		cancel()
+		logger.Error("Failed to init snapshot manager", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to init snapshot manager: %w", err)
 	}
 
@@ -102,6 +110,7 @@ func NewServer() (*Server, error) {
 	go pool.Populate(ctx)
 	handleSignals(ctx, cancel, s)
 
+	logger.Info("Server initialized successfully")
 	return s, nil
 }
 
@@ -117,40 +126,46 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 }
 
-func (s *Server) Start(port string) error {
-	s.httpServer = &http.Server{Addr: ":" + port, Handler: s.router}
+func (s *Server) Start(addr string) error {
+	logger := ulog.GetLogger()
+	logger.Info("Starting HTTP server", ulog.F("address", addr))
 
+	s.httpServer = &http.Server{Addr: addr, Handler: s.router}
 	err := s.httpServer.ListenAndServe()
 	if err == http.ErrServerClosed {
-		fmt.Println("main server gracefully stopped.")
+		logger.Info("Main server gracefully stopped")
 		err = nil
 	}
 	return err
 }
 
 func (s *Server) Cleanup() {
+	logger := ulog.GetLogger()
+
 	s.cleanupOnce.Do(func() {
 		// stop httpServer
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer shutdownCancel()
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			fmt.Printf("HTTP server Shutdown error: %v\n", err)
+			logger.Error("HTTP server shutdown error", ulog.F("error", err))
 		} else {
-			fmt.Println("HTTP server gracefully stopped.")
+			logger.Info("HTTP server gracefully stopped")
 		}
 
 		if err := s.sandboxManager.(*sandbox.Manager).CleanupPool(); err != nil {
-			fmt.Printf("Server cleanup error: %v\n", err)
+			logger.Error("Server cleanup error", ulog.F("error", err))
 		}
 		snapshot.CleanupAllViews()
 		if err := s.daemonClient.Close(); err != nil {
-			fmt.Printf("Containerd cleanup error: %v\n", err)
+			logger.Error("Containerd cleanup error", ulog.F("error", err))
 		}
+		logger.Info("Cleanup completed")
 	})
 }
 
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("begin CreateSandbox \n")
+	logger := ulog.GetLogger()
+	logger.Debug("Handling create sandbox request")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -159,17 +174,25 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req = sandbox.SandboxCreateRequest{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	peerIP, err := s.sandboxManager.Create(req)
 	if err != nil {
-		fmt.Printf("Failed to create sandbox: %s \n", err)
-
+		logger.Error("Failed to create sandbox",
+			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("error", err),
+		)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+
+	logger.Info("Sandbox created successfully",
+		ulog.F("sandbox_id", req.SandboxId),
+		ulog.F("peer_ip", peerIP),
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -179,7 +202,8 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("begin DeleteSandbox \n")
+	logger := ulog.GetLogger()
+	logger.Debug("Handling delete sandbox request")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -188,23 +212,30 @@ func (s *Server) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req sandbox.SandboxDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	err := s.sandboxManager.Delete(req)
 	if err != nil {
-		fmt.Printf("Failed to delete sandbox %s: %v\n", req.SandboxId, err)
+		logger.Error("Failed to delete sandbox",
+			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("error", err),
+		)
 		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxId))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("begin PauseSandbox \n")
+	logger := ulog.GetLogger()
+	logger.Debug("Handling pause sandbox request")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -213,16 +244,25 @@ func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req sandbox.SandboxPauseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	snapshotId, err := s.sandboxManager.Pause(req)
 	if err != nil {
-		fmt.Printf("Failed to pause sandbox %s: %v\n", req.SandboxId, err)
+		logger.Error("Failed to pause sandbox",
+			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("error", err),
+		)
 		http.Error(w, "Failed to pause sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	logger.Info("Sandbox paused successfully",
+		ulog.F("sandbox_id", req.SandboxId),
+		ulog.F("snapshot_id", snapshotId),
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
