@@ -11,7 +11,7 @@ snapshot:
   ram_mb: 1024                                    # *Memory size in MB
 
 image:
-  image_name: ""                                  # *Image name
+  image_name: "hub.oepkgs.net/conch/conch-boot-x86:v0.1"
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
   vcpu_num: 1                                     # *Number of virtual CPUs
   ram_mb: 1024                                    # *Memory size in MB

@@ -4,8 +4,14 @@ import requests
 import json
 import uuid
 import secrets
-from client import AgentClient
-from config_loader import config
+
+# Try relative imports first (when imported as a package), fall back to absolute imports
+try:
+    from .client import AgentClient
+    from .config_loader import config
+except ImportError:
+    from client import AgentClient
+    from config_loader import config
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"

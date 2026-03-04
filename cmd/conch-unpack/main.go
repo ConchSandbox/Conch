@@ -4,18 +4,36 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
 
 	"github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const defaultContainerdAddress = "/run/containerd/containerd.sock"
 
 func main() {
+	// Initialize logger
+	err := ulog.Init(ulog.Config{
+		Level:      ulog.InfoLevel,
+		OutputPath: "/var/log/conch-unpack/",
+		Stdout:     true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		logger := ulog.GetLogger()
+		if closer, ok := logger.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
+
+	logger := ulog.GetLogger()
+
 	addr := flag.String("address", "", "containerd socket address (default: "+defaultContainerdAddress+")")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <image-name>\n", os.Args[0])
@@ -42,16 +60,16 @@ func main() {
 	ctx := namespaces.WithNamespace(context.Background(), "default")
 	client, err := containerd.New(containerdAddr)
 	if err != nil {
-		log.Fatalf("failed to connect to containerd: %v", err)
+		logger.Fatal("Failed to connect to containerd", ulog.F("error", err))
 	}
 	defer client.Close()
 
-	fmt.Printf("Starting analysis for main image: %s\n", imageName)
+	logger.Info("Starting analysis for main image", ulog.F("image", imageName))
 	fmt.Println("------------------------------------------------------------")
 
 	results, err := image.UnpackAllSubImages(ctx, client, imageName)
 	if err != nil {
-		fmt.Printf("Program error: %v\n", err)
+		logger.Error("Program error", ulog.F("error", err))
 		os.Exit(1)
 	}
 

@@ -2,6 +2,8 @@ package vmm
 
 import (
 	"fmt"
+
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
@@ -12,6 +14,13 @@ const (
 var vmmTypeMap = map[string]int{
 	"cloud-hypervisor": CLHVmmType,
 	"stratovirt":       StratovirtVmmType,
+}
+
+func GetVmmType(vmmName string) (int, bool) {
+	logger := ulog.GetLogger()
+	logger.Debug("Getting VMM type", ulog.F("vmm_name", vmmName))
+	vmmType, exists := vmmTypeMap[vmmName]
+	return vmmType, exists
 }
 
 type ResourceArgs struct {
@@ -38,11 +47,6 @@ type ResourceArgs struct {
 	SnapfilePath string
 }
 
-func GetVmmType(vmmName string) (int, bool) {
-	vmmType, exists := vmmTypeMap[vmmName]
-	return vmmType, exists
-}
-
 type vmmClient interface {
 	BuildStartCmd(args *ResourceArgs, isResume bool) (string, error)
 	CheckDaemonAlive() error
@@ -50,16 +54,24 @@ type vmmClient interface {
 	ResumeVM() error
 	DeleteVM() error
 	CreateSnapshot(snapfilePath string) error
-	LoadSnapshot(snapfilePath string, prefault bool) error
+	LoadSnapshot(snapfilePath string, preferVNC bool) error
 }
 
 func newVmmClient(vmmType int, vmmSocketPath string) (vmmClient, error) {
 	switch vmmType {
 	case CLHVmmType:
+		logger := ulog.GetLogger()
+		logger.Info("Creating CLH client", ulog.F("socket", vmmSocketPath))
 		return NewCLHClient(vmmType, vmmSocketPath), nil
 	case StratovirtVmmType:
-		return nil, fmt.Errorf("not support vmm type: %d", vmmType)
+		ulog.GetLogger().Error("Unsupported VMM type",
+			ulog.F("type", vmmType),
+		)
+		return nil, fmt.Errorf("unsupported VMM type: %s", vmmType)
 	default:
-		return nil, fmt.Errorf("unknown vmm type: %d", vmmType)
+		ulog.GetLogger().Error("Unknown VMM type",
+			ulog.F("type", vmmType),
+		)
+		return nil, fmt.Errorf("unknown VMM type: %s", vmmType)
 	}
 }

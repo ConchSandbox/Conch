@@ -2,8 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"log"
 	"net"
 	"os"
 	"syscall"
@@ -12,6 +10,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	pb "github.com/openeuler/Conch/api/go_proto"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const ServerPort = ":4064"
@@ -19,40 +18,81 @@ const ServerPort = ":4064"
 const ServerVersion = "0.0.1"
 
 func main() {
-	fmt.Println("This is conch-agent")
-	fmt.Println("========================================")
+	// Initialize logger
+	logDir := "/var/log/conch-agent/"
+	err := os.MkdirAll(logDir, 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	err = ulog.Init(ulog.Config{
+		Level:      ulog.DebugLevel,
+		OutputPath: logDir,
+		Stdout:     true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		logger := ulog.GetLogger()
+		if closer, ok := logger.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
+
+	logger := ulog.GetLogger()
+
+	logger.Info("Starting conch-agent",
+		ulog.F("version", ServerVersion),
+		ulog.F("port", ServerPort),
+	)
 
 	var chrootPath string
 	flag.StringVar(&chrootPath, "path", "", "Path for chroot directory")
 	flag.Parse()
 
 	if chrootPath != "" {
-		fmt.Printf("Executing chroot to: %s\n", chrootPath)
+		logger.Info("Executing chroot", ulog.F("path", chrootPath))
 
 		if err := syscall.Chroot(chrootPath); err != nil {
-			log.Fatalf("failed to chroot to %s: %v", chrootPath, err)
+			logger.Fatal("Failed to chroot",
+				ulog.F("path", chrootPath),
+				ulog.F("error", err),
+			)
 		}
 
 		if err := os.Chdir("/"); err != nil {
-			log.Fatalf("failed to chdir to /: %v", err)
+			logger.Fatal("Failed to chdir to /",
+				ulog.F("error", err),
+			)
 		}
 
-		fmt.Printf("Successfully changed root to %s\n", chrootPath)
+		logger.Info("Successfully changed root",
+			ulog.F("path", chrootPath),
+		)
 	}
 
 	listener, err := net.Listen("tcp", ServerPort)
 	if err != nil {
-		log.Fatalf("failed to create listener: %v", err)
+		logger.Fatal("Failed to create listener",
+			ulog.F("port", ServerPort),
+			ulog.F("error", err),
+		)
 	}
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterAgentServiceServer(grpcServer, &AgentServer{Version: ServerVersion})
 
 	reflection.Register(grpcServer)
-	log.Printf("Agent gRPC server listening at %v (version: %s)", listener.Addr(), ServerVersion)
+	logger.Info("Agent gRPC server listening",
+		ulog.F("address", listener.Addr()),
+		ulog.F("version", ServerVersion),
+	)
 
 	if err := grpcServer.Serve(listener); err != nil {
-		log.Fatalf("failed to serve gRPC: %v", err)
+		logger.Fatal("Failed to serve gRPC",
+			ulog.F("error", err),
+		)
 	}
 
 }

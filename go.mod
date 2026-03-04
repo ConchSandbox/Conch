@@ -63,4 +63,5 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 	google.golang.org/genproto v0.0.0-20231211222908-989df2bf70f3 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
