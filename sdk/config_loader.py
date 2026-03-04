@@ -2,12 +2,7 @@ import os
 import yaml
 from typing import Dict, Any
 
-DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),  # Get sdk directory
-    "..",
-    "config",
-    "sdk-config.yaml"
-)
+DEFAULT_CONFIG_PATH = '/etc/conch/sdk-config.yaml'
 
 def load_config(config_path: str = None) -> Dict[str, Any]:
     config_path = config_path or DEFAULT_CONFIG_PATH
