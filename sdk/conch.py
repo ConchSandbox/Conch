@@ -7,15 +7,45 @@ import secrets
 from client import AgentClient
 from config_loader import config
 
+# API keys
+SANDBOX_ID_KEY = "sandbox_id"
+SNAPSHOT_ID_KEY = "snapshot_id"
+IMAGE_NAME_KEY = "image_name"
+VMM_NAME_KEY = "vmm_name"
+VCPU_NUM_KEY = "vcpu_num"
+RAM_MB_KEY = "ram_mb"
+STATUS_KEY = "status"
+ERROR_KEY = "error"
+MESSAGE_KEY = "message"
+IP_KEY = "ip"
+SNAPSHOT_ID_RESP_KEY = "snapshotId"
+
+# Config keys
+CFG_SANDBOX_SECTION = "sandbox"
+CFG_SNAPSHOT_SECTION = "snapshot"
+CFG_IMAGE_SECTION = "image"
+CFG_API_URL_KEY = "api_url"
+CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
+CFG_USE_SNAPSHOT_KEY = "use_snapshot"
+
+# API paths
+SANDBOX_CREATE_PATH = "/api/sandbox/create"
+SANDBOX_DELETE_PATH = "/api/sandbox/delete"
+SANDBOX_PAUSE_PATH = "/api/sandbox/pause"
+
+RANDOM_ID_HEX_BYTES = 12
+WORKDIR_UUID_SUFFIX_LEN = 8
+UNKNOWN_EXIT_CODE = -1
+
 def generate_random_id(prefix: str = "sandbox_") -> str:
-    return prefix + secrets.token_hex(12)
+    return prefix + secrets.token_hex(RANDOM_ID_HEX_BYTES)
 
 class Execution:
     # Store execution output/exit code
     def __init__(self, data: Dict[str, Any]):
         self.stdout = data.get("stdout", "")
         self.stderr = data.get("stderr", "")
-        self.exit_code = data.get("exit_code", -1)
+        self.exit_code = data.get("exit_code", UNKNOWN_EXIT_CODE)
         self.logs = self.stdout + self.stderr
 
     def __str__(self):
@@ -34,14 +64,18 @@ class Sandbox:
             ram_mb: Optional[int] = None,
     ):
         # Init core sandbox config (URL/workdir/IDs)
-        self.api_url = api_url.rstrip('/') if api_url else config["sandbox"]["api_url"].rstrip('/')
+        self.api_url = api_url.rstrip('/') if api_url else config[CFG_SANDBOX_SECTION][CFG_API_URL_KEY].rstrip('/')
         self.workdir: str = workdir or self._generate_workdir()
-        self.use_snapshot = use_snapshot if use_snapshot is not None else config["sandbox"]["use_snapshot"]
+        self.use_snapshot = (
+            use_snapshot
+            if use_snapshot is not None
+            else config[CFG_SANDBOX_SECTION][CFG_USE_SNAPSHOT_KEY]
+        )
 
-        config_sandbox_id = config["sandbox"].get("sandbox_id", "")
+        config_sandbox_id = config[CFG_SANDBOX_SECTION].get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
 
-        config_snapshot_id = config["snapshot"].get("snapshot_id", "")
+        config_snapshot_id = config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
 
         self.vm_ip = None
@@ -56,12 +90,12 @@ class Sandbox:
             self.create()
 
     def _generate_workdir(self) -> str:
-        return f"{config['sandbox']['workdir_prefix']}{uuid.uuid4().hex[:8]}"
+        return f"{config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
 
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result
-        status = result.get("status")
-        server_ip = result.get("ip")
+        status = result.get(STATUS_KEY)
+        server_ip = result.get(IP_KEY)
 
         if status == "ok" and server_ip:
             self.vm_ip = server_ip
@@ -72,31 +106,29 @@ class Sandbox:
                     pass
             self.client = AgentClient(host=self.vm_ip)
         else:
-            error_val = result.get("error")
+            error_val = result.get(ERROR_KEY)
             error_msg = str(error_val) if error_val is not None else "Unknown error"
             raise RuntimeError(f"Sandbox creation failed: {error_msg}")
 
     def create_by_snapshot(self):
         # Create sandbox from pre-defined snapshot
-        url = f"{self.api_url}/api/sandbox/create"
-        snap_config = config["snapshot"]
+        url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
+        snap_config = config[CFG_SNAPSHOT_SECTION]
         payload = {
-            "snapshot_id": self.snapshot_id,
-            "image_name": "",
-            "vmm_name": snap_config["vmm_name"],
-            "sandbox_id": self.sandbox_id,
-            "kernel_path": snap_config["kernel_path"],
-            "disk_image_path": snap_config["disk_image_path"],
-            "vcpu_num": self.vcpu_num or snap_config["vcpu_num"],
-            "ram_mb": self.ram_mb or snap_config["ram_mb"],
+            SNAPSHOT_ID_KEY: self.snapshot_id,
+            IMAGE_NAME_KEY: "",
+            VMM_NAME_KEY: snap_config[VMM_NAME_KEY],
+            SANDBOX_ID_KEY: self.sandbox_id,
+            VCPU_NUM_KEY: self.vcpu_num or snap_config[VCPU_NUM_KEY],
+            RAM_MB_KEY: self.ram_mb or snap_config[RAM_MB_KEY],
         }
 
         try:
             response = requests.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
-            result["sandbox_id"] = self.sandbox_id
-            result["snapshot_id"] = self.snapshot_id
+            result[SANDBOX_ID_KEY] = self.sandbox_id
+            result[SNAPSHOT_ID_KEY] = self.snapshot_id
             print(f"Create Sandbox by Snapshot !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
 
@@ -106,32 +138,30 @@ class Sandbox:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to create sandbox by snapshot !")
             return {
-                "status": "failed",
-                "sandbox_id": self.sandbox_id,
-                "snapshot_id": self.snapshot_id,
-                "error": error_msg
+                STATUS_KEY: "failed",
+                SANDBOX_ID_KEY: self.sandbox_id,
+                SNAPSHOT_ID_KEY: self.snapshot_id,
+                ERROR_KEY: error_msg
             }
 
     def create(self):
         # Create sandbox from base image
-        url = f"{self.api_url}/api/sandbox/create"
-        img_config = config["image"]
+        url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
+        img_config = config[CFG_IMAGE_SECTION]
         payload = {
-            "snapshot_id": "",
-            "image_name": img_config["image_name"],
-            "vmm_name": img_config["vmm_name"],
-            "sandbox_id": self.sandbox_id,
-            "kernel_path": img_config["kernel_path"],
-            "disk_image_path": img_config["disk_image_path"],
-            "vcpu_num": self.vcpu_num or img_config["vcpu_num"],
-            "ram_mb": self.ram_mb or img_config["ram_mb"],
+            SNAPSHOT_ID_KEY: "",
+            IMAGE_NAME_KEY: img_config[IMAGE_NAME_KEY],
+            VMM_NAME_KEY: img_config[VMM_NAME_KEY],
+            SANDBOX_ID_KEY: self.sandbox_id,
+            VCPU_NUM_KEY: self.vcpu_num or img_config[VCPU_NUM_KEY],
+            RAM_MB_KEY: self.ram_mb or img_config[RAM_MB_KEY],
         }
 
         try:
             response = requests.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
-            result["sandbox_id"] = self.sandbox_id
+            result[SANDBOX_ID_KEY] = self.sandbox_id
             print(f"Sandbox Created !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
 
@@ -141,21 +171,21 @@ class Sandbox:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to create sandbox !")
             return {
-                "status": "failed",
-                "sandbox_id": self.sandbox_id,
-                "error": error_msg
+                STATUS_KEY: "failed",
+                SANDBOX_ID_KEY: self.sandbox_id,
+                ERROR_KEY: error_msg
             }
 
     def delete(self):
         # Delete sandbox
-        url = f"{self.api_url}/api/sandbox/delete"
-        payload = {"sandbox_id": self.sandbox_id, }
+        url = f"{self.api_url}{SANDBOX_DELETE_PATH}"
+        payload = {SANDBOX_ID_KEY: self.sandbox_id}
 
         try:
             response = requests.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
-            result["sandbox_id"] = self.sandbox_id
+            result[SANDBOX_ID_KEY] = self.sandbox_id
             print(f"Sandbox Deleted !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
 
@@ -163,24 +193,24 @@ class Sandbox:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to delete sandbox !")
             return {
-                "status": "failed",
-                "sandbox_id": self.sandbox_id,
-                "error": error_msg
+                STATUS_KEY: "failed",
+                SANDBOX_ID_KEY: self.sandbox_id,
+                ERROR_KEY: error_msg
             }
 
     def pause(self):
         # Pause sandbox
-        url = f"{self.api_url}/api/sandbox/pause"
+        url = f"{self.api_url}{SANDBOX_PAUSE_PATH}"
         payload = {
-            "sandbox_id": self.sandbox_id,
+            SANDBOX_ID_KEY: self.sandbox_id,
         }
 
         try:
             response = requests.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
-            result["sandbox_id"] = self.sandbox_id
-            self.snapshot_id = result.get("snapshotId")
+            result[SANDBOX_ID_KEY] = self.sandbox_id
+            self.snapshot_id = result.get(SNAPSHOT_ID_RESP_KEY)
             print(f"Sandbox Paused !")
             print(json.dumps(result, indent=4, ensure_ascii=False))
 
@@ -188,9 +218,9 @@ class Sandbox:
             error_msg = response.text if 'response' in locals() else str(e)
             print(f"Failed to pause sandbox !")
             return {
-                "status": "failed",
-                "sandbox_id": self.sandbox_id,
-                "error": error_msg
+                STATUS_KEY: "failed",
+                SANDBOX_ID_KEY: self.sandbox_id,
+                ERROR_KEY: error_msg
             }
 
     def get_sandbox_id(self) -> str:
@@ -240,8 +270,8 @@ class Sandbox:
             return self.client.health_check()
         except Exception as e:
             return {
-                "status": "ERROR",
-                "message": f"Health check failed: {e}"
+                STATUS_KEY: "ERROR",
+                MESSAGE_KEY: f"Health check failed: {e}"
             }
 
     def upload(self, *args, **kwargs) -> Dict[str, Any]:
@@ -251,9 +281,9 @@ class Sandbox:
             local_path, remote_path = args
             full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
             if not os.path.exists(local_path):
-                return {"status": -1, "message": f"Local file not found: {local_path}"}
+                return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Local file not found: {local_path}"}
             if not os.path.isfile(local_path):
-                return {"status": -1, "message": f"Not a file: {local_path}"}
+                return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Not a file: {local_path}"}
             with open(local_path, "rb") as f:
                 content = f.read()
             files.append({"filepath": full_remote, "content": content})
@@ -262,14 +292,17 @@ class Sandbox:
             file_specs = args[0]
             for item in file_specs:
                 if not isinstance(item, dict) or "filepath" not in item or "content" not in item:
-                    return {"status": -1, "message": f"Invalid file spec: {item}"}
+                    return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Invalid file spec: {item}"}
                 remote_path = item["filepath"]
                 content = item["content"]
                 full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
                 files.append({"filepath": full_remote, "content": content})
 
         else:
-            return {"status": -1, "message": "Invalid call. Usage: upload(local, remote) or upload([spec, ...])"}
+            return {
+                STATUS_KEY: AgentClient.STATUS_FAILED,
+                MESSAGE_KEY: "Invalid call. Usage: upload(local, remote) or upload([spec, ...])",
+            }
 
         return self.client.post_files(files=files, **kwargs)
 

@@ -117,8 +117,8 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 }
 
-func (s *Server) Start(addr string) error {
-	s.httpServer = &http.Server{Addr: addr, Handler: s.router}
+func (s *Server) Start(port string) error {
+	s.httpServer = &http.Server{Addr: ":" + port, Handler: s.router}
 
 	err := s.httpServer.ListenAndServe()
 	if err == http.ErrServerClosed {
