@@ -10,8 +10,6 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-const listenPort = "4063"
-
 func main() {
 	// Parse command line flags
 	configPath := flag.String("config", "", "Path to config file")
