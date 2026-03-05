@@ -33,6 +33,7 @@ type StorageLocal struct {
 	maxSlotSize  int
 	acquiredNs   map[string]struct{}
 	acquiredNsMu sync.Mutex
+	acquiredNsCh chan struct{}
 }
 
 func NewStorageLocal(maxSlotsSize int) (Storage, error) {
@@ -46,9 +47,12 @@ func NewStorageLocal(maxSlotsSize int) (Storage, error) {
 	}
 	return &StorageLocal{
 		hostNs:       hostNsMap,
-		maxSlotSize:  maxSlotsSize,
-		acquiredNs:   make(map[string]struct{}, maxSlotsSize),
+		// Excluding 10.12.0.1/24 as it is assigned to br0
+		maxSlotSize:  maxSlotsSize-1,
+		acquiredNs:   make(map[string]struct{}, maxSlotsSize-1),
 		acquiredNsMu: sync.Mutex{},
+		// Channel buffer caps at one less than the max acquired ns, so that Acquire() func can be blocked and not causing endless err logs
+		acquiredNsCh: make(chan struct{}, maxSlotsSize-2),
 	}, nil
 }
 
@@ -77,8 +81,16 @@ func getForeignNamespaces() ([]string, error) {
 }
 
 func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
+	var e error
 	acquireTimeoutCtx, acquireCancel := context.WithTimeout(ctx, time.Millisecond*500)
-	defer acquireCancel()
+	defer func() {
+		if e == nil {
+			// Fill the usage channel on successful acquisition
+			s.acquiredNsCh <- struct{}{}
+		}
+		acquireCancel()
+	}()
+	defer 
 
 	s.acquiredNsMu.Lock()
 	defer s.acquiredNsMu.Unlock()
@@ -87,10 +99,12 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 	for {
 		select {
 		case <-acquireTimeoutCtx.Done():
-			return nil, fmt.Errorf("failed to acquire IP slot: timeout")
+			e = fmt.Errorf("failed to acquire IP slot: timeout")
+			return nil, e
 		default:
 			if len(s.acquiredNs) > s.maxSlotSize {
-				return nil, fmt.Errorf("failed to acquire IP slot: no empty slots found")
+				e = fmt.Errorf("failed to acquire IP slot: no empty slots found")
+				return nil, e
 			}
 
 			slotIdx++
@@ -107,7 +121,8 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 			// check if the slot can be acquired
 			available, err := isNamespaceAvailable(slotName)
 			if err != nil {
-				return nil, fmt.Errorf("error checking if namespace is available: %w", err)
+				e = fmt.Errorf("error checking if namespace is available: %w", err)
+				return nil, e
 			}
 
 			if !available {
@@ -120,7 +135,8 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 			if err == nil {
 				s.acquiredNs[slotName] = struct{}{}
 			}
-			return slot, err
+			e = err
+			return slot, e
 		}
 	}
 }
@@ -155,6 +171,8 @@ func (s *StorageLocal) Release(ips *Slot) error {
 	defer s.acquiredNsMu.Unlock()
 	slotName := getSlotName(ips.Idx)
 	delete(s.acquiredNs, slotName)
+	// Drain the usage channel on successful releases
+	<-s.acquiredNsCh
 
 	return nil
 }
