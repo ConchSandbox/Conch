@@ -6,12 +6,9 @@ import uuid
 import secrets
 
 # Try relative imports first (when imported as a package), fall back to absolute imports
-try:
-    from .client import AgentClient
-    from .config_loader import config
-except ImportError:
-    from client import AgentClient
-    from config_loader import config
+from .client import AgentClient
+from .config_loader import load_config
+
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
@@ -68,20 +65,22 @@ class Sandbox:
             snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             ram_mb: Optional[int] = None,
+            config_path: Optional[str] = None,
     ):
-        # Init core sandbox config (URL/workdir/IDs)
-        self.api_url = api_url.rstrip('/') if api_url else config[CFG_SANDBOX_SECTION][CFG_API_URL_KEY].rstrip('/')
+        self._config: Dict[str, Any] = load_config(config_path=config_path)
+        sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
+        self.api_url = api_url.rstrip('/') if api_url else sandbox_cfg[CFG_API_URL_KEY].rstrip('/')
         self.workdir: str = workdir or self._generate_workdir()
         self.use_snapshot = (
             use_snapshot
             if use_snapshot is not None
-            else config[CFG_SANDBOX_SECTION][CFG_USE_SNAPSHOT_KEY]
+            else sandbox_cfg[CFG_USE_SNAPSHOT_KEY]
         )
 
-        config_sandbox_id = config[CFG_SANDBOX_SECTION].get(SANDBOX_ID_KEY, "")
+        config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
 
-        config_snapshot_id = config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
+        config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
 
         self.vm_ip = None
@@ -90,13 +89,13 @@ class Sandbox:
         self.ram_mb = ram_mb
 
         # Create sandbox and Update client(snapshot or normal mode)
-        if use_snapshot:
+        if self.use_snapshot:
             self.create_by_snapshot()
         else:
             self.create()
 
     def _generate_workdir(self) -> str:
-        return f"{config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
+        return f"{self._config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
 
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result
@@ -119,7 +118,7 @@ class Sandbox:
     def create_by_snapshot(self):
         # Create sandbox from pre-defined snapshot
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
-        snap_config = config[CFG_SNAPSHOT_SECTION]
+        snap_config = self._config[CFG_SNAPSHOT_SECTION]
         payload = {
             SNAPSHOT_ID_KEY: self.snapshot_id,
             IMAGE_NAME_KEY: "",
@@ -153,7 +152,7 @@ class Sandbox:
     def create(self):
         # Create sandbox from base image
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
-        img_config = config[CFG_IMAGE_SECTION]
+        img_config = self._config[CFG_IMAGE_SECTION]
         payload = {
             SNAPSHOT_ID_KEY: "",
             IMAGE_NAME_KEY: img_config[IMAGE_NAME_KEY],

@@ -1,13 +1,7 @@
-from . import conch
-from . import client
+from .sandbox import Sandbox
+from .client import AgentClient
 
 __all__ = [
-    "client",
-    "conch",
-    "AgentClient",
     "Sandbox",
+    "AgentClient",
 ]
-
-# For backward compatibility, expose directly
-AgentClient = client.AgentClient
-Sandbox = conch.Sandbox
