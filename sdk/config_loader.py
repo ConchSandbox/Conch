@@ -3,29 +3,45 @@ from typing import Dict, Any, Optional, List
 
 import yaml
 
+CONFIG_ENV_VAR = "CONCH_SDK_CONFIG"
+CONFIG_FILE_NAME = "sdk-config.yaml"
+SYSTEM_CONFIG_DIR = "/etc/conch"
+SYSTEM_CONFIG_PATH = os.path.join(SYSTEM_CONFIG_DIR, CONFIG_FILE_NAME)
+REPO_CONFIG_DIR_NAME = "config"
+REPO_CONFIG_REL_PATH = os.path.join(REPO_CONFIG_DIR_NAME, CONFIG_FILE_NAME)
+
+
+def get_package_template_path() -> str:
+    here = os.path.dirname(__file__)
+    repo_root = os.path.abspath(os.path.join(here, ".."))
+    return os.path.join(repo_root, REPO_CONFIG_REL_PATH)
+
+
 def _candidate_paths_from_env() -> List[str]:
     paths: List[str] = []
-    env_path = os.getenv("CONCH_SDK_CONFIG")
+    env_path = os.getenv(CONFIG_ENV_VAR)
     if env_path:
         paths.append(env_path)
     return paths
+
 
 def _candidate_paths_from_user() -> List[str]:
     paths: List[str] = []
     home = os.path.expanduser("~")
     xdg_config_home = os.getenv("XDG_CONFIG_HOME", os.path.join(home, ".config"))
-    user_path = os.path.join(xdg_config_home, "conch", "sdk-config.yaml")
+    user_path = os.path.join(xdg_config_home, "conch", CONFIG_FILE_NAME)
     paths.append(user_path)
     return paths
 
-def _candidate_paths_from_system() -> List[str]:
-    return ["/etc/conch/sdk-config.yaml"]
 
-def _candidate_paths_from_repo_configs() -> List[str]:
-    # repo configs/ directory as fallback (for development/source code running scenarios)
-    here = os.path.dirname(__file__)
-    repo_root = os.path.abspath(os.path.join(here, ".."))
-    return [os.path.join(repo_root, "config", "sdk-config.yaml")]
+def _candidate_paths_from_system() -> List[str]:
+    return [SYSTEM_CONFIG_PATH]
+
+
+def _candidate_paths_from_repo_config() -> List[str]:
+    # repo config/ directory as fallback (for development/source code running scenarios)
+    return [get_package_template_path()]
+
 
 def _find_default_config_path() -> str:
     """
@@ -33,13 +49,13 @@ def _find_default_config_path() -> str:
     1. environment variable CONCH_SDK_CONFIG
     2. user-level config ~/.config/conch/sdk-config.yaml (or $XDG_CONFIG_HOME)
     3. system-level config /etc/conch/sdk-config.yaml
-    4. repo-level default config configs/sdk-config.yaml
+    4. repo-level default config config/sdk-config.yaml
     """
     search_order = (
         _candidate_paths_from_env()
         + _candidate_paths_from_user()
         + _candidate_paths_from_system()
-        + _candidate_paths_from_repo_configs()
+        + _candidate_paths_from_repo_config()
     )
 
     for path in search_order:
@@ -52,10 +68,11 @@ def _find_default_config_path() -> str:
         "  1) $CONCH_SDK_CONFIG\n"
         "  2) $XDG_CONFIG_HOME/conch/sdk-config.yaml (or ~/.config/conch/sdk-config.yaml)\n"
         "  3) /etc/conch/sdk-config.yaml\n"
-        "  4) <repo>/configs/sdk-config.yaml\n"
-        "Please create one based on the default template (configs/sdk-config.yaml) "
+        "  4) <repo>/config/sdk-config.yaml\n"
+        "Please create one based on the default template (config/sdk-config.yaml) "
         "or run the CLI to initialize /etc configuration."
     )
+
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -75,6 +92,8 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             raise ValueError(f"Failed to parse configuration file '{resolved_path}': {e}")
 
     if not isinstance(cfg, dict):
-        raise ValueError(f"Configuration file '{resolved_path}' must contain a YAML mapping at the top level.")
+        raise ValueError(
+            f"Configuration file '{resolved_path}' must contain a YAML mapping at the top level."
+        )
 
     return cfg
