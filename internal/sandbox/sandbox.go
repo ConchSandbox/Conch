@@ -41,7 +41,7 @@ func ResumeSandbox(
 
 	slot, err := pool.Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init network")
+		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -118,7 +118,7 @@ func CreateSandbox(
 
 	slot, err := pool.Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init network")
+		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
 
 	cleanup.Add(func(ctx context.Context) error {

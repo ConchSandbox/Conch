@@ -27,15 +27,16 @@ import (
 )
 
 const (
-	newSlotsPoolSize = 250
-	cleanupTimeout   = 10
-	bridgeName       = "conch_bridge"
+	defaultPoolSize = 250
+	cleanupTimeout  = 10
+	bridgeName      = "conch_bridge"
 )
 
 type Pool struct {
-	slotStorage Storage
-	newSlots    chan *Slot
-	done        chan struct{}
+	slotStorage        Storage
+	newSlots           chan *Slot
+	done               chan struct{}
+	dynamicReservation bool
 }
 
 func initBridge() (retErr error) {
@@ -84,22 +85,33 @@ func deleteBridge() error {
 	return nil
 }
 
-func NewPool() *Pool {
-	newSlots := make(chan *Slot, newSlotsPoolSize-1)
+func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
+	if poolSize <= 0 {
+		poolSize = defaultPoolSize
+	}
+
+	if poolSize > maxVrtSlotsSize {
+		return nil, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, maxVrtSlotsSize)
+	}
+	newSlots := make(chan *Slot, poolSize)
+
 	slotStorage, err := NewStorage(maxVrtSlotsSize)
 	if err != nil {
-		ulog.Debug("failed to create new storage", ulog.F("error", err))
-		return nil
+		return nil, fmt.Errorf("failed to create new storage: %w", err)
 	}
+
 	if err := initBridge(); err != nil {
-		ulog.Debug("failed to init bridge", ulog.F("error", err))
-		return nil
+		return nil, fmt.Errorf("failed to init bridge: %w", err)
 	}
-	return &Pool{
-		slotStorage: slotStorage,
-		newSlots:    newSlots,
-		done:        make(chan struct{}),
+
+	p := &Pool{
+		slotStorage:        slotStorage,
+		newSlots:           newSlots,
+		done:               make(chan struct{}),
+		dynamicReservation: dynamicReservation,
 	}
+
+	return p, nil
 }
 
 func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
@@ -122,6 +134,16 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 func (p *Pool) Populate(ctx context.Context) {
 	defer close(p.newSlots)
 
+	if !p.dynamicReservation {
+		p.populateStatic(ctx)
+		select {
+		case <-p.done:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+
 	for {
 		select {
 		case <-p.done:
@@ -139,6 +161,26 @@ func (p *Pool) Populate(ctx context.Context) {
 	}
 }
 
+func (p *Pool) populateStatic(ctx context.Context) {
+	target := cap(p.newSlots)
+	for len(p.newSlots) < target {
+		select {
+		case <-p.done:
+			return
+		case <-ctx.Done():
+			return
+		default:
+			slot, err := p.createNetworkSlot(ctx)
+			if err != nil {
+				ulog.Warn("pool: static reservation stopped before reaching target", ulog.F("current", len(p.newSlots)), ulog.F("target", target), ulog.F("error", err))
+				return
+			}
+			p.newSlots <- slot
+		}
+	}
+	ulog.Info("pool: static reservation completed", ulog.F("reserved", len(p.newSlots)))
+}
+
 func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 	select {
 	case <-ctx.Done():
@@ -148,21 +190,45 @@ func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 	}
 }
 
+func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Populate closes newSlots during shutdown; Release may race with that close.
+			err = fmt.Errorf("network pool is closed")
+		}
+	}()
+
+	select {
+	case <-p.done:
+		return fmt.Errorf("pool is stopping")
+	case <-ctx.Done():
+		return ctx.Err()
+	case p.newSlots <- slot:
+		return nil
+	}
+}
+
 func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 		if slot != nil {
-			err := slot.RemoveNetwork()
-			if err != nil {
-				ulog.Error("failed to remove network", ulog.F("error", err))
-				return fmt.Errorf("failed to remove network: %w", err)
-			}
-			err = p.slotStorage.Release(slot)
-			if err != nil {
-				ulog.Error("failed to release network slot", ulog.F("error", err))
-				return fmt.Errorf("failed to release network slot: %w", err)
+			if p.dynamicReservation {
+				err := slot.RemoveNetwork()
+				if err != nil {
+					ulog.Error("failed to remove network", ulog.F("error", err))
+					return fmt.Errorf("failed to remove network: %w", err)
+				}
+				err = p.slotStorage.Release(slot)
+				if err != nil {
+					ulog.Error("failed to release network slot", ulog.F("error", err))
+					return fmt.Errorf("failed to release network slot: %w", err)
+				}
+			} else {
+				if err := p.enqueueReplacement(ctx, slot); err != nil {
+					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
+				}
 			}
 		}
 		return nil
