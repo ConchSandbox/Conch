@@ -1,17 +1,20 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 func TestGetLogConfig(t *testing.T) {
 	tests := []struct {
-		name      string
-		cfg       *Config
+		name       string
+		cfg        *Config
 		wantStdout bool
 		wantPath   string
-		wantErr   bool
+		wantErr    bool
 	}{
 		{
 			name: "stdout mode",
@@ -77,8 +80,8 @@ func TestGetServerAddress(t *testing.T) {
 
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {
-		level string
-		want  ulog.LogLevel
+		level   string
+		want    ulog.LogLevel
 		wantErr bool
 	}{
 		{"debug", ulog.DebugLevel, false},
@@ -100,5 +103,41 @@ func TestParseLogLevel(t *testing.T) {
 				t.Errorf("parseLogLevel() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	data := []byte("app:\n  name: conch-test\nlog:\n  level: debug\n  output: both\nserver:\n  host: 127.0.0.1\n  port: 4567\nnetwork:\n  pool_size: 123\n  dynamic_reservation: true\n")
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.App.Name != "conch-test" {
+		t.Errorf("LoadConfig().App.Name = %q, want %q", cfg.App.Name, "conch-test")
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("LoadConfig().Log.Level = %q, want %q", cfg.Log.Level, "debug")
+	}
+	if cfg.Log.Output != "both" {
+		t.Errorf("LoadConfig().Log.Output = %q, want %q", cfg.Log.Output, "both")
+	}
+	if cfg.Server.Host != "127.0.0.1" {
+		t.Errorf("LoadConfig().Server.Host = %q, want %q", cfg.Server.Host, "127.0.0.1")
+	}
+	if cfg.Server.Port != 4567 {
+		t.Errorf("LoadConfig().Server.Port = %d, want %d", cfg.Server.Port, 4567)
+	}
+	if cfg.Network.PoolSize != 123 {
+		t.Errorf("LoadConfig().Network.PoolSize = %d, want %d", cfg.Network.PoolSize, 123)
+	}
+	if !cfg.Network.DynamicReservation {
+		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
 	}
 }

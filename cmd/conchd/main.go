@@ -45,6 +45,7 @@ func main() {
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.address", cfg.GetServerAddress()),
+		ulog.F("network.pool_size", cfg.Network.PoolSize),
 	)
 
 	server, err := internal.NewServer(cfg)

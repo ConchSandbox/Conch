@@ -101,6 +101,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = defaultCfg.Server.Port
 	}
+	if cfg.Network.PoolSize == 0 {
+		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	}
 
 	return &cfg, nil
 }
