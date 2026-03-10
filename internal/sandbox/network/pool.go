@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
@@ -135,7 +137,9 @@ func (p *Pool) Populate(ctx context.Context) {
 	defer close(p.newSlots)
 
 	if !p.dynamicReservation {
-		p.populateStatic(ctx)
+		if err := p.populateStatic(ctx); err != nil {
+			ulog.Warn("pool: static reservation exited with error", ulog.F("error", err))
+		}
 		select {
 		case <-p.done:
 			return
@@ -161,31 +165,36 @@ func (p *Pool) Populate(ctx context.Context) {
 	}
 }
 
-func (p *Pool) populateStatic(ctx context.Context) {
+func (p *Pool) populateStatic(ctx context.Context) error {
 	target := cap(p.newSlots)
+	// len(channel) is concurrency-safe but only a snapshot. In static mode this is best-effort:
+	// concurrent consumers may change the queue length between this check and the enqueue below.
 	for len(p.newSlots) < target {
 		select {
 		case <-p.done:
-			return
+			return nil
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 			slot, err := p.createNetworkSlot(ctx)
 			if err != nil {
-				ulog.Warn("pool: static reservation stopped before reaching target", ulog.F("current", len(p.newSlots)), ulog.F("target", target), ulog.F("error", err))
-				return
+				return fmt.Errorf("static reservation stopped before reaching target: current=%d target=%d: %w", len(p.newSlots), target, err)
 			}
 			p.newSlots <- slot
 		}
 	}
 	ulog.Info("pool: static reservation completed", ulog.F("reserved", len(p.newSlots)))
+	return nil
 }
 
 func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case s := <-p.newSlots:
+	case s, ok := <-p.newSlots:
+		if !ok {
+			return nil, fmt.Errorf("network channel has been closed")
+		}
 		return s, nil
 	}
 }
@@ -194,7 +203,7 @@ func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			// Populate closes newSlots during shutdown; Release may race with that close.
-			err = fmt.Errorf("network pool is closed")
+			err = fmt.Errorf("network channel has been closed")
 		}
 	}()
 
@@ -214,7 +223,15 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		return ctx.Err()
 	default:
 		if slot != nil {
-			if p.dynamicReservation {
+			slotHealthErr := slotHealth(slot)
+			if !p.dynamicReservation && slotHealthErr == nil {
+				if err := p.enqueueReplacement(ctx, slot); err != nil {
+					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
+				}
+			} else {
+				if !p.dynamicReservation {
+					ulog.Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+				}
 				err := slot.RemoveNetwork()
 				if err != nil {
 					ulog.Error("failed to remove network", ulog.F("error", err))
@@ -225,35 +242,59 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 					ulog.Error("failed to release network slot", ulog.F("error", err))
 					return fmt.Errorf("failed to release network slot: %w", err)
 				}
-			} else {
-				if err := p.enqueueReplacement(ctx, slot); err != nil {
-					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
-				}
 			}
 		}
 		return nil
 	}
 }
 
+func slotHealth(slot *Slot) error {
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if _, err := os.Stat(filepath.Join("/var/run/netns", slot.NamespaceID())); err != nil {
+		return fmt.Errorf("namespace missing: %w", err)
+	}
+	veth, err := netlink.LinkByName(slot.VethName())
+	if err != nil {
+		return fmt.Errorf("veth missing: %w", err)
+	}
+	if veth.Attrs() == nil || veth.Attrs().MasterIndex == 0 {
+		return fmt.Errorf("veth is not attached to bridge")
+	}
+	return nil
+}
+
 func (p *Pool) Cleanup() error {
 	var errs []error
+	cleaned := 0
+	failed := 0
 	for slot := range p.newSlots {
-		if slot != nil {
-			err := slot.RemoveNetwork()
-			if err != nil {
-				ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("error", err))
-				errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
-				continue
-			}
-			err = p.slotStorage.Release(slot)
-			if err != nil {
-				ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("error", err))
-				errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
-				continue
-			}
+		if slot == nil {
+			failed++
+			continue
 		}
+		err := slot.RemoveNetwork()
+		if err != nil {
+			ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("error", err))
+			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
+			failed++
+			continue
+		}
+		err = p.slotStorage.Release(slot)
+		if err != nil {
+			ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("error", err))
+			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
+			failed++
+			continue
+		}
+		cleaned++
 	}
-	// del bridge
-	errs = append(errs, deleteBridge())
+
+	ulog.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
+
+	if err := deleteBridge(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
