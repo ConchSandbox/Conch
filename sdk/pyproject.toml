@@ -37,3 +37,6 @@ Repository = "https://atomgit.com/openeuler/Conch"
 packages = ["conch"]
 package-dir = { "conch" = "." }
 zip-safe = false
+
+[project.scripts]
+conch-sdk-init-config = "conch.init_config:main"
