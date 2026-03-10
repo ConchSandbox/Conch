@@ -171,9 +171,15 @@ func (p *Pool) Populate(ctx context.Context) {
 
 func (p *Pool) populateStatic(ctx context.Context) error {
 	target := cap(p.newSlots)
-	// len(channel) is concurrency-safe but only a snapshot. In static mode this is best-effort:
-	// concurrent consumers may change the queue length between this check and the enqueue below.
-	for len(p.newSlots) < target {
+	// len(channel) and len(inUse) are concurrency-safe snapshots.
+	// Their sum is best-effort (not an atomic cross-structure invariant):
+	// concurrent consumers may change queued/in-use counts between checks and enqueue.
+	safeLenInUse := func(p *Pool) int {
+		p.inUseMu.Lock()
+		defer p.inUseMu.Unlock()
+		return len(p.inUse)
+	}
+	for len(p.newSlots)+safeLenInUse(p) < target {
 		select {
 		case <-p.done:
 			return nil
@@ -187,7 +193,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 			p.newSlots <- slot
 		}
 	}
-	ulog.Info("pool: static reservation completed", ulog.F("reserved", len(p.newSlots)))
+	ulog.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)+safeLenInUse(p)), ulog.F("in_pool", len(p.newSlots)), ulog.F("in_use", safeLenInUse(p)), ulog.F("target", target))
 	return nil
 }
 
