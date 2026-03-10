@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
@@ -39,6 +40,8 @@ type Pool struct {
 	newSlots           chan *Slot
 	done               chan struct{}
 	dynamicReservation bool
+	inUse              map[string]*Slot
+	inUseMu            sync.Mutex
 }
 
 func initBridge() (retErr error) {
@@ -111,6 +114,7 @@ func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
 		newSlots:           newSlots,
 		done:               make(chan struct{}),
 		dynamicReservation: dynamicReservation,
+		inUse:              make(map[string]*Slot),
 	}
 
 	return p, nil
@@ -195,6 +199,9 @@ func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 		if !ok {
 			return nil, fmt.Errorf("network channel has been closed")
 		}
+		if s != nil {
+			p.trackInUse(s)
+		}
 		return s, nil
 	}
 }
@@ -228,6 +235,7 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 				if err := p.enqueueReplacement(ctx, slot); err != nil {
 					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
 				}
+				p.untrackInUse(slot)
 			} else {
 				if !p.dynamicReservation {
 					ulog.Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
@@ -242,10 +250,34 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 					ulog.Error("failed to release network slot", ulog.F("error", err))
 					return fmt.Errorf("failed to release network slot: %w", err)
 				}
+				p.untrackInUse(slot)
 			}
 		}
 		return nil
 	}
+}
+
+func (p *Pool) trackInUse(slot *Slot) {
+	p.inUseMu.Lock()
+	defer p.inUseMu.Unlock()
+	p.inUse[slot.Key] = slot
+}
+
+func (p *Pool) untrackInUse(slot *Slot) {
+	p.inUseMu.Lock()
+	defer p.inUseMu.Unlock()
+	delete(p.inUse, slot.Key)
+}
+
+func (p *Pool) drainInUse() []*Slot {
+	p.inUseMu.Lock()
+	defer p.inUseMu.Unlock()
+	slots := make([]*Slot, 0, len(p.inUse))
+	for key, slot := range p.inUse {
+		slots = append(slots, slot)
+		delete(p.inUse, key)
+	}
+	return slots
 }
 
 func slotHealth(slot *Slot) error {
@@ -269,26 +301,34 @@ func (p *Pool) Cleanup() error {
 	var errs []error
 	cleaned := 0
 	failed := 0
-	for slot := range p.newSlots {
+	cleanupSlot := func(slot *Slot, category string) {
 		if slot == nil {
 			failed++
-			continue
+			return
 		}
 		err := slot.RemoveNetwork()
 		if err != nil {
-			ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("error", err))
+			ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
-			continue
+			return
 		}
 		err = p.slotStorage.Release(slot)
 		if err != nil {
-			ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("error", err))
+			ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
-			continue
+			return
 		}
 		cleaned++
+	}
+
+	for _, slot := range p.drainInUse() {
+		cleanupSlot(slot, "in_use")
+	}
+
+	for slot := range p.newSlots {
+		cleanupSlot(slot, "queue")
 	}
 
 	ulog.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
