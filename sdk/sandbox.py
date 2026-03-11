@@ -88,12 +88,6 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.ram_mb = ram_mb
 
-        # Create sandbox and Update client(snapshot or normal mode)
-        if self.use_snapshot:
-            self.create_by_snapshot()
-        else:
-            self.create()
-
     def _generate_workdir(self) -> str:
         return f"{self._config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
 
@@ -116,7 +110,6 @@ class Sandbox:
             raise RuntimeError(f"Sandbox creation failed: {error_msg}")
 
     def create_by_snapshot(self):
-        # Create sandbox from pre-defined snapshot
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
         snap_config = self._config[CFG_SNAPSHOT_SECTION]
         payload = {
@@ -140,17 +133,9 @@ class Sandbox:
             self._update_client_from_result(result)
 
         except requests.exceptions.RequestException as e:
-            error_msg = response.text if 'response' in locals() else str(e)
-            print(f"Failed to create sandbox by snapshot !")
-            return {
-                STATUS_KEY: "failed",
-                SANDBOX_ID_KEY: self.sandbox_id,
-                SNAPSHOT_ID_KEY: self.snapshot_id,
-                ERROR_KEY: error_msg
-            }
+            return f'{e}'
 
     def create(self):
-        # Create sandbox from base image
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
         img_config = self._config[CFG_IMAGE_SECTION]
         payload = {
@@ -167,22 +152,12 @@ class Sandbox:
             response.raise_for_status()
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
-            print(f"Sandbox Created !")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
-
             self._update_client_from_result(result)
 
         except requests.exceptions.RequestException as e:
-            error_msg = response.text if 'response' in locals() else str(e)
-            print(f"Failed to create sandbox !")
-            return {
-                STATUS_KEY: "failed",
-                SANDBOX_ID_KEY: self.sandbox_id,
-                ERROR_KEY: error_msg
-            }
+            return f'{e}'
 
     def delete(self):
-        # Delete sandbox
         url = f"{self.api_url}{SANDBOX_DELETE_PATH}"
         payload = {SANDBOX_ID_KEY: self.sandbox_id}
 
@@ -191,17 +166,9 @@ class Sandbox:
             response.raise_for_status()
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
-            print(f"Sandbox Deleted !")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
 
         except requests.exceptions.RequestException as e:
-            error_msg = response.text if 'response' in locals() else str(e)
-            print(f"Failed to delete sandbox !")
-            return {
-                STATUS_KEY: "failed",
-                SANDBOX_ID_KEY: self.sandbox_id,
-                ERROR_KEY: error_msg
-            }
+            return f'{e}'
 
     def pause(self):
         # Pause sandbox
