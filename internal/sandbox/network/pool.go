@@ -33,6 +33,7 @@ const (
 	defaultPoolSize = 250
 	cleanupTimeout  = 10
 	bridgeName      = "conch_bridge"
+	prefillWorkers  = 16
 )
 
 type Pool struct {
@@ -171,29 +172,82 @@ func (p *Pool) Populate(ctx context.Context) {
 
 func (p *Pool) populateStatic(ctx context.Context) error {
 	target := cap(p.newSlots)
-	// len(channel) and len(inUse) are concurrency-safe snapshots.
-	// Their sum is best-effort (not an atomic cross-structure invariant):
-	// concurrent consumers may change queued/in-use counts between checks and enqueue.
-	safeLenInUse := func(p *Pool) int {
-		p.inUseMu.Lock()
-		defer p.inUseMu.Unlock()
-		return len(p.inUse)
+
+	type job struct{}
+	type result struct {
+		slot *Slot
+		err  error
 	}
-	for len(p.newSlots)+safeLenInUse(p) < target {
+
+	// jobs fan out slot-creation work; results fan in worker outputs.
+	jobs := make(chan job, target)
+	results := make(chan result, target)
+
+	workers := prefillWorkers
+	if target < workers {
+		workers = target
+	}
+
+	// Start a bounded worker pool to avoid overwhelming netns/iptables operations.
+	for w := 0; w < workers; w++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-p.done:
+					return
+				case _, ok := <-jobs:
+					if !ok {
+						return
+					}
+					slot, err := p.createNetworkSlot(ctx)
+
+					select {
+					case <-ctx.Done():
+						return
+					case <-p.done:
+						return
+					case results <- result{slot: slot, err: err}:
+					}
+				}
+			}
+		}()
+	}
+
+	// Submit one prefill task per target slot; static reservation is one-shot.
+	for i := 0; i < target; i++ {
+		jobs <- job{}
+	}
+	close(jobs)
+
+	var firstErr error
+	// Drain all worker results to avoid blocked goroutine sends, then return first error if any.
+	for i := 0; i < target; i++ {
 		select {
 		case <-p.done:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-			slot, err := p.createNetworkSlot(ctx)
-			if err != nil {
-				return fmt.Errorf("static reservation stopped before reaching target: current=%d target=%d: %w", len(p.newSlots), target, err)
+		case r := <-results:
+			if r.err != nil {
+				if firstErr == nil {
+					firstErr = r.err
+				}
+				continue
 			}
-			p.newSlots <- slot
+			p.newSlots <- r.slot
 		}
 	}
-	ulog.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)+safeLenInUse(p)), ulog.F("in_pool", len(p.newSlots)), ulog.F("in_use", safeLenInUse(p)), ulog.F("target", target))
+
+	if firstErr != nil {
+		return fmt.Errorf(
+			"static reservation stopped before reaching target: current=%d target=%d: %w",
+			len(p.newSlots), target, firstErr,
+		)
+	}
+
+	ulog.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", target))
 	return nil
 }
 
@@ -344,3 +398,5 @@ func (p *Pool) Cleanup() error {
 	}
 	return errors.Join(errs...)
 }
+
+
