@@ -74,6 +74,13 @@ def _find_default_config_path() -> str:
     )
 
 
+def warn_onproxy():
+    if os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY'):
+        print('warning: http proxy enabled')
+    if os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY'):
+        print('warning: https proxy enabled')
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     load config:
@@ -96,4 +103,5 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             f"Configuration file '{resolved_path}' must contain a YAML mapping at the top level."
         )
 
+    warn_onproxy()
     return cfg

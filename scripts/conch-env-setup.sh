@@ -187,7 +187,7 @@ run_unpack() {
 install_sdk() {
     echo "--- Installing Python SDK ---"
     if [ -d "./sdk" ]; then
-        pip install -e ./sdk --break-system-packages
+        pip install -e ./sdk --break-system-packages  --ignore-installed typing-extensions
         if [ $? -ne 0 ]; then
             echo "Error: Failed to install SDK with pip."
             return 1
