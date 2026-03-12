@@ -49,11 +49,20 @@ After compilation, the binary files are located in the `bin/` directory. Start t
 
 ```python
 from conch import Sandbox
+
 sandbox = Sandbox()
-result = sandbox.execute(cmd="python3",content="print('hello Conch！')")
-print(result)
-sandbox.delete()
+err = sandbox.create()
+if err:
+    raise RuntimeError(f"failed to create sandbox: {err}")
+
+try:
+    result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
+    print(result)
+finally:
+    sandbox.delete()
 ```
+
+Call `create()` (or `create_by_snapshot()`) before `execute()`, and make sure `./bin/conchd` is already running; otherwise the `Sandbox` instance has not been bound to an available Agent client yet.
 
 ## License
 Mulan Permissive Software License, Version 2 (Mulan PSL v2)
