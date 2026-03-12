@@ -29,6 +29,15 @@ import (
 	"github.com/vishvananda/netns"
 )
 
+const ipv4ForwardingSysctlPath = "/proc/sys/net/ipv4/ip_forward"
+
+func enableIPv4Forwarding(sysctlPath string) error {
+	if err := os.WriteFile(sysctlPath, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("error enabling ipv4 forwarding via %s: %w", sysctlPath, err)
+	}
+	return nil
+}
+
 func (s *Slot) addVethToBridge(veth *netlink.Veth, hostNS netns.NsHandle) error {
 	// Move Veth device to the host NS
 	err := netlink.LinkSetNsFd(veth, int(hostNS))
@@ -99,6 +108,11 @@ func (s *Slot) initSandboxNetwork(tables *iptables.IPTables, sandboxNs netns.NsH
 	err = netlink.LinkSetUp(lo)
 	if err != nil {
 		return fmt.Errorf("error setting lo device up: %w", err)
+	}
+
+	// DNAT to the guest tap address requires IPv4 forwarding inside the sandbox netns.
+	if err := enableIPv4Forwarding(ipv4ForwardingSysctlPath); err != nil {
+		return err
 	}
 
 	// Add NS default route
