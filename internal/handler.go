@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandbox/network"
@@ -76,7 +77,7 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
 	return
 }
 
-func NewServer() (*Server, error) {
+func NewServer(cfg *config.Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
@@ -104,10 +105,18 @@ func NewServer() (*Server, error) {
 	}
 
 	// Initialize sandbox manager
-	pool := network.NewPool()
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient))
+	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation)
+	if err != nil {
+		logger.Error("Failed to initialize network pool; sandbox APIs will return errors", ulog.F("error", err))
+		_ = daemonClient.Close()
+		cancel()
+		_ = snapshot.Close()
+		return nil, fmt.Errorf("failed to init network pool: %w", err)
+	}
 
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient))
 	go pool.Populate(ctx)
+
 	handleSignals(ctx, cancel, s)
 
 	logger.Info("Server initialized successfully")
@@ -152,8 +161,10 @@ func (s *Server) Cleanup() {
 			logger.Info("HTTP server gracefully stopped")
 		}
 
-		if err := s.sandboxManager.(*sandbox.Manager).CleanupPool(); err != nil {
-			logger.Error("Server cleanup error", ulog.F("error", err))
+		if m, ok := s.sandboxManager.(*sandbox.Manager); ok {
+			if err := m.CleanupPool(); err != nil {
+				logger.Error("Server cleanup error", ulog.F("error", err))
+			}
 		}
 		snapshot.CleanupAllViews()
 		if err := s.daemonClient.Close(); err != nil {

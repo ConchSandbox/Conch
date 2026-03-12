@@ -5,15 +5,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v3"
 	"github.com/openeuler/Conch/pkg/ulog"
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds the application configuration
 type Config struct {
-	App    AppConfig    `yaml:"app"`
-	Log    LogConfig    `yaml:"log"`
-	Server ServerConfig `yaml:"server"`
+	App     AppConfig     `yaml:"app"`
+	Log     LogConfig     `yaml:"log"`
+	Server  ServerConfig  `yaml:"server"`
+	Network NetworkConfig `yaml:"network"`
 }
 
 // AppConfig holds application-specific configuration
@@ -33,6 +34,12 @@ type ServerConfig struct {
 	Port int    `yaml:"port"`
 }
 
+// NetworkConfig holds network pool configuration
+type NetworkConfig struct {
+	PoolSize           int  `yaml:"pool_size"`
+	DynamicReservation bool `yaml:"dynamic_reservation"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -46,6 +53,10 @@ func DefaultConfig() *Config {
 		Server: ServerConfig{
 			Host: "0.0.0.0",
 			Port: 4063,
+		},
+		Network: NetworkConfig{
+			PoolSize:           250,
+			DynamicReservation: false,
 		},
 	}
 }
@@ -89,6 +100,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = defaultCfg.Server.Port
+	}
+	if cfg.Network.PoolSize == 0 {
+		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
 	}
 
 	return &cfg, nil
