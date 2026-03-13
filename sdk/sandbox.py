@@ -127,10 +127,8 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             result[SNAPSHOT_ID_KEY] = self.snapshot_id
-            print(f"Create Sandbox by Snapshot !")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
-
             self._update_client_from_result(result)
+            return result
 
         except requests.exceptions.RequestException as e:
             return f'{e}'
@@ -153,6 +151,7 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self._update_client_from_result(result)
+            return result
 
         except requests.exceptions.RequestException as e:
             return f'{e}'
