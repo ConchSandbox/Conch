@@ -23,7 +23,32 @@ Sandbox(use_snapshot=False, api_url=None, client=None, workdir=None,
 - `ram_mb`: int - 内存大小（MB，默认从配置读取）
 - `config_path`: str - 配置文件路径
 
+**注意:**
+- `Sandbox()` 只初始化本地配置、工作目录和标识符，不会自动创建远端沙箱。
+- 在调用 `execute()`、`upload()`、`download()`、`health_check()`、`list_files()` 之前，必须先调用 `create()` 或 `create_by_snapshot()`。
+- 调用 `create()` 之前，请先确保 `conchd` 服务已经启动且 `sandbox.api_url` 可访问。
+
 ### 方法
+
+#### create
+
+基于镜像创建沙箱。
+
+```python
+create()
+```
+
+**返回:** `None` 表示成功，返回字符串表示创建失败原因
+
+#### create_by_snapshot
+
+基于快照创建沙箱。
+
+```python
+create_by_snapshot()
+```
+
+**返回:** `None` 表示成功，返回字符串表示创建失败原因
 
 #### execute
 
@@ -44,6 +69,8 @@ execute(cmd, content=None, cwd=None, **kwargs)
 - `filename`: str - 脚本文件名（默认推断）
 
 **返回:** Execution对象，包含stdout、stderr、exit_code等信息
+
+**前置条件:** 必须先成功调用 `create()` 或 `create_by_snapshot()`
 
 #### delete
 
@@ -241,8 +268,12 @@ close()
 ```python
 from conch import Sandbox
 
-# 创建沙箱
-with Sandbox() as box:
+box = Sandbox()
+err = box.create()
+if err:
+    raise RuntimeError(f"failed to create sandbox: {err}")
+
+try:
     # 执行命令
     result = box.execute(cmd='python3', content='print("Hello")')
     print(result.stdout)
@@ -255,4 +286,6 @@ with Sandbox() as box:
 
     # 列出文件
     files = box.list_files()
+finally:
+    box.delete()
 ```

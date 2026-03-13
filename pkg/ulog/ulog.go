@@ -120,7 +120,7 @@ type Config struct {
 	Level       LogLevel // Minimum log level to output
 	OutputPath  string   // Path to log directory (default: /var/log/conchd/)
 	Stdout      bool     // Also write to stdout
-	MaxFileSize  int64    // Maximum size for a log file before rotation (default: 10MB)
+	MaxFileSize int64    // Maximum size for a log file before rotation (default: 10MB)
 }
 
 var (
@@ -129,12 +129,26 @@ var (
 
 	// default config
 	defaultConfig = Config{
-		Level:      InfoLevel,
-		OutputPath: "/var/log/conchd/",
-		Stdout:     true,
+		Level:       InfoLevel,
+		OutputPath:  "/var/log/conchd/",
+		Stdout:      true,
 		MaxFileSize: DefaultMaxFileSize,
 	}
 )
+
+func newStdoutLogger(level LogLevel, maxFileSize int64) Logger {
+	if maxFileSize == 0 {
+		maxFileSize = DefaultMaxFileSize
+	}
+	return &ulog{
+		level:       level,
+		output:      nil,
+		filePath:    "",
+		writer:      &stdoutWriter{},
+		maxFileSize: maxFileSize,
+		rotation:    0,
+	}
+}
 
 // Init initializes the global logger with the given config
 func Init(config Config) error {
@@ -146,9 +160,9 @@ func Init(config Config) error {
 	}
 
 	logger := &ulog{
-		level:    config.Level,
+		level:       config.Level,
 		maxFileSize: config.MaxFileSize,
-		rotation: 0,
+		rotation:    0,
 	}
 
 	// Determine output mode based on OutputPath and Stdout
@@ -188,13 +202,13 @@ func Init(config Config) error {
 		if bothMode {
 			// Both mode - write to file and stdout
 			logger.writer = &multiWriter{
-				file:       logFile,
-				stdout:     os.Stdout,
-				filePath:   logFilePath,
+				file:        logFile,
+				stdout:      os.Stdout,
+				filePath:    logFilePath,
 				maxFileSize: config.MaxFileSize,
-				baseName:   logFileName,
-				outputPath: config.OutputPath,
-				rotation:   &logger.rotation,
+				baseName:    logFileName,
+				outputPath:  config.OutputPath,
+				rotation:    &logger.rotation,
 			}
 		} else {
 			// File mode - write only to file
@@ -235,14 +249,14 @@ func Init(config Config) error {
 
 // multiWriter writes to both file and stdout
 type multiWriter struct {
-	file       *os.File
-	stdout     *os.File
-	filePath   string
+	file        *os.File
+	stdout      *os.File
+	filePath    string
 	maxFileSize int64
-	baseName   string
-	outputPath string
-	rotation   *int
-	mu         sync.Mutex
+	baseName    string
+	outputPath  string
+	rotation    *int
+	mu          sync.Mutex
 }
 
 func (w *multiWriter) Write(p []byte) (n int, err error) {
@@ -310,7 +324,10 @@ func (w *multiWriter) Sync() error {
 func GetLogger() Logger {
 	if defaultLogger == nil {
 		// Initialize with default config if not initialized
-		_ = Init(defaultConfig)
+		if err := Init(defaultConfig); err != nil {
+			defaultLogger = newStdoutLogger(defaultConfig.Level, defaultConfig.MaxFileSize)
+			fmt.Fprintf(os.Stderr, "ulog: fallback to stdout logger: %v\n", err)
+		}
 	}
 	return defaultLogger
 }

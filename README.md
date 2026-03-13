@@ -53,11 +53,20 @@ pip install -e ./sdk
 ### Python SDK 示例
 ```python
 from conch import Sandbox
+
 sandbox = Sandbox()
-result = sandbox.execute(cmd="python3",content="print('hello Conch！')")
-print(result)
-sandbox.delete()
+err = sandbox.create()
+if err:
+    raise RuntimeError(f"failed to create sandbox: {err}")
+
+try:
+    result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
+    print(result)
+finally:
+    sandbox.delete()
 ```
+
+调用 `execute()` 之前必须先执行 `create()`（或 `create_by_snapshot()`），并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 还没有关联到可用的 Agent client。
 
 ## 许可证
 
@@ -66,4 +75,3 @@ sandbox.delete()
 ## 贡献指南
 
 欢迎社区贡献代码和文档。
-
