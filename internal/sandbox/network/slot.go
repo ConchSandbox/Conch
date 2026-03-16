@@ -202,6 +202,6 @@ func GetVrtSlotsSize() int {
 	totalIPs := 1 << (32 - ones)
 	totalSlots := (totalIPs / vrtAddressPerSlot) - vrtAddressPerSlot
 
-	ulog.Info("Using network slot size", ulog.F("total_slots", totalSlots))
+	logger.Info("Using network slot size", ulog.F("total_slots", totalSlots))
 	return totalSlots
 }

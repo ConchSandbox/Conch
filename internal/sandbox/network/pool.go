@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -35,6 +36,8 @@ const (
 	bridgeName      = "conch_bridge"
 	prefillWorkers  = 16
 )
+
+var logger = ulog.GetLogger()
 
 type Pool struct {
 	slotStorage        Storage
@@ -54,7 +57,7 @@ func initBridge() (retErr error) {
 		},
 	}
 	if err := netlink.LinkAdd(bridge); err != nil {
-		ulog.Error("failed to create bridge", ulog.F("error", err))
+		logger.Error("failed to create bridge", ulog.F("error", err))
 		return fmt.Errorf("error create bridge: %w", err)
 	}
 	defer func() {
@@ -65,12 +68,12 @@ func initBridge() (retErr error) {
 
 	bridgeLink, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		ulog.Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		logger.Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
 		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
 	}
 	err = netlink.LinkSetUp(bridgeLink)
 	if err != nil {
-		ulog.Error("failed to set vpeer device up", ulog.F("error", err))
+		logger.Error("failed to set vpeer device up", ulog.F("error", err))
 		return fmt.Errorf("error setting vpeer device up: %w", err)
 	}
 
@@ -80,12 +83,12 @@ func initBridge() (retErr error) {
 func deleteBridge() error {
 	veth, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		ulog.Error("failed to find bridge", ulog.F("error", err))
+		logger.Error("failed to find bridge", ulog.F("error", err))
 		return fmt.Errorf("error finding bridge: %w", err)
 	}
 	err = netlink.LinkDel(veth)
 	if err != nil {
-		ulog.Error("failed to delete bridge device", ulog.F("error", err))
+		logger.Error("failed to delete bridge device", ulog.F("error", err))
 		return fmt.Errorf("error delete bridge device: %w", err)
 	}
 	return nil
@@ -124,7 +127,10 @@ func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
 func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 	ips, err := p.slotStorage.Acquire(ctx)
 	if err != nil {
-		ulog.Error("failed to acquire network slot", ulog.F("error", err))
+		if isExpectedShutdownError(ctx, err) {
+			return nil, context.Canceled
+		}
+		logger.Error("failed to acquire network slot", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
 	}
 
@@ -132,10 +138,28 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 	if err != nil {
 		releaseErr := p.slotStorage.Release(ips)
 		err = errors.Join(err, releaseErr)
-		ulog.Error("failed to create network", ulog.F("error", err))
+		if isExpectedShutdownError(ctx, err) {
+			logger.Debug("network creation interrupted during shutdown", ulog.F("error", err))
+			return nil, context.Canceled
+		}
+		logger.Error("failed to create network", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
 	return ips, nil
+}
+
+func isExpectedShutdownError(ctx context.Context, err error) bool {
+	// Without an error or an active context cancellation, this is not shutdown-related noise.
+	if err == nil || ctx.Err() == nil {
+		return false
+	}
+	// Prefer typed context errors when the lower layers preserve them.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Some external command failures during Ctrl+C only surface as stderr text.
+	msg := err.Error()
+	return strings.Contains(msg, "exit status -1") || strings.Contains(msg, "signal: interrupt")
 }
 
 func (p *Pool) Populate(ctx context.Context) {
@@ -143,7 +167,7 @@ func (p *Pool) Populate(ctx context.Context) {
 
 	if !p.dynamicReservation {
 		if err := p.populateStatic(ctx); err != nil {
-			ulog.Warn("pool: static reservation exited with error", ulog.F("error", err))
+			logger.Warn("pool: static reservation exited with error", ulog.F("error", err))
 		}
 		select {
 		case <-p.done:
@@ -162,7 +186,10 @@ func (p *Pool) Populate(ctx context.Context) {
 		default:
 			slot, err := p.createNetworkSlot(ctx)
 			if err != nil {
-				ulog.Debug("pool: failed to create network", ulog.F("error", err))
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+				logger.Debug("pool: failed to create network", ulog.F("error", err))
 				continue
 			}
 			p.newSlots <- slot
@@ -247,7 +274,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 		)
 	}
 
-	ulog.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", target))
+	logger.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", target))
 	return nil
 }
 
@@ -298,16 +325,16 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 				p.untrackInUse(slot)
 			} else {
 				if !p.dynamicReservation {
-					ulog.Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+					logger.Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
 				}
 				err := slot.RemoveNetwork()
 				if err != nil {
-					ulog.Error("failed to remove network", ulog.F("error", err))
+					logger.Error("failed to remove network", ulog.F("error", err))
 					return fmt.Errorf("failed to remove network: %w", err)
 				}
 				err = p.slotStorage.Release(slot)
 				if err != nil {
-					ulog.Error("failed to release network slot", ulog.F("error", err))
+					logger.Error("failed to release network slot", ulog.F("error", err))
 					return fmt.Errorf("failed to release network slot: %w", err)
 				}
 				p.untrackInUse(slot)
@@ -368,14 +395,14 @@ func (p *Pool) Cleanup() error {
 		}
 		err := slot.RemoveNetwork()
 		if err != nil {
-			ulog.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
+			logger.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
 			return
 		}
 		err = p.slotStorage.Release(slot)
 		if err != nil {
-			ulog.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
+			logger.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
 			return
@@ -391,12 +418,10 @@ func (p *Pool) Cleanup() error {
 		cleanupSlot(slot, "queue")
 	}
 
-	ulog.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
+	logger.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
 
 	if err := deleteBridge(); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
-
-
