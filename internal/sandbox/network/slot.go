@@ -208,6 +208,6 @@ func GetVrtSlotsSizeAndIndex() (slotCount int, maxSlotIndex int) {
 	if slotCount < 0 || maxSlotIndex < firstSlotIndex {
 		return invaildSlotSize, invaildSlotSize
 	}
-	logger.Info("Using network slot size", ulog.F("total_slots", slotCount), ulog.F("max_slot_index", maxSlotIndex))
+	getLogger().Info("Using network slot size", ulog.F("total_slots", slotCount), ulog.F("max_slot_index", maxSlotIndex))
 	return slotCount, maxSlotIndex
 }

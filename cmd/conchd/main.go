@@ -22,7 +22,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize logger with config from config file
+	// Initialize the process-wide logger from config once, and keep it alive for the full
+	// daemon lifetime so background goroutines do not race with a closed writer.
 	logConfig, err := cfg.GetLogConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid log config: %v\n", err)
@@ -32,12 +33,6 @@ func main() {
 	if err := ulog.Init(logConfig); err != nil {
 		ulog.GetLogger().Fatal("Failed to initialize logger", ulog.F("error", err))
 	}
-	defer func() {
-		logger := ulog.GetLogger()
-		if closer, ok := logger.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}()
 
 	logger := ulog.GetLogger()
 	logger.Info("Loaded configuration",
