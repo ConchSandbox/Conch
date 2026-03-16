@@ -87,7 +87,7 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 	for {
 		select {
 		case <-acquireTimeoutCtx.Done():
-			return nil, fmt.Errorf("failed to acquire IP slot: timeout")
+			return nil, fmt.Errorf("failed to acquire IP slot: %w", acquireTimeoutCtx.Err())
 		default:
 			if len(s.acquiredNs) >= s.maxSlotSize {
 				return nil, fmt.Errorf("failed to acquire IP slot: no empty slots found")
