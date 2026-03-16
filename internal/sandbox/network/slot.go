@@ -29,21 +29,22 @@ import (
 )
 
 const (
-	defaultVrtNetworkCIDR = "10.12.0.0/24"
-	vrtMask               = 24
+	defaultVrtNetworkCIDR = "10.12.0.0/20"
+	vrtMask               = 20
 	invaildSlotSize       = 0
 	vrtAddressPerSlot     = 1
+	firstSlotIndex        = 2
 	tapInterfaceName      = "tap0"
 	tapIp                 = "192.168.100.2"
-	tapMask               = 24
+	tapMask               = 20
 	loopbackInterface     = "lo"
 )
 
 var (
-	vrtNetworkCIDR  = GetVrtNetworkCIDR()
-	maxVrtSlotsSize = GetVrtSlotsSize()
-	bridgeIP        net.IP
-	once            sync.Once
+	vrtNetworkCIDR                   = GetVrtNetworkCIDR()
+	maxVrtSlotsSize, maxVrtSlotIndex = GetVrtSlotsSizeAndIndex()
+	bridgeIP                         net.IP
+	once                             sync.Once
 )
 
 type Slot struct {
@@ -59,8 +60,8 @@ type Slot struct {
 }
 
 func NewSlot(key string, idx int) (*Slot, error) {
-	if idx < 1 || idx > maxVrtSlotsSize {
-		return nil, fmt.Errorf("slot index %d is out of range [1, %d)", idx, maxVrtSlotsSize)
+	if idx < firstSlotIndex || idx > maxVrtSlotIndex {
+		return nil, fmt.Errorf("slot index %d is out of range [%d, %d]", idx, firstSlotIndex, maxVrtSlotIndex)
 	}
 
 	if vrtNetworkCIDR == nil {
@@ -192,16 +193,21 @@ func GetVrtNetworkCIDR() *net.IPNet {
 	return vrtIp
 }
 
-func GetVrtSlotsSize() int {
+func GetVrtSlotsSizeAndIndex() (slotCount int, maxSlotIndex int) {
 	vrtIp, err := getVrtNetworkCIDR()
 	if err != nil {
 		fmt.Errorf("failed to get vrtNetworkAddr, err is %v", err)
-		return invaildSlotSize
+		return invaildSlotSize, invaildSlotSize
 	}
 	ones, _ := vrtIp.Mask.Size()
 	totalIPs := 1 << (32 - ones)
-	totalSlots := (totalIPs / vrtAddressPerSlot) - vrtAddressPerSlot
 
-	logger.Info("Using network slot size", ulog.F("total_slots", totalSlots))
-	return totalSlots
+	slotCount = (totalIPs / vrtAddressPerSlot) - vrtAddressPerSlot - 2
+	maxSlotIndex = totalIPs - 2
+
+	if slotCount < 0 || maxSlotIndex < firstSlotIndex {
+		return invaildSlotSize, invaildSlotSize
+	}
+	logger.Info("Using network slot size", ulog.F("total_slots", slotCount), ulog.F("max_slot_index", maxSlotIndex))
+	return slotCount, maxSlotIndex
 }

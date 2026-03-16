@@ -83,7 +83,7 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 	s.acquiredNsMu.Lock()
 	defer s.acquiredNsMu.Unlock()
 
-	slotIdx := 1
+	slotIdx := firstSlotIndex - 1
 	for {
 		select {
 		case <-acquireTimeoutCtx.Done():

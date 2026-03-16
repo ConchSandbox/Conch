@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 )
@@ -80,6 +81,17 @@ func initBridge() (retErr error) {
 	return nil
 }
 
+func initHostMasquerade() error {
+	tables, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("error initializing iptables: %w", err)
+	}
+	if err := tables.AppendUnique("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
+		return fmt.Errorf("error creating postrouting rule: %w", err)
+	}
+	return nil
+}
+
 func deleteBridge() error {
 	veth, err := netlink.LinkByName(bridgeName)
 	if err != nil {
@@ -90,6 +102,17 @@ func deleteBridge() error {
 	if err != nil {
 		logger.Error("failed to delete bridge device", ulog.F("error", err))
 		return fmt.Errorf("error delete bridge device: %w", err)
+	}
+	return nil
+}
+
+func deleteHostMasquerade() error {
+	tables, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("error initializing iptables: %w", err)
+	}
+	if err := tables.Delete("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
+		return fmt.Errorf("error deleting postrouting rule: %w", err)
 	}
 	return nil
 }
@@ -111,6 +134,10 @@ func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
 
 	if err := initBridge(); err != nil {
 		return nil, fmt.Errorf("failed to init bridge: %w", err)
+	}
+	if err := initHostMasquerade(); err != nil {
+		_ = deleteBridge()
+		return nil, fmt.Errorf("failed to init host masquerade: %w", err)
 	}
 
 	p := &Pool{
@@ -420,6 +447,9 @@ func (p *Pool) Cleanup() error {
 
 	logger.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
 
+	if err := deleteHostMasquerade(); err != nil {
+		errs = append(errs, err)
+	}
 	if err := deleteBridge(); err != nil {
 		errs = append(errs, err)
 	}
