@@ -4,6 +4,7 @@ import requests
 import json
 import uuid
 import secrets
+import time
 
 # Try relative imports first (when imported as a package), fall back to absolute imports
 from .client import AgentClient
@@ -127,10 +128,9 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             result[SNAPSHOT_ID_KEY] = self.snapshot_id
-            print(f"Create Sandbox by Snapshot !")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
-
             self._update_client_from_result(result)
+            self._wait_agent_ready()
+            return result
 
         except requests.exceptions.RequestException as e:
             return f'{e}'
@@ -153,6 +153,8 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self._update_client_from_result(result)
+            self._wait_agent_ready()
+            return result
 
         except requests.exceptions.RequestException as e:
             return f'{e}'
@@ -245,6 +247,21 @@ class Sandbox:
                 STATUS_KEY: "ERROR",
                 MESSAGE_KEY: f"Health check failed: {e}"
             }
+    
+    def _wait_agent_ready(self, timeout: int = 30, interval: int = 1) -> None:
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                result = self.client.health_check()
+                if result.get("status") == "OK":
+                    return
+            except Exception:
+                pass
+            
+            time.sleep(interval)
+        
+        raise RuntimeError(f"Agent not ready after {timeout} seconds")
 
     def upload(self, *args, **kwargs) -> Dict[str, Any]:
         # Upload files to sandbox working dir
