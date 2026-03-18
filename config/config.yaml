@@ -13,7 +13,7 @@ server:
   port: 4063
 
 network:
-  # Available pool range: 0~1000, default at 250
+  # CIDR capacity: 4093 slots; practical max depends on host/kernel/network setup. Default: 250
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 )
@@ -37,7 +38,9 @@ const (
 	prefillWorkers  = 16
 )
 
-var logger = ulog.GetLogger()
+func getLogger() ulog.Logger {
+	return ulog.GetLogger()
+}
 
 type Pool struct {
 	slotStorage        Storage
@@ -57,7 +60,7 @@ func initBridge() (retErr error) {
 		},
 	}
 	if err := netlink.LinkAdd(bridge); err != nil {
-		logger.Error("failed to create bridge", ulog.F("error", err))
+		getLogger().Error("failed to create bridge", ulog.F("error", err))
 		return fmt.Errorf("error create bridge: %w", err)
 	}
 	defer func() {
@@ -68,28 +71,50 @@ func initBridge() (retErr error) {
 
 	bridgeLink, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		logger.Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
 		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
 	}
 	err = netlink.LinkSetUp(bridgeLink)
 	if err != nil {
-		logger.Error("failed to set vpeer device up", ulog.F("error", err))
+		getLogger().Error("failed to set vpeer device up", ulog.F("error", err))
 		return fmt.Errorf("error setting vpeer device up: %w", err)
 	}
 
 	return nil
 }
 
+func initHostMasquerade() error {
+	tables, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("error initializing iptables: %w", err)
+	}
+	if err := tables.AppendUnique("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
+		return fmt.Errorf("error creating postrouting rule: %w", err)
+	}
+	return nil
+}
+
 func deleteBridge() error {
 	veth, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		logger.Error("failed to find bridge", ulog.F("error", err))
+		getLogger().Error("failed to find bridge", ulog.F("error", err))
 		return fmt.Errorf("error finding bridge: %w", err)
 	}
 	err = netlink.LinkDel(veth)
 	if err != nil {
-		logger.Error("failed to delete bridge device", ulog.F("error", err))
+		getLogger().Error("failed to delete bridge device", ulog.F("error", err))
 		return fmt.Errorf("error delete bridge device: %w", err)
+	}
+	return nil
+}
+
+func deleteHostMasquerade() error {
+	tables, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("error initializing iptables: %w", err)
+	}
+	if err := tables.Delete("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
+		return fmt.Errorf("error deleting postrouting rule: %w", err)
 	}
 	return nil
 }
@@ -112,6 +137,10 @@ func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
 	if err := initBridge(); err != nil {
 		return nil, fmt.Errorf("failed to init bridge: %w", err)
 	}
+	if err := initHostMasquerade(); err != nil {
+		_ = deleteBridge()
+		return nil, fmt.Errorf("failed to init host masquerade: %w", err)
+	}
 
 	p := &Pool{
 		slotStorage:        slotStorage,
@@ -130,7 +159,7 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 		if isExpectedShutdownError(ctx, err) {
 			return nil, context.Canceled
 		}
-		logger.Error("failed to acquire network slot", ulog.F("error", err))
+		getLogger().Error("failed to acquire network slot", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
 	}
 
@@ -139,10 +168,10 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 		releaseErr := p.slotStorage.Release(ips)
 		err = errors.Join(err, releaseErr)
 		if isExpectedShutdownError(ctx, err) {
-			logger.Debug("network creation interrupted during shutdown", ulog.F("error", err))
+			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
 			return nil, context.Canceled
 		}
-		logger.Error("failed to create network", ulog.F("error", err))
+		getLogger().Error("failed to create network", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
 	return ips, nil
@@ -167,7 +196,7 @@ func (p *Pool) Populate(ctx context.Context) {
 
 	if !p.dynamicReservation {
 		if err := p.populateStatic(ctx); err != nil {
-			logger.Warn("pool: static reservation exited with error", ulog.F("error", err))
+			getLogger().Warn("pool: static reservation exited with error", ulog.F("error", err))
 		}
 		select {
 		case <-p.done:
@@ -189,7 +218,7 @@ func (p *Pool) Populate(ctx context.Context) {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
-				logger.Debug("pool: failed to create network", ulog.F("error", err))
+				getLogger().Debug("pool: failed to create network", ulog.F("error", err))
 				continue
 			}
 			p.newSlots <- slot
@@ -274,7 +303,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 		)
 	}
 
-	logger.Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", target))
+	getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", target))
 	return nil
 }
 
@@ -325,16 +354,16 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 				p.untrackInUse(slot)
 			} else {
 				if !p.dynamicReservation {
-					logger.Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+					getLogger().Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
 				}
 				err := slot.RemoveNetwork()
 				if err != nil {
-					logger.Error("failed to remove network", ulog.F("error", err))
+					getLogger().Error("failed to remove network", ulog.F("error", err))
 					return fmt.Errorf("failed to remove network: %w", err)
 				}
 				err = p.slotStorage.Release(slot)
 				if err != nil {
-					logger.Error("failed to release network slot", ulog.F("error", err))
+					getLogger().Error("failed to release network slot", ulog.F("error", err))
 					return fmt.Errorf("failed to release network slot: %w", err)
 				}
 				p.untrackInUse(slot)
@@ -395,14 +424,14 @@ func (p *Pool) Cleanup() error {
 		}
 		err := slot.RemoveNetwork()
 		if err != nil {
-			logger.Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
+			getLogger().Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
 			return
 		}
 		err = p.slotStorage.Release(slot)
 		if err != nil {
-			logger.Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
+			getLogger().Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
 			failed++
 			return
@@ -418,8 +447,11 @@ func (p *Pool) Cleanup() error {
 		cleanupSlot(slot, "queue")
 	}
 
-	logger.Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
+	getLogger().Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
 
+	if err := deleteHostMasquerade(); err != nil {
+		errs = append(errs, err)
+	}
 	if err := deleteBridge(); err != nil {
 		errs = append(errs, err)
 	}
