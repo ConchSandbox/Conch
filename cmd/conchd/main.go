@@ -41,6 +41,7 @@ func main() {
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.address", cfg.GetServerAddress()),
 		ulog.F("server.work_dir", "/var/run/conch"),
+		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
 		ulog.F("containerd.socket", cfg.Containerd.Socket),
 		ulog.F("containerd.default_namespace", cfg.Containerd.DefaultNamespace),
 		ulog.F("network.pool_size", cfg.Network.PoolSize),
@@ -53,9 +54,15 @@ func main() {
 	defer server.Cleanup()
 
 	serverAddr := cfg.GetServerAddress()
-	logger.Info("Starting conchd server", ulog.F("address", serverAddr))
-	if err := server.Start(serverAddr); err != nil {
-		logger.Fatal("Failed to start server", ulog.F("error", err))
-
+	serverUnixSocket := cfg.GetServerUnixSocket()
+	if serverUnixSocket != "" {
+		logger.Info("Starting conchd server", ulog.F("network", "unix"), ulog.F("socket", serverUnixSocket))
+	} else {
+		logger.Info("Starting conchd server", ulog.F("network", "tcp"), ulog.F("address", serverAddr))
+	}
+	if err := server.Start(serverAddr, serverUnixSocket); err != nil {
+		logger.Error("Failed to start server", ulog.F("error", err))
+		server.Cleanup()
+		os.Exit(1)
 	}
 }

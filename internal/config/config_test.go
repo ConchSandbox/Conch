@@ -78,6 +78,16 @@ func TestGetServerAddress(t *testing.T) {
 	}
 }
 
+func TestGetServerUnixSocket(t *testing.T) {
+	socketPath := "/var/run/conchd.sock"
+	cfg := &Config{
+		Server: ServerConfig{UnixSocket: &socketPath},
+	}
+	if got := cfg.GetServerUnixSocket(); got != socketPath {
+		t.Errorf("GetServerUnixSocket() = %q, want %q", got, socketPath)
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {
 		level   string
@@ -147,6 +157,9 @@ containerd:
 	}
 	if cfg.Server.Port != 4567 {
 		t.Errorf("LoadConfig().Server.Port = %d, want %d", cfg.Server.Port, 4567)
+	}
+	if cfg.GetServerUnixSocket() != "" {
+		t.Errorf("LoadConfig().Server.UnixSocket = %q, want empty", cfg.GetServerUnixSocket())
 	}
 	if cfg.Network.PoolSize != 123 {
 		t.Errorf("LoadConfig().Network.PoolSize = %d, want %d", cfg.Network.PoolSize, 123)

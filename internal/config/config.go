@@ -31,8 +31,9 @@ type LogConfig struct {
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host       string  `yaml:"host"`
+	Port       int     `yaml:"port"`
+	UnixSocket *string `yaml:"unix_socket"`
 }
 
 // NetworkConfig holds network pool configuration
@@ -49,6 +50,7 @@ type ContainerdConfig struct {
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
+	defaultUnixSocket := "/var/run/conchd.sock"
 	return &Config{
 		App: AppConfig{
 			Name: "conch",
@@ -58,8 +60,9 @@ func DefaultConfig() *Config {
 			Output: "stdout",
 		},
 		Server: ServerConfig{
-			Host: "0.0.0.0",
-			Port: 4063,
+			Host:       "127.0.0.1",
+			Port:       4063,
+			UnixSocket: &defaultUnixSocket,
 		},
 		Network: NetworkConfig{
 			PoolSize:           250,
@@ -112,6 +115,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = defaultCfg.Server.Port
 	}
+	if cfg.Server.UnixSocket == nil {
+		cfg.Server.UnixSocket = defaultCfg.Server.UnixSocket
+	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
 	}
@@ -160,6 +166,13 @@ func (c *Config) GetLogConfig() (ulog.Config, error) {
 // GetServerAddress returns the server address in "host:port" format
 func (c *Config) GetServerAddress() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func (c *Config) GetServerUnixSocket() string {
+	if c.Server.UnixSocket == nil {
+		return ""
+	}
+	return *c.Server.UnixSocket
 }
 
 // parseLogLevel converts string log level to ulog.LogLevel
