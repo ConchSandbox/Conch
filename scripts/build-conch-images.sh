@@ -11,8 +11,57 @@ echo "  \_____\___/|_| |_|\___|_| |_| Image Builder   "
 echo "------------------------------------------------"
 
 # ===================== 配置参数 =====================
-TAG="build-test"
-IMAGE_REG="hub.oepkgs.net/conch"
+TAG_DEFAULT="build-test"
+IMAGE_REG_DEFAULT="hub.oepkgs.net/conch"
+
+usage() {
+    cat <<EOF
+用法: $0 [选项]
+构建 Conch 镜像
+
+选项:
+  -t, --tag TAG         镜像标签 (默认: ${TAG_DEFAULT})
+  -r, --registry URL   镜像仓库 (默认: ${IMAGE_REG_DEFAULT})
+  -h, --help            显示帮助信息
+EOF
+}
+
+# 默认值支持环境变量覆盖；命令行参数优先
+TAG="${TAG:-$TAG_DEFAULT}"
+IMAGE_REG="${IMAGE_REG:-$IMAGE_REG_DEFAULT}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--tag)
+            if [[ $# -lt 2 ]]; then
+                echo "缺少参数: $1" >&2
+                usage
+                exit 1
+            fi
+            TAG="$2"
+            shift 2
+            ;;
+        -r|--registry)
+            if [[ $# -lt 2 ]]; then
+                echo "缺少参数: $1" >&2
+                usage
+                exit 1
+            fi
+            IMAGE_REG="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "未知参数: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
 INDEX_NAME="${IMAGE_REG}/conch-claw:${TAG}"
 
 VM_IMAGE="${IMAGE_REG}/conch-vm:${TAG}"
@@ -92,7 +141,10 @@ process_erofs() {
     local src_tar=$1
     local dest_erofs=$2
     echo -en "    转换至 $(basename "$dest_erofs")... "
-    "$MKFS_EROFS" --tar=f --aufs -Enoinline_data "$dest_erofs" "$src_tar" >/dev/null 2>&1
+    if ! "$MKFS_EROFS" --tar=f --aufs -Enoinline_data "$dest_erofs" "$src_tar"; then
+        log_error "EROFS 转换失败: $src_tar -> $dest_erofs"
+        exit 1
+    fi
 
     # 2MB 对齐
     local file_size
@@ -101,7 +153,7 @@ process_erofs() {
     [ "$aligned_size" -eq 0 ] && aligned_size=$ALIGN_BYTES
     truncate -s "$aligned_size" "$dest_erofs"
 
-    echo -e "${GREEN}完成${NC}"
+    log_success "完成"
 }
 
 make_erofs_layers() {
@@ -130,15 +182,14 @@ make_erofs_layers() {
     if [ -f "$WORK_DIR/manifest.json" ]; then
         echo -e "${YELLOW}检测到 Docker Save 格式 (多层)${NC}"
         tar -xf "$CURRENT_TAR" -C "$WORK_DIR"
-        local layers
-        layers=$(jq -r '.[0].Layers[]' "$WORK_DIR/manifest.json")
         local n=0
-        for layer_path in $layers; do
+        while IFS= read -r layer_path; do
+            [ -z "$layer_path" ] && continue
             local dest="$BUILD_DIR/layer${n}.erofs"
             process_erofs "$WORK_DIR/$layer_path" "$dest"
             ERFS_LAYERS+=("$dest")
             n=$((n+1))
-        done
+        done < <(jq -r '.[0].Layers[]' "$WORK_DIR/manifest.json")
     else
         echo -e "${YELLOW}检测到单层 Rootfs 格式${NC}"
         local dest="$BUILD_DIR/rootfs.erofs"
@@ -179,7 +230,10 @@ build_rootfs_image() {
     cid=$($BUILDAH_CMD from scratch)
 
     for layer_file in "${ERFS_LAYERS[@]}"; do
-        [ ! -f "$layer_file" ] && log_error "$layer_file 不存在"
+        if [ ! -f "$layer_file" ]; then
+            log_error "$layer_file 不存在"
+            exit 1
+        fi
         $BUILDAH_CMD copy "$cid" "$layer_file" "/$(basename "$layer_file")"
     done
 
