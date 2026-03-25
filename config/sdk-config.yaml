@@ -1,5 +1,6 @@
 sandbox:
-  api_url: "http://localhost:4063"                # *Sandbox service API endpoint
+  unix_socket: "/var/run/conchd.sock"             # Preferred: talk to conchd over local Unix socket
+  api_url: "http://localhost:4063"                # Fallback: used only when unix_socket is empty
   workdir_prefix: "/tmp/sandbox_"                 # *Prefix for sandbox working directory
   sandbox_id: ""                                  # Optional: sandbox ID (default:auto generate)
 

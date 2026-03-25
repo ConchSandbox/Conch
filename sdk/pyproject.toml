@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.25.0",
+    "requests-unixsocket>=0.3.0",
     "grpcio>=1.57.0",
     "protobuf>=4.21.0",
     "PyYAML>=5.4.0",
