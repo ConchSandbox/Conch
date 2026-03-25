@@ -12,6 +12,7 @@ from .config_loader import load_config
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
+NAMESPACE_KEY = "namespace"
 SNAPSHOT_ID_KEY = "snapshot_id"
 IMAGE_NAME_KEY = "image_name"
 VMM_NAME_KEY = "vmm_name"
@@ -62,6 +63,7 @@ class Sandbox:
             client: Optional["AgentClient"] = None,
             workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
+            namespace: Optional[str] = None,
             snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             ram_mb: Optional[int] = None,
@@ -79,6 +81,7 @@ class Sandbox:
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
+        self.namespace = namespace or ""
 
         config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
@@ -113,6 +116,7 @@ class Sandbox:
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
         snap_config = self._config[CFG_SNAPSHOT_SECTION]
         payload = {
+            NAMESPACE_KEY: self.namespace,
             SNAPSHOT_ID_KEY: self.snapshot_id,
             IMAGE_NAME_KEY: "",
             VMM_NAME_KEY: snap_config[VMM_NAME_KEY],
@@ -137,6 +141,7 @@ class Sandbox:
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
         img_config = self._config[CFG_IMAGE_SECTION]
         payload = {
+            NAMESPACE_KEY: self.namespace,
             SNAPSHOT_ID_KEY: "",
             IMAGE_NAME_KEY: img_config[IMAGE_NAME_KEY],
             VMM_NAME_KEY: img_config[VMM_NAME_KEY],
@@ -158,7 +163,10 @@ class Sandbox:
 
     def delete(self):
         url = f"{self.api_url}{SANDBOX_DELETE_PATH}"
-        payload = {SANDBOX_ID_KEY: self.sandbox_id}
+        payload = {
+            NAMESPACE_KEY: self.namespace,
+            SANDBOX_ID_KEY: self.sandbox_id,
+        }
 
         try:
             response = requests.post(url, json=payload)
@@ -173,6 +181,7 @@ class Sandbox:
         # Pause sandbox
         url = f"{self.api_url}{SANDBOX_PAUSE_PATH}"
         payload = {
+            NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: self.sandbox_id,
         }
 

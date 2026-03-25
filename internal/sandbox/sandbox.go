@@ -39,7 +39,7 @@ type Sandbox struct {
 func ResumeSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
 ) (s *Sandbox, e error) {
 	cleanup := NewCleanup()
 	defer func() {
@@ -93,6 +93,7 @@ func ResumeSandbox(
 		snapshotConf: snapshotConf,
 		process:      vmmHandle,
 		cleanup:      cleanup,
+		namespace:    namespace,
 		slot:         slot,
 	}
 
@@ -115,7 +116,7 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
 ) (s *Sandbox, e error) {
 
 	cleanup := NewCleanup()
@@ -170,6 +171,7 @@ func CreateSandbox(
 		snapshotConf: snapshotConf,
 		process:      vmmHandle,
 		cleanup:      cleanup,
+		namespace:    namespace,
 		slot:         slot,
 	}
 

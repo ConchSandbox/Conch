@@ -18,10 +18,9 @@ const (
 	PmemPrefix             = "layer"
 	PemSuffix              = ".erofs"
 
-	ContainerdSock   = "/run/containerd/containerd.sock"
-	DefaultNamespace = "default"
-	WorkDir          = "/var/run/conch"
-	RequestTimeout   = 60 * time.Second
+	ContainerdSock = "/run/containerd/containerd.sock"
+	WorkDir        = "/var/run/conch"
+	RequestTimeout = 60 * time.Second
 
 	ImageKindVirtualMachine = "virtual-machine"
 	ImageKindMemSnapshot    = "snapshot"
