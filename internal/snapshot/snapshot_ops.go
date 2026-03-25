@@ -118,7 +118,7 @@ func (ops *snapshotOps) buildCommitConfigs(
 
 // commitRootfsSnapshot commits the rootfs snapshot with appropriate labels.
 func (ops *snapshotOps) commitRootfsSnapshot(ctx context.Context, namespace, key, rootfsSnapshotID string, conf *SnapshotConfig, memSnapshotID, parentVMSnapshotID string) error {
-	return ops.server.snt.Commit(ctx, namespace, key, rootfsSnapshotID, noGcOpt, func(info *snapshots.Info) error {
+	return ops.server.snt.Commit(ctx, namespace, key, rootfsSnapshotID, func(info *snapshots.Info) error {
 		if info.Labels == nil {
 			info.Labels = make(map[string]string)
 		}
@@ -133,7 +133,7 @@ func (ops *snapshotOps) commitRootfsSnapshot(ctx context.Context, namespace, key
 
 // commitMemSnapshot commits the mem snapshot with back-reference to rootfs.
 func (ops *snapshotOps) commitMemSnapshot(ctx context.Context, namespace, memKey, memSnapshotID, rootfsSnapshotID string) error {
-	err := ops.server.snt.Commit(ctx, namespace, memKey, memSnapshotID, noGcOpt, func(info *snapshots.Info) error {
+	err := ops.server.snt.Commit(ctx, namespace, memKey, memSnapshotID, func(info *snapshots.Info) error {
 		if info.Labels == nil {
 			info.Labels = make(map[string]string)
 		}
@@ -176,7 +176,7 @@ func (ops *snapshotOps) prewarmViewMounts(ctx context.Context, namespace, rootfs
 	var prewarmKeys []string
 	for _, item := range prewarmItems {
 		viewKey := common.TempViewPrefix + item.parentID
-		_, _, viewErr := ops.server.viewMgr.acquireViewMount(ops.server.snt, ctx, namespace, item.parentID, viewKey, item.mountPoint, noGcOpt)
+		_, _, viewErr := ops.server.viewMgr.acquireViewMount(ops.server.snt, ctx, namespace, item.parentID, viewKey, item.mountPoint)
 		if viewErr != nil {
 			if len(prewarmKeys) > 0 {
 				if _, releaseErr := ops.server.viewMgr.releaseViewAliases(ops.server.snt, namespace, prewarmKeys...); releaseErr != nil {

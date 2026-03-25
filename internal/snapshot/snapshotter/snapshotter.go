@@ -71,31 +71,28 @@ func (c *ContainerdSnap) View(ctx context.Context, namespace, key, parent string
 
 // Commit commits an active snapshot to a persistent snapshot
 func (c *ContainerdSnap) Commit(ctx context.Context, namespace, key, snapshotID string, opts ...snapshots.Opt) error {
-	nsCtx, ok := c.client.GetNamespaceContext(namespace)
-	if !ok {
-		return fmt.Errorf("snapshotter of %s is not init", namespace)
+	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
+	if err != nil {
+		return err
 	}
-	sn := c.client.SnapshotService(containerd.DefaultSnapshotter)
 	return sn.Commit(nsCtx, snapshotID, key, opts...)
 }
 
 // Remove removes a snapshot
 func (c *ContainerdSnap) Remove(ctx context.Context, namespace, key string) error {
-	nsCtx, ok := c.client.GetNamespaceContext(namespace)
-	if !ok {
-		return fmt.Errorf("snapshotter of %s is not init", namespace)
+	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
+	if err != nil {
+		return err
 	}
-	sn := c.client.SnapshotService(containerd.DefaultSnapshotter)
 	return sn.Remove(nsCtx, key)
 }
 
 // Stat gets snapshot information
 func (c *ContainerdSnap) Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
-	nsCtx, ok := c.client.GetNamespaceContext(namespace)
-	if !ok {
-		return snapshots.Info{}, fmt.Errorf("snapshotter of %s is not init", namespace)
+	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
+	if err != nil {
+		return snapshots.Info{}, err
 	}
-	sn := c.client.SnapshotService(containerd.DefaultSnapshotter)
 	return sn.Stat(nsCtx, key)
 }
 

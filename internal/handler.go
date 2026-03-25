@@ -170,6 +170,9 @@ func (s *Server) Cleanup() {
 			}
 		}
 		snapshot.CleanupAllViews()
+		if err := snapshot.Close(); err != nil {
+			logger.Error("Snapshot cleanup error", ulog.F("error", err))
+		}
 		if err := s.daemonClient.Close(); err != nil {
 			logger.Error("Containerd cleanup error", ulog.F("error", err))
 		}

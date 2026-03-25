@@ -7,13 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/openeuler/Conch/internal/daemon"
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
 )
@@ -24,15 +23,10 @@ type server struct {
 	snapshots map[string]map[string]*snapshots.Info // only active snapshot
 	lock      sync.RWMutex
 	workDir   string
-	daemonClient  *daemon.Client
 	viewMgr   *viewManager
 }
 
 var gServer server
-
-var noGcOpt = snapshots.WithLabels(map[string]string{
-	"containerd.io/gc.root": time.Now().UTC().Format(time.RFC3339),
-})
 
 // NewServer initializes the snapshot server with containerd client.
 func NewServer(workDir string, daemonClient *daemon.Client) error {
@@ -42,7 +36,6 @@ func NewServer(workDir string, daemonClient *daemon.Client) error {
 	}
 	gServer.snt = sn
 	gServer.workDir = workDir
-	gServer.daemonClient = daemonClient
 	gServer.snapshots = make(map[string]map[string]*snapshots.Info)
 	gServer.viewMgr = &viewManager{
 		viewMounts:  make(map[string]map[string]*viewMountRef),
@@ -180,7 +173,7 @@ func (s *server) Prepare(
 	}()
 
 	// Step 1: prepare rootfs
-	rootfsCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, key, parents.Rootfs), conf.Rootfs, noGcOpt, withLabels(conf))
+	rootfsCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, key, parents.Rootfs), conf.Rootfs, withLabels(conf))
 	if err != nil {
 		return nil, err
 	}
@@ -192,13 +185,13 @@ func (s *server) Prepare(
 	}
 
 	// Step 2: view vm (read-only, shared)
-	vmCleaner, err = ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir, noGcOpt)
+	vmCleaner, err = ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir)
 	if err != nil {
 		return nil, fmt.Errorf("view vm failed: %v", err)
 	}
 
 	// Step 3: prepare mem + create sparse memfile
-	memCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, memKey, parents.Mem), conf.MemDir, noGcOpt)
+	memCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, memKey, parents.Mem), conf.MemDir)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +245,7 @@ func (s *server) AcquireView(
 	}()
 
 	// Step 1: view rootfs
-	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, key, conf.Rootfs, noGcOpt, withLabels(conf))
+	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, key, conf.Rootfs, withLabels(conf))
 	if err != nil {
 		return nil, fmt.Errorf("view rootfs failed: %v", err)
 	}
@@ -264,14 +257,14 @@ func (s *server) AcquireView(
 	}
 
 	// Step 2: view vm
-	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir, noGcOpt)
+	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir)
 	if err != nil {
 		return nil, fmt.Errorf("view vm failed: %v", err)
 	}
 	cleanups = append(cleanups, vmCleaner)
 
 	// Step 3: view mem + verify mem.img
-	memCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Mem, memKey, conf.MemDir, noGcOpt)
+	memCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Mem, memKey, conf.MemDir)
 	if err != nil {
 		return nil, fmt.Errorf("view mem failed: %v", err)
 	}
@@ -445,7 +438,6 @@ func (s *server) CleanupAllViews() {
 
 // Close releases snapshot resources.
 func (s *server) Close() error {
-	// daemonClient cleanup is handled by the caller
 	return nil
 }
 

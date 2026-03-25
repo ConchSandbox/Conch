@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/containerd/containerd/leases"
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd"
@@ -16,6 +18,7 @@ import (
 type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	lease  leases.Lease
 }
 
 // Client wraps containerd client connection and provides namespace management
@@ -70,20 +73,35 @@ func (c *Client) WithNamespace(ctx context.Context, namespace string) (context.C
 		return s.ctx, nil
 	}
 
-	nsCtx, cancel := context.WithCancel(namespaces.WithNamespace(ctx, ns))
-	c.sessions[ns] = &session{ctx: nsCtx, cancel: cancel}
-	return nsCtx, nil
+	namespaceCtx := namespaces.WithNamespace(context.Background(), ns)
+	lease, err := c.LeasesService().Create(namespaceCtx, leases.WithRandomID())
+	if err != nil {
+		return nil, fmt.Errorf("create lease for namespace %s: %w", ns, err)
+	}
+
+	sessionCtx, cancel := context.WithCancel(leases.WithLease(namespaceCtx, lease.ID))
+	c.sessions[ns] = &session{ctx: sessionCtx, cancel: cancel, lease: lease}
+	return sessionCtx, nil
 }
 
 // Close closes the connection and cleans up all sessions
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	var errs []error
 	for k, v := range c.sessions {
+		namespaceCtx := namespaces.WithNamespace(context.Background(), k)
+		if err := c.LeasesService().Delete(namespaceCtx, v.lease); err != nil {
+			errs = append(errs, fmt.Errorf("delete lease %s in namespace %s: %w", v.lease.ID, k, err))
+		}
 		v.cancel()
 		delete(c.sessions, k)
 	}
-	return c.Client.Close()
+	if err := c.Client.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // DefaultNamespace returns the default namespace
