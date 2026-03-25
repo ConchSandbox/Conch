@@ -11,10 +11,11 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	App     AppConfig     `yaml:"app"`
-	Log     LogConfig     `yaml:"log"`
-	Server  ServerConfig  `yaml:"server"`
-	Network NetworkConfig `yaml:"network"`
+	App        AppConfig        `yaml:"app"`
+	Log        LogConfig        `yaml:"log"`
+	Server     ServerConfig     `yaml:"server"`
+	Network    NetworkConfig    `yaml:"network"`
+	Containerd ContainerdConfig `yaml:"containerd"`
 }
 
 // AppConfig holds application-specific configuration
@@ -40,6 +41,12 @@ type NetworkConfig struct {
 	DynamicReservation bool `yaml:"dynamic_reservation"`
 }
 
+// ContainerdConfig holds containerd connection configuration
+type ContainerdConfig struct {
+	Socket           string `yaml:"socket"`
+	DefaultNamespace string `yaml:"default_namespace"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -57,6 +64,10 @@ func DefaultConfig() *Config {
 		Network: NetworkConfig{
 			PoolSize:           250,
 			DynamicReservation: false,
+		},
+		Containerd: ContainerdConfig{
+			Socket:           "/run/containerd/containerd.sock",
+			DefaultNamespace: "default",
 		},
 	}
 }
@@ -103,6 +114,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	}
+	if cfg.Containerd.Socket == "" {
+		cfg.Containerd.Socket = defaultCfg.Containerd.Socket
+	}
+	if cfg.Containerd.DefaultNamespace == "" {
+		cfg.Containerd.DefaultNamespace = defaultCfg.Containerd.DefaultNamespace
 	}
 
 	return &cfg, nil

@@ -20,6 +20,7 @@ const (
 
 	ContainerdSock   = "/run/containerd/containerd.sock"
 	DefaultNamespace = "default"
+	WorkDir          = "/var/run/conch"
 	RequestTimeout   = 60 * time.Second
 
 	ImageKindVirtualMachine = "virtual-machine"

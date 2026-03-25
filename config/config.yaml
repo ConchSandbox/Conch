@@ -17,3 +17,7 @@ network:
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false
+
+containerd:
+  socket: /run/containerd/containerd.sock
+  default_namespace: default

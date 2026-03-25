@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/containerd/containerd"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/sandbox"
@@ -22,7 +23,6 @@ import (
 )
 
 const (
-	workDir         = "/tmp/snapshot"
 	shutdownTimeout = 30 * time.Second
 )
 
@@ -87,7 +87,10 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 	logger := ulog.GetLogger()
 
-	daemonClient, err := daemon.New(common.ContainerdSock)
+	daemonClient, err := daemon.New(
+		cfg.Containerd.Socket,
+		containerd.WithDefaultNamespace(cfg.Containerd.DefaultNamespace),
+	)
 	if err != nil {
 		logger.Error("Failed to init containerd manager", ulog.F("error", err))
 		cancel()
@@ -96,7 +99,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	s.daemonClient = daemonClient
 
 	// Initialize snapshot server
-	err = snapshot.NewServer(workDir, daemonClient)
+	err = snapshot.NewServer(common.WorkDir, daemonClient)
 	if err != nil {
 		_ = daemonClient.Close()
 		cancel()
