@@ -23,12 +23,12 @@ type AgentServer struct {
 }
 
 func (s *AgentServer) HealthCheck(ctx context.Context, in *pb.Empty) (*pb.CheckReply, error) {
-	ulog.Debug("Received health check request")
+	ulog.Info("Received health check request")
 	return &pb.CheckReply{Message: HealthMsgOK}, nil
 }
 
 func (s *AgentServer) ExecuteCommand(ctx context.Context, req *pb.CommandRequest) (*pb.CommandResponse, error) {
-	ulog.Debug("Received command execution request", ulog.F("command", req.Command), ulog.F("args", fmt.Sprintf("%v", req.Args)))
+	ulog.Info("Received command execution request", ulog.F("command", req.Command), ulog.F("args", fmt.Sprintf("%v", req.Args)))
 
 	cmd := exec.Command(req.Command, req.Args...)
 	output, err := cmd.CombinedOutput()
@@ -147,7 +147,7 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 
 // Starts a process with custom working dir, environment, and script content
 func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequest) (*pb.StartProcessResponse, error) {
-	ulog.Debug("Received start process request",
+	ulog.Info("Received start process request",
 		ulog.F("cmd", req.Cmd),
 		ulog.F("args", fmt.Sprintf("%v", req.Args)),
 		ulog.F("cwd", req.Cwd),
@@ -240,7 +240,7 @@ func (s *AgentServer) PostFiles(ctx context.Context, req *pb.PostFilesRequest) (
 			}, nil
 		}
 
-		ulog.Debug("Successfully uploaded file",
+		ulog.Info("Successfully uploaded file",
 			ulog.F("file", cleanedFilepath),
 			ulog.F("size", len(file.Content)))
 		uploadedCount++
@@ -273,7 +273,7 @@ func (s *AgentServer) GetFile(ctx context.Context, req *pb.GetFileRequest) (*pb.
 		return &pb.GetFileResponse{Error: errMsg}, nil
 	}
 
-	ulog.Debug("Successfully read file",
+	ulog.Info("Successfully read file",
 		ulog.F("file", req.Filepath),
 		ulog.F("size", len(content)))
 	return &pb.GetFileResponse{Content: content}, nil

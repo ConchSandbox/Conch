@@ -25,7 +25,7 @@ func (cu *configUpdater) updateSnapshotConfig(configFilePath, kernelPath, initrd
 	cu.updatePayloadPaths(config, kernelPath, initrdPath)
 	cu.updateMemoryZone(config, memoryPath)
 	cu.updatePmemDevices(config, pmemPaths)
-
+	cu.removeVsockConfig(config)
 	updatedData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("error marshal config: %w", err)
@@ -87,4 +87,12 @@ func (cu *configUpdater) updatePmemDevices(config map[string]interface{}, pmemPa
 	}
 	slog.Debug("update pmem", "paths", pmemPaths)
 	config["pmem"] = pmemArray
+}
+
+// removeVsockConfig sets the vsock field to nil (null in JSON).
+func (cu *configUpdater) removeVsockConfig(config map[string]interface{}) {
+    if _, ok := config["vsock"]; ok {
+        slog.Info("Removing vsock configuration from config")
+        config["vsock"] = nil
+    }
 }

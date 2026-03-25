@@ -45,6 +45,13 @@ type ResourceArgs struct {
 
 	// Snapshot
 	SnapfilePath string
+
+	// Vsock
+	VsockCID        uint32
+	VsockSocketPath string
+
+	// Sandbox ID (passed via kernel cmdline)
+	SandboxId string
 }
 
 type vmmClient interface {
