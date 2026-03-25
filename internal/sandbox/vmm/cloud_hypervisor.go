@@ -24,13 +24,14 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --cpus boot={{ .CPUBoot }},max={{ .CPUMax }},max_phys_bits=42 \
 --kernel {{ .KernelPath }} \
 --initramfs {{ .InitrdPath }} \
---pmem file={{ .PmemPath }} \
+--pmem file={{ .PmemPath }},discard_writes=on \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
---cmdline "console=hvc0 root=/dev/ram0 rw debug" \
+--cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}" \
 --api-socket {{ .VmmSocket }} \
 --console null \
 --net "tap={{ .TapName }}" \
+--vsock "cid={{ .VsockCID }},socket={{ .VsockSocketPath }}" \
 --seccomp false`
 
 // -vv use for printing log when test
@@ -42,17 +43,20 @@ const resumeScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --seccomp false`
 
 type StartScriptCLHArgs struct {
-	VmmBinaryPath string
-	CPUBoot       int64
-	CPUMax        int64
-	MemorySize    string
-	MemoryPath    string
-	KernelPath    string
-	InitrdPath    string
-	PmemPath      string
-	NamespaceID   string
-	TapName       string
-	VmmSocket     string
+	VmmBinaryPath   string
+	CPUBoot         int64
+	CPUMax          int64
+	MemorySize      string
+	MemoryPath      string
+	KernelPath      string
+	InitrdPath      string
+	PmemPath        string
+	NamespaceID     string
+	TapName         string
+	VmmSocket       string
+	VsockCID        uint32
+	VsockSocketPath string
+	SandboxId       string
 }
 
 type CLHClient struct {
@@ -103,17 +107,20 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 	}
 
 	clhArgs := StartScriptCLHArgs{
-		VmmBinaryPath: vmmBinaryPath,
-		CPUBoot:       args.CPUBoot,
-		CPUMax:        args.CPUMax,
-		MemorySize:    strconv.FormatInt(args.MemorySize, 10) + "M",
-		MemoryPath:    args.MemoryPath,
-		KernelPath:    args.KernelPath,
-		InitrdPath:    args.InitrdPath,
-		PmemPath:      strings.Join(args.PmemPaths, " file="),
-		NamespaceID:   args.NamespaceID,
-		TapName:       args.TapName,
-		VmmSocket:     clh.socketPath,
+		VmmBinaryPath:   vmmBinaryPath,
+		CPUBoot:         args.CPUBoot,
+		CPUMax:          args.CPUMax,
+		MemorySize:      strconv.FormatInt(args.MemorySize, 10) + "M",
+		MemoryPath:      args.MemoryPath,
+		KernelPath:      args.KernelPath,
+		InitrdPath:      args.InitrdPath,
+		PmemPath:        strings.Join(args.PmemPaths, " file="),
+		NamespaceID:     args.NamespaceID,
+		TapName:         args.TapName,
+		VmmSocket:       clh.socketPath,
+		VsockCID:        args.VsockCID,
+		VsockSocketPath: args.VsockSocketPath,
+		SandboxId:       args.SandboxId,
 	}
 
 	_, err := os.Stat(clhArgs.VmmBinaryPath)

@@ -402,6 +402,16 @@ func (l *ulog) log(level LogLevel, msg string, fields ...Field) {
 		b.WriteString(" ")
 	}
 
+	// SandboxId (as a fixed part if present)
+	for _, f := range l.fields {
+		if f.Key == "sandboxId" {
+			b.WriteString("[")
+			b.WriteString(fmt.Sprintf("%v", f.Value))
+			b.WriteString("] ")
+			break
+		}
+	}
+
 	// Message
 	b.WriteString(msg)
 

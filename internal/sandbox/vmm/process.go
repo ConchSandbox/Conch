@@ -17,11 +17,12 @@ import (
 const waitInterval = 10 * time.Millisecond
 
 type Process struct {
-	cmd           *exec.Cmd
-	VmmSocketPath string
-	rootfsPaths   []string
-	kernelPath    string
-	initrdPath    string
+	cmd             *exec.Cmd
+	VmmSocketPath   string
+	VsockSocketPath string
+	rootfsPaths     []string
+	kernelPath      string
+	initrdPath      string
 	// Exit *utils.SetOnce[struct{}]
 	client        vmmClient
 	exitSignal chan error
@@ -53,12 +54,13 @@ func NewProcess(
 	}
 
 	p := Process{
-		VmmSocketPath: vmmSocketPath,
-		rootfsPaths:   vmmResourceArgs.PmemPaths,
-		kernelPath:    vmmResourceArgs.KernelPath,
-		initrdPath:    vmmResourceArgs.InitrdPath,
-		client:        client,
-		exitSignal:    make(chan error, 1),
+		VmmSocketPath:   vmmSocketPath,
+		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
+		rootfsPaths:     vmmResourceArgs.PmemPaths,
+		kernelPath:      vmmResourceArgs.KernelPath,
+		initrdPath:      vmmResourceArgs.InitrdPath,
+		client:          client,
+		exitSignal:      make(chan error, 1),
 	}
 
 	startScript, err := client.BuildStartCmd(vmmResourceArgs, isResume)

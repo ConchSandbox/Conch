@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/sandbox/vmm"
@@ -12,7 +13,16 @@ import (
 
 const (
 	defaultCPUBoot = 1
+	// CID 0 = hypervisor, 1 = reserved, 2 = host
+	vsockCIDOffset = 3
+	// VsockSocketDir is the directory for vsock socket files
+	VsockSocketDir = "/var/run/conch"
 )
+
+// SandboxVsockSocketPath returns the vsock socket path for a sandbox.
+func SandboxVsockSocketPath(sandboxId string) string {
+	return filepath.Join(VsockSocketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId))
+}
 
 type Execution struct {
 	Logs string `json:"logs"`
@@ -130,15 +140,18 @@ func CreateSandbox(
 	})
 
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:     defaultCPUBoot,
-		CPUMax:      vcpuNum,
-		MemorySize:  snapshotConf.MemSize,
-		MemoryPath:  snapshotConf.SnapshotMemFile(),
-		NamespaceID: slot.NamespaceID(),
-		TapName:     slot.TapName(),
-		KernelPath:  snapshotConf.KernelFile(),
-		InitrdPath:  snapshotConf.InitrdFile(),
-		PmemPaths:   snapshotConf.PmemFiles(),
+		CPUBoot:         defaultCPUBoot,
+		CPUMax:          vcpuNum,
+		MemorySize:      snapshotConf.MemSize,
+		MemoryPath:      snapshotConf.SnapshotMemFile(),
+		NamespaceID:     slot.NamespaceID(),
+		TapName:         slot.TapName(),
+		KernelPath:      snapshotConf.KernelFile(),
+		InitrdPath:      snapshotConf.InitrdFile(),
+		PmemPaths:       snapshotConf.PmemFiles(),
+		VsockCID:        uint32(slot.Idx + vsockCIDOffset),
+		VsockSocketPath: SandboxVsockSocketPath(sandboxId),
+		SandboxId:       sandboxId,
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
@@ -161,7 +174,7 @@ func CreateSandbox(
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(sbx.process.VmmSocketPath)
+		filesErr := cleanupFiles(sbx.process.VmmSocketPath, sbx.process.VsockSocketPath)
 		if filesErr != nil {
 			return fmt.Errorf("failed to cleanup files: %w", filesErr)
 		}
