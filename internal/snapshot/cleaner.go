@@ -14,7 +14,6 @@ import (
 // snapshotCleaner handles cleanup of snapshot resources.
 type snapshotCleaner struct {
 	ctx        context.Context
-	server     *server
 	viewMgr    *viewManager
 	snt        snapshotter.Snapshotter
 	namespace  string
@@ -47,6 +46,8 @@ func (sc *snapshotCleaner) Cleanup() {
 	if sc.dirCreated {
 		if removeDirErr := os.RemoveAll(sc.mountPoint); removeDirErr != nil {
 			slog.Warn("failed to delete dir", "mountPoint", sc.mountPoint, "err", removeDirErr)
+		} else if pruneErr := cleanupEmptySnapshotParents(sc.mountPoint); pruneErr != nil {
+			slog.Warn("failed to prune empty parent dirs", "mountPoint", sc.mountPoint, "err", pruneErr)
 		}
 	}
 	if sc.prepared {

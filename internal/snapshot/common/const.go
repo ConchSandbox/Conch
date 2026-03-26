@@ -22,6 +22,11 @@ const (
 	WorkDir        = "/var/run/conch"
 	RequestTimeout = 60 * time.Second
 
+	SnapshotMountRootfs = "rootfs"
+	SnapshotMountMem    = "mem"
+	SnapshotMountVM     = "vm"
+	SnapshotSharedDir   = "shared"
+
 	ImageKindVirtualMachine = "virtual-machine"
 	ImageKindMemSnapshot    = "snapshot"
 	ImageKindRootfs         = "rootfs"

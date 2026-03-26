@@ -3,12 +3,14 @@ package snapshot
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/containerd/containerd/snapshots"
 	"github.com/opencontainers/go-digest"
@@ -139,9 +141,20 @@ func ensureMemFile(conf *SnapshotConfig, memDir string, createIfMissing bool) er
 	return prepareSparseMemfile(conf, memDir)
 }
 
-// getMountPath constructs the mount path for a snapshot.
-func getMountPath(workDir, namespace, mountKey string) string {
-	return filepath.Join(workDir, namespace, mountKey)
+func getSnapshotBasePath(workDir, namespace string) string {
+	return filepath.Join(workDir, "snapshot", namespace)
+}
+
+func snapshotPathName(snapshotID string) string {
+	return strings.ReplaceAll(snapshotID, ":", "")
+}
+
+func getActiveMountPath(workDir, namespace, sandboxID, mountKind string) string {
+	return filepath.Join(getSnapshotBasePath(workDir, namespace), sandboxID, mountKind)
+}
+
+func getSharedMountPath(workDir, namespace, snapshotID string) string {
+	return filepath.Join(getSnapshotBasePath(workDir, namespace), common.SnapshotSharedDir, snapshotPathName(snapshotID))
 }
 
 // getMemKeyFromRootfs derives the mem snapshot key from rootfs key.
@@ -152,6 +165,34 @@ func getMemKeyFromRootfs(rootfsKey string) string {
 // getVMKeyFromRootfs derives the VM snapshot key from rootfs key.
 func getVMKeyFromRootfs(rootfsKey string) string {
 	return rootfsKey + common.VmKeySuffix
+}
+
+// cleanupEmptySnapshotParents removes empty parent directories after a mount point
+// directory has been deleted. It only prunes within the snapshot tree and stops
+// at the "snapshot" root directory.
+func cleanupEmptySnapshotParents(mountPoint string) error {
+	dir := filepath.Dir(mountPoint)
+	for {
+		base := filepath.Base(dir)
+		if base == "." || base == string(filepath.Separator) || base == "snapshot" {
+			return nil
+		}
+
+		err := os.Remove(dir)
+		if err == nil {
+			dir = filepath.Dir(dir)
+			continue
+		}
+		if os.IsNotExist(err) {
+			dir = filepath.Dir(dir)
+			continue
+		}
+		// Non-empty directories stop the prune quietly; other failures bubble up.
+		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return nil
+		}
+		return err
+	}
 }
 
 // mergeLabels merges snapshot info labels into config.

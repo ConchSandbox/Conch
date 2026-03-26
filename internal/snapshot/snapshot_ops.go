@@ -26,7 +26,6 @@ func (ops *snapshotOps) prepareAndRegisterSnapshot(
 
 	cleaner := &snapshotCleaner{
 		ctx:        ctx,
-		server:     ops.server,
 		namespace:  locator.Namespace,
 		key:        locator.Key,
 		mountPoint: mountPoint,
@@ -67,7 +66,7 @@ func (ops *snapshotOps) prepareAndRegisterSnapshot(
 	return cleaner, nil
 }
 
-// viewSnapshot acquires a view mount for a committed snapshot.
+// viewSnapshot acquires a shared view mount for a committed snapshot.
 func (ops *snapshotOps) viewSnapshot(
 	ctx context.Context,
 	namespace, parentID, viewKey, mountPoint string,
@@ -88,9 +87,9 @@ func (ops *snapshotOps) buildCommitConfigs(
 	opts []Opt,
 ) (*SnapshotConfig, *SnapshotConfig, error) {
 	conf := &SnapshotConfig{
-		Rootfs: getMountPath(ops.server.workDir, namespace, key),
-		MemDir: getMountPath(ops.server.workDir, namespace, memKey),
-		VmDir:  getMountPath(ops.server.workDir, namespace, parentVMSnapshotID),
+		Rootfs: getActiveMountPath(ops.server.workDir, namespace, key, common.SnapshotMountRootfs),
+		MemDir: getActiveMountPath(ops.server.workDir, namespace, key, common.SnapshotMountMem),
+		VmDir:  getSharedMountPath(ops.server.workDir, namespace, parentVMSnapshotID),
 	}
 	conf.initDefaults()
 	mergeLabels(si, conf)
@@ -106,9 +105,9 @@ func (ops *snapshotOps) buildCommitConfigs(
 	}
 
 	viewConf := &SnapshotConfig{
-		Rootfs:    getMountPath(ops.server.workDir, namespace, snapshotID),
-		MemDir:    getMountPath(ops.server.workDir, namespace, memSnapshotID),
-		VmDir:     getMountPath(ops.server.workDir, namespace, parentVMSnapshotID),
+		Rootfs:    getSharedMountPath(ops.server.workDir, namespace, snapshotID),
+		MemDir:    getSharedMountPath(ops.server.workDir, namespace, memSnapshotID),
+		VmDir:     getSharedMountPath(ops.server.workDir, namespace, parentVMSnapshotID),
 		pmemFiles: conf.pmemFiles,
 	}
 	viewConf.initDefaults()

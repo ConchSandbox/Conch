@@ -113,6 +113,9 @@ func (s *server) unmountPath(path string) error {
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("remove dir %s: %w", path, err)
 	}
+	if err := cleanupEmptySnapshotParents(path); err != nil {
+		return fmt.Errorf("prune empty parent dirs for %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -142,9 +145,9 @@ func (s *server) Prepare(
 	ops := &snapshotOps{server: s}
 
 	conf := &SnapshotConfig{
-		Rootfs: getMountPath(s.workDir, namespace, key),
-		MemDir: getMountPath(s.workDir, namespace, memKey),
-		VmDir:  getMountPath(s.workDir, namespace, parents.VM),
+		Rootfs: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
+		MemDir: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
+		VmDir:  getSharedMountPath(s.workDir, namespace, parents.VM),
 	}
 	conf.initDefaults()
 	for _, o := range opts {
@@ -173,7 +176,12 @@ func (s *server) Prepare(
 	}()
 
 	// Step 1: prepare rootfs
-	rootfsCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, key, parents.Rootfs), conf.Rootfs, withLabels(conf))
+	rootfsCleaner, err := ops.prepareAndRegisterSnapshot(
+		ctx,
+		NewSnapshotLocator(namespace, key, parents.Rootfs),
+		conf.Rootfs,
+		withLabels(conf),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -221,9 +229,9 @@ func (s *server) AcquireView(
 	vmKey := getVMKeyFromRootfs(key)
 
 	conf := &SnapshotConfig{
-		Rootfs: getMountPath(s.workDir, namespace, parents.Rootfs),
-		MemDir: getMountPath(s.workDir, namespace, parents.Mem),
-		VmDir:  getMountPath(s.workDir, namespace, parents.VM),
+		Rootfs: getSharedMountPath(s.workDir, namespace, parents.Rootfs),
+		MemDir: getSharedMountPath(s.workDir, namespace, parents.Mem),
+		VmDir:  getSharedMountPath(s.workDir, namespace, parents.VM),
 	}
 	conf.initDefaults()
 	for _, o := range opts {
@@ -396,11 +404,14 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 	var unmountErrs []error
 	ops := &snapshotOps{server: s}
 	for _, item := range activeItems {
-		mountPoint := getMountPath(s.workDir, namespace, item.key)
+		mountPoint := ""
 		if item.key == key {
+			mountPoint = getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs)
 			if rootfs, ok := item.info.Labels[common.SnapshotLabelRootfs]; ok && rootfs != "" {
 				mountPoint = rootfs
 			}
+		} else if item.key == memKey {
+			mountPoint = getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem)
 		}
 		if err := ops.unmountPath(mountPoint); err != nil {
 			unmountErrs = append(unmountErrs, err)

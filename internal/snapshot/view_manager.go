@@ -253,6 +253,8 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, namespace, 
 	}
 	if removeDirErr := os.RemoveAll(mountPoint); removeDirErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove dir %s: %w", mountPoint, removeDirErr))
+	} else if pruneErr := cleanupEmptySnapshotParents(mountPoint); pruneErr != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("prune empty parent dirs for %s: %w", mountPoint, pruneErr))
 	}
 	if removeErr := snt.Remove(context.Background(), refNamespace, snapshotKey); removeErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove snapshot %s: %w", snapshotKey, removeErr))
@@ -299,6 +301,8 @@ func (vm *viewManager) CleanupAllViews(snt snapshotter.Snapshotter) {
 		}
 		if err := os.RemoveAll(item.mountPoint); err != nil {
 			slog.Warn("cleanup: failed to delete dir", "mountPoint", item.mountPoint, "err", err)
+		} else if err := cleanupEmptySnapshotParents(item.mountPoint); err != nil {
+			slog.Warn("cleanup: failed to prune empty parent dirs", "mountPoint", item.mountPoint, "err", err)
 		}
 		if err := snt.Remove(context.Background(), item.namespace, item.snapshotKey); err != nil {
 			slog.Warn("cleanup: failed to remove view snapshot", "snapshotKey", item.snapshotKey, "err", err)
