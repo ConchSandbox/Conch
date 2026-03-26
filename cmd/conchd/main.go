@@ -40,6 +40,9 @@ func main() {
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.address", cfg.GetServerAddress()),
+		ulog.F("server.work_dir", "/var/run/conch"),
+		ulog.F("containerd.socket", cfg.Containerd.Socket),
+		ulog.F("containerd.default_namespace", cfg.Containerd.DefaultNamespace),
 		ulog.F("network.pool_size", cfg.Network.PoolSize),
 	)
 
