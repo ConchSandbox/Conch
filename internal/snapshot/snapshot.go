@@ -124,6 +124,15 @@ func ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, erro
 	return gServer.ResolveParentSnapshotIDs(namespace, rootfs)
 }
 
+// ResolveImageParentSnapshotIDs resolves image startup parents from a rootfs snapshot.
+// Unlike snapshot resume, image startup allows mem label to be empty.
+func ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
+	if gServer.snt == nil {
+		return ParentSnapshotIDs{}, fmt.Errorf("server not init")
+	}
+	return gServer.ResolveImageParentSnapshotIDs(namespace, rootfs)
+}
+
 func Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) error {
 	if gServer.snt == nil {
 		return fmt.Errorf("server not init")

@@ -209,7 +209,7 @@ func (m *Manager) resolveParentSnapshotIDs(
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
 	}
-	parents, err := snapshot.ResolveParentSnapshotIDs(namespace, rootfsSnapshotID)
+	parents, err := snapshot.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, err
 	}

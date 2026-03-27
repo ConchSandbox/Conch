@@ -14,7 +14,7 @@ type snapshotOps struct {
 	server *server
 }
 
-// prepareAndRegisterSnapshot prepares a snapshot, mounts it, and registers in cache.
+// prepareAndRegisterSnapshot prepares a snapshot, mounts it, and registers it as an active runtime snapshot.
 func (ops *snapshotOps) prepareAndRegisterSnapshot(
 	ctx context.Context,
 	locator SnapshotLocator,
@@ -61,7 +61,7 @@ func (ops *snapshotOps) prepareAndRegisterSnapshot(
 		err = statErr
 		return nil, err
 	}
-	ops.server.addSnapshot(locator.Namespace, locator.Key, &result)
+	ops.server.addActiveSnapshot(locator.Namespace, locator.Key, &result)
 	return cleaner, nil
 }
 
@@ -189,7 +189,7 @@ func (ops *snapshotOps) tryRemoveSnapshot(ctx context.Context, namespace, key st
 			return fmt.Errorf("remove snapshot %s: %w", key, err)
 		}
 	}
-	ops.server.removeSnapshot(namespace, key)
+	ops.server.removeActiveSnapshot(namespace, key)
 	return nil
 }
 
