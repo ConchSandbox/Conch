@@ -451,17 +451,7 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 	if err := ops.commitMemSnapshot(ctx, namespace, memKey, memSnapshotID, snapshotID); err != nil {
 		return err
 	}
-
-	addedSnapshots, err := ops.updateSnapshotCache(ctx, namespace, snapshotID, memSnapshotID)
-	if err != nil {
-		// Rollback on partial failure
-		for _, added := range addedSnapshots {
-			s.removeSnapshot(namespace, added)
-		}
-		return err
-	}
-
-	if err := ops.prewarmViewMounts(ctx, namespace, snapshotID, memSnapshotID, parentVMSnapshotID, viewConf); err != nil {
+	if err := ops.prewarmViewMounts(ctx, namespace, snapshotID, parentVMSnapshotID, viewConf); err != nil {
 		return err
 	}
 

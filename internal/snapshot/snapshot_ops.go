@@ -3,7 +3,6 @@ package snapshot
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/containerd/containerd/snapshots"
 
@@ -154,55 +153,31 @@ func (ops *snapshotOps) commitMemSnapshot(ctx context.Context, namespace, memKey
 	return nil
 }
 
-// updateSnapshotCache updates the server's snapshot cache with newly committed snapshots.
-// Returns list of successfully added snapshot IDs for rollback purposes.
-func (ops *snapshotOps) updateSnapshotCache(ctx context.Context, namespace, rootfsSnapshotID, memSnapshotID string) ([]string, error) {
-	var addedSnapshots []string
-	for _, sid := range []string{rootfsSnapshotID, memSnapshotID} {
-		result, statErr := ops.server.snt.Stat(ctx, namespace, sid)
-		if statErr != nil {
-			return addedSnapshots, fmt.Errorf("stat committed snapshot %s failed: %v", sid, statErr)
-		}
-		ops.server.addSnapshot(namespace, sid, &result)
-		addedSnapshots = append(addedSnapshots, sid)
-	}
-	return addedSnapshots, nil
-}
-
-// prewarmViewMounts pre-creates view mounts for fast subsequent restore operations.
-// Rolls back any partially created views on failure.
-func (ops *snapshotOps) prewarmViewMounts(ctx context.Context, namespace, rootfsSnapshotID, memSnapshotID, parentVMSnapshotID string, viewConf *SnapshotConfig) error {
+// prewarmViewMounts pre-creates shared rootfs/vm view mounts for fast restore.
+// Prewarmed mounts are kept with refCount=0 and promoted on first real use.
+func (ops *snapshotOps) prewarmViewMounts(ctx context.Context, namespace, rootfsSnapshotID, parentVMSnapshotID string, viewConf *SnapshotConfig) error {
 	prewarmItems := []struct {
+		mountKind  string
 		parentID   string
 		mountPoint string
 	}{
-		{rootfsSnapshotID, viewConf.Rootfs},
-		{parentVMSnapshotID, viewConf.VmDir},
-		{memSnapshotID, viewConf.MemDir},
+		{common.SnapshotMountRootfs, rootfsSnapshotID, viewConf.Rootfs},
+		{common.SnapshotMountVM, parentVMSnapshotID, viewConf.VmDir},
 	}
 
-	var prewarmKeys []string
 	for _, item := range prewarmItems {
-		viewKey := common.TempViewPrefix + item.parentID
-		_, _, viewErr := ops.server.viewMgr.acquireViewMount(
+		viewSnapshotKey := getSharedViewSnapshotKey(item.mountKind, item.parentID)
+		viewErr := ops.server.viewMgr.ensureViewMount(
 			ops.server.snt,
 			ctx,
 			namespace,
 			item.parentID,
-			viewKey,
-			viewKey,
+			viewSnapshotKey,
 			item.mountPoint,
 		)
 		if viewErr != nil {
-			if len(prewarmKeys) > 0 {
-				if _, releaseErr := ops.server.viewMgr.releaseViewAliases(ops.server.snt, namespace, prewarmKeys...); releaseErr != nil {
-					slog.Warn("prewarm rollback had errors", "err", releaseErr)
-				}
-			}
-			slog.Warn("prewarm failed, rolled back views", "rolledBack", len(prewarmKeys), "err", viewErr)
 			return fmt.Errorf("prewarm view for %s failed: %w", item.parentID, viewErr)
 		}
-		prewarmKeys = append(prewarmKeys, viewKey)
 	}
 	return nil
 }

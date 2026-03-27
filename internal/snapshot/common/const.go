@@ -10,7 +10,6 @@ const (
 	SnapshotConfigFileName = "config.json"
 	MemKeySuffix           = "-mem"
 	VmKeySuffix            = "-vm"
-	TempViewPrefix         = "temp-view-"
 	MemMB                  = (1024 * 1024)
 	MemFileDefaultSize     = 256 // 256MB
 	VmInitrdRelativePath   = "data/conch.initrd"

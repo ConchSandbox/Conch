@@ -102,6 +102,47 @@ func (vm *viewManager) acquireViewMount(
 	namespace, parentSnapshotID, viewAliasKey, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) (_ *snapshotCleaner, shared bool, err error) {
+	ref, created, err := vm.getOrCreateViewMount(snt, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+	if err != nil {
+		return nil, false, err
+	}
+
+	vm.viewLock.Lock()
+	ref.refCount++
+	vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
+	vm.viewLock.Unlock()
+
+	return &snapshotCleaner{
+		ctx:              ctx,
+		viewMgr:          vm,
+		snt:              snt,
+		namespace:        namespace,
+		key:              viewAliasKey,
+		mountPoint:       mountPoint,
+		viewed:           true,
+		parentSnapshotID: parentSnapshotID,
+	}, !created, nil
+}
+
+// ensureViewMount pre-creates a shared view mount with refCount=0.
+func (vm *viewManager) ensureViewMount(
+	snt snapshotter.Snapshotter,
+	ctx context.Context,
+	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
+	opts ...snapshots.Opt,
+) error {
+	_, _, err := vm.getOrCreateViewMount(snt, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+	return err
+}
+
+// getOrCreateViewMount returns an existing or newly created shared view mount.
+// Newly created mounts start with refCount=0 and are promoted when a sandbox alias acquires them.
+func (vm *viewManager) getOrCreateViewMount(
+	snt snapshotter.Snapshotter,
+	ctx context.Context,
+	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
+	opts ...snapshots.Opt,
+) (_ *viewMountRef, created bool, err error) {
 	vm.viewLock.Lock()
 	if nsMap, ok := vm.viewMounts[namespace]; ok {
 		if ref, ok := nsMap[parentSnapshotID]; ok {
@@ -127,19 +168,8 @@ func (vm *viewManager) acquireViewMount(
 				vm.viewLock.Unlock()
 				return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
 			}
-			ref.refCount++
-			vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
 			vm.viewLock.Unlock()
-			return &snapshotCleaner{
-				ctx:              ctx,
-				viewMgr:          vm,
-				snt:              snt,
-				namespace:        namespace,
-				key:              viewAliasKey,
-				mountPoint:       mountPoint,
-				viewed:           true,
-				parentSnapshotID: parentSnapshotID,
-			}, true, nil
+			return ref, false, nil
 		}
 	}
 
@@ -179,22 +209,11 @@ func (vm *viewManager) acquireViewMount(
 	}
 
 	vm.viewLock.Lock()
-	placeholder.refCount = 1
 	placeholder.ready = nil
-	vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
 	vm.viewLock.Unlock()
 	close(readyCh)
 
-	return &snapshotCleaner{
-		ctx:              ctx,
-		viewMgr:          vm,
-		snt:              snt,
-		namespace:        namespace,
-		key:              viewAliasKey,
-		mountPoint:       mountPoint,
-		viewed:           true,
-		parentSnapshotID: parentSnapshotID,
-	}, false, nil
+	return placeholder, true, nil
 }
 
 // removePlaceholder cleans up a failed placeholder ref and signals waiting goroutines.
