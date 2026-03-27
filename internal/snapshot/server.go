@@ -140,7 +140,8 @@ func (s *server) Prepare(
 	}
 
 	memKey := getMemKeyFromRootfs(key)
-	vmKey := getVMKeyFromRootfs(key)
+	vmViewAliasKey := getVMViewAliasKey(key)
+	vmViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountVM, parents.VM)
 
 	ops := &snapshotOps{server: s}
 
@@ -193,7 +194,7 @@ func (s *server) Prepare(
 	}
 
 	// Step 2: view vm (read-only, shared)
-	vmCleaner, err = ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir)
+	vmCleaner, err = ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
 	if err != nil {
 		return nil, fmt.Errorf("view vm failed: %v", err)
 	}
@@ -225,8 +226,12 @@ func (s *server) AcquireView(
 	parents ParentSnapshotIDs,
 	opts ...Opt,
 ) (_ *SnapshotConfig, err error) {
-	memKey := getMemKeyFromRootfs(key)
-	vmKey := getVMKeyFromRootfs(key)
+	rootfsViewAliasKey := getRootfsViewAliasKey(key)
+	rootfsViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountRootfs, parents.Rootfs)
+	memViewAliasKey := getMemViewAliasKey(key)
+	memViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountMem, parents.Mem)
+	vmViewAliasKey := getVMViewAliasKey(key)
+	vmViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountVM, parents.VM)
 
 	conf := &SnapshotConfig{
 		Rootfs: getSharedMountPath(s.workDir, namespace, parents.Rootfs),
@@ -253,7 +258,7 @@ func (s *server) AcquireView(
 	}()
 
 	// Step 1: view rootfs
-	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, key, conf.Rootfs, withLabels(conf))
+	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs, withLabels(conf))
 	if err != nil {
 		return nil, fmt.Errorf("view rootfs failed: %v", err)
 	}
@@ -265,14 +270,14 @@ func (s *server) AcquireView(
 	}
 
 	// Step 2: view vm
-	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmKey, conf.VmDir)
+	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
 	if err != nil {
 		return nil, fmt.Errorf("view vm failed: %v", err)
 	}
 	cleanups = append(cleanups, vmCleaner)
 
 	// Step 3: view mem + verify mem.img
-	memCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Mem, memKey, conf.MemDir)
+	memCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Mem, memViewAliasKey, memViewSnapshotKey, conf.MemDir)
 	if err != nil {
 		return nil, fmt.Errorf("view mem failed: %v", err)
 	}
@@ -412,10 +417,10 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 	if memInfo == nil {
 		return fmt.Errorf("mem snapshot [%s:%s] not found", namespace, memKey)
 	}
-	vmKey := getVMKeyFromRootfs(key)
-	parentVMSnapshotID, ok := s.viewMgr.getViewAlias(namespace, vmKey)
+	vmViewAliasKey := getVMViewAliasKey(key)
+	parentVMSnapshotID, ok := s.viewMgr.getViewAlias(namespace, vmViewAliasKey)
 	if !ok {
-		return fmt.Errorf("vm view alias [%s:%s] not found", namespace, vmKey)
+		return fmt.Errorf("vm view alias [%s:%s] not found", namespace, vmViewAliasKey)
 	}
 
 	memSnapshotID, err := CalculateSnapshotID(namespace, memKey, "")
@@ -466,7 +471,9 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 // Remove removes snapshots and cleans up associated resources.
 func (s *server) Remove(ctx context.Context, namespace, key string) error {
 	memKey := getMemKeyFromRootfs(key)
-	vmKey := getVMKeyFromRootfs(key)
+	rootfsViewAliasKey := getRootfsViewAliasKey(key)
+	memViewAliasKey := getMemViewAliasKey(key)
+	vmViewAliasKey := getVMViewAliasKey(key)
 
 	type activeItem struct {
 		key  string
@@ -477,20 +484,30 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 	var missingKeys []string
 	var errs []error
 
-	for _, currentKey := range []string{key, memKey, vmKey} {
-		if info := s.getSnapshot(namespace, currentKey); info != nil {
-			activeItems = append(activeItems, activeItem{key: currentKey, info: info})
-			continue
-		}
-		if _, ok := s.viewMgr.getViewAlias(namespace, currentKey); ok {
-			viewKeys = append(viewKeys, currentKey)
-			continue
-		}
-		missingKeys = append(missingKeys, currentKey)
+	if info := s.getSnapshot(namespace, key); info != nil {
+		activeItems = append(activeItems, activeItem{key: key, info: info})
+	} else if _, ok := s.viewMgr.getViewAlias(namespace, rootfsViewAliasKey); ok {
+		viewKeys = append(viewKeys, rootfsViewAliasKey)
+	} else {
+		missingKeys = append(missingKeys, key)
+	}
+
+	if info := s.getSnapshot(namespace, memKey); info != nil {
+		activeItems = append(activeItems, activeItem{key: memKey, info: info})
+	} else if _, ok := s.viewMgr.getViewAlias(namespace, memViewAliasKey); ok {
+		viewKeys = append(viewKeys, memViewAliasKey)
+	} else {
+		missingKeys = append(missingKeys, memKey)
+	}
+
+	if _, ok := s.viewMgr.getViewAlias(namespace, vmViewAliasKey); ok {
+		viewKeys = append(viewKeys, vmViewAliasKey)
+	} else {
+		missingKeys = append(missingKeys, vmViewAliasKey)
 	}
 
 	if len(activeItems) == 0 && len(viewKeys) == 0 {
-		return fmt.Errorf("snapshots [%s:%s,%s,%s] not found in active/view caches", namespace, key, memKey, vmKey)
+		return fmt.Errorf("snapshots [%s:%s,%s] and view aliases [%s,%s,%s] not found in active/view caches", namespace, key, memKey, rootfsViewAliasKey, memViewAliasKey, vmViewAliasKey)
 	}
 
 	var unmountErrs []error

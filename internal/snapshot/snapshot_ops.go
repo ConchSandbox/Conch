@@ -69,13 +69,22 @@ func (ops *snapshotOps) prepareAndRegisterSnapshot(
 // viewSnapshot acquires a shared view mount for a committed snapshot.
 func (ops *snapshotOps) viewSnapshot(
 	ctx context.Context,
-	namespace, parentID, viewKey, mountPoint string,
+	namespace, parentID, viewAliasKey, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) (*snapshotCleaner, error) {
 	if parentID == "" {
-		return nil, fmt.Errorf("view requires parent snapshot for %s/%s", namespace, viewKey)
+		return nil, fmt.Errorf("view requires parent snapshot for %s/%s", namespace, viewAliasKey)
 	}
-	cleaner, _, err := ops.server.viewMgr.acquireViewMount(ops.server.snt, ctx, namespace, parentID, viewKey, mountPoint, opts...)
+	cleaner, _, err := ops.server.viewMgr.acquireViewMount(
+		ops.server.snt,
+		ctx,
+		namespace,
+		parentID,
+		viewAliasKey,
+		viewSnapshotKey,
+		mountPoint,
+		opts...,
+	)
 	return cleaner, err
 }
 
@@ -175,7 +184,15 @@ func (ops *snapshotOps) prewarmViewMounts(ctx context.Context, namespace, rootfs
 	var prewarmKeys []string
 	for _, item := range prewarmItems {
 		viewKey := common.TempViewPrefix + item.parentID
-		_, _, viewErr := ops.server.viewMgr.acquireViewMount(ops.server.snt, ctx, namespace, item.parentID, viewKey, item.mountPoint)
+		_, _, viewErr := ops.server.viewMgr.acquireViewMount(
+			ops.server.snt,
+			ctx,
+			namespace,
+			item.parentID,
+			viewKey,
+			viewKey,
+			item.mountPoint,
+		)
 		if viewErr != nil {
 			if len(prewarmKeys) > 0 {
 				if _, releaseErr := ops.server.viewMgr.releaseViewAliases(ops.server.snt, namespace, prewarmKeys...); releaseErr != nil {

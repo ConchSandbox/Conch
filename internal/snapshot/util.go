@@ -162,9 +162,20 @@ func getMemKeyFromRootfs(rootfsKey string) string {
 	return rootfsKey + common.MemKeySuffix
 }
 
-// getVMKeyFromRootfs derives the VM snapshot key from rootfs key.
-func getVMKeyFromRootfs(rootfsKey string) string {
-	return rootfsKey + common.VmKeySuffix
+func getRootfsViewAliasKey(sandboxID string) string {
+	return fmt.Sprintf("view-%s-%s", common.SnapshotMountRootfs, sandboxID)
+}
+
+func getMemViewAliasKey(sandboxID string) string {
+	return fmt.Sprintf("view-%s-%s", common.SnapshotMountMem, sandboxID)
+}
+
+func getVMViewAliasKey(sandboxID string) string {
+	return fmt.Sprintf("view-%s-%s", common.SnapshotMountVM, sandboxID)
+}
+
+func getSharedViewSnapshotKey(mountKind, snapshotID string) string {
+	return fmt.Sprintf("shared-%s-%s", mountKind, snapshotPathName(snapshotID))
 }
 
 // cleanupEmptySnapshotParents removes empty parent directories after a mount point

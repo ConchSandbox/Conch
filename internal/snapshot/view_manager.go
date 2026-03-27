@@ -99,14 +99,13 @@ func (vm *viewManager) releaseViewAliases(snt snapshotter.Snapshotter, namespace
 func (vm *viewManager) acquireViewMount(
 	snt snapshotter.Snapshotter,
 	ctx context.Context,
-	namespace, parentSnapshotID, viewKey, mountPoint string,
+	namespace, parentSnapshotID, viewAliasKey, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) (_ *snapshotCleaner, shared bool, err error) {
 	vm.viewLock.Lock()
 	if nsMap, ok := vm.viewMounts[namespace]; ok {
 		if ref, ok := nsMap[parentSnapshotID]; ok {
 			if ref.ready != nil {
-				// Another goroutine is initializing this mount; wait for it.
 				readyCh := ref.ready
 				vm.viewLock.Unlock()
 				select {
@@ -114,7 +113,6 @@ func (vm *viewManager) acquireViewMount(
 				case <-ctx.Done():
 					return nil, false, ctx.Err()
 				}
-				// Re-acquire lock and check the result.
 				vm.viewLock.Lock()
 				ref, ok = nsMap[parentSnapshotID]
 				if !ok || ref.initErr != nil {
@@ -125,20 +123,19 @@ func (vm *viewManager) acquireViewMount(
 					return nil, false, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
 				}
 			}
-
 			if ref.mountPoint != mountPoint {
 				vm.viewLock.Unlock()
 				return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
 			}
 			ref.refCount++
-			vm.addViewAliasWithoutLock(namespace, viewKey, parentSnapshotID)
+			vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
 			vm.viewLock.Unlock()
 			return &snapshotCleaner{
 				ctx:              ctx,
 				viewMgr:          vm,
 				snt:              snt,
 				namespace:        namespace,
-				key:              ref.snapshotKey,
+				key:              viewAliasKey,
 				mountPoint:       mountPoint,
 				viewed:           true,
 				parentSnapshotID: parentSnapshotID,
@@ -146,12 +143,11 @@ func (vm *viewManager) acquireViewMount(
 		}
 	}
 
-	// Insert a placeholder ref so concurrent callers wait on the ready channel.
 	readyCh := make(chan struct{})
 	placeholder := &viewMountRef{
 		namespace:   namespace,
 		snapshotID:  parentSnapshotID,
-		snapshotKey: viewKey,
+		snapshotKey: viewSnapshotKey,
 		mountPoint:  mountPoint,
 		refCount:    0,
 		ready:       readyCh,
@@ -162,8 +158,7 @@ func (vm *viewManager) acquireViewMount(
 	vm.viewMounts[namespace][parentSnapshotID] = placeholder
 	vm.viewLock.Unlock()
 
-	// Perform I/O outside the lock.
-	mounts, err := snt.View(ctx, namespace, viewKey, parentSnapshotID, opts...)
+	mounts, err := snt.View(ctx, namespace, viewSnapshotKey, parentSnapshotID, opts...)
 	if err != nil {
 		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
 		return nil, false, err
@@ -178,16 +173,15 @@ func (vm *viewManager) acquireViewMount(
 		return nil, false, err
 	}
 	if err = mounts[0].Mount(mountPoint); err != nil {
-		mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewKey, err)
+		mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewSnapshotKey, err)
 		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, mountErr)
 		return nil, false, mountErr
 	}
 
-	// Mount succeeded; finalize the ref under lock.
 	vm.viewLock.Lock()
 	placeholder.refCount = 1
 	placeholder.ready = nil
-	vm.addViewAliasWithoutLock(namespace, viewKey, parentSnapshotID)
+	vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
 	vm.viewLock.Unlock()
 	close(readyCh)
 
@@ -196,7 +190,7 @@ func (vm *viewManager) acquireViewMount(
 		viewMgr:          vm,
 		snt:              snt,
 		namespace:        namespace,
-		key:              viewKey,
+		key:              viewAliasKey,
 		mountPoint:       mountPoint,
 		viewed:           true,
 		parentSnapshotID: parentSnapshotID,
@@ -232,6 +226,10 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, namespace, 
 	}
 	ref, ok := nsMap[snapshotID]
 	if !ok || ref.ready != nil {
+		return nil
+	}
+	if ref.refCount > 1 {
+		ref.refCount--
 		return nil
 	}
 	// Store cleanup data before deleting the ref
