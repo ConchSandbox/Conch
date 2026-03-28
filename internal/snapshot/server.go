@@ -285,6 +285,98 @@ func (s *server) AcquireView(
 	return conf, nil
 }
 
+// AcquireResumeWorkspace prepares a restore workspace for snapshot-based startup.
+// Rootfs and VM remain shared views, while mem is prepared as an active layer so
+// the snapshot config can be rewritten before restore.
+func (s *server) AcquireResumeWorkspace(
+	ctx context.Context,
+	namespace, key string,
+	parents ParentSnapshotIDs,
+	opts ...Opt,
+) (_ *SnapshotConfig, err error) {
+	memKey := getMemKeyFromRootfs(key)
+	rootfsViewAliasKey := getRootfsViewAliasKey(key)
+	rootfsViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountRootfs, parents.Rootfs)
+	vmViewAliasKey := getVMViewAliasKey(key)
+	vmViewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountVM, parents.VM)
+
+	conf := &SnapshotConfig{
+		Rootfs: getSharedMountPath(s.workDir, namespace, parents.Rootfs),
+		MemDir: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
+		VmDir:  getSharedMountPath(s.workDir, namespace, parents.VM),
+	}
+	conf.initDefaults()
+	for _, o := range opts {
+		o(conf)
+	}
+	conf.createLabels()
+
+	ops := &snapshotOps{server: s}
+
+	type cleanupItem struct {
+		key     string
+		cleaner *snapshotCleaner
+	}
+	var activeCleanups []cleanupItem
+	var viewCleanups []*snapshotCleaner
+	defer func() {
+		if err != nil {
+			for _, item := range activeCleanups {
+				s.removeActiveSnapshot(namespace, item.key)
+				if item.cleaner != nil {
+					item.cleaner.Cleanup()
+				}
+			}
+			for _, cleaner := range viewCleanups {
+				if cleaner != nil {
+					cleaner.Cleanup()
+				}
+			}
+		}
+	}()
+
+	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs, withLabels(conf))
+	if err != nil {
+		return nil, fmt.Errorf("view rootfs failed: %v", err)
+	}
+	viewCleanups = append(viewCleanups, rootfsCleaner)
+
+	conf.pmemFiles, err = listRootfsLayerErofs(conf.Rootfs)
+	if err != nil {
+		return nil, fmt.Errorf("list rootfs layer erofs failed: %v", err)
+	}
+
+	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
+	if err != nil {
+		return nil, fmt.Errorf("view vm failed: %v", err)
+	}
+	viewCleanups = append(viewCleanups, vmCleaner)
+
+	memCleaner, err := ops.prepareAndRegisterSnapshot(ctx, NewSnapshotLocator(namespace, memKey, parents.Mem), conf.MemDir)
+	if err != nil {
+		return nil, err
+	}
+	activeCleanups = append(activeCleanups, cleanupItem{key: memKey, cleaner: memCleaner})
+
+	if err = ensureMemFile(conf, conf.MemDir, false); err != nil {
+		return nil, fmt.Errorf("mem.img verification failed: %v", err)
+	}
+
+	configUpdater := &configUpdater{}
+	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
+	if err = configUpdater.updateSnapshotConfig(
+		configFilePath,
+		conf.KernelFile(),
+		conf.InitrdFile(),
+		conf.SnapshotMemFile(),
+		conf.PmemFiles(),
+	); err != nil {
+		return nil, fmt.Errorf("update snapshot config failed: %v", err)
+	}
+
+	return conf, nil
+}
+
 // ResolveParentSnapshotIDs resolves parent mem/vm snapshots from rootfs snapshot.
 func (s *server) ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	if rootfs == "" {

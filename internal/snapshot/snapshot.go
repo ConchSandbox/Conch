@@ -106,6 +106,16 @@ func AcquireView(ctx context.Context, namespace, key string, parents ParentSnaps
 	return gServer.AcquireView(ctx, namespace, key, parents, opts...)
 }
 
+// AcquireResumeWorkspace prepares a snapshot-based restore workspace.
+// Rootfs and VM are mounted as shared views, while mem is mounted as an active
+// layer so the snapshot config can be updated before restore.
+func AcquireResumeWorkspace(ctx context.Context, namespace, key string, parents ParentSnapshotIDs, opts ...Opt) (*SnapshotConfig, error) {
+	if gServer.snt == nil {
+		return nil, fmt.Errorf("server not init")
+	}
+	return gServer.AcquireResumeWorkspace(ctx, namespace, key, parents, opts...)
+}
+
 // ResolveParentSnapshotIDs resolves parent mem/vm snapshots from rootfs snapshot.
 func ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	if gServer.snt == nil {
