@@ -1,5 +1,6 @@
 import os
 from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 import requests
 import json
 import uuid
@@ -28,9 +29,8 @@ SNAPSHOT_ID_RESP_KEY = "snapshotId"
 CFG_SANDBOX_SECTION = "sandbox"
 CFG_SNAPSHOT_SECTION = "snapshot"
 CFG_IMAGE_SECTION = "image"
-CFG_API_URL_KEY = "api_url"
+CFG_API_URL_KEY = "更新 API endpoint"
 CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
-CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
 SANDBOX_CREATE_PATH = "/api/sandbox/create"
@@ -43,6 +43,19 @@ UNKNOWN_EXIT_CODE = -1
 
 def generate_random_id(prefix: str = "sandbox_") -> str:
     return prefix + secrets.token_hex(RANDOM_ID_HEX_BYTES)
+
+@dataclass
+class SnapshotInfo:
+    snapshot_id: str
+    sandbox_id: str
+
+
+@dataclass
+class SandboxInfo:
+    sandbox_id: str
+    ip: str
+    snapshot_id: Optional[str]
+
 
 class Execution:
     # Store execution output/exit code
@@ -58,11 +71,10 @@ class Execution:
 class Sandbox:
     def __init__(
             self,
-            use_snapshot: bool = False,
             api_url: Optional[str] = None,
-            client: Optional["AgentClient"] = None,
             workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
+            image_name: Optional[str] = None,
             namespace: Optional[str] = None,
             snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
@@ -73,21 +85,17 @@ class Sandbox:
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
         self.api_url = api_url.rstrip('/') if api_url else sandbox_cfg[CFG_API_URL_KEY].rstrip('/')
         self.workdir: str = workdir or self._generate_workdir()
-        self.use_snapshot = (
-            use_snapshot
-            if use_snapshot is not None
-            else sandbox_cfg[CFG_USE_SNAPSHOT_KEY]
-        )
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
         self.namespace = namespace or ""
+        self.image_name = image_name or self._config[CFG_IMAGE_SECTION][IMAGE_NAME_KEY]
 
         config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
 
-        self.vm_ip = None
-        self.client = client
+        self.ip = None
+        self.client = None
         self.vcpu_num = vcpu_num
         self.ram_mb = ram_mb
 
@@ -100,13 +108,13 @@ class Sandbox:
         server_ip = result.get(IP_KEY)
 
         if status == "ok" and server_ip:
-            self.vm_ip = server_ip
+            self.ip = server_ip
             if self.client:
                 try:
                     self.client.close()
                 except Exception:
                     pass
-            self.client = AgentClient(host=self.vm_ip)
+            self.client = AgentClient(host=self.ip)
         else:
             error_val = result.get(ERROR_KEY)
             error_msg = str(error_val) if error_val is not None else "Unknown error"

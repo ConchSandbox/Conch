@@ -1,7 +1,6 @@
 sandbox:
   api_url: "http://localhost:4063"                # *Sandbox service API endpoint
   workdir_prefix: "/tmp/sandbox_"                 # *Prefix for sandbox working directory
-  use_snapshot: false                             # *Whether to use snapshot for sandbox creation (default:false)
   sandbox_id: ""                                  # Optional: sandbox ID (default:auto generate)
 
 snapshot:
