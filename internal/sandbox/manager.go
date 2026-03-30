@@ -134,7 +134,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 
 	if resume {
 		logger.Debug("creating sandbox by snapshotId")
-		snapshotConf, err = snapshot.AcquireView(context.Background(), namespace, key, parentIDs, memOpt)
+		snapshotConf, err = snapshot.AcquireResumeWorkspace(context.Background(), namespace, key, parentIDs, memOpt)
 	} else {
 		logger.Debug("creating sandbox by image", ulog.F("imageName", req.ImageName))
 		snapshotConf, err = snapshot.Prepare(context.Background(), namespace, key, parentIDs, memOpt)
@@ -209,7 +209,7 @@ func (m *Manager) resolveParentSnapshotIDs(
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
 	}
-	parents, err := snapshot.ResolveParentSnapshotIDs(namespace, rootfsSnapshotID)
+	parents, err := snapshot.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, err
 	}

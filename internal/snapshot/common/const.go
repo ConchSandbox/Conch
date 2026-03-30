@@ -10,7 +10,6 @@ const (
 	SnapshotConfigFileName = "config.json"
 	MemKeySuffix           = "-mem"
 	VmKeySuffix            = "-vm"
-	TempViewPrefix         = "temp-view-"
 	MemMB                  = (1024 * 1024)
 	MemFileDefaultSize     = 256 // 256MB
 	VmInitrdRelativePath   = "data/conch.initrd"
@@ -21,6 +20,11 @@ const (
 	ContainerdSock = "/run/containerd/containerd.sock"
 	WorkDir        = "/var/run/conch"
 	RequestTimeout = 60 * time.Second
+
+	SnapshotMountRootfs = "rootfs"
+	SnapshotMountMem    = "mem"
+	SnapshotMountVM     = "vm"
+	SnapshotSharedDir   = "shared"
 
 	ImageKindVirtualMachine = "virtual-machine"
 	ImageKindMemSnapshot    = "snapshot"

@@ -99,14 +99,54 @@ func (vm *viewManager) releaseViewAliases(snt snapshotter.Snapshotter, namespace
 func (vm *viewManager) acquireViewMount(
 	snt snapshotter.Snapshotter,
 	ctx context.Context,
-	namespace, parentSnapshotID, viewKey, mountPoint string,
+	namespace, parentSnapshotID, viewAliasKey, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) (_ *snapshotCleaner, shared bool, err error) {
+	ref, created, err := vm.getOrCreateViewMount(snt, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+	if err != nil {
+		return nil, false, err
+	}
+
+	vm.viewLock.Lock()
+	ref.refCount++
+	vm.addViewAliasWithoutLock(namespace, viewAliasKey, parentSnapshotID)
+	vm.viewLock.Unlock()
+
+	return &snapshotCleaner{
+		ctx:              ctx,
+		viewMgr:          vm,
+		snt:              snt,
+		namespace:        namespace,
+		key:              viewAliasKey,
+		mountPoint:       mountPoint,
+		viewed:           true,
+		parentSnapshotID: parentSnapshotID,
+	}, !created, nil
+}
+
+// ensureViewMount pre-creates a shared view mount with refCount=0.
+func (vm *viewManager) ensureViewMount(
+	snt snapshotter.Snapshotter,
+	ctx context.Context,
+	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
+	opts ...snapshots.Opt,
+) error {
+	_, _, err := vm.getOrCreateViewMount(snt, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+	return err
+}
+
+// getOrCreateViewMount returns an existing or newly created shared view mount.
+// Newly created mounts start with refCount=0 and are promoted when a sandbox alias acquires them.
+func (vm *viewManager) getOrCreateViewMount(
+	snt snapshotter.Snapshotter,
+	ctx context.Context,
+	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
+	opts ...snapshots.Opt,
+) (_ *viewMountRef, created bool, err error) {
 	vm.viewLock.Lock()
 	if nsMap, ok := vm.viewMounts[namespace]; ok {
 		if ref, ok := nsMap[parentSnapshotID]; ok {
 			if ref.ready != nil {
-				// Another goroutine is initializing this mount; wait for it.
 				readyCh := ref.ready
 				vm.viewLock.Unlock()
 				select {
@@ -114,7 +154,6 @@ func (vm *viewManager) acquireViewMount(
 				case <-ctx.Done():
 					return nil, false, ctx.Err()
 				}
-				// Re-acquire lock and check the result.
 				vm.viewLock.Lock()
 				ref, ok = nsMap[parentSnapshotID]
 				if !ok || ref.initErr != nil {
@@ -125,33 +164,20 @@ func (vm *viewManager) acquireViewMount(
 					return nil, false, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
 				}
 			}
-
 			if ref.mountPoint != mountPoint {
 				vm.viewLock.Unlock()
 				return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
 			}
-			ref.refCount++
-			vm.addViewAliasWithoutLock(namespace, viewKey, parentSnapshotID)
 			vm.viewLock.Unlock()
-			return &snapshotCleaner{
-				ctx:              ctx,
-				viewMgr:          vm,
-				snt:              snt,
-				namespace:        namespace,
-				key:              ref.snapshotKey,
-				mountPoint:       mountPoint,
-				viewed:           true,
-				parentSnapshotID: parentSnapshotID,
-			}, true, nil
+			return ref, false, nil
 		}
 	}
 
-	// Insert a placeholder ref so concurrent callers wait on the ready channel.
 	readyCh := make(chan struct{})
 	placeholder := &viewMountRef{
 		namespace:   namespace,
 		snapshotID:  parentSnapshotID,
-		snapshotKey: viewKey,
+		snapshotKey: viewSnapshotKey,
 		mountPoint:  mountPoint,
 		refCount:    0,
 		ready:       readyCh,
@@ -162,8 +188,7 @@ func (vm *viewManager) acquireViewMount(
 	vm.viewMounts[namespace][parentSnapshotID] = placeholder
 	vm.viewLock.Unlock()
 
-	// Perform I/O outside the lock.
-	mounts, err := snt.View(ctx, namespace, viewKey, parentSnapshotID, opts...)
+	mounts, err := snt.View(ctx, namespace, viewSnapshotKey, parentSnapshotID, opts...)
 	if err != nil {
 		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
 		return nil, false, err
@@ -178,29 +203,17 @@ func (vm *viewManager) acquireViewMount(
 		return nil, false, err
 	}
 	if err = mounts[0].Mount(mountPoint); err != nil {
-		mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewKey, err)
+		mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewSnapshotKey, err)
 		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, mountErr)
 		return nil, false, mountErr
 	}
 
-	// Mount succeeded; finalize the ref under lock.
 	vm.viewLock.Lock()
-	placeholder.refCount = 1
 	placeholder.ready = nil
-	vm.addViewAliasWithoutLock(namespace, viewKey, parentSnapshotID)
 	vm.viewLock.Unlock()
 	close(readyCh)
 
-	return &snapshotCleaner{
-		ctx:              ctx,
-		viewMgr:          vm,
-		snt:              snt,
-		namespace:        namespace,
-		key:              viewKey,
-		mountPoint:       mountPoint,
-		viewed:           true,
-		parentSnapshotID: parentSnapshotID,
-	}, false, nil
+	return placeholder, true, nil
 }
 
 // removePlaceholder cleans up a failed placeholder ref and signals waiting goroutines.
@@ -234,6 +247,10 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, namespace, 
 	if !ok || ref.ready != nil {
 		return nil
 	}
+	if ref.refCount > 1 {
+		ref.refCount--
+		return nil
+	}
 	// Store cleanup data before deleting the ref
 	refNamespace := ref.namespace
 	snapshotKey := ref.snapshotKey
@@ -253,6 +270,8 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, namespace, 
 	}
 	if removeDirErr := os.RemoveAll(mountPoint); removeDirErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove dir %s: %w", mountPoint, removeDirErr))
+	} else if pruneErr := cleanupEmptySnapshotParents(mountPoint); pruneErr != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("prune empty parent dirs for %s: %w", mountPoint, pruneErr))
 	}
 	if removeErr := snt.Remove(context.Background(), refNamespace, snapshotKey); removeErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove snapshot %s: %w", snapshotKey, removeErr))
@@ -299,6 +318,8 @@ func (vm *viewManager) CleanupAllViews(snt snapshotter.Snapshotter) {
 		}
 		if err := os.RemoveAll(item.mountPoint); err != nil {
 			slog.Warn("cleanup: failed to delete dir", "mountPoint", item.mountPoint, "err", err)
+		} else if err := cleanupEmptySnapshotParents(item.mountPoint); err != nil {
+			slog.Warn("cleanup: failed to prune empty parent dirs", "mountPoint", item.mountPoint, "err", err)
 		}
 		if err := snt.Remove(context.Background(), item.namespace, item.snapshotKey); err != nil {
 			slog.Warn("cleanup: failed to remove view snapshot", "snapshotKey", item.snapshotKey, "err", err)
