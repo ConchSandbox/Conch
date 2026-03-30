@@ -69,13 +69,9 @@ def add_config(box):
     )
 
 def prepare_box():
-    box = Sandbox()
-    info = box.create()
-    if isinstance(info, str):
-        raise RuntimeError(f"create sandbox failed: {info}")
-    
+    box = Sandbox.create()
     print(f'sandbox {box.sandbox_id} created')
-    ip = info['ip']
+    ip = box.ip
     add_config(box)
     print(f'sandbox prepared ok with ip={ip}')
     return box, ip
