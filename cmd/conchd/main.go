@@ -7,6 +7,7 @@ import (
 
 	"github.com/openeuler/Conch/internal"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -42,6 +43,7 @@ func main() {
 		ulog.F("server.address", cfg.GetServerAddress()),
 		ulog.F("server.work_dir", "/var/run/conch"),
 		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
+		ulog.F("server.pid_file", cfg.Server.PIDFile),
 		ulog.F("containerd.socket", cfg.Containerd.Socket),
 		ulog.F("containerd.default_namespace", cfg.Containerd.DefaultNamespace),
 		ulog.F("network.pool_size", cfg.Network.PoolSize),
@@ -52,6 +54,11 @@ func main() {
 		logger.Fatal("Failed to initialize server", ulog.F("error", err))
 	}
 	defer server.Cleanup()
+
+	if err := util.WritePIDFile(cfg.Server.PIDFile); err != nil {
+		logger.Fatal("Failed to write pid file", ulog.F("error", err))
+	}
+	defer util.RemovePIDFile(cfg.Server.PIDFile)
 
 	serverAddr := cfg.GetServerAddress()
 	serverUnixSocket := cfg.GetServerUnixSocket()
