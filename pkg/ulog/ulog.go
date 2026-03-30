@@ -152,9 +152,6 @@ func newStdoutLogger(level LogLevel, maxFileSize int64) Logger {
 
 // Init initializes the global logger with the given config
 func Init(config Config) error {
-	if config.Level == 0 {
-		config.Level = defaultConfig.Level
-	}
 	if config.MaxFileSize == 0 {
 		config.MaxFileSize = defaultConfig.MaxFileSize
 	}
