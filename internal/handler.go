@@ -121,7 +121,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to init network pool: %w", err)
 	}
 
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Containerd.Namespace))
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Containerd.DefaultNamespace))
 	go pool.Populate(ctx)
 
 	handleSignals(ctx, cancel, s)

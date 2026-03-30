@@ -123,7 +123,7 @@ func TestLoadConfig(t *testing.T) {
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n" +
-			"containerd:\n  namespace: conch\n" +
+			"containerd:\n  socket: /run/containerd/containerd.sock\n  default_namespace: default\n" +
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
@@ -168,8 +168,11 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Network.TapMask != 25 {
 		t.Errorf("LoadConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 25)
 	}
-	if cfg.Containerd.Namespace != "conch" {
-		t.Errorf("LoadConfig().Containerd.Namespace = %q, want %q", cfg.Containerd.Namespace, "conch")
+	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
+		t.Errorf("LoadConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/containerd/containerd.sock")
+	}
+	if cfg.Containerd.DefaultNamespace != "default" {
+		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
 	}
 }
 
@@ -193,7 +196,10 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	if cfg.Server.PIDFile != "/var/run/conchd/conchd.pid" {
 		t.Errorf("DefaultConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/var/run/conchd/conchd.pid")
 	}
-	if cfg.Containerd.Namespace != "conch" {
-		t.Errorf("DefaultConfig().Containerd.Namespace = %q, want %q", cfg.Containerd.Namespace, "conch")
+	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
+		t.Errorf("DefaultConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/containerd/containerd.sock")
+	}
+	if cfg.Containerd.DefaultNamespace != "default" {
+		t.Errorf("DefaultConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
 	}
 }

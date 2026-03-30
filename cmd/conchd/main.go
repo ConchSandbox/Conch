@@ -56,7 +56,7 @@ func main() {
 	defer server.Cleanup()
 
 	if err := util.WritePIDFile(cfg.Server.PIDFile); err != nil {
-		logger.Fatal("Failed to write pid file", ulog.F("error", err))
+		logger.Error("Failed to write pid file", ulog.F("error", err))
 	}
 	defer util.RemovePIDFile(cfg.Server.PIDFile)
 

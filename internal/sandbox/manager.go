@@ -26,7 +26,6 @@ func NewManager(p *network.Pool, daemonClient *daemon.Client, namespace string) 
 	return &Manager{
 		pool:         p,
 		daemonClient: daemonClient,
-		namespace:    namespace,
 	}
 }
 
