@@ -54,19 +54,18 @@ pip install -e ./sdk
 ```python
 from conch import Sandbox
 
-sandbox = Sandbox()
-err = sandbox.create()
-if err:
-    raise RuntimeError(f"failed to create sandbox: {err}")
-
 try:
+    sandbox = Sandbox.create()
+    print(f"Sandbox created: {sandbox.sandbox_id}")
     result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
     print(result)
+except RuntimeError as e:
+    print(f"Error: {e}")
 finally:
     sandbox.delete()
 ```
 
-调用 `execute()` 之前必须先执行 `create()`（或 `create_by_snapshot()`），并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 还没有关联到可用的 Agent client。
+调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
 
 ## 许可证
 
