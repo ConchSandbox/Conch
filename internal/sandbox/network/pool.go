@@ -119,13 +119,16 @@ func deleteHostMasquerade() error {
 	return nil
 }
 
-func NewPool(poolSize int, dynamicReservation bool) (*Pool, error) {
+func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int) (*Pool, error) {
 	if poolSize <= 0 {
 		poolSize = defaultPoolSize
 	}
 
 	if poolSize > maxVrtSlotsSize {
 		return nil, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, maxVrtSlotsSize)
+	}
+	if err := configureTapNetwork(tapIP, tapMask); err != nil {
+		return nil, fmt.Errorf("invalid tap network config: %w", err)
 	}
 	newSlots := make(chan *Slot, poolSize)
 

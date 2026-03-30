@@ -30,21 +30,24 @@ import (
 
 const (
 	defaultVrtNetworkCIDR = "10.12.0.0/20"
+	defaultTapIP          = "192.168.100.2"
+	defaultTapMask        = 24
 	vrtMask               = 20
 	invaildSlotSize       = 0
 	vrtAddressPerSlot     = 1
 	// Index 1 is reserved for the bridge IP, so sandbox slots start from index 2.
 	firstSlotIndex    = 2
 	tapInterfaceName  = "tap0"
-	tapIp             = "192.168.100.2"
-	tapMask           = 24
 	loopbackInterface = "lo"
+	namespaceIPIndex  = 21
 )
 
 var (
 	vrtNetworkCIDR                   = GetVrtNetworkCIDR()
 	maxVrtSlotsSize, maxVrtSlotIndex = GetVrtSlotsSizeAndIndex()
 	bridgeIP                         net.IP
+	configuredTapIP                  = defaultTapIP
+	configuredTapMask                = defaultTapMask
 	once                             sync.Once
 )
 
@@ -56,8 +59,9 @@ type Slot struct {
 	vrtMask  net.IPMask
 	bridgeIp net.IP
 
-	tapIp   net.IP
-	tapMask net.IPMask
+	tapIp       net.IP
+	tapMask     net.IPMask
+	namespaceIP net.IP
 }
 
 func NewSlot(key string, idx int) (*Slot, error) {
@@ -80,10 +84,14 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		return nil, fmt.Errorf("failed to parse vrt CIDR: %w", err)
 	}
 
-	tapCIDR := fmt.Sprintf("%s/%d", tapIp, tapMask)
-	tapIp, tapNet, err := net.ParseCIDR(tapCIDR)
+	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
+	tapIP, tapNet, err := net.ParseCIDR(tapCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse tap CIDR: %w", err)
+	}
+	namespaceIP, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive namespace IP from tap CIDR: %w", err)
 	}
 	// The bridge uses the first usable IP (.0.1) in the subnet, so it is outside the
 	// allocatable sandbox slot range.
@@ -123,10 +131,33 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		vrtMask:  vrtNet.Mask,
 		bridgeIp: bridgeIP,
 
-		tapIp:   tapIp,
-		tapMask: tapNet.Mask,
+		tapIp:       tapIP,
+		tapMask:     tapNet.Mask,
+		namespaceIP: namespaceIP,
 	}
 	return slot, nil
+}
+
+func configureTapNetwork(tapIP string, tapMask int) error {
+	if tapIP == "" {
+		tapIP = defaultTapIP
+	}
+	if tapMask == 0 {
+		tapMask = defaultTapMask
+	}
+
+	tapCIDR := fmt.Sprintf("%s/%d", tapIP, tapMask)
+	_, tapNet, err := net.ParseCIDR(tapCIDR)
+	if err != nil {
+		return fmt.Errorf("failed to parse tap CIDR %q: %w", tapCIDR, err)
+	}
+	if _, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex); err != nil {
+		return fmt.Errorf("failed to derive namespace IP from tap CIDR %q: %w", tapCIDR, err)
+	}
+
+	configuredTapIP = tapIP
+	configuredTapMask = tapMask
+	return nil
 }
 
 func (s *Slot) NamespaceID() string {
@@ -174,7 +205,7 @@ func (s *Slot) TapCIDR() net.IPMask {
 }
 
 func (s *Slot) NamespaceIP() string {
-	return "192.168.100.21"
+	return s.namespaceIP.String()
 }
 
 func (s *Slot) VrtNetworkCIDRString() string {

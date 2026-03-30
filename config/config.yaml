@@ -10,7 +10,7 @@ log:
 
 server:
   # If unix_socket is set as empty, conchd listens on host:port via TCP. Otherwise, conchd listens on local socket by default
-  unix_socket: /var/run/conchd.sock
+  unix_socket: /var/run/conchd/conchd.sock
   host: 127.0.0.1
   port: 4063
 
@@ -19,6 +19,10 @@ network:
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false
+  # Tap interface address inside the sandbox network namespace
+  tap_ip: 192.168.100.2
+  # CIDR mask for tap_ip
+  tap_mask: 24
 
 containerd:
   socket: /run/containerd/containerd.sock

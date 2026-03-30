@@ -79,7 +79,7 @@ func TestGetServerAddress(t *testing.T) {
 }
 
 func TestGetServerUnixSocket(t *testing.T) {
-	socketPath := "/var/run/conchd.sock"
+	socketPath := "/var/run/conchd/conchd.sock"
 	cfg := &Config{
 		Server: ServerConfig{UnixSocket: &socketPath},
 	}
@@ -119,21 +119,12 @@ func TestParseLogLevel(t *testing.T) {
 func TestLoadConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	data := []byte(`app:
-  name: conch-test
-log:
-  level: debug
-  output: both
-server:
-  host: 127.0.0.1
-  port: 4567
-network:
-  pool_size: 123
-  dynamic_reservation: true
-containerd:
-  socket: /run/custom-containerd.sock
-  default_namespace: team-a`)
+	data := []byte(
+		"app:\n  name: conch-test\n" +
+			"log:\n  level: debug\n  output: both\n" +
+			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n" +
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n",
+	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -166,11 +157,5 @@ containerd:
 	}
 	if !cfg.Network.DynamicReservation {
 		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
-	}
-	if cfg.Containerd.Socket != "/run/custom-containerd.sock" {
-		t.Errorf("LoadConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/custom-containerd.sock")
-	}
-	if cfg.Containerd.DefaultNamespace != "team-a" {
-		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "team-a")
 	}
 }

@@ -38,8 +38,10 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int  `yaml:"pool_size"`
-	DynamicReservation bool `yaml:"dynamic_reservation"`
+	PoolSize           int    `yaml:"pool_size"`
+	DynamicReservation bool   `yaml:"dynamic_reservation"`
+	TapIP              string `yaml:"tap_ip"`
+	TapMask            int    `yaml:"tap_mask"`
 }
 
 // ContainerdConfig holds containerd connection configuration
@@ -50,7 +52,7 @@ type ContainerdConfig struct {
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
-	defaultUnixSocket := "/var/run/conchd.sock"
+	defaultUnixSocket := "/var/run/conchd/conchd.sock"
 	return &Config{
 		App: AppConfig{
 			Name: "conch",
@@ -67,6 +69,8 @@ func DefaultConfig() *Config {
 		Network: NetworkConfig{
 			PoolSize:           250,
 			DynamicReservation: false,
+			TapIP:              "192.168.100.2",
+			TapMask:            24,
 		},
 		Containerd: ContainerdConfig{
 			Socket:           "/run/containerd/containerd.sock",
@@ -120,6 +124,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	}
+	if cfg.Network.TapIP == "" {
+		cfg.Network.TapIP = defaultCfg.Network.TapIP
+	}
+	if cfg.Network.TapMask == 0 {
+		cfg.Network.TapMask = defaultCfg.Network.TapMask
 	}
 	if cfg.Containerd.Socket == "" {
 		cfg.Containerd.Socket = defaultCfg.Containerd.Socket
@@ -197,9 +207,9 @@ func parseLogLevel(level string) (ulog.LogLevel, error) {
 func FindConfigFile() string {
 	// Check common config file locations
 	locations := []string{
-		"config/config.yaml",
 		"/etc/conchd/config.yaml",
 		"/etc/conch/config.yaml",
+		"config/config.yaml",
 	}
 
 	for _, loc := range locations {

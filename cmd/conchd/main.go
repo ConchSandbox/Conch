@@ -12,7 +12,7 @@ import (
 
 func main() {
 	// Parse command line flags
-	configPath := flag.String("config", "", "Path to config file")
+	configPath := flag.String("config", config.FindConfigFile(), "Path to config file")
 	flag.Parse()
 
 	// Load configuration

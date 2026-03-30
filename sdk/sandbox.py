@@ -117,7 +117,7 @@ class Sandbox:
             return f"{self.api_url}{path}"
         raise ValueError("Either sandbox.unix_socket or sandbox.api_url must be configured")
 
-    def _post_control_plane_request(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_control_plane_requests(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self._build_control_plane_url(path)
         response = self._session.post(url, json=payload)
         response.raise_for_status()
@@ -160,7 +160,7 @@ class Sandbox:
         }
 
         try:
-            result = self._post_control_plane_request(SANDBOX_CREATE_PATH, payload)
+            result = self._post_control_plane_requests(SANDBOX_CREATE_PATH, payload)
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self._update_client_from_result(result)
             return self
@@ -217,7 +217,7 @@ class Sandbox:
         }
 
         try:
-            result = self._post_control_plane_request(SANDBOX_PAUSE_PATH, payload)
+            result = self._post_control_plane_requests(SANDBOX_PAUSE_PATH, payload)
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self.snapshot_id = result.get(SNAPSHOT_ID_RESP_KEY)
             return SnapshotInfo(
