@@ -202,7 +202,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			ulog.F("sandbox_id", req.SandboxId),
 			ulog.F("error", err),
 		)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
