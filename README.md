@@ -54,6 +54,23 @@ pip install -e ./sdk
 
 `conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `SNAP` 扩展指令。
 
+最小 rootfs Dockerfile 示例：
+
+```dockerfile
+FROM scratch
+COPY hello.txt /hello.txt
+```
+
+启用 SNAP 流程时，在 Dockerfile 中补充 `KERNEL` 与 `SNAP`：
+
+```dockerfile
+FROM scratch
+COPY hello.txt /hello.txt
+
+KERNEL bzImage conch.initrd
+SNAP
+```
+
 ```bash
 # 查看帮助
 ./bin/conch --help
