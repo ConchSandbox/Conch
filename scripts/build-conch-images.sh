@@ -65,7 +65,7 @@ usage() {
   -t, --tag TAG           镜像标签 (默认: ${TAG_DEFAULT})
   -r, --registry URL      镜像仓库前缀 (默认: ${IMAGE_REG_DEFAULT})
       --index-repo REPO   Index 镜像仓库名，不含 tag (默认: <registry>/conch-claw)
-      --vm-repo REPO      VM 镜像仓库名，不含 tag (默认: <registry>/conch-vm)
+      --vm-repo REPO      Kernel 镜像仓库名，不含 tag (默认: <registry>/kernel)
       --rootfs-repo REPO  RootFS 镜像仓库名，不含 tag (默认: <registry>/pmem-rootfs)
       --build-dir DIR     构建产物目录 (默认: ${BUILD_DIR_DEFAULT})
       --context-dir DIR   Dockerfile 构建上下文目录 (默认: ${CONTEXT_DIR_DEFAULT})
@@ -354,7 +354,7 @@ create_manifest_index() {
         printf '[DRY-RUN] %q manifest rm %q\n' "$BUILDAH_CMD" "$INDEX_NAME"
         printf '[DRY-RUN] %q manifest create %q\n' "$BUILDAH_CMD" "$INDEX_NAME"
         printf '[DRY-RUN] %q manifest add --annotation io.conch.kind=rootfs %q %q\n' "$BUILDAH_CMD" "$INDEX_NAME" "$ROOTFS_IMAGE"
-        printf '[DRY-RUN] %q manifest add --annotation io.conch.kind=virtual-machine %q %q\n' "$BUILDAH_CMD" "$INDEX_NAME" "$VM_IMAGE"
+        printf '[DRY-RUN] %q manifest add --annotation io.conch.kind=sandbox %q %q\n' "$BUILDAH_CMD" "$INDEX_NAME" "$VM_IMAGE"
         return 0
     fi
 
@@ -367,8 +367,8 @@ create_manifest_index() {
         "$INDEX_NAME" "$ROOTFS_IMAGE"
 
     "$BUILDAH_CMD" manifest add \
-        --annotation "io.conch.kind=virtual-machine" \
-        --annotation "org.opencontainers.image.title=Virtual Machine Base Image" \
+        --annotation "io.conch.kind=sandbox" \
+        --annotation "org.opencontainers.image.title=Sandbox Base Image" \
         "$INDEX_NAME" "$VM_IMAGE"
 }
 
@@ -518,7 +518,7 @@ if [[ "$INPUT_PATH" != /* ]]; then
 fi
 
 [ -n "$INDEX_REPO" ] || INDEX_REPO="${IMAGE_REG}/conch-claw"
-[ -n "$VM_REPO" ] || VM_REPO="${IMAGE_REG}/conch-vm"
+[ -n "$VM_REPO" ] || VM_REPO="${IMAGE_REG}/kernel"
 [ -n "$ROOTFS_REPO" ] || ROOTFS_REPO="${IMAGE_REG}/pmem-rootfs"
 
 INDEX_NAME="${INDEX_REPO}:${TAG}"
