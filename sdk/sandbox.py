@@ -1,5 +1,6 @@
 import os
 from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 import requests
 import json
 import uuid
@@ -30,7 +31,6 @@ CFG_SNAPSHOT_SECTION = "snapshot"
 CFG_IMAGE_SECTION = "image"
 CFG_API_URL_KEY = "api_url"
 CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
-CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
 SANDBOX_CREATE_PATH = "/api/sandbox/create"
@@ -43,6 +43,19 @@ UNKNOWN_EXIT_CODE = -1
 
 def generate_random_id(prefix: str = "sandbox_") -> str:
     return prefix + secrets.token_hex(RANDOM_ID_HEX_BYTES)
+
+@dataclass
+class SnapshotInfo:
+    snapshot_id: str
+    sandbox_id: str
+
+
+@dataclass
+class SandboxInfo:
+    sandbox_id: str
+    ip: str
+    snapshot_id: Optional[str]
+
 
 class Execution:
     # Store execution output/exit code
@@ -58,11 +71,10 @@ class Execution:
 class Sandbox:
     def __init__(
             self,
-            use_snapshot: bool = False,
             api_url: Optional[str] = None,
-            client: Optional["AgentClient"] = None,
             workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
+            image_name: Optional[str] = None,
             namespace: Optional[str] = None,
             snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
@@ -73,21 +85,17 @@ class Sandbox:
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
         self.api_url = api_url.rstrip('/') if api_url else sandbox_cfg[CFG_API_URL_KEY].rstrip('/')
         self.workdir: str = workdir or self._generate_workdir()
-        self.use_snapshot = (
-            use_snapshot
-            if use_snapshot is not None
-            else sandbox_cfg[CFG_USE_SNAPSHOT_KEY]
-        )
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
         self.namespace = namespace or ""
+        self.image_name = image_name or self._config[CFG_IMAGE_SECTION][IMAGE_NAME_KEY]
 
         config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
 
-        self.vm_ip = None
-        self.client = client
+        self.ip = None
+        self.client = None
         self.vcpu_num = vcpu_num
         self.ram_mb = ram_mb
 
@@ -100,54 +108,34 @@ class Sandbox:
         server_ip = result.get(IP_KEY)
 
         if status == "ok" and server_ip:
-            self.vm_ip = server_ip
+            self.ip = server_ip
             if self.client:
                 try:
                     self.client.close()
                 except Exception:
                     pass
-            self.client = AgentClient(host=self.vm_ip)
+            self.client = AgentClient(host=self.ip)
         else:
             error_val = result.get(ERROR_KEY)
             error_msg = str(error_val) if error_val is not None else "Unknown error"
             raise RuntimeError(f"Sandbox creation failed: {error_msg}")
 
-    def create_by_snapshot(self):
+    def _do_create(self):
         url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
-        snap_config = self._config[CFG_SNAPSHOT_SECTION]
+        
+        if self.snapshot_id:
+            config = self._config[CFG_SNAPSHOT_SECTION]
+        else:
+            config = self._config[CFG_IMAGE_SECTION]
+        
         payload = {
             NAMESPACE_KEY: self.namespace,
-            SNAPSHOT_ID_KEY: self.snapshot_id,
-            IMAGE_NAME_KEY: "",
-            VMM_NAME_KEY: snap_config[VMM_NAME_KEY],
+            SNAPSHOT_ID_KEY: self.snapshot_id or "",
+            IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
+            VMM_NAME_KEY: config[VMM_NAME_KEY],
             SANDBOX_ID_KEY: self.sandbox_id,
-            VCPU_NUM_KEY: self.vcpu_num or snap_config[VCPU_NUM_KEY],
-            RAM_MB_KEY: self.ram_mb or snap_config[RAM_MB_KEY],
-        }
-
-        try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            result[SANDBOX_ID_KEY] = self.sandbox_id
-            result[SNAPSHOT_ID_KEY] = self.snapshot_id
-            self._update_client_from_result(result)
-            return result
-
-        except requests.exceptions.RequestException as e:
-            return f'{e}'
-
-    def create(self):
-        url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
-        img_config = self._config[CFG_IMAGE_SECTION]
-        payload = {
-            NAMESPACE_KEY: self.namespace,
-            SNAPSHOT_ID_KEY: "",
-            IMAGE_NAME_KEY: img_config[IMAGE_NAME_KEY],
-            VMM_NAME_KEY: img_config[VMM_NAME_KEY],
-            SANDBOX_ID_KEY: self.sandbox_id,
-            VCPU_NUM_KEY: self.vcpu_num or img_config[VCPU_NUM_KEY],
-            RAM_MB_KEY: self.ram_mb or img_config[RAM_MB_KEY],
+            VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
+            RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
 
         try:
@@ -156,26 +144,51 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self._update_client_from_result(result)
-            return result
+            return self
 
         except requests.exceptions.RequestException as e:
-            return f'{e}'
+            error_msg = e.response.text if hasattr(e, 'response') else str(e)
+            raise RuntimeError(error_msg)
 
-    def delete(self):
+    def delete(self, sandbox_id: Optional[str] = None):
         url = f"{self.api_url}{SANDBOX_DELETE_PATH}"
+        target_id = sandbox_id if sandbox_id else self.sandbox_id
         payload = {
             NAMESPACE_KEY: self.namespace,
-            SANDBOX_ID_KEY: self.sandbox_id,
+            SANDBOX_ID_KEY: target_id,
         }
-
+        
         try:
             response = requests.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
-            result[SANDBOX_ID_KEY] = self.sandbox_id
+            result[SANDBOX_ID_KEY] = target_id
+            return True
 
         except requests.exceptions.RequestException as e:
-            return f'{e}'
+            error_msg = e.response.text if hasattr(e, 'response') else str(e)
+            raise RuntimeError(error_msg)
+
+    @staticmethod
+    def delete_sandbox(sandbox_id: str):
+        _config = load_config()
+        api_url = _config[CFG_SANDBOX_SECTION][CFG_API_URL_KEY].rstrip('/')
+        
+        url = f"{api_url}{SANDBOX_DELETE_PATH}"
+        payload = {
+            SANDBOX_ID_KEY: sandbox_id,
+        }
+        
+        try:
+            response = requests.post(url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            result[SANDBOX_ID_KEY] = sandbox_id
+            return True
+
+        except requests.exceptions.RequestException as e:
+            error_msg = e.response.text if hasattr(e, 'response') else str(e)
+            raise RuntimeError(error_msg)
 
     def pause(self):
         # Pause sandbox
@@ -191,26 +204,31 @@ class Sandbox:
             result = response.json()
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self.snapshot_id = result.get(SNAPSHOT_ID_RESP_KEY)
-            print(f"Sandbox Paused !")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
+            return SnapshotInfo(
+                snapshot_id=self.snapshot_id,
+                sandbox_id=self.sandbox_id
+            )
 
         except requests.exceptions.RequestException as e:
-            error_msg = response.text if 'response' in locals() else str(e)
-            print(f"Failed to pause sandbox !")
-            return {
-                STATUS_KEY: "failed",
-                SANDBOX_ID_KEY: self.sandbox_id,
-                ERROR_KEY: error_msg
-            }
+            error_msg = getattr(e.response, 'text', str(e)) if hasattr(e, 'response') else str(e)
+            raise RuntimeError(error_msg)
 
-    def get_sandbox_id(self) -> str:
-        # Return sandbox unique ID
-        return self.sandbox_id
-
-    def get_snapshot_id(self) -> str:
-        # Return snapshot unique ID
-        return self.snapshot_id
-
+    @classmethod
+    def create(cls, snapshot_id: Optional[str] = None, **kwargs) -> "Sandbox":
+        sbx = cls(snapshot_id=snapshot_id, **kwargs)
+        try:
+            sbx._do_create()
+        except Exception as e:
+            raise RuntimeError(e) from None
+        return sbx
+    
+    def get_info(self) -> SandboxInfo:
+        return SandboxInfo(
+            sandbox_id=self.sandbox_id,
+            ip=self.ip if self.ip else "",
+            snapshot_id=self.snapshot_id,
+        )
+    
     def execute(
             self,
             cmd: str,
