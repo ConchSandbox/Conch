@@ -46,6 +46,11 @@ func TestInit(t *testing.T) {
 	if logger == nil {
 		t.Fatal("GetLogger() returned nil")
 	}
+	if got, ok := logger.(*ulog); ok {
+		if got.GetLevel() != DebugLevel {
+			t.Fatalf("Init() level = %v, want %v", got.GetLevel(), DebugLevel)
+		}
+	}
 
 	// Check if log file was created
 	entries, err := os.ReadDir(tmpDir)
@@ -67,6 +72,21 @@ func TestInit(t *testing.T) {
 	if closer, ok := logger.(*ulog); ok {
 		_ = closer.Close()
 	}
+}
+
+func TestGetLoggerDefaultsToInfoLevel(t *testing.T) {
+	SetLogger(nil)
+
+	logger := GetLogger()
+	ulogger, ok := logger.(*ulog)
+	if !ok {
+		t.Fatalf("GetLogger() type = %T, want *ulog", logger)
+	}
+	if ulogger.GetLevel() != InfoLevel {
+		t.Fatalf("GetLogger() default level = %v, want %v", ulogger.GetLevel(), InfoLevel)
+	}
+
+	_ = ulogger.Close()
 }
 
 func TestLoggerMethods(t *testing.T) {

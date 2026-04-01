@@ -2,14 +2,18 @@ app:
   name: conch
 
 log:
-  level: info
+  level: debug
   # output: "stdout" - only output to stdout
   # output: "file" - only output to file
   # output: "both" - output to both stdout and file
   output: stdout
 
 server:
-  host: 0.0.0.0
+  # If unix_socket is set as empty, conchd listens on host:port via TCP. Otherwise, conchd listens on local socket by default
+  unix_socket: /var/run/conchd/conchd.sock
+  pid_file: /var/run/conchd/conchd.pid
+  work_dir: /var/run/conch
+  host: 127.0.0.1
   port: 4063
 
 network:
@@ -17,6 +21,10 @@ network:
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false
+  # Tap interface address inside the sandbox network namespace
+  tap_ip: 192.168.100.2
+  # CIDR mask for tap_ip
+  tap_mask: 24
 
 containerd:
   socket: /run/containerd/containerd.sock

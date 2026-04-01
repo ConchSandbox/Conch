@@ -31,14 +31,19 @@ type LogConfig struct {
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host       string  `yaml:"host"`
+	Port       int     `yaml:"port"`
+	UnixSocket *string `yaml:"unix_socket"`
+	PIDFile    string  `yaml:"pid_file"`
+	WorkDir    string  `yaml:"work_dir"`
 }
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int  `yaml:"pool_size"`
-	DynamicReservation bool `yaml:"dynamic_reservation"`
+	PoolSize           int    `yaml:"pool_size"`
+	DynamicReservation bool   `yaml:"dynamic_reservation"`
+	TapIP              string `yaml:"tap_ip"`
+	TapMask            int    `yaml:"tap_mask"`
 }
 
 // ContainerdConfig holds containerd connection configuration
@@ -49,21 +54,29 @@ type ContainerdConfig struct {
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
+	defaultUnixSocket := "/var/run/conchd/conchd.sock"
+	defaultPIDFile := "/var/run/conchd/conchd.pid"
+	defaultWorkDir := "/var/run/conch"
 	return &Config{
 		App: AppConfig{
 			Name: "conch",
 		},
 		Log: LogConfig{
-			Level:  "info",
+			Level:  "debug",
 			Output: "stdout",
 		},
 		Server: ServerConfig{
-			Host: "0.0.0.0",
-			Port: 4063,
+			Host:       "127.0.0.1",
+			Port:       4063,
+			UnixSocket: &defaultUnixSocket,
+			PIDFile:    defaultPIDFile,
+			WorkDir:    defaultWorkDir,
 		},
 		Network: NetworkConfig{
 			PoolSize:           250,
 			DynamicReservation: false,
+			TapIP:              "192.168.100.2",
+			TapMask:            24,
 		},
 		Containerd: ContainerdConfig{
 			Socket:           "/run/containerd/containerd.sock",
@@ -112,8 +125,23 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = defaultCfg.Server.Port
 	}
+	if cfg.Server.UnixSocket == nil {
+		cfg.Server.UnixSocket = defaultCfg.Server.UnixSocket
+	}
+	if cfg.Server.PIDFile == "" {
+		cfg.Server.PIDFile = defaultCfg.Server.PIDFile
+	}
+	if cfg.Server.WorkDir == "" {
+		cfg.Server.WorkDir = defaultCfg.Server.WorkDir
+	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	}
+	if cfg.Network.TapIP == "" {
+		cfg.Network.TapIP = defaultCfg.Network.TapIP
+	}
+	if cfg.Network.TapMask == 0 {
+		cfg.Network.TapMask = defaultCfg.Network.TapMask
 	}
 	if cfg.Containerd.Socket == "" {
 		cfg.Containerd.Socket = defaultCfg.Containerd.Socket
@@ -162,6 +190,13 @@ func (c *Config) GetServerAddress() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
+func (c *Config) GetServerUnixSocket() string {
+	if c.Server.UnixSocket == nil {
+		return ""
+	}
+	return *c.Server.UnixSocket
+}
+
 // parseLogLevel converts string log level to ulog.LogLevel
 func parseLogLevel(level string) (ulog.LogLevel, error) {
 	switch level {
@@ -184,9 +219,9 @@ func parseLogLevel(level string) (ulog.LogLevel, error) {
 func FindConfigFile() string {
 	// Check common config file locations
 	locations := []string{
-		"config/config.yaml",
 		"/etc/conchd/config.yaml",
 		"/etc/conch/config.yaml",
+		"config/config.yaml",
 	}
 
 	for _, loc := range locations {

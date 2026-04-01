@@ -1,8 +1,9 @@
 import os
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+from urllib.parse import quote_plus
 import requests
-import json
+import requests_unixsocket
 import uuid
 import secrets
 
@@ -29,6 +30,7 @@ SNAPSHOT_ID_RESP_KEY = "snapshotId"
 CFG_SANDBOX_SECTION = "sandbox"
 CFG_SNAPSHOT_SECTION = "snapshot"
 CFG_IMAGE_SECTION = "image"
+CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
 CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
 
@@ -52,6 +54,7 @@ class SnapshotInfo:
 
 @dataclass
 class SandboxInfo:
+    # TODO: Extend this with more sandbox metadata once the SDK surface is finalized.
     sandbox_id: str
     ip: str
     snapshot_id: Optional[str]
@@ -71,6 +74,7 @@ class Execution:
 class Sandbox:
     def __init__(
             self,
+            unix_socket: Optional[str] = None,
             api_url: Optional[str] = None,
             workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
@@ -83,7 +87,12 @@ class Sandbox:
     ):
         self._config: Dict[str, Any] = load_config(config_path=config_path)
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
-        self.api_url = api_url.rstrip('/') if api_url else sandbox_cfg[CFG_API_URL_KEY].rstrip('/')
+
+        configured_unix_socket = sandbox_cfg.get(CFG_UNIX_SOCKET_KEY, "")
+        configured_api_url = sandbox_cfg.get(CFG_API_URL_KEY, "")
+        self.unix_socket = unix_socket if unix_socket is not None else configured_unix_socket
+        self.api_url = api_url.rstrip('/') if api_url else configured_api_url.rstrip('/')
+        self._session = requests_unixsocket.Session() if self.unix_socket else requests.Session()
         self.workdir: str = workdir or self._generate_workdir()
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
@@ -101,6 +110,20 @@ class Sandbox:
 
     def _generate_workdir(self) -> str:
         return f"{self._config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
+
+    def _build_control_plane_url(self, path: str) -> str:
+        if self.unix_socket:
+            encoded_socket = quote_plus(self.unix_socket)
+            return f"http+unix://{encoded_socket}{path}"
+        if self.api_url:
+            return f"{self.api_url}{path}"
+        raise ValueError("Either sandbox.unix_socket or sandbox.api_url must be configured")
+
+    def _post_control_plane_requests(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = self._build_control_plane_url(path)
+        response = self._session.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
 
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result
@@ -121,13 +144,11 @@ class Sandbox:
             raise RuntimeError(f"Sandbox creation failed: {error_msg}")
 
     def _do_create(self):
-        url = f"{self.api_url}{SANDBOX_CREATE_PATH}"
-        
         if self.snapshot_id:
             config = self._config[CFG_SNAPSHOT_SECTION]
         else:
             config = self._config[CFG_IMAGE_SECTION]
-        
+
         payload = {
             NAMESPACE_KEY: self.namespace,
             SNAPSHOT_ID_KEY: self.snapshot_id or "",
@@ -139,9 +160,7 @@ class Sandbox:
         }
 
         try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            result = response.json()
+            result = self._post_control_plane_requests(SANDBOX_CREATE_PATH, payload)
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self._update_client_from_result(result)
             return self
@@ -150,58 +169,37 @@ class Sandbox:
             error_msg = e.response.text if hasattr(e, 'response') else str(e)
             raise RuntimeError(error_msg)
 
-    def delete(self, sandbox_id: Optional[str] = None):
-        url = f"{self.api_url}{SANDBOX_DELETE_PATH}"
+    def delete(self, sandbox_id: Optional[str] = None) -> bool:
         target_id = sandbox_id if sandbox_id else self.sandbox_id
         payload = {
             NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: target_id,
         }
-        
+
         try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            result = response.json()
+            result = self._post_control_plane_requests(SANDBOX_DELETE_PATH, payload)
             result[SANDBOX_ID_KEY] = target_id
             return True
 
         except requests.exceptions.RequestException as e:
-            error_msg = e.response.text if hasattr(e, 'response') else str(e)
+            error_msg = getattr(e.response, 'text', str(e)) if hasattr(e, 'response') else str(e)
             raise RuntimeError(error_msg)
 
     @staticmethod
     def delete_sandbox(sandbox_id: str):
-        _config = load_config()
-        api_url = _config[CFG_SANDBOX_SECTION][CFG_API_URL_KEY].rstrip('/')
-        
-        url = f"{api_url}{SANDBOX_DELETE_PATH}"
-        payload = {
-            SANDBOX_ID_KEY: sandbox_id,
-        }
-        
-        try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            result[SANDBOX_ID_KEY] = sandbox_id
-            return True
-
-        except requests.exceptions.RequestException as e:
-            error_msg = e.response.text if hasattr(e, 'response') else str(e)
-            raise RuntimeError(error_msg)
+        sbx = Sandbox(sandbox_id=sandbox_id)
+        return sbx.delete(sandbox_id=sandbox_id)
 
     def pause(self):
-        # Pause sandbox
-        url = f"{self.api_url}{SANDBOX_PAUSE_PATH}"
+        # Pause sandbox.
+        # TODO: Revisit the current pause lifecycle so snapshotting is not tightly coupled to sandbox deletion.
         payload = {
             NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: self.sandbox_id,
         }
 
         try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            result = response.json()
+            result = self._post_control_plane_requests(SANDBOX_PAUSE_PATH, payload)
             result[SANDBOX_ID_KEY] = self.sandbox_id
             self.snapshot_id = result.get(SNAPSHOT_ID_RESP_KEY)
             return SnapshotInfo(

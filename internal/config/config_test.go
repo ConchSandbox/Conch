@@ -78,6 +78,16 @@ func TestGetServerAddress(t *testing.T) {
 	}
 }
 
+func TestGetServerUnixSocket(t *testing.T) {
+	socketPath := "/var/run/conchd/conchd.sock"
+	cfg := &Config{
+		Server: ServerConfig{UnixSocket: &socketPath},
+	}
+	if got := cfg.GetServerUnixSocket(); got != socketPath {
+		t.Errorf("GetServerUnixSocket() = %q, want %q", got, socketPath)
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {
 		level   string
@@ -109,21 +119,13 @@ func TestParseLogLevel(t *testing.T) {
 func TestLoadConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	data := []byte(`app:
-  name: conch-test
-log:
-  level: debug
-  output: both
-server:
-  host: 127.0.0.1
-  port: 4567
-network:
-  pool_size: 123
-  dynamic_reservation: true
-containerd:
-  socket: /run/custom-containerd.sock
-  default_namespace: team-a`)
+	data := []byte(
+		"app:\n  name: conch-test\n" +
+			"log:\n  level: debug\n  output: both\n" +
+			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
+			"containerd:\n  socket: /run/containerd/containerd.sock\n  default_namespace: default\n" +
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
+	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -148,16 +150,62 @@ containerd:
 	if cfg.Server.Port != 4567 {
 		t.Errorf("LoadConfig().Server.Port = %d, want %d", cfg.Server.Port, 4567)
 	}
+	if cfg.GetServerUnixSocket() != "" {
+		t.Errorf("LoadConfig().Server.UnixSocket = %q, want empty", cfg.GetServerUnixSocket())
+	}
+	if cfg.Server.PIDFile != "/tmp/conchd.pid" {
+		t.Errorf("LoadConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/tmp/conchd.pid")
+	}
+	if cfg.Server.WorkDir != "/tmp/conch" {
+		t.Errorf("LoadConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/tmp/conch")
+	}
 	if cfg.Network.PoolSize != 123 {
 		t.Errorf("LoadConfig().Network.PoolSize = %d, want %d", cfg.Network.PoolSize, 123)
 	}
 	if !cfg.Network.DynamicReservation {
 		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
 	}
-	if cfg.Containerd.Socket != "/run/custom-containerd.sock" {
-		t.Errorf("LoadConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/custom-containerd.sock")
+	if cfg.Network.TapIP != "192.168.100.10" {
+		t.Errorf("LoadConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.10")
 	}
-	if cfg.Containerd.DefaultNamespace != "team-a" {
-		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "team-a")
+	if cfg.Network.TapMask != 25 {
+		t.Errorf("LoadConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 25)
+	}
+	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
+		t.Errorf("LoadConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/containerd/containerd.sock")
+	}
+	if cfg.Containerd.DefaultNamespace != "default" {
+		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
+	}
+}
+
+func TestDefaultConfigNetworkTapSettings(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Network.TapIP != "192.168.100.2" {
+		t.Errorf("DefaultConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.2")
+	}
+	if cfg.Network.TapMask != 24 {
+		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
+	}
+}
+
+func TestDefaultConfigContainerdSettings(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Server.UnixSocket == nil || *cfg.Server.UnixSocket != "/var/run/conchd/conchd.sock" {
+		t.Errorf("DefaultConfig().Server.UnixSocket = %v, want %q", cfg.Server.UnixSocket, "/var/run/conchd/conchd.sock")
+	}
+	if cfg.Server.PIDFile != "/var/run/conchd/conchd.pid" {
+		t.Errorf("DefaultConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/var/run/conchd/conchd.pid")
+	}
+	if cfg.Server.WorkDir != "/var/run/conch" {
+		t.Errorf("DefaultConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/var/run/conch")
+	}
+	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
+		t.Errorf("DefaultConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/containerd/containerd.sock")
+	}
+	if cfg.Containerd.DefaultNamespace != "default" {
+		t.Errorf("DefaultConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
 	}
 }

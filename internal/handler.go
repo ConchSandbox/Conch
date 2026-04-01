@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -18,7 +20,6 @@ import (
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -31,6 +32,8 @@ type Server struct {
 	sandboxManager sandboxManager
 	daemonClient   *daemon.Client
 	httpServer     *http.Server
+	listener       net.Listener
+	unixSocketPath string
 	cleanupOnce    sync.Once
 
 	// TODO: need ListCachedBuilds()
@@ -99,7 +102,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	s.daemonClient = daemonClient
 
 	// Initialize snapshot server
-	err = snapshot.NewServer(common.WorkDir, daemonClient)
+	err = snapshot.NewServer(cfg.Server.WorkDir, daemonClient)
 	if err != nil {
 		_ = daemonClient.Close()
 		cancel()
@@ -108,7 +111,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 
 	// Initialize sandbox manager
-	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation)
+	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation, cfg.Network.TapIP, cfg.Network.TapMask)
 	if err != nil {
 		logger.Error("Failed to initialize network pool; sandbox APIs will return errors", ulog.F("error", err))
 		_ = daemonClient.Close()
@@ -138,12 +141,48 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 }
 
-func (s *Server) Start(addr string) error {
+func (s *Server) Start(addr string, unixSocket string) error {
 	logger := ulog.GetLogger()
-	logger.Info("Starting HTTP server", ulog.F("address", addr))
+	var (
+		err error
+		ln  net.Listener
+	)
 
-	s.httpServer = &http.Server{Addr: addr, Handler: s.router}
-	err := s.httpServer.ListenAndServe()
+	if unixSocket != "" {
+		// If the Unix socket is not empty, then we should use it for server listen port
+		// First create the parent directory if needed; this requires permission for the socket path.
+		// Then for any existing stale socket it should be removed before start to listen
+		if err := os.MkdirAll(filepath.Dir(unixSocket), 0o755); err != nil {
+			return fmt.Errorf("failed to create unix socket directory: %w", err)
+		}
+		if err := os.Remove(unixSocket); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove stale unix socket: %w", err)
+		}
+
+		ln, err = net.Listen("unix", unixSocket)
+		if err != nil {
+			return fmt.Errorf("failed to listen on unix socket %s: %w", unixSocket, err)
+		}
+		if err := os.Chmod(unixSocket, 0o660); err != nil {
+			_ = ln.Close()
+			_ = os.Remove(unixSocket)
+			return fmt.Errorf("failed to set unix socket permissions: %w", err)
+		}
+
+		s.unixSocketPath = unixSocket
+		logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
+	} else {
+		// If the Unix socket is empty, then we should use tcp IP for server listen port
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to listen on address %s: %w", addr, err)
+		}
+		logger.Info("Starting HTTP server", ulog.F("network", "tcp"), ulog.F("address", addr))
+	}
+
+	s.listener = ln
+	s.httpServer = &http.Server{Handler: s.router}
+	err = s.httpServer.Serve(ln)
 	if err == http.ErrServerClosed {
 		logger.Info("Main server gracefully stopped")
 		err = nil
@@ -156,12 +195,22 @@ func (s *Server) Cleanup() {
 
 	s.cleanupOnce.Do(func() {
 		// stop httpServer
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer shutdownCancel()
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("HTTP server shutdown error", ulog.F("error", err))
-		} else {
-			logger.Info("HTTP server gracefully stopped")
+		if s.httpServer != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer shutdownCancel()
+			if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("HTTP server shutdown error", ulog.F("error", err))
+			} else {
+				logger.Info("HTTP server gracefully stopped")
+			}
+		}
+
+		if s.unixSocketPath != "" {
+			if err := os.Remove(s.unixSocketPath); err != nil && !os.IsNotExist(err) {
+				logger.Error("Failed to remove unix socket", ulog.F("socket", s.unixSocketPath), ulog.F("error", err))
+			} else {
+				logger.Info("Removed unix socket", ulog.F("socket", s.unixSocketPath))
+			}
 		}
 
 		if m, ok := s.sandboxManager.(*sandbox.Manager); ok {
