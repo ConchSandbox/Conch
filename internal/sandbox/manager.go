@@ -22,7 +22,7 @@ type Manager struct {
 	daemonClient *daemon.Client
 }
 
-func NewManager(p *network.Pool, daemonClient *daemon.Client, namespace string) *Manager {
+func NewManager(p *network.Pool, daemonClient *daemon.Client) *Manager {
 	return &Manager{
 		pool:         p,
 		daemonClient: daemonClient,

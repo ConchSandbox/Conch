@@ -2,7 +2,7 @@ app:
   name: conch
 
 log:
-  level: info
+  level: debug
   # output: "stdout" - only output to stdout
   # output: "file" - only output to file
   # output: "both" - output to both stdout and file
@@ -12,6 +12,7 @@ server:
   # If unix_socket is set as empty, conchd listens on host:port via TCP. Otherwise, conchd listens on local socket by default
   unix_socket: /var/run/conchd/conchd.sock
   pid_file: /var/run/conchd/conchd.pid
+  work_dir: /var/run/conch
   host: 127.0.0.1
   port: 4063
 

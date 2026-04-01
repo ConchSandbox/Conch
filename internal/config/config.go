@@ -35,6 +35,7 @@ type ServerConfig struct {
 	Port       int     `yaml:"port"`
 	UnixSocket *string `yaml:"unix_socket"`
 	PIDFile    string  `yaml:"pid_file"`
+	WorkDir    string  `yaml:"work_dir"`
 }
 
 // NetworkConfig holds network pool configuration
@@ -55,12 +56,13 @@ type ContainerdConfig struct {
 func DefaultConfig() *Config {
 	defaultUnixSocket := "/var/run/conchd/conchd.sock"
 	defaultPIDFile := "/var/run/conchd/conchd.pid"
+	defaultWorkDir := "/var/run/conch"
 	return &Config{
 		App: AppConfig{
 			Name: "conch",
 		},
 		Log: LogConfig{
-			Level:  "info",
+			Level:  "debug",
 			Output: "stdout",
 		},
 		Server: ServerConfig{
@@ -68,6 +70,7 @@ func DefaultConfig() *Config {
 			Port:       4063,
 			UnixSocket: &defaultUnixSocket,
 			PIDFile:    defaultPIDFile,
+			WorkDir:    defaultWorkDir,
 		},
 		Network: NetworkConfig{
 			PoolSize:           250,
@@ -127,6 +130,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Server.PIDFile == "" {
 		cfg.Server.PIDFile = defaultCfg.Server.PIDFile
+	}
+	if cfg.Server.WorkDir == "" {
+		cfg.Server.WorkDir = defaultCfg.Server.WorkDir
 	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize

@@ -18,7 +18,6 @@ const (
 	PemSuffix              = ".erofs"
 
 	ContainerdSock = "/run/containerd/containerd.sock"
-	WorkDir        = "/var/run/conch"
 	RequestTimeout = 60 * time.Second
 
 	SnapshotMountRootfs = "rootfs"

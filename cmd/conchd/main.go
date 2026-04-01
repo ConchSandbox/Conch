@@ -36,12 +36,17 @@ func main() {
 	}
 
 	logger := ulog.GetLogger()
+	if err := util.WritePIDFile(cfg.Server.PIDFile); err != nil {
+		logger.Fatal("Failed to acquire pid file", ulog.F("error", err))
+	}
+	defer util.RemovePIDFile(cfg.Server.PIDFile)
+
 	logger.Info("Loaded configuration",
 		ulog.F("app", cfg.App.Name),
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.address", cfg.GetServerAddress()),
-		ulog.F("server.work_dir", "/var/run/conch"),
+		ulog.F("server.work_dir", cfg.Server.WorkDir),
 		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
 		ulog.F("server.pid_file", cfg.Server.PIDFile),
 		ulog.F("containerd.socket", cfg.Containerd.Socket),
@@ -54,11 +59,6 @@ func main() {
 		logger.Fatal("Failed to initialize server", ulog.F("error", err))
 	}
 	defer server.Cleanup()
-
-	if err := util.WritePIDFile(cfg.Server.PIDFile); err != nil {
-		logger.Error("Failed to write pid file", ulog.F("error", err))
-	}
-	defer util.RemovePIDFile(cfg.Server.PIDFile)
 
 	serverAddr := cfg.GetServerAddress()
 	serverUnixSocket := cfg.GetServerUnixSocket()

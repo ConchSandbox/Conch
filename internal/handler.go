@@ -20,7 +20,6 @@ import (
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -103,7 +102,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	s.daemonClient = daemonClient
 
 	// Initialize snapshot server
-	err = snapshot.NewServer(common.WorkDir, daemonClient)
+	err = snapshot.NewServer(cfg.Server.WorkDir, daemonClient)
 	if err != nil {
 		_ = daemonClient.Close()
 		cancel()
@@ -121,7 +120,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to init network pool: %w", err)
 	}
 
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Containerd.DefaultNamespace))
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient))
 	go pool.Populate(ctx)
 
 	handleSignals(ctx, cancel, s)

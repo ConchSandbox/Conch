@@ -122,7 +122,7 @@ func TestLoadConfig(t *testing.T) {
 	data := []byte(
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
-			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n" +
+			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  socket: /run/containerd/containerd.sock\n  default_namespace: default\n" +
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
 	)
@@ -155,6 +155,9 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Server.PIDFile != "/tmp/conchd.pid" {
 		t.Errorf("LoadConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/tmp/conchd.pid")
+	}
+	if cfg.Server.WorkDir != "/tmp/conch" {
+		t.Errorf("LoadConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/tmp/conch")
 	}
 	if cfg.Network.PoolSize != 123 {
 		t.Errorf("LoadConfig().Network.PoolSize = %d, want %d", cfg.Network.PoolSize, 123)
@@ -195,6 +198,9 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	}
 	if cfg.Server.PIDFile != "/var/run/conchd/conchd.pid" {
 		t.Errorf("DefaultConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/var/run/conchd/conchd.pid")
+	}
+	if cfg.Server.WorkDir != "/var/run/conch" {
+		t.Errorf("DefaultConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/var/run/conch")
 	}
 	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
 		t.Errorf("DefaultConfig().Containerd.Socket = %q, want %q", cfg.Containerd.Socket, "/run/containerd/containerd.sock")
