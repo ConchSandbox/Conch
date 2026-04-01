@@ -191,13 +191,14 @@ Sandbox.delete_sandbox("sandbox_abc")
 ## Sandbox 构造函数
 
 ```python
-Sandbox(api_url=None, sandbox_id=None, image_name=None,
+Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
          namespace=None, snapshot_id=None, vcpu_num=None,
          ram_mb=None, workdir=None, config_path=None)
 ```
 
 **主要参数：**
-- `api_url`: 服务地址（默认从配置读取）
+- `unix_socket`: Unix socket 路径（默认从配置读取）
+- `api_url`: 服务地址；仅当 `unix_socket` 为空时使用
 - `sandbox_id`: 沙箱 ID（默认自动生成）
 - `image_name`: 镜像名称
 - `snapshot_id`: 快照 ID
