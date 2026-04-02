@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
 )
 
 type SnapshotMeta struct {
@@ -18,8 +17,6 @@ type SnapshotMeta struct {
 }
 
 func GetSnapshotInfo(ctx context.Context, client *containerd.Client, key string) (*SnapshotMeta, error) {
-	// Inject the namespace into the context; required for containerd service calls
-	ctx = namespaces.WithNamespace(ctx, "default")
 	sn := client.SnapshotService("overlayfs")
 
 	// 1. Fetch basic metadata (Stat contains Name, Parent, Labels, etc.)

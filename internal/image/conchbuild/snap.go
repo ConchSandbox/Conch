@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/snapshots"
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/image/conchbuild/client"
 	"github.com/openeuler/Conch/internal/image/conchbuild/erofs"
 	"github.com/openeuler/Conch/internal/image/conchbuild/ocipublisher"
@@ -52,17 +54,14 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		return Result{}, fmt.Errorf("resolving kernel paths: %w", err)
 	}
 
-	containerdAddr := os.Getenv("CONTAINERD_ADDRESS")
-	if containerdAddr == "" {
-		containerdAddr = "/run/containerd/containerd.sock"
-	}
+	containerdAddr, containerdNamespace := resolveContainerdRuntime()
 	ctrdClient, err := containerd.New(containerdAddr)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to connect to containerd: %w", err)
 	}
 	defer ctrdClient.Close()
 
-	snapCtx := namespaces.WithNamespace(ctx, "default")
+	snapCtx := namespaces.WithNamespace(ctx, containerdNamespace)
 
 	// Always convert OCI rootfs to EROFS and use it as VM DiskPath.
 	// If CONCH_EROFS_OUTPUT_DIR is empty, create a temp output directory for this build.
@@ -224,6 +223,27 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		BootIndexTag:    bootIndexTag,
 		PmemRootfsRef:   rootfsImageRef,
 	}, nil
+}
+
+func resolveContainerdRuntime() (address string, namespace string) {
+	address = strings.TrimSpace(os.Getenv("CONTAINERD_ADDRESS"))
+	namespace = ""
+
+	cfgPath := config.FindConfigFile()
+	if cfg, err := config.LoadConfig(cfgPath); err == nil {
+		if address == "" {
+			address = strings.TrimSpace(cfg.Containerd.Socket)
+		}
+		namespace = strings.TrimSpace(cfg.Containerd.DefaultNamespace)
+	}
+
+	if address == "" {
+		address = "/run/containerd/containerd.sock"
+	}
+	if namespace == "" {
+		namespace = "default"
+	}
+	return address, namespace
 }
 
 func linkRootfsSnapshotToVM(ctx context.Context, ctrdClient *containerd.Client, rootfsSnapshotID, vmSnapshotID string) error {
