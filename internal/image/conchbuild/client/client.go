@@ -2,42 +2,37 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/openeuler/Conch/internal/config"
 )
 
 const (
 	// DefaultConchAPIURL is the default conchd HTTP base URL.
 	DefaultConchAPIURL = "http://localhost:4063"
+	defaultUnixAPIURL  = "http://conchd-unix"
 	defaultVmmName     = "cloud-hypervisor"
-	DefaultRamMB    = 256 // Exported for SNAP CreateSandbox; override via SNAPOpts if needed
-	defaultRamMB    = DefaultRamMB
-	createSandbox   = "/api/sandbox/create"
-	pauseSandbox    = "/api/sandbox/pause"
-	requestTimeout  = 120 * time.Second
-	sandboxIDPrefix = "buildah-snap-"
+	DefaultRamMB       = 256 // Exported for SNAP CreateSandbox; override via SNAPOpts if needed
+	defaultRamMB       = DefaultRamMB
+	createSandbox      = "/api/sandbox/create"
+	pauseSandbox       = "/api/sandbox/pause"
+	requestTimeout     = 120 * time.Second
+	sandboxIDPrefix    = "buildah-snap-"
 )
 
 // ResolveBaseURL returns conchd base URL: BUILDAH_CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
 func ResolveBaseURL() string {
-	if u := strings.TrimSpace(os.Getenv("BUILDAH_CONCH_API_URL")); u != "" {
-		return u
-	}
-	host := strings.TrimSpace(os.Getenv("CONCHD_HOST"))
-	port := strings.TrimSpace(os.Getenv("CONCHD_PORT"))
-	if host != "" {
-		if port == "" {
-			port = "4063"
-		}
-		return fmt.Sprintf("http://%s:%s", host, port)
-	}
-	return DefaultConchAPIURL
+	baseURL, _ := resolveClientTransport("")
+	return baseURL
 }
 
 // CreateRequest matches Conch SandboxCreateRequest (image_name for image-based startup).
@@ -77,14 +72,56 @@ type Client struct {
 
 // NewClient creates a Conch API client. baseURL defaults to DefaultConchAPIURL if empty.
 func NewClient(baseURL string) *Client {
-	if baseURL == "" {
-		baseURL = DefaultConchAPIURL
-	}
+	resolvedURL, httpClient := resolveClientTransport(baseURL)
 	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: requestTimeout,
+		baseURL:    resolvedURL,
+		httpClient: httpClient,
+	}
+}
+
+func resolveClientTransport(baseURL string) (string, *http.Client) {
+	if strings.TrimSpace(baseURL) != "" {
+		return baseURL, &http.Client{Timeout: requestTimeout}
+	}
+
+	if u := strings.TrimSpace(os.Getenv("BUILDAH_CONCH_API_URL")); u != "" {
+		return u, &http.Client{Timeout: requestTimeout}
+	}
+
+	cfgPath := config.FindConfigFile()
+	if cfg, err := config.LoadConfig(cfgPath); err == nil {
+		if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
+			return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket)
+		}
+		host := strings.TrimSpace(cfg.Server.Host)
+		port := cfg.Server.Port
+		if host != "" && port > 0 {
+			return fmt.Sprintf("http://%s:%d", host, port), &http.Client{Timeout: requestTimeout}
+		}
+	}
+
+	host := strings.TrimSpace(os.Getenv("CONCHD_HOST"))
+	port := strings.TrimSpace(os.Getenv("CONCHD_PORT"))
+	if host != "" {
+		if port == "" {
+			port = "4063"
+		}
+		return fmt.Sprintf("http://%s:%s", host, port), &http.Client{Timeout: requestTimeout}
+	}
+
+	return DefaultConchAPIURL, &http.Client{Timeout: requestTimeout}
+}
+
+func newUnixSocketHTTPClient(socketPath string) *http.Client {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
 		},
+	}
+	return &http.Client{
+		Timeout:   requestTimeout,
+		Transport: transport,
 	}
 }
 

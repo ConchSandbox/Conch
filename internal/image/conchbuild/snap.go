@@ -142,11 +142,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	}
 	logrus.Infof("[conch build] linked rootfs snapshot %s -> sandbox snapshot %s", rootfsSnapshotID, vmSnapshotID)
 
-	conchAPI := opts.ConchAPIBaseURL
-	if conchAPI == "" {
-		conchAPI = client.ResolveBaseURL()
-	}
-	conchClient := client.NewClient(conchAPI)
+	conchClient := client.NewClient(opts.ConchAPIBaseURL)
 	sandboxID := client.GenSandboxID()
 
 	if err := conchClient.CreateSandbox(rootfsImageName, sandboxID, kernelPath, diskPathForVM, client.DefaultRamMB); err != nil {
