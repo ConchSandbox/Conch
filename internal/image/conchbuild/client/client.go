@@ -31,7 +31,7 @@ const (
 
 // ResolveBaseURL returns conchd base URL: BUILDAH_CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
 func ResolveBaseURL() string {
-	baseURL, _ := resolveClientTransport("")
+	baseURL, _ := resolveClientTransport("", "")
 	return baseURL
 }
 
@@ -72,14 +72,19 @@ type Client struct {
 
 // NewClient creates a Conch API client. baseURL defaults to DefaultConchAPIURL if empty.
 func NewClient(baseURL string) *Client {
-	resolvedURL, httpClient := resolveClientTransport(baseURL)
+	return NewClientWithConfig(baseURL, "")
+}
+
+// NewClientWithConfig creates a Conch API client using configPath when baseURL is empty.
+func NewClientWithConfig(baseURL, configPath string) *Client {
+	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath)
 	return &Client{
 		baseURL:    resolvedURL,
 		httpClient: httpClient,
 	}
 }
 
-func resolveClientTransport(baseURL string) (string, *http.Client) {
+func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 	if strings.TrimSpace(baseURL) != "" {
 		return baseURL, &http.Client{Timeout: requestTimeout}
 	}
@@ -88,7 +93,10 @@ func resolveClientTransport(baseURL string) (string, *http.Client) {
 		return u, &http.Client{Timeout: requestTimeout}
 	}
 
-	cfgPath := config.FindConfigFile()
+	cfgPath := configPath
+	if cfgPath == "" {
+		cfgPath = config.FindConfigFile()
+	}
 	if cfg, err := config.LoadConfig(cfgPath); err == nil {
 		if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
 			return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket)

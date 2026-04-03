@@ -24,6 +24,7 @@ type BuildRequest struct {
 	ContextDir      string
 	DockerfilePath  string
 	BuildahArgs     []string
+	ConfigPath      string
 	ConchAPIBaseURL string // default http://localhost:4063; also see BUILDAH_CONCH_API_URL
 	Stdout          io.Writer
 	Stderr          io.Writer
@@ -64,6 +65,7 @@ type SnapRequest struct {
 	RootfsImageRef  string
 	BootIndexTag    string
 	VMImageRef      string
+	ConfigPath      string
 	ConchAPIBaseURL string
 	Stdout          io.Writer
 }
@@ -200,6 +202,7 @@ func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResul
 			RootfsImageRef:  rootfsRef,
 			BootIndexTag:    bootIndexTag,
 			VMImageRef:      vmTag,
+			ConfigPath:      req.ConfigPath,
 			ConchAPIBaseURL: apiBase,
 			Stdout:          out,
 		}
@@ -309,6 +312,7 @@ func ExecuteSnapFlow(ctx context.Context, store storage.Store, sysCtx *types.Sys
 		ImageRef:        req.RootfsImageRef,
 		BootIndexTag:    req.BootIndexTag,
 		VMImageRef:      req.VMImageRef,
+		ConfigPath:      req.ConfigPath,
 		SystemContext:   sysCtx,
 		Out:             req.Stdout,
 		ConchAPIBaseURL: req.ConchAPIBaseURL,

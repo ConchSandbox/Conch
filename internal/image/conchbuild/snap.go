@@ -33,6 +33,7 @@ type SNAPOpts struct {
 	VMImageRef      string
 	SystemContext   *types.SystemContext
 	Out             io.Writer
+	ConfigPath      string
 	ConchAPIBaseURL string // optional; overrides BUILDAH_CONCH_API_URL / CONCHD_* when non-empty
 }
 
@@ -54,7 +55,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		return Result{}, fmt.Errorf("resolving kernel paths: %w", err)
 	}
 
-	containerdAddr, containerdNamespace := resolveContainerdRuntime()
+	containerdAddr, containerdNamespace := resolveContainerdRuntime(opts.ConfigPath)
 	ctrdClient, err := containerd.New(containerdAddr)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to connect to containerd: %w", err)
@@ -141,7 +142,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	}
 	logrus.Infof("[conch build] linked rootfs snapshot %s -> sandbox snapshot %s", rootfsSnapshotID, vmSnapshotID)
 
-	conchClient := client.NewClient(opts.ConchAPIBaseURL)
+	conchClient := client.NewClientWithConfig(opts.ConchAPIBaseURL, opts.ConfigPath)
 	sandboxID := client.GenSandboxID()
 
 	if err := conchClient.CreateSandbox(rootfsImageName, sandboxID, kernelPath, diskPathForVM, client.DefaultRamMB); err != nil {
@@ -225,12 +226,18 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	}, nil
 }
 
-func resolveContainerdRuntime() (address string, namespace string) {
+func resolveContainerdRuntime(configPath string) (address string, namespace string) {
 	address = strings.TrimSpace(os.Getenv("CONTAINERD_ADDRESS"))
 	namespace = ""
 
-	cfgPath := config.FindConfigFile()
+	cfgPath := configPath
+	if cfgPath == "" {
+		cfgPath = config.FindConfigFile()
+	}
 	if cfg, err := config.LoadConfig(cfgPath); err == nil {
+		if cfgPath != "" {
+			logrus.Infof("Using config: %s", cfgPath)
+		}
 		if address == "" {
 			address = strings.TrimSpace(cfg.Containerd.Socket)
 		}

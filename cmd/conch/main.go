@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/containerd/containerd"
@@ -65,6 +66,10 @@ func printBuildHelp(out io.Writer) {
 	fmt.Fprintln(out, "  Forward arguments to `buildah bud` and consume Dockerfile")
 	fmt.Fprintln(out, "  extensions `KERNEL` and `SNAP` in the Conch pipeline.")
 	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  -config, --config string")
+	fmt.Fprintln(out, "        config file path for Conch SNAP flow")
+	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Environment:")
 	fmt.Fprintln(out, "  CONCH_BUILDAH_BIN        buildah binary path (default: buildah)")
 	fmt.Fprintln(out, "  BUILDAH_CONCH_API_URL    conchd API base URL")
@@ -94,8 +99,13 @@ func initUnpackLogger() error {
 }
 
 func runBuild(ctx context.Context, args []string) error {
-	_, err := image.BuildWithConchExtensions(ctx, image.BuildRequest{
-		BuildahArgs: args,
+	configPath, forward, err := parseBuildConfigArg(args)
+	if err != nil {
+		return err
+	}
+	_, err = image.BuildWithConchExtensions(ctx, image.BuildRequest{
+		BuildahArgs: forward,
+		ConfigPath:  configPath,
 		Stdout:      os.Stdout,
 		Stderr:      os.Stderr,
 	})
@@ -103,6 +113,35 @@ func runBuild(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch build: %w", err)
 	}
 	return nil
+}
+
+func parseBuildConfigArg(args []string) (string, []string, error) {
+	forward := make([]string, 0, len(args))
+	configPath := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--config" || arg == "-config":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("conch build: missing value for %s", arg)
+			}
+			configPath = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--config="):
+			configPath = strings.TrimPrefix(arg, "--config=")
+			if configPath == "" {
+				return "", nil, fmt.Errorf("conch build: empty --config=")
+			}
+		case strings.HasPrefix(arg, "-config="):
+			configPath = strings.TrimPrefix(arg, "-config=")
+			if configPath == "" {
+				return "", nil, fmt.Errorf("conch build: empty -config=")
+			}
+		default:
+			forward = append(forward, arg)
+		}
+	}
+	return configPath, forward, nil
 }
 
 func runUnpack(ctx context.Context, args []string) error {

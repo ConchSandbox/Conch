@@ -81,8 +81,7 @@ SNAP
 
 # 启用 SNAP 流程（需 Dockerfile 中包含 KERNEL + SNAP）
 CONCH_EROFS_OUTPUT_DIR=/tmp/conch-erofs \
-BUILDAH_CONCH_API_URL=http://127.0.0.1:4063 \
-./bin/conch build -f Dockerfile.snap -t localhost/demo-snap:latest .
+./bin/conch build --config config/config.yaml -f Dockerfile.snap -t localhost/demo-snap:latest .
 ```
 
 启用 `SNAP` 后，命令会额外打印构建出的镜像名与推送示例，例如：
