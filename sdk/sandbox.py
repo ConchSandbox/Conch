@@ -46,6 +46,13 @@ UNKNOWN_EXIT_CODE = -1
 def generate_random_id(prefix: str = "sandbox_") -> str:
     return prefix + secrets.token_hex(RANDOM_ID_HEX_BYTES)
 
+
+def _request_exception_message(exc: requests.exceptions.RequestException) -> str:
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "text", None):
+        return response.text
+    return str(exc)
+
 @dataclass
 class SnapshotInfo:
     snapshot_id: str
@@ -166,8 +173,7 @@ class Sandbox:
             return self
 
         except requests.exceptions.RequestException as e:
-            error_msg = e.response.text if hasattr(e, 'response') else str(e)
-            raise RuntimeError(error_msg)
+            raise RuntimeError(_request_exception_message(e))
 
     def delete(self, sandbox_id: Optional[str] = None) -> bool:
         target_id = sandbox_id if sandbox_id else self.sandbox_id
@@ -182,12 +188,23 @@ class Sandbox:
             return True
 
         except requests.exceptions.RequestException as e:
-            error_msg = getattr(e.response, 'text', str(e)) if hasattr(e, 'response') else str(e)
-            raise RuntimeError(error_msg)
+            raise RuntimeError(_request_exception_message(e))
 
     @staticmethod
-    def delete_sandbox(sandbox_id: str):
-        sbx = Sandbox(sandbox_id=sandbox_id)
+    def delete_sandbox(
+            sandbox_id: str,
+            unix_socket: Optional[str] = None,
+            api_url: Optional[str] = None,
+            namespace: Optional[str] = None,
+            config_path: Optional[str] = None,
+    ):
+        sbx = Sandbox(
+            sandbox_id=sandbox_id,
+            unix_socket=unix_socket,
+            api_url=api_url,
+            namespace=namespace,
+            config_path=config_path,
+        )
         return sbx.delete(sandbox_id=sandbox_id)
 
     def pause(self):
@@ -208,17 +225,12 @@ class Sandbox:
             )
 
         except requests.exceptions.RequestException as e:
-            error_msg = getattr(e.response, 'text', str(e)) if hasattr(e, 'response') else str(e)
-            raise RuntimeError(error_msg)
+            raise RuntimeError(_request_exception_message(e))
 
     @classmethod
     def create(cls, snapshot_id: Optional[str] = None, **kwargs) -> "Sandbox":
         sbx = cls(snapshot_id=snapshot_id, **kwargs)
-        try:
-            sbx._do_create()
-        except Exception as e:
-            raise RuntimeError(e) from None
-        return sbx
+        return sbx._do_create()
     
     def get_info(self) -> SandboxInfo:
         return SandboxInfo(
