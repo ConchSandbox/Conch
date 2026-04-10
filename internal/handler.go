@@ -120,7 +120,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to init network pool: %w", err)
 	}
 
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient))
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Sandbox.VsockSignalRetry, cfg.Sandbox.VsockSignalTimeout, cfg.Sandbox.RequestTimeout))
 	go pool.Populate(ctx)
 
 	handleSignals(ctx, cancel, s)
@@ -216,6 +216,9 @@ func (s *Server) Cleanup() {
 		if m, ok := s.sandboxManager.(*sandbox.Manager); ok {
 			if err := m.CleanupPool(); err != nil {
 				logger.Error("Server cleanup error", ulog.F("error", err))
+			}
+			if err := m.CleanupCIDMap(); err != nil {
+				logger.Error("CID map cleanup error", ulog.F("error", err))
 			}
 		}
 		snapshot.CleanupAllViews()
