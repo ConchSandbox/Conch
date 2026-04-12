@@ -12,6 +12,7 @@ snapshot:
 
 image:
   image_name: "hub.oepkgs.net/conch/conch-boot-x86:v0.1"
+  use_snapshot: false                              # When true, treat image_name as a snapshot-start image and use the snapshot startup path
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
   vcpu_num: 1                                     # *Number of virtual CPUs
   ram_mb: 1024                                    # *Memory size in MB
