@@ -112,6 +112,39 @@ Build outputs:
 ./bin/conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
+### conch pull 示例
+
+`conch pull` 用于拉取 Conch 镜像，并在本地自动完成 unpack。
+
+对于 Conch 原生镜像，`conch pull` 会直接拉取并恢复本地 snapshot 关系：
+
+```bash
+# 查看帮助
+./bin/conch pull --help
+
+# 拉取并解包 sandbox-snapshot
+./bin/conch pull hub.oepkgs.net/conch/sandbox-snapshot:latest
+```
+
+对于标准 OCI 镜像，`conch pull` 会将其转换为 Conch 可运行输入后，再在本地完成 unpack。
+
+```bash
+# 拉取普通 OCI 镜像并自动转换为 Conch 可运行镜像
+./bin/conch pull docker.io/library/nginx:latest
+
+# 如源镜像所在 registry 需要，可显式指定源镜像的拉取参数
+./bin/conch pull --plain-http --user <username:password> docker.io/library/nginx:latest
+
+# 如默认 kernel 镜像使用独立 registry，也可单独指定 kernel 镜像的拉取参数
+./bin/conch pull --kernel-plain-http --kernel-user <username:password> docker.io/library/nginx:latest
+```
+
+`conch pull` 与 `conch unpack` 均支持通过 config 读取：
+- `containerd.socket`
+- `containerd.default_namespace`
+
+其中，标准 OCI 镜像转换流程还会使用默认的 kernel 镜像配置。默认配置使用 `hub.oepkgs.net/conch/kernel:6.6.0`，该 tag 应发布为 multi-arch 镜像，由镜像仓库和本地拉取工具自动选择对应架构。
+
 ### Python SDK 示例
 ```python
 from conch import Sandbox

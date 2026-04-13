@@ -187,6 +187,30 @@ kernel 镜像由 kernel 与 initrd 组成，是启动侧输入。
 
 在 `conch build` 与 `conch pack` 中，kernel 镜像均作为标准输入使用。
 
+默认 kernel 镜像采用 multi-arch tag 发布。构建时可通过 `scripts/build-kernel-image.sh` 从不同架构的 kernel 目录生成统一镜像：
+
+```bash
+bash scripts/build-kernel-image.sh \
+  --x86-dir ./kernel-x86 \
+  --arm-dir ./kernel-arm \
+  --repo hub.oepkgs.net/conch/kernel \
+  --version 6.6.0 \
+  --push
+```
+
+其中 `--x86-dir` 与 `--arm-dir` 指向的目录均需包含：
+
+- `bzImage`
+- `conch.initrd`
+
+脚本会生成并推送统一 tag：
+
+```text
+hub.oepkgs.net/conch/kernel:6.6.0
+```
+
+该 tag 可作为 `image.default_kernel_image` 的默认值供 `conch pull` 转换标准 OCI 镜像时使用。
+
 ### 5.4 当前构建过程中的主要产物
 
 构建过程会涉及以下镜像与中间产物：
@@ -237,13 +261,38 @@ kernel 镜像由 kernel 与 initrd 组成，是启动侧输入。
 
 执行：
 
-1. `ctr pull`
+1. 将标准 OCI 镜像拉取到本地镜像存储
 2. 判断该镜像不属于 Conch 原生镜像格式
-3. 读取默认配置中的 kernel / sandbox 相关配置
+3. 读取默认配置中的 kernel 镜像，并结合命令行拉取参数
 4. 将 OCI rootfs 转换为 EROFS rootfs，并执行 2MB 对齐
 5. 构建 rootfs 镜像
 6. 结合 kernel 镜像组装为 `sandbox-image`
-7. 执行 unpack，在本地形成可运行状态
+7. 将生成的 `sandbox-image` 导入 containerd
+8. 执行 unpack，在本地形成可运行状态
+
+### 6.3 `conch pull` 的配置来源
+
+`conch pull` 与 `conch unpack` 统一使用以下配置：
+
+- `containerd.socket`
+- `containerd.default_namespace`
+
+对于标准 OCI 镜像转换路径，还使用以下 image 配置：
+
+- `image.default_kernel_image`
+
+其中：
+
+- `image.default_kernel_image` 用于指定标准 OCI 镜像转换时默认使用的 kernel 镜像，默认值为 `hub.oepkgs.net/conch/kernel:6.6.0`
+
+默认 kernel 镜像应发布为 multi-arch tag，例如同一个 `hub.oepkgs.net/conch/kernel:6.6.0` 下同时包含 `linux/amd64` 与 `linux/arm64`，由镜像拉取流程选择匹配当前机器架构的镜像。
+
+当前实现中，如标准 OCI 镜像或默认 kernel 镜像拉取需要认证，`conch pull` 通过命令行参数传入认证信息；`plain-http` 也通过命令行参数显式指定，而不固化在配置模型中。
+
+其中：
+
+- 源镜像拉取参数使用 `--plain-http` 与 `--user`
+- 默认 kernel 镜像拉取参数使用 `--kernel-plain-http` 与 `--kernel-user`
 
 ## 7. 镜像类型识别
 

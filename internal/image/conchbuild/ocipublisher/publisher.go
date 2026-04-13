@@ -137,3 +137,36 @@ func PublishBootIndex(
 	fmt.Printf("Boot index created: %s (ID: %s)\n", bootIndexTag, img.ID)
 	return indexDigest, nil
 }
+
+// PublishSandboxImage assembles rootfs and sandbox into a normal OCI index.
+func PublishSandboxImage(
+	ctx context.Context,
+	store storage.Store,
+	rootfsTag string,
+	sandboxTag string,
+	indexTag string,
+) (digest.Digest, error) {
+	if err := claimImageNames(store, []string{indexTag}, ""); err != nil {
+		return "", fmt.Errorf("failed to claim sandbox image tag: %w", err)
+	}
+	if err := ensureFreshManifestList(ctx, indexTag); err != nil {
+		return "", fmt.Errorf("create sandbox manifest list: %w", err)
+	}
+	if err := addManifestMember(ctx, indexTag, rootfsTag, "rootfs", "Base RootFS Image"); err != nil {
+		return "", fmt.Errorf("add rootfs manifest: %w", err)
+	}
+	if err := addManifestMember(ctx, indexTag, sandboxTag, "sandbox", "Sandbox Base Image"); err != nil {
+		return "", fmt.Errorf("add sandbox manifest: %w", err)
+	}
+
+	img, err := store.Image(indexTag)
+	if err != nil {
+		return "", fmt.Errorf("lookup sandbox image %s: %w", indexTag, err)
+	}
+	indexBytes, err := store.ImageBigData(img.ID, storage.ImageDigestBigDataKey)
+	if err != nil {
+		return "", fmt.Errorf("read sandbox image manifest: %w", err)
+	}
+	indexDigest := digest.FromBytes(indexBytes)
+	return indexDigest, nil
+}
