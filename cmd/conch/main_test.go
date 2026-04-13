@@ -7,13 +7,14 @@ import (
 	"testing"
 )
 
-func TestPrintHelpIncludesBuildPullAndUnpack(t *testing.T) {
+func TestPrintHelpIncludesBuildPushPullAndUnpack(t *testing.T) {
 	var buf bytes.Buffer
 	printHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
 		"conch build [buildah-bud-args...]",
+		"conch push [options] <local-image> <remote-image>",
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
 		"Subcommands:",
@@ -21,6 +22,98 @@ func TestPrintHelpIncludesBuildPullAndUnpack(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("help output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestPrintPushHelpIncludesExample(t *testing.T) {
+	var buf bytes.Buffer
+	printPushHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch push [options] <local-image> <remote-image>",
+		"buildah manifest push --all",
+		"--plain-http",
+		"--tls-verify bool",
+		"buildah login",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("push help output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParsePushArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantLocal  string
+		wantRemote string
+		wantTLS    bool
+		wantErr    bool
+	}{
+		{
+			name:       "default",
+			args:       []string{"localhost/demo:latest", "hub.oepkgs.net/conch/demo:latest"},
+			wantLocal:  "localhost/demo:latest",
+			wantRemote: "hub.oepkgs.net/conch/demo:latest",
+			wantTLS:    true,
+		},
+		{
+			name:       "plain http",
+			args:       []string{"--plain-http", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			wantLocal:  "localhost/demo:latest",
+			wantRemote: "conch.example.com/conch/demo:latest",
+			wantTLS:    false,
+		},
+		{
+			name:       "tls verify false",
+			args:       []string{"--tls-verify=false", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			wantLocal:  "localhost/demo:latest",
+			wantRemote: "conch.example.com/conch/demo:latest",
+			wantTLS:    false,
+		},
+		{
+			name:    "missing image",
+			args:    []string{"localhost/demo:latest"},
+			wantErr: true,
+		},
+		{
+			name:    "unknown option",
+			args:    []string{"--user", "demo:demo", "localhost/demo:latest", "remote/demo:latest"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePushArgs(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parsePushArgs() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.tlsVerify != tt.wantTLS {
+				t.Fatalf("parsePushArgs() = %#v", got)
+			}
+		})
+	}
+}
+
+func TestBuildPushCommandArgs(t *testing.T) {
+	got := buildPushCommandArgs(pushOptions{
+		localImage:  "localhost/demo:latest",
+		remoteImage: "conch.example.com/conch/demo:latest",
+		tlsVerify:   false,
+	})
+	want := []string{
+		"manifest", "push", "--all", "--tls-verify=false",
+		"localhost/demo:latest",
+		"docker://conch.example.com/conch/demo:latest",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("buildPushCommandArgs() = %#v, want %#v", got, want)
 	}
 }
 

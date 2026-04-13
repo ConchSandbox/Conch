@@ -279,7 +279,7 @@ func printBuildResultSummary(out io.Writer, result BuildResult) {
 		}
 		if result.BootIndexTag != "" {
 			printLine("Sandbox snapshot", result.BootIndexTag)
-			printLine("Push command", fmt.Sprintf("buildah manifest push --all %s docker://<registry>/<repository>:<tag>", result.BootIndexTag))
+			printLine("Push command", fmt.Sprintf("conch push %s <registry>/<repository>:<tag>", result.BootIndexTag))
 		}
 		return
 	}
@@ -297,7 +297,7 @@ func printBuildResultSummary(out io.Writer, result BuildResult) {
 		}
 		if result.SandboxImageRef != "" {
 			printLine("Sandbox image", result.SandboxImageRef)
-			printLine("Push command", fmt.Sprintf("buildah manifest push --all %s docker://<registry>/<repository>:<tag>", result.SandboxImageRef))
+			printLine("Push command", fmt.Sprintf("conch push %s <registry>/<repository>:<tag>", result.SandboxImageRef))
 		}
 		return
 	}

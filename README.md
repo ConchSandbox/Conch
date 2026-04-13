@@ -107,7 +107,24 @@ Build outputs:
   PMEM RootFS image:  localhost/conch/pmem-rootfs:latest
   Kernel image:       localhost/conch/kernel:latest
   Sandbox snapshot:   localhost/conch/sandbox-snapshot:latest
-  Push command:       buildah manifest push --all localhost/conch/sandbox-snapshot:latest docker://<registry>/<repository>:<tag>
+  Push command:       conch push localhost/conch/sandbox-snapshot:latest <registry>/<repository>:<tag>
+```
+
+### conch push 示例
+
+`conch push` 用于发布 `conch build` 生成的 `sandbox-image` 或 `sandbox-snapshot`，底层等价于 `buildah manifest push --all`。
+
+认证建议通过 `buildah login <registry>` 提前完成。
+
+```bash
+# 查看帮助
+./bin/conch push --help
+
+# 推送到远端 registry
+./bin/conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
+
+# 如目标 registry 需要 plain HTTP 或跳过 TLS 校验
+./bin/conch push --plain-http localhost/demo-sandbox:latest conch.example.com/conch/demo-sandbox:latest
 ```
 
 ### conch unpack 示例

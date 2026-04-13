@@ -1,4 +1,5 @@
 // conch build: KERNEL/INDEX/SNAP Dockerfile extensions are preprocessed and post-processed in internal/image.
+// conch push: Conch OCI indexes are pushed through buildah manifest push.
 // conch unpack: boot OCI index components are unpacked into containerd and linked via snapshot labels.
 package main
 
@@ -24,16 +25,19 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  conch build [buildah-bud-args...]")
+	fmt.Fprintln(out, "  conch push [options] <local-image> <remote-image>")
 	fmt.Fprintln(out, "  conch pull [options] <image-name>")
 	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
 	fmt.Fprintln(out, "  conch --help")
 	fmt.Fprintln(out, "  conch build --help")
+	fmt.Fprintln(out, "  conch push --help")
 	fmt.Fprintln(out, "  conch pull --help")
 	fmt.Fprintln(out, "  conch unpack --help")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  build   Forward arguments to `buildah bud` and consume Dockerfile")
 	fmt.Fprintln(out, "          extensions `KERNEL`, `INDEX`, and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "  push    Push a Conch OCI index using `buildah manifest push --all`.")
 	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
 	fmt.Fprintln(out, "")
@@ -160,6 +164,12 @@ func main() {
 			return
 		}
 		err = runPull(ctx, os.Args[2:])
+	case "push":
+		if len(os.Args) >= 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
+			printPushHelp(os.Stdout)
+			return
+		}
+		err = runPush(ctx, os.Args[2:])
 	case "unpack":
 		if len(os.Args) >= 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
 			printUnpackHelp(os.Stdout)

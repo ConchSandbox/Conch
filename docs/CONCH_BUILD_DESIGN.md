@@ -139,8 +139,10 @@ conch pack <oci-image> --kernel-image <kernel-image> -t <sandbox-image-name>
 建议形式：
 
 ```bash
-conch push <conch-image> docker://<registry>/<repo>:<tag>
+conch push <local-conch-image> <registry>/<repo>:<tag>
 ```
+
+`conch push` 底层使用 `buildah manifest push --all`，目标镜像会自动使用 `docker://` transport。认证建议通过 `buildah login <registry>` 预先完成。
 
 ### 4.4 `conch pull`
 
