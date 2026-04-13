@@ -74,6 +74,7 @@ func TestSplitDockerfileAndContext_DoesNotTreatBuildArgAsContext(t *testing.T) {
 
 func TestBuildahArgsPlaceContextLast(t *testing.T) {
 	patched := patchDockerfileFlag([]string{"-t", "demo:latest"}, "/tmp/processed.Dockerfile")
+	patched = ensureBuildahIsolation(patched)
 	patched = append(patched, "--iidfile", "/tmp/imageid")
 	patched = append(patched, "/tmp/context")
 
@@ -96,6 +97,28 @@ func TestBuildahArgsPlaceContextLast(t *testing.T) {
 	}
 	if !foundIID {
 		t.Fatalf("missing --iidfile pair before context: %#v", patched)
+	}
+}
+
+func TestEnsureBuildahIsolationAddsDefault(t *testing.T) {
+	got := ensureBuildahIsolation([]string{"-t", "demo:latest"})
+	want := []string{"--isolation", "chroot", "-t", "demo:latest"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("ensureBuildahIsolation() = %#v, want %#v", got, want)
+	}
+}
+
+func TestEnsureBuildahIsolationRespectsExistingValue(t *testing.T) {
+	tests := [][]string{
+		{"--isolation", "oci", "-t", "demo:latest"},
+		{"--isolation=oci", "-t", "demo:latest"},
+	}
+
+	for _, tt := range tests {
+		got := ensureBuildahIsolation(tt)
+		if strings.Join(got, "\x00") != strings.Join(tt, "\x00") {
+			t.Fatalf("ensureBuildahIsolation(%#v) = %#v, want unchanged", tt, got)
+		}
 	}
 }
 

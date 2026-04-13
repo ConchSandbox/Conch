@@ -131,6 +131,7 @@ func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResul
 	}
 
 	patched := patchDockerfileFlag(forward, pre.TempDockerfile)
+	patched = ensureBuildahIsolation(patched)
 	requestedTag := firstImageTag(patched)
 	rootfsRef := requestedTag
 	bootIndexTag := ""
@@ -468,6 +469,26 @@ func isLikelyBuildContextArg(arg string) bool {
 	}
 	if fi, err := os.Stat(arg); err == nil && fi.IsDir() {
 		return true
+	}
+	return false
+}
+
+func ensureBuildahIsolation(args []string) []string {
+	if hasBuildahIsolation(args) {
+		return args
+	}
+
+	out := make([]string, 0, len(args)+2)
+	out = append(out, "--isolation", "chroot")
+	out = append(out, args...)
+	return out
+}
+
+func hasBuildahIsolation(args []string) bool {
+	for _, arg := range args {
+		if arg == "--isolation" || strings.HasPrefix(arg, "--isolation=") {
+			return true
+		}
 	}
 	return false
 }
