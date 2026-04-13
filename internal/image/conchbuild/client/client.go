@@ -41,8 +41,6 @@ type CreateRequest struct {
 	ImageName  string `json:"image_name"`
 	VmmName    string `json:"vmm_name"`
 	SandboxId  string `json:"sandbox_id"`
-	KernelPath string `json:"kernel_path"`
-	DiskPath   string `json:"disk_image_path"`
 	VcpuNum    int64  `json:"vcpu_num"`
 	RamMB      int64  `json:"ram_mb"`
 }
@@ -133,19 +131,17 @@ func newUnixSocketHTTPClient(socketPath string) *http.Client {
 	}
 }
 
-// CreateSandbox calls POST /api/sandbox/create (JSON field image_name = rootfsImageName after containerd import).
-func (c *Client) CreateSandbox(rootfsImageName, sandboxID, kernelPath, diskPath string, ramMB int64) error {
+// CreateSandbox calls POST /api/sandbox/create using image_name-based startup.
+func (c *Client) CreateSandbox(rootfsImageName, sandboxID string, ramMB int64) error {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
 	}
 	req := CreateRequest{
-		ImageName:  rootfsImageName,
-		SandboxId:  sandboxID,
-		KernelPath: kernelPath,
-		DiskPath:   diskPath,
-		VmmName:    defaultVmmName,
-		VcpuNum:    1,
-		RamMB:      ramMB,
+		ImageName: rootfsImageName,
+		SandboxId: sandboxID,
+		VmmName:   defaultVmmName,
+		VcpuNum:   1,
+		RamMB:     ramMB,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
