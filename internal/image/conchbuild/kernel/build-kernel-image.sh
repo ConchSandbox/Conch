@@ -18,7 +18,7 @@ DRY_RUN="false"
 usage() {
     cat <<'EOF'
 Usage:
-  bash scripts/build-kernel-image.sh [options]
+  bash internal/image/conchbuild/kernel/build-kernel-image.sh [options]
 
 Description:
   Build Conch kernel images from bzImage and conch.initrd.
@@ -51,10 +51,10 @@ Options:
 
 Examples:
   # Build a single-arch local kernel image.
-  bash scripts/build-kernel-image.sh --build-dir ./kernel-x86 --arch x86_64 --repo hub.oepkgs.net/conch/kernel --version 6.6.0
+  bash internal/image/conchbuild/kernel/build-kernel-image.sh --build-dir ./kernel-x86 --arch x86_64 --repo hub.oepkgs.net/conch/kernel --version 6.6.0
 
   # Build and push a multi-arch kernel image from two directories.
-  bash scripts/build-kernel-image.sh \
+  bash internal/image/conchbuild/kernel/build-kernel-image.sh \
     --x86-dir ./kernel-x86 \
     --arm-dir ./kernel-arm \
     --repo hub.oepkgs.net/conch/kernel \

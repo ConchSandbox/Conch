@@ -1,4 +1,4 @@
-// conch build: KERNEL/SNAP Dockerfile extensions are preprocessed and post-processed in internal/image.
+// conch build: KERNEL/INDEX/SNAP Dockerfile extensions are preprocessed and post-processed in internal/image.
 // conch unpack: boot OCI index components are unpacked into containerd and linked via snapshot labels.
 package main
 
@@ -33,7 +33,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  build   Forward arguments to `buildah bud` and consume Dockerfile")
-	fmt.Fprintln(out, "          extensions `KERNEL` and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "          extensions `KERNEL`, `INDEX`, and `SNAP` in the Conch pipeline.")
 	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
 	fmt.Fprintln(out, "")
@@ -50,7 +50,7 @@ func printBuildHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
 	fmt.Fprintln(out, "  Forward arguments to `buildah bud` and consume Dockerfile")
-	fmt.Fprintln(out, "  extensions `KERNEL` and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "  extensions `KERNEL`, `INDEX`, and `SNAP` in the Conch pipeline.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -config, --config string")

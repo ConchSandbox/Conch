@@ -138,7 +138,7 @@ func PublishBootIndex(
 	return indexDigest, nil
 }
 
-// PublishSandboxImage assembles rootfs and sandbox into a normal OCI index.
+// PublishSandboxImage assembles rootfs and sandbox into a normal Conch OCI index.
 func PublishSandboxImage(
 	ctx context.Context,
 	store storage.Store,

@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/image/conchbuild"
+	"github.com/openeuler/Conch/internal/image/conchbuild/erofs"
 	"github.com/openeuler/Conch/internal/image/conchbuild/kernel"
+	"github.com/openeuler/Conch/internal/image/conchbuild/ocipublisher"
+	"github.com/openeuler/Conch/internal/image/conchbuild/rootfs"
 	"github.com/sirupsen/logrus"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
@@ -36,9 +39,11 @@ type BuildResult struct {
 	FinalImageID       string
 	RootfsImageRef     string
 	VMImageRef         string
+	SandboxImageRef    string
 	PmemRootfsImageRef string
 	BootIndexTag       string
 	UsedKernel         bool
+	UsedIndex          bool
 	UsedSnap           bool
 }
 
@@ -77,7 +82,7 @@ type SnapResult struct {
 	PmemRootfsRef   string
 }
 
-// BuildWithConchExtensions is the main entry for `conch build`: preprocess, buildah bud, optional KERNEL/SNAP.
+// BuildWithConchExtensions is the main entry for `conch build`: preprocess, buildah bud, optional Conch image assembly.
 func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResult, error) {
 	out, errOut := req.Stdout, req.Stderr
 	if out == nil {
@@ -119,14 +124,17 @@ func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResul
 	}
 	if pre.Plan.NeedSnap {
 		logrus.Infof("[conch build] SNAP detected: snapshot flow enabled")
+	} else if pre.Plan.NeedIndex {
+		logrus.Infof("[conch build] INDEX detected: sandbox-image flow enabled")
 	} else {
-		logrus.Infof("[conch build] SNAP not detected: rootfs-only build")
+		logrus.Infof("[conch build] INDEX/SNAP not detected: rootfs-only build")
 	}
 
 	patched := patchDockerfileFlag(forward, pre.TempDockerfile)
 	requestedTag := firstImageTag(patched)
 	rootfsRef := requestedTag
 	bootIndexTag := ""
+	sandboxImageTag := ""
 	if pre.Plan.NeedSnap {
 		bootIndexTag = requestedTag
 		if bootIndexTag == "" {
@@ -135,6 +143,14 @@ func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResul
 		rootfsRef = fmt.Sprintf("localhost/conch-rootfs:%d", time.Now().UnixNano())
 		patched = replaceImageTag(patched, rootfsRef)
 		logrus.Infof("[conch build] using temporary rootfs tag %s for SNAP flow", rootfsRef)
+	} else if pre.Plan.NeedIndex {
+		sandboxImageTag = requestedTag
+		if sandboxImageTag == "" {
+			sandboxImageTag = "localhost/conch/sandbox-image:latest"
+		}
+		rootfsRef = fmt.Sprintf("localhost/conch-rootfs:%d", time.Now().UnixNano())
+		patched = replaceImageTag(patched, rootfsRef)
+		logrus.Infof("[conch build] using temporary rootfs tag %s for INDEX flow", rootfsRef)
 	}
 
 	iidFile, err := os.CreateTemp("", "conch-iid-*")
@@ -216,6 +232,25 @@ func BuildWithConchExtensions(ctx context.Context, req BuildRequest) (BuildResul
 		result.BootIndexTag = sres.BootIndexTag
 		logrus.Infof("[conch build] boot index digest: %s", result.FinalImageID)
 	}
+	if pre.Plan.NeedIndex {
+		if pre.Plan.KernelFile == "" || pre.Plan.InitrdFile == "" {
+			return BuildResult{}, fmt.Errorf("E_INDEX_DEPENDS_KERNEL: INDEX requires KERNEL paths")
+		}
+		pmemRootfsRef, err := buildPmemRootfsForIndex(ctx, store, imageID, rootfsRef, sysCtx)
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("E_INDEX_ROOTFS_BUILD: %w", err)
+		}
+		result.PmemRootfsImageRef = pmemRootfsRef
+
+		indexDigest, err := ocipublisher.PublishSandboxImage(ctx, store, pmemRootfsRef, vmTag, sandboxImageTag)
+		if err != nil {
+			return BuildResult{}, fmt.Errorf("E_INDEX_PUBLISH: %w", err)
+		}
+		result.UsedIndex = true
+		result.FinalImageID = indexDigest.String()
+		result.SandboxImageRef = sandboxImageTag
+		logrus.Infof("[conch build] sandbox image built: tag=%s digest=%s", sandboxImageTag, result.FinalImageID)
+	}
 	logrus.Infof("[conch build] final image id: %s", result.FinalImageID)
 	printBuildResultSummary(out, result)
 	return result, nil
@@ -248,10 +283,47 @@ func printBuildResultSummary(out io.Writer, result BuildResult) {
 		return
 	}
 
+	if result.UsedIndex {
+		fmt.Fprintln(out, "Build outputs:")
+		if result.RootfsImageRef != "" {
+			printLine("RootFS build image", result.RootfsImageRef)
+		}
+		if result.PmemRootfsImageRef != "" {
+			printLine("PMEM RootFS image", result.PmemRootfsImageRef)
+		}
+		if result.VMImageRef != "" {
+			printLine("Kernel image", result.VMImageRef)
+		}
+		if result.SandboxImageRef != "" {
+			printLine("Sandbox image", result.SandboxImageRef)
+			printLine("Push command", fmt.Sprintf("buildah manifest push --all %s docker://<registry>/<repository>:<tag>", result.SandboxImageRef))
+		}
+		return
+	}
+
 	if result.RootfsImageRef != "" {
 		fmt.Fprintln(out, "Build outputs:")
 		printLine("RootFS image", result.RootfsImageRef)
 	}
+}
+
+func buildPmemRootfsForIndex(ctx context.Context, store storage.Store, imageID, imageRef string, sysCtx *types.SystemContext) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "conch-index-erofs-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp erofs output dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	erofsPath, err := erofs.ConvertImageToEROFSDirect(ctx, store, imageID, imageRef, sysCtx, tmpDir)
+	if err != nil {
+		return "", fmt.Errorf("convert rootfs image to EROFS: %w", err)
+	}
+
+	rootfsTag := fmt.Sprintf("localhost/conch/pmem-rootfs:index-%d", time.Now().UnixNano())
+	if _, err := rootfs.BuildRootfsImage(ctx, store, []string{erofsPath}, rootfsTag); err != nil {
+		return "", fmt.Errorf("build pmem-rootfs image: %w", err)
+	}
+	return rootfsTag, nil
 }
 
 // BuildOCIImage runs `buildah bud` (CONCH_BUILDAH_BIN, default `buildah`) with given args.

@@ -137,6 +137,7 @@ func TestPrintBuildHelpIncludesUsageAndEnv(t *testing.T) {
 		"conch build [buildah-bud-args...]",
 		"Forward arguments to `buildah bud`",
 		"--config string",
+		"`KERNEL`, `INDEX`, and `SNAP`",
 		"CONCH_BUILDAH_BIN",
 	} {
 		if !strings.Contains(got, want) {

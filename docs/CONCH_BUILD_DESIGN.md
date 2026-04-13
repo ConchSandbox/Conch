@@ -106,6 +106,7 @@ Conch image 模块覆盖从构建到运行前准备的完整链路：
 
 2. `KERNEL + INDEX`
 - 生成 `sandbox-image`
+- rootfs 先使用临时 tag 构建，再与 kernel 镜像组装为 `-t` 指定的最终镜像
 
 3. `KERNEL + SNAP`
 - 生成 `sandbox-snapshot`
@@ -187,10 +188,10 @@ kernel 镜像由 kernel 与 initrd 组成，是启动侧输入。
 
 在 `conch build` 与 `conch pack` 中，kernel 镜像均作为标准输入使用。
 
-默认 kernel 镜像采用 multi-arch tag 发布。构建时可通过 `scripts/build-kernel-image.sh` 从不同架构的 kernel 目录生成统一镜像：
+默认 kernel 镜像采用 multi-arch tag 发布。构建时可通过 `internal/image/conchbuild/kernel/build-kernel-image.sh` 从不同架构的 kernel 目录生成统一镜像：
 
 ```bash
-bash scripts/build-kernel-image.sh \
+bash internal/image/conchbuild/kernel/build-kernel-image.sh \
   --x86-dir ./kernel-x86 \
   --arm-dir ./kernel-arm \
   --repo hub.oepkgs.net/conch/kernel \
@@ -414,6 +415,8 @@ sandbox-image-<source-name>:<source-tag>
 
 2. `KERNEL + INDEX`
 - 生成 `sandbox-image`
+- rootfs 会先转换为 PMEM/EROFS rootfs 镜像，再与 kernel 镜像组装为 Conch index
+- 适用于只需要生成可分发 Conch 镜像、不需要立即创建热启动快照的场景
 
 3. `KERNEL + SNAP`
 - 生成 `sandbox-snapshot`

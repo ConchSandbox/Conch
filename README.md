@@ -52,13 +52,23 @@ pip install -e ./sdk
 
 ### conch build 示例
 
-`conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `SNAP` 扩展指令。
+`conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `INDEX` / `SNAP` 扩展指令。
 
 最小 rootfs Dockerfile 示例：
 
 ```dockerfile
 FROM scratch
 COPY hello.txt /hello.txt
+```
+
+生成 `sandbox-image` 时，在 Dockerfile 中补充 `KERNEL` 与 `INDEX`：
+
+```dockerfile
+FROM scratch
+COPY hello.txt /hello.txt
+
+KERNEL bzImage conch.initrd
+INDEX
 ```
 
 启用 SNAP 流程时，在 Dockerfile 中补充 `KERNEL` 与 `SNAP`：
@@ -79,10 +89,15 @@ SNAP
 # 普通构建（仅 rootfs）
 ./bin/conch build -f Dockerfile -t localhost/demo:latest .
 
+# 生成 sandbox-image（需 Dockerfile 中包含 KERNEL + INDEX）
+./bin/conch build -f Dockerfile.index -t localhost/demo-sandbox:latest .
+
 # 启用 SNAP 流程（需 Dockerfile 中包含 KERNEL + SNAP）
 CONCH_EROFS_OUTPUT_DIR=/tmp/conch-erofs \
 ./bin/conch build --config config/config.yaml -f Dockerfile.snap -t localhost/demo-snap:latest .
 ```
+
+启用 `INDEX` 后，命令会先将 rootfs 转换为 PMEM/EROFS rootfs 镜像，再与 kernel 镜像组装为 `sandbox-image`，最终镜像名使用 `-t` 指定的 tag。
 
 启用 `SNAP` 后，命令会额外打印构建出的镜像名与推送示例，例如：
 

@@ -8,10 +8,11 @@ import (
 	"strings"
 )
 
-// ExtensionPlan captures KERNEL/SNAP extracted from a Dockerfile before vanilla buildah runs.
+// ExtensionPlan captures Conch Dockerfile extensions before vanilla buildah runs.
 type ExtensionPlan struct {
 	KernelFile string
 	InitrdFile string
+	NeedIndex  bool
 	NeedSnap   bool
 }
 
@@ -21,7 +22,7 @@ type PreprocessResult struct {
 	Plan           ExtensionPlan
 }
 
-// PreprocessDockerfile reads the Dockerfile, validates KERNEL/SNAP usage, optionally checks
+// PreprocessDockerfile reads the Dockerfile, validates Conch extension usage, optionally checks
 // KERNEL paths under contextDir, and writes a temporary Dockerfile without extension lines.
 func PreprocessDockerfile(dockerfilePath, contextDir string) (PreprocessResult, error) {
 	var res PreprocessResult
@@ -43,7 +44,7 @@ func PreprocessDockerfile(dockerfilePath, contextDir string) (PreprocessResult, 
 	var out strings.Builder
 	sc := bufio.NewScanner(f)
 	lineNo := 0
-	kernelCount, snapCount := 0, 0
+	kernelCount, indexCount, snapCount := 0, 0, 0
 
 	for sc.Scan() {
 		lineNo++
@@ -68,6 +69,14 @@ func PreprocessDockerfile(dockerfilePath, contextDir string) (PreprocessResult, 
 			res.Plan.NeedSnap = true
 			continue
 		}
+		if len(fields) == 1 && strings.EqualFold(fields[0], "INDEX") {
+			if kernelCount == 0 {
+				return res, fmt.Errorf("dockerfile line %d: INDEX requires a preceding KERNEL <kernel> <initrd>", lineNo)
+			}
+			indexCount++
+			res.Plan.NeedIndex = true
+			continue
+		}
 
 		out.WriteString(line)
 		out.WriteString("\n")
@@ -79,8 +88,17 @@ func PreprocessDockerfile(dockerfilePath, contextDir string) (PreprocessResult, 
 	if snapCount > 1 {
 		return res, fmt.Errorf("dockerfile: at most one SNAP instruction is allowed")
 	}
+	if indexCount > 1 {
+		return res, fmt.Errorf("dockerfile: at most one INDEX instruction is allowed")
+	}
 	if res.Plan.NeedSnap && kernelCount == 0 {
 		return res, fmt.Errorf("dockerfile: SNAP requires a preceding KERNEL <kernel> <initrd>")
+	}
+	if res.Plan.NeedIndex && kernelCount == 0 {
+		return res, fmt.Errorf("dockerfile: INDEX requires a preceding KERNEL <kernel> <initrd>")
+	}
+	if res.Plan.NeedIndex && res.Plan.NeedSnap {
+		return res, fmt.Errorf("dockerfile: INDEX and SNAP cannot be used together")
 	}
 	if kernelCount > 1 {
 		return res, fmt.Errorf("dockerfile: at most one KERNEL instruction is allowed in this version")
