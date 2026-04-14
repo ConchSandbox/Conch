@@ -19,10 +19,10 @@ const (
 	SnapshotLabelMemSnapshot = "conch/snapshotter/mem-snapshot"
 	SnapshotLabelVMSnapshot  = "conch/snapshotter/vm-snapshot"
 
-	KindRootfs         = "rootfs"
-	KindVirtualMachine = "virtual-machine"
-	KindSnapshot       = "snapshot"
-	KindUnknown        = "unknown"
+	KindRootfs      = "rootfs"
+	KindSandbox     = "sandbox"
+	KindMemSnapshot = "mem-snapshot"
+	KindUnknown     = "unknown"
 )
 
 // UnpackAllSubImages parses OCI Image Index, unpacks all child manifests,
@@ -59,6 +59,10 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 		ulog.Info("Generated SnapshotID",
 			ulog.F("kind", kind),
 			ulog.F("snapshot_id", snapshotID))
+	}
+
+	if err := validateRequiredKinds(snapshotMap); err != nil {
+		return nil, err
 	}
 
 	if err = linkSnapshotLabels(ctx, snapshotter, snapshotMap); err != nil {
@@ -107,6 +111,17 @@ func getKind(manifestDesc ocispec.Descriptor) string {
 	return KindUnknown
 }
 
+func validateRequiredKinds(snapshotMap map[string]string) error {
+	if snapshotMap[KindRootfs] == "" {
+		return fmt.Errorf("boot index missing required kind %q", KindRootfs)
+	}
+	if snapshotMap[KindSandbox] == "" {
+		return fmt.Errorf("boot index missing required kind %q", KindSandbox)
+	}
+	// KindMemSnapshot is optional for normal boot images and required only for snapshot images.
+	return nil
+}
+
 func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshotter snapshots.Snapshotter, manifestDesc ocispec.Descriptor, kind string, createdSnapshotIDs *[]string) (string, error) {
 	subImg := containerd.NewImage(client, images.Image{
 		Name:   fmt.Sprintf("temp-unpack-%s", manifestDesc.Digest.Encoded()[:12]),
@@ -133,16 +148,16 @@ func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshott
 
 func linkSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotMap map[string]string) error {
 	rootfsSID := snapshotMap[KindRootfs]
-	vmSID := snapshotMap[KindVirtualMachine]
-	memSID := snapshotMap[KindSnapshot]
-	if rootfsSID == "" || (vmSID == "" && memSID == "") {
-		return nil
+	sandboxSID := snapshotMap[KindSandbox]
+	memSID := snapshotMap[KindMemSnapshot]
+	if rootfsSID == "" || sandboxSID == "" {
+		return fmt.Errorf("cannot link snapshot labels: need rootfs and sandbox kinds")
 	}
 
 	labels := make(map[string]string)
 	fieldpaths := []string{}
-	if vmSID != "" {
-		labels[SnapshotLabelVMSnapshot] = vmSID
+	if sandboxSID != "" {
+		labels[SnapshotLabelVMSnapshot] = sandboxSID
 		fieldpaths = append(fieldpaths, "labels."+SnapshotLabelVMSnapshot)
 	}
 	if memSID != "" {

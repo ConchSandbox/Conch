@@ -176,10 +176,10 @@ run_build() {
 
 run_unpack() {
     echo "--- Unpacking $MAIN_IMG ---"
-    if [ -x "./bin/conch-unpack" ]; then
-        ./bin/conch-unpack "$MAIN_IMG"
+    if [ -x "./bin/conch" ]; then
+        ./bin/conch unpack "$MAIN_IMG"
     else
-        echo "Error: ./bin/conch-unpack executable not found."
+        echo "Error: ./bin/conch executable not found."
         return 1
     fi
 }

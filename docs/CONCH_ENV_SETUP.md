@@ -40,7 +40,7 @@
 
 #### 2. pull 命令
 功能：拉取功能镜像并执行解包。
-逻辑：拉取 `main_image` -> 调用 `conch-unpack`。
+逻辑：拉取 `main_image` -> 调用 `conch unpack`。
 
 使用示例：
 ```bash
@@ -156,11 +156,11 @@
   - x86环境 containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
   - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
 
-问题 2：执行 process 命令提示「./bin/conch-unpack 不存在」
+问题 2：执行 pull/process 命令提示「./bin/conch 不存在」
 
-报错示例：Error: ./bin/conch-unpack executable not found.
+报错示例：Error: ./bin/conch executable not found.
 
-解决方案：先执行 `build` 命令完成容器化编译，生成 conch-unpack 工具后再执行 process 命令，示例：
+解决方案：先执行 `build` 命令完成容器化编译，生成 `conch` 工具后再执行 pull/process 命令，示例：
 ```
 ./scripts/conch-env-setup.sh build
 ./scripts/conch-env-setup.sh process

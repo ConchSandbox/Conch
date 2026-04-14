@@ -20,7 +20,7 @@ CONCH_PY_PROTO_DIR := ./api/py_proto
 CLEANSCRIPT := ./scripts/cleancode.sh
 
 # get all cmd directory subdirectories as binary names
-CMDS := $(shell find cmd -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+CMDS := $(shell find cmd -mindepth 1 -maxdepth 1 -type d ! -name conch-unpack -exec basename {} \;)
 
 export GO111MODULE=on
 
@@ -134,4 +134,3 @@ cleancode: ## Clean code (remove trailing spaces/CR)
 	fi
 	@$(CLEANSCRIPT) > /dev/null 2>&1
 	@echo "code cleaning completed"
-

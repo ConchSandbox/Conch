@@ -50,6 +50,68 @@ pip install -e ./sdk
 ./bin/conchd
 ```
 
+### conch build 示例
+
+`conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `SNAP` 扩展指令。
+
+最小 rootfs Dockerfile 示例：
+
+```dockerfile
+FROM scratch
+COPY hello.txt /hello.txt
+```
+
+启用 SNAP 流程时，在 Dockerfile 中补充 `KERNEL` 与 `SNAP`：
+
+```dockerfile
+FROM scratch
+COPY hello.txt /hello.txt
+
+KERNEL bzImage conch.initrd
+SNAP
+```
+
+```bash
+# 查看帮助
+./bin/conch --help
+./bin/conch build --help
+
+# 普通构建（仅 rootfs）
+./bin/conch build -f Dockerfile -t localhost/demo:latest .
+
+# 启用 SNAP 流程（需 Dockerfile 中包含 KERNEL + SNAP）
+CONCH_EROFS_OUTPUT_DIR=/tmp/conch-erofs \
+./bin/conch build --config config/config.yaml -f Dockerfile.snap -t localhost/demo-snap:latest .
+```
+
+启用 `SNAP` 后，命令会额外打印构建出的镜像名与推送示例，例如：
+
+```text
+Build outputs:
+  RootFS build image: localhost/demo-snap:latest
+  PMEM RootFS image:  localhost/conch/pmem-rootfs:latest
+  Kernel image:       localhost/conch/kernel:latest
+  Sandbox snapshot:   localhost/conch/sandbox-snapshot:latest
+  Push command:       buildah manifest push --all localhost/conch/sandbox-snapshot:latest docker://<registry>/<repository>:<tag>
+```
+
+### conch unpack 示例
+
+`conch unpack` 用于替代原来的 `conch-unpack`，把 boot OCI index 解包到 containerd 并回写关联的 snapshot label。
+
+支持通过 `-n`/`--namespace` 指定 containerd namespace，默认使用 `default`。
+
+```bash
+# 查看帮助
+./bin/conch unpack --help
+
+# 解包 boot OCI index（默认 namespace: default）
+./bin/conch unpack hub.oepkgs.net/conch/conch-index:v0.1
+
+# 解包到指定 namespace
+./bin/conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1
+```
+
 ### Python SDK 示例
 ```python
 from conch import Sandbox

@@ -219,7 +219,6 @@ func parseLogLevel(level string) (ulog.LogLevel, error) {
 func FindConfigFile() string {
 	// Check common config file locations
 	locations := []string{
-		"/etc/conchd/config.yaml",
 		"/etc/conch/config.yaml",
 		"config/config.yaml",
 	}

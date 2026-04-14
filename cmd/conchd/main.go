@@ -16,8 +16,16 @@ func main() {
 	configPath := flag.String("config", config.FindConfigFile(), "Path to config file")
 	flag.Parse()
 
+	cfgPath := *configPath
+	if cfgPath == "" {
+		cfgPath = config.FindConfigFile()
+	}
+	if cfgPath != "" {
+		fmt.Printf("Using config: %s\n", cfgPath)
+	}
+
 	// Load configuration
-	cfg, err := config.LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -41,7 +49,11 @@ func main() {
 	}
 	defer util.RemovePIDFile(cfg.Server.PIDFile)
 
+	logger.Info("Parsed cli flags",
+		ulog.F("configPath", *configPath),
+	)
 	logger.Info("Loaded configuration",
+		ulog.F("config.path", cfgPath),
 		ulog.F("app", cfg.App.Name),
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
