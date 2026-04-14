@@ -7,10 +7,10 @@
 本文档覆盖以下命令与流程：
 
 - `conch build`
-- `conch unpack`
+- `conch push`
 - `conch pull`
 - `conch pack`
-- `conch push`
+- `conch unpack`
 
 本文档同时覆盖以下镜像与产物类型：
 
@@ -42,16 +42,9 @@
 
 ### 2.2 kernel 镜像
 
-kernel 镜像用于承载 kernel 与 initrd，是启动侧镜像的统一表达方式。
+kernel 镜像用于承载 kernel 与 initrd，是 sandbox 启动链路中的标准输入。
 
-建议命名规则：
-
-- x86:
-  - `conch/kernel:6.6.0`
-- arm:
-  - `conch/kernel:6.6.0-aarch`
-
-kernel 镜像包含 kernel 与 initrd，是 sandbox 启动链路中的标准输入。
+默认 kernel 镜像采用 multi-arch tag 发布，例如 `hub.oepkgs.net/conch/kernel:6.6.0`。同一个 tag 下可同时包含 `linux/amd64` 与 `linux/arm64`，由镜像拉取流程选择匹配当前机器架构的镜像。
 
 ### 2.3 sandbox
 
@@ -111,28 +104,13 @@ Conch image 模块覆盖从构建到运行前准备的完整链路：
 3. `KERNEL + SNAP`
 - 生成 `sandbox-snapshot`
 
-### 4.2 `conch pack`
-
-`conch pack` 面向标准 OCI 镜像输入，用于将标准 OCI rootfs 加工为 Conch 原生的 `sandbox-image`。
-
-建议形式：
-
-```bash
-conch pack <oci-image> --kernel <bzImage> <initrd> -t <sandbox-image-name>
-```
-
-也可扩展：
-
-```bash
-conch pack <oci-image> --kernel-image <kernel-image> -t <sandbox-image-name>
-```
-
-### 4.3 `conch push`
+### 4.2 `conch push`
 
 `conch push` 提供统一的推送入口，用于发布 Conch 原生产物。
 
 处理对象包括：
 
+- `kernel image`
 - `sandbox-image`
 - `sandbox-snapshot`
 
@@ -142,9 +120,9 @@ conch pack <oci-image> --kernel-image <kernel-image> -t <sandbox-image-name>
 conch push <local-conch-image> <registry>/<repo>:<tag>
 ```
 
-`conch push` 底层使用 `buildah manifest push --all`，目标镜像会自动使用 `docker://` transport。认证建议通过 `buildah login <registry>` 预先完成。
+`conch push` 负责将本地 Conch 镜像发布到目标 registry。认证建议通过本地 registry 登录状态预先完成。
 
-### 4.4 `conch pull`
+### 4.3 `conch pull`
 
 `conch pull` 提供统一的拉取入口。
 
@@ -153,13 +131,23 @@ conch push <local-conch-image> <registry>/<repo>:<tag>
 1. Conch 原生镜像
 2. 标准 OCI 镜像
 
-### 4.5 `conch unpack`
+### 4.4 `conch unpack`
 
 `conch unpack` 作为底层解包与恢复能力保留，用于：
 
 - 本地已有镜像时的单独解包
 - 调试与排障
 - 作为 `conch pull` 的底层能力复用
+
+### 4.5 `conch pack`
+
+`conch pack` 面向本地已有输入，用于将标准 OCI rootfs 或已有 rootfs/kernel 产物加工为 Conch 原生的 `sandbox-image`。
+
+建议形式：
+
+```bash
+conch pack <oci-image> --kernel-image <kernel-image> -t <sandbox-image-name>
+```
 
 ## 5. 构建侧设计
 
@@ -188,7 +176,7 @@ rootfs 镜像由 EROFS rootfs 构建而来，是 sandbox 侧镜像组装时的�
 
 kernel 镜像由 kernel 与 initrd 组成，是启动侧输入。
 
-在 `conch build` 与 `conch pack` 中，kernel 镜像均作为标准输入使用。
+在 `conch build`、`conch pull` 的标准 OCI 镜像转换路径与 `conch pack` 中，kernel 镜像均作为标准输入使用。
 
 默认 kernel 镜像采用 multi-arch tag 发布。构建时可通过 `internal/image/conchbuild/kernel/build-kernel-image.sh` 从不同架构的 kernel 目录生成统一镜像：
 
@@ -197,8 +185,7 @@ bash internal/image/conchbuild/kernel/build-kernel-image.sh \
   --x86-dir ./kernel-x86 \
   --arm-dir ./kernel-arm \
   --repo hub.oepkgs.net/conch/kernel \
-  --version 6.6.0 \
-  --push
+  --version 6.6.0
 ```
 
 其中 `--x86-dir` 与 `--arm-dir` 指向的目录均需包含：
@@ -206,13 +193,25 @@ bash internal/image/conchbuild/kernel/build-kernel-image.sh \
 - `bzImage`
 - `conch.initrd`
 
-脚本会生成并推送统一 tag：
+脚本会生成本地统一 tag：
 
 ```text
 hub.oepkgs.net/conch/kernel:6.6.0
 ```
 
-该 tag 可作为 `image.default_kernel_image` 的默认值供 `conch pull` 转换标准 OCI 镜像时使用。
+发布 kernel 镜像时使用统一的 `conch push` 入口：
+
+```bash
+conch push hub.oepkgs.net/conch/kernel:6.6.0 hub.oepkgs.net/conch/kernel:6.6.0
+```
+
+也可以在构建时使用本地暂存名称，再推送到目标仓库：
+
+```bash
+conch push localhost/conch/kernel:6.6.0 hub.oepkgs.net/conch/kernel:6.6.0
+```
+
+该 tag 可作为 `image.default_kernel_image` 的默认值供 `conch pull` 转换标准 OCI 镜像时使用。拉取默认 kernel 镜像时，`conch pull` 会按当前机器平台选择对应的 manifest。
 
 ### 5.4 当前构建过程中的主要产物
 
@@ -246,6 +245,7 @@ hub.oepkgs.net/conch/kernel:6.6.0
 
 其职责是为以下镜像提供统一分发入口：
 
+- `kernel image`
 - `sandbox-image`
 - `sandbox-snapshot`
 
@@ -288,7 +288,7 @@ hub.oepkgs.net/conch/kernel:6.6.0
 
 - `image.default_kernel_image` 用于指定标准 OCI 镜像转换时默认使用的 kernel 镜像，默认值为 `hub.oepkgs.net/conch/kernel:6.6.0`
 
-默认 kernel 镜像应发布为 multi-arch tag，例如同一个 `hub.oepkgs.net/conch/kernel:6.6.0` 下同时包含 `linux/amd64` 与 `linux/arm64`，由镜像拉取流程选择匹配当前机器架构的镜像。
+默认 kernel 镜像应发布为 multi-arch tag，例如同一个 `hub.oepkgs.net/conch/kernel:6.6.0` 下同时包含 `linux/amd64` 与 `linux/arm64`。`conch pull` 拉取默认 kernel 镜像时会按当前机器平台选择对应的 manifest。
 
 当前实现中，如标准 OCI 镜像或默认 kernel 镜像拉取需要认证，`conch pull` 通过命令行参数传入认证信息；`plain-http` 也通过命令行参数显式指定，而不固化在配置模型中。
 
@@ -385,7 +385,7 @@ sandbox-image-<source-name>:<source-tag>
 
 `conch pack` 的内部流程包括：
 
-1. 拉取标准 OCI 镜像
+1. 读取本地已有 OCI 镜像或 rootfs 输入
 2. 读取 OCI rootfs
 3. 转换为 EROFS rootfs，并执行 2MB 对齐
 4. 构建 rootfs 镜像

@@ -50,132 +50,23 @@ pip install -e ./sdk
 ./bin/conchd
 ```
 
-### conch build 示例
+### 镜像管理
 
-`conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `INDEX` / `SNAP` 扩展指令。
-
-最小 rootfs Dockerfile 示例：
-
-```dockerfile
-FROM scratch
-COPY hello.txt /hello.txt
-```
-
-生成 `sandbox-image` 时，在 Dockerfile 中补充 `KERNEL` 与 `INDEX`：
-
-```dockerfile
-FROM scratch
-COPY hello.txt /hello.txt
-
-KERNEL bzImage conch.initrd
-INDEX
-```
-
-启用 SNAP 流程时，在 Dockerfile 中补充 `KERNEL` 与 `SNAP`：
-
-```dockerfile
-FROM scratch
-COPY hello.txt /hello.txt
-
-KERNEL bzImage conch.initrd
-SNAP
-```
+Conch 提供统一的镜像管理命令，用于构建、发布、拉取和解包 Conch 镜像：
 
 ```bash
-# 查看帮助
-./bin/conch --help
-./bin/conch build --help
+conch build -f Dockerfile -t localhost/demo-sandbox:latest .
+conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
+conch pull hub.oepkgs.net/conch/demo-sandbox:latest
+conch pull docker.io/library/nginx:latest
 
-# 普通构建（仅 rootfs）
-./bin/conch build -f Dockerfile -t localhost/demo:latest .
-
-# 生成 sandbox-image（需 Dockerfile 中包含 KERNEL + INDEX）
-./bin/conch build -f Dockerfile.index -t localhost/demo-sandbox:latest .
-
-# 启用 SNAP 流程（需 Dockerfile 中包含 KERNEL + SNAP）
-CONCH_EROFS_OUTPUT_DIR=/tmp/conch-erofs \
-./bin/conch build --config config/config.yaml -f Dockerfile.snap -t localhost/demo-snap:latest .
+# 本地已有 Conch 镜像时可单独解包
+conch unpack hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-启用 `INDEX` 后，命令会先将 rootfs 转换为 PMEM/EROFS rootfs 镜像，再与 kernel 镜像组装为 `sandbox-image`，最终镜像名使用 `-t` 指定的 tag。
+其中 `conch pull` 会在拉取后自动完成本地 unpack；`conch unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。
 
-启用 `SNAP` 后，命令会额外打印构建出的镜像名与推送示例，例如：
-
-```text
-Build outputs:
-  RootFS build image: localhost/demo-snap:latest
-  PMEM RootFS image:  localhost/conch/pmem-rootfs:latest
-  Kernel image:       localhost/conch/kernel:latest
-  Sandbox snapshot:   localhost/conch/sandbox-snapshot:latest
-  Push command:       conch push localhost/conch/sandbox-snapshot:latest <registry>/<repository>:<tag>
-```
-
-### conch push 示例
-
-`conch push` 用于发布 `conch build` 生成的 `sandbox-image` 或 `sandbox-snapshot`，底层等价于 `buildah manifest push --all`。
-
-认证建议通过 `buildah login <registry>` 提前完成。
-
-```bash
-# 查看帮助
-./bin/conch push --help
-
-# 推送到远端 registry
-./bin/conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
-
-# 如目标 registry 需要 plain HTTP 或跳过 TLS 校验
-./bin/conch push --plain-http localhost/demo-sandbox:latest conch.example.com/conch/demo-sandbox:latest
-```
-
-### conch unpack 示例
-
-`conch unpack` 用于替代原来的 `conch-unpack`，把 boot OCI index 解包到 containerd 并回写关联的 snapshot label。
-
-支持通过 `-n`/`--namespace` 指定 containerd namespace，默认使用 `default`。
-
-```bash
-# 查看帮助
-./bin/conch unpack --help
-
-# 解包 boot OCI index（默认 namespace: default）
-./bin/conch unpack hub.oepkgs.net/conch/conch-index:v0.1
-
-# 解包到指定 namespace
-./bin/conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1
-```
-
-### conch pull 示例
-
-`conch pull` 用于拉取 Conch 镜像，并在本地自动完成 unpack。
-
-对于 Conch 原生镜像，`conch pull` 会直接拉取并恢复本地 snapshot 关系：
-
-```bash
-# 查看帮助
-./bin/conch pull --help
-
-# 拉取并解包 sandbox-snapshot
-./bin/conch pull hub.oepkgs.net/conch/sandbox-snapshot:latest
-```
-
-对于标准 OCI 镜像，`conch pull` 会将其转换为 Conch 可运行输入后，再在本地完成 unpack。
-
-```bash
-# 拉取普通 OCI 镜像并自动转换为 Conch 可运行镜像
-./bin/conch pull docker.io/library/nginx:latest
-
-# 如源镜像所在 registry 需要，可显式指定源镜像的拉取参数
-./bin/conch pull --plain-http --user <username:password> docker.io/library/nginx:latest
-
-# 如默认 kernel 镜像使用独立 registry，也可单独指定 kernel 镜像的拉取参数
-./bin/conch pull --kernel-plain-http --kernel-user <username:password> docker.io/library/nginx:latest
-```
-
-`conch pull` 与 `conch unpack` 均支持通过 config 读取：
-- `containerd.socket`
-- `containerd.default_namespace`
-
-其中，标准 OCI 镜像转换流程还会使用默认的 kernel 镜像配置。默认配置使用 `hub.oepkgs.net/conch/kernel:6.6.0`，该 tag 应发布为 multi-arch 镜像，由镜像仓库和本地拉取工具自动选择对应架构。
+详细用法见 [Conch Image Guide](docs/guide/image.md)。
 
 ### Python SDK 示例
 ```python

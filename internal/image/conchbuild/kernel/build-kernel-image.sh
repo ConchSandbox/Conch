@@ -10,9 +10,6 @@ BUILD_DIR="$(pwd)"
 KERNEL_FILE=""
 INITRD_FILE=""
 ARCH="$(uname -m)"
-PUSH="false"
-PLAIN_HTTP="false"
-CREDS=""
 DRY_RUN="false"
 
 usage() {
@@ -24,7 +21,7 @@ Description:
   Build Conch kernel images from bzImage and conch.initrd.
 
   The preferred release flow is to build both x86_64 and aarch64 images, then
-  publish them under one multi-arch tag such as:
+  package them under one multi-arch tag such as:
 
     hub.oepkgs.net/conch/kernel:6.6.0
 
@@ -43,9 +40,6 @@ Options:
                          default: localhost/conch/kernel
   --version VERSION      Kernel version used in the image tag
                          default: latest
-  --push                 Push the final image / manifest to docker://<repo>:<version>
-  --plain-http           Push with --tls-verify=false
-  --user USER:PASS       Registry credentials for push
   --dry-run              Print actions without executing buildah
   -h, --help             Show this help message
 
@@ -53,13 +47,12 @@ Examples:
   # Build a single-arch local kernel image.
   bash internal/image/conchbuild/kernel/build-kernel-image.sh --build-dir ./kernel-x86 --arch x86_64 --repo hub.oepkgs.net/conch/kernel --version 6.6.0
 
-  # Build and push a multi-arch kernel image from two directories.
+  # Build a multi-arch local kernel image from two directories.
   bash internal/image/conchbuild/kernel/build-kernel-image.sh \
     --x86-dir ./kernel-x86 \
     --arm-dir ./kernel-arm \
     --repo hub.oepkgs.net/conch/kernel \
-    --version 6.6.0 \
-    --push
+    --version 6.6.0
 EOF
 }
 
@@ -115,16 +108,6 @@ local_arch_tag() {
     printf '%s:%s-%s\n' "${IMAGE_REPO}" "${VERSION}" "${arch}"
 }
 
-push_args() {
-    if [[ "${PLAIN_HTTP}" == "true" ]]; then
-        printf '%s\n' "--tls-verify=false"
-    fi
-    if [[ -n "${CREDS}" ]]; then
-        printf '%s\n' "--creds"
-        printf '%s\n' "${CREDS}"
-    fi
-}
-
 build_kernel_image() {
     local arch="$1"
     local input_dir="$2"
@@ -162,21 +145,10 @@ build_kernel_image() {
     "${BUILDAH_CMD}" rm "${cid}" >/dev/null 2>&1 || true
 }
 
-push_image() {
-    local image_tag="$1"
-    local args=()
-    while IFS= read -r arg; do
-        args+=("${arg}")
-    done < <(push_args)
-
-    run_cmd "${BUILDAH_CMD}" push "${args[@]}" "${image_tag}" "docker://${image_tag}"
-}
-
 create_multiarch_manifest() {
     local manifest_tag="$1"
     local x86_tag="$2"
     local arm_tag="$3"
-    local args=()
 
     log "Creating multi-arch manifest: ${manifest_tag}"
     if [[ "${DRY_RUN}" == "true" ]]; then
@@ -187,17 +159,7 @@ create_multiarch_manifest() {
     run_cmd "${BUILDAH_CMD}" manifest create "${manifest_tag}"
     run_cmd "${BUILDAH_CMD}" manifest add --arch amd64 --os linux "${manifest_tag}" "${x86_tag}"
     run_cmd "${BUILDAH_CMD}" manifest add --arch arm64 --os linux "${manifest_tag}" "${arm_tag}"
-
-    if [[ "${PUSH}" == "true" ]]; then
-        while IFS= read -r arg; do
-            args+=("${arg}")
-        done < <(push_args)
-        run_cmd "${BUILDAH_CMD}" manifest push --all "${args[@]}" "${manifest_tag}" "docker://${manifest_tag}"
-        log "Pushed multi-arch kernel image: ${manifest_tag}"
-    else
-        log "Multi-arch kernel image built locally: ${manifest_tag}"
-        log "Push example: buildah manifest push --all ${manifest_tag} docker://${manifest_tag}"
-    fi
+    log "Multi-arch kernel image built locally: ${manifest_tag}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -232,18 +194,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --version)
             VERSION="$2"
-            shift 2
-            ;;
-        --push)
-            PUSH="true"
-            shift
-            ;;
-        --plain-http)
-            PLAIN_HTTP="true"
-            shift
-            ;;
-        --user)
-            CREDS="$2"
             shift 2
             ;;
         --dry-run)
@@ -289,9 +239,4 @@ fi
 IMAGE_TAG="$(local_arch_tag "${ARCH}")"
 build_kernel_image "${ARCH}" "${BUILD_DIR}" "${IMAGE_TAG}"
 
-if [[ "${PUSH}" == "true" ]]; then
-    push_image "${IMAGE_TAG}"
-else
-    log "Kernel image built successfully: ${IMAGE_TAG}"
-    log "Push example: buildah push ${IMAGE_TAG} docker://${IMAGE_TAG}"
-fi
+log "Kernel image built successfully: ${IMAGE_TAG}"

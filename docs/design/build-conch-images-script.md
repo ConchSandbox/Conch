@@ -1,6 +1,6 @@
 # `build-conch-images.sh` 使用说明
 
-本文档说明 [build-conch-images.sh](/root/Conch/scripts/build-conch-images.sh) 的用途、默认文件位置和常见使用方式。
+本文档说明 [build-conch-images.sh](../../scripts/build-conch-images.sh) 的用途、默认文件位置和常见使用方式。
 
 ## 1. 脚本作用
 
@@ -28,12 +28,12 @@
 
 脚本默认按仓库根目录推导以下路径：
 
-- 仓库根目录：`/root/Conch`
-- Dockerfile：`/root/Conch/Dockerfile`
-- kernel：`/root/Conch/build-artifacts/bzImage`
-- initrd：`/root/Conch/build-artifacts/conch.initrd`
-- rootfs tar：`/root/Conch/build-artifacts/conch-rootfs.tar`
-- erofs 层：`/root/Conch/build-artifacts/rootfs.erofs` 或 `layer*.erofs`
+- 仓库根目录：`<repo>`
+- Dockerfile：`<repo>/Dockerfile`
+- kernel：`<repo>/build-artifacts/bzImage`
+- initrd：`<repo>/build-artifacts/conch.initrd`
+- rootfs tar：`<repo>/build-artifacts/conch-rootfs.tar`
+- erofs 层：`<repo>/build-artifacts/rootfs.erofs` 或 `layer*.erofs`
 
 如果你的文件不在这些位置，可以通过以下参数覆盖：
 
