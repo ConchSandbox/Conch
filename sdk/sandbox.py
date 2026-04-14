@@ -17,6 +17,7 @@ SANDBOX_ID_KEY = "sandbox_id"
 NAMESPACE_KEY = "namespace"
 SNAPSHOT_ID_KEY = "snapshot_id"
 IMAGE_NAME_KEY = "image_name"
+USE_SNAPSHOT_KEY = "use_snapshot"
 VMM_NAME_KEY = "vmm_name"
 VCPU_NUM_KEY = "vcpu_num"
 RAM_MB_KEY = "ram_mb"
@@ -33,6 +34,7 @@ CFG_IMAGE_SECTION = "image"
 CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
 CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
+CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
 SANDBOX_CREATE_PATH = "/api/sandbox/create"
@@ -91,6 +93,7 @@ class Sandbox:
             vcpu_num: Optional[int] = None,
             ram_mb: Optional[int] = None,
             config_path: Optional[str] = None,
+            use_snapshot: Optional[bool] = None,
     ):
         self._config: Dict[str, Any] = load_config(config_path=config_path)
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
@@ -109,6 +112,8 @@ class Sandbox:
 
         config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
         self.snapshot_id = snapshot_id or config_snapshot_id
+        config_use_snapshot = self._config[CFG_IMAGE_SECTION].get(CFG_USE_SNAPSHOT_KEY, False)
+        self.use_snapshot = bool(config_use_snapshot if use_snapshot is None else use_snapshot)
 
         self.ip = None
         self.client = None
@@ -132,6 +137,31 @@ class Sandbox:
         response.raise_for_status()
         return response.json()
 
+    def _use_snapshot_startup(self) -> bool:
+        return bool(self.snapshot_id) or self.use_snapshot
+
+    def _startup_config(self) -> Dict[str, Any]:
+        if self._use_snapshot_startup():
+            return self._config[CFG_SNAPSHOT_SECTION]
+        return self._config[CFG_IMAGE_SECTION]
+
+    def _build_create_payload(self) -> Dict[str, Any]:
+        if not self.snapshot_id and not self.image_name:
+            raise ValueError("image_name is required when snapshot_id is empty")
+
+        config = self._startup_config()
+        use_snapshot_image = bool(self.use_snapshot and not self.snapshot_id)
+        return {
+            NAMESPACE_KEY: self.namespace,
+            SNAPSHOT_ID_KEY: self.snapshot_id or "",
+            IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
+            USE_SNAPSHOT_KEY: use_snapshot_image,
+            VMM_NAME_KEY: config[VMM_NAME_KEY],
+            SANDBOX_ID_KEY: self.sandbox_id,
+            VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
+            RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
+        }
+
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result
         status = result.get(STATUS_KEY)
@@ -151,20 +181,7 @@ class Sandbox:
             raise RuntimeError(f"Sandbox creation failed: {error_msg}")
 
     def _do_create(self):
-        if self.snapshot_id:
-            config = self._config[CFG_SNAPSHOT_SECTION]
-        else:
-            config = self._config[CFG_IMAGE_SECTION]
-
-        payload = {
-            NAMESPACE_KEY: self.namespace,
-            SNAPSHOT_ID_KEY: self.snapshot_id or "",
-            IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
-            VMM_NAME_KEY: config[VMM_NAME_KEY],
-            SANDBOX_ID_KEY: self.sandbox_id,
-            VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
-            RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
-        }
+        payload = self._build_create_payload()
 
         try:
             result = self._post_control_plane_requests(SANDBOX_CREATE_PATH, payload)

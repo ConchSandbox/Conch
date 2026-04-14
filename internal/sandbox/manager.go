@@ -30,13 +30,14 @@ func NewManager(p *network.Pool, daemonClient *daemon.Client) *Manager {
 }
 
 type SandboxCreateRequest struct {
-	Namespace  string `json:"namespace"`
-	SnapshotId string `json:"snapshot_id"`
-	ImageName  string `json:"image_name"`
-	VmmName    string `json:"vmm_name"`
-	SandboxId  string `json:"sandbox_id"`
-	VcpuNum    int64  `json:"vcpu_num"`
-	RamMB      int64  `json:"ram_mb"`
+	Namespace   string `json:"namespace"`
+	SnapshotId  string `json:"snapshot_id"`
+	ImageName   string `json:"image_name"`
+	UseSnapshot bool   `json:"use_snapshot"`
+	VmmName     string `json:"vmm_name"`
+	SandboxId   string `json:"sandbox_id"`
+	VcpuNum     int64  `json:"vcpu_num"`
+	RamMB       int64  `json:"ram_mb"`
 }
 
 type SandboxDeleteRequest struct {
@@ -121,9 +122,12 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	resume := req.SnapshotId != "" || req.UseSnapshot
+	if resume && parentIDs.Mem == "" {
+		return "", fmt.Errorf("mem snapshot label not found on rootfs snapshot %s", parentIDs.Rootfs)
+	}
 
 	var key = req.SandboxId
-	resume := req.SnapshotId != ""
 
 	memOpt := func(info *snapshot.SnapshotConfig) error {
 		info.MemSize = req.RamMB
@@ -192,28 +196,26 @@ func (m *Manager) resolveParentSnapshotIDs(
 	namespace string,
 	req SandboxCreateRequest,
 ) (snapshot.ParentSnapshotIDs, error) {
+	var rootfsSnapshotID string
+
 	if req.SnapshotId != "" {
-		// snapshot-based startup
-		parents, err := snapshot.ResolveParentSnapshotIDs(namespace, req.SnapshotId)
-		if err != nil {
-			return snapshot.ParentSnapshotIDs{}, err
+		rootfsSnapshotID = req.SnapshotId
+	} else {
+		if req.ImageName == "" {
+			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("imageName or snapshotID is required")
 		}
-		return parents, nil
-	}
-	// image-based startup
-	if req.ImageName == "" {
-		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("imageName or snapshotID is required")
+
+		var err error
+		rootfsSnapshotID, err = image.GetSnapshotID(ctx, m.daemonClient, namespace, req.ImageName)
+		if err != nil {
+			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
+		}
 	}
 
-	rootfsSnapshotID, err := image.GetSnapshotID(ctx, m.daemonClient, namespace, req.ImageName)
-	if err != nil {
-		return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
-	}
 	parents, err := snapshot.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, err
 	}
-	parents.Rootfs = rootfsSnapshotID
 	return parents, nil
 }
 
