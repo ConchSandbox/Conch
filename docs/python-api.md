@@ -46,13 +46,14 @@ with Sandbox.create() as sbx:
 ### 创建沙箱
 
 ```python
-Sandbox.create(snapshot_id=None, **kwargs) -> Sandbox
+Sandbox.create(snapshot_id=None, use_snapshot=False, **kwargs) -> Sandbox
 ```
 
 基于镜像或快照创建沙箱。
 
 **参数：**
 - `snapshot_id` (可选): 从指定快照创建
+- `use_snapshot` (可选): 当传入 `image_name` 时，将其视为快照启动镜像；SDK 会走快照恢复链路
 
 **返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
 
@@ -66,6 +67,14 @@ sbx.delete()
 # 从快照创建
 sbx = Sandbox.create(snapshot_id="snap_123")
 sbx.execute(cmd='python3', content='print("Restored")')
+sbx.delete()
+
+# 从快照镜像创建
+sbx = Sandbox.create(
+    image_name="hub.oepkgs.net/conch/conch-snapshot:v0.1",
+    use_snapshot=True,
+)
+sbx.execute(cmd='python3', content='print("Restored from snapshot image")')
 sbx.delete()
 
 # 使用上下文管理器
@@ -193,7 +202,7 @@ Sandbox.delete_sandbox("sandbox_abc")
 ```python
 Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
          namespace=None, snapshot_id=None, vcpu_num=None,
-         ram_mb=None, workdir=None, config_path=None)
+         ram_mb=None, workdir=None, config_path=None, use_snapshot=False)
 ```
 
 **主要参数：**
@@ -201,6 +210,7 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
 - `api_url`: 服务地址；仅当 `unix_socket` 为空时使用
 - `sandbox_id`: 沙箱 ID（默认自动生成）
 - `image_name`: 镜像名称
+- `use_snapshot`: 是否将 `image_name` 作为快照镜像处理
 - `snapshot_id`: 快照 ID
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法。

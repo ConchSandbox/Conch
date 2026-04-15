@@ -275,6 +275,8 @@ func (s *server) AcquireResumeWorkspace(
 	ctx context.Context,
 	namespace, key string,
 	parents ParentSnapshotIDs,
+	cid uint32,
+	socketPath string,
 	opts ...Opt,
 ) (_ *SnapshotConfig, err error) {
 	memKey := getMemKeyFromRootfs(key)
@@ -353,6 +355,8 @@ func (s *server) AcquireResumeWorkspace(
 		conf.InitrdFile(),
 		conf.SnapshotMemFile(),
 		conf.PmemFiles(),
+		cid,
+		socketPath,
 	); err != nil {
 		return nil, fmt.Errorf("update snapshot config failed: %v", err)
 	}
@@ -431,7 +435,7 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
-	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles()); err != nil {
+	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles(),0,""); err != nil {
 		return fmt.Errorf("update snapshot config failed: %v", err)
 	}
 

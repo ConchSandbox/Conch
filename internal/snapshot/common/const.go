@@ -1,7 +1,5 @@
 package common
 
-import "time"
-
 const (
 	DirMode  = 0750
 	FileMode = 0640
@@ -18,7 +16,6 @@ const (
 	PemSuffix              = ".erofs"
 
 	ContainerdSock = "/run/containerd/containerd.sock"
-	RequestTimeout = 60 * time.Second
 
 	SnapshotMountRootfs = "rootfs"
 	SnapshotMountMem    = "mem"

@@ -3,13 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -20,67 +18,18 @@ import (
 )
 
 const (
-	ServerPort = ":4064"
-	ServerVersion = "0.0.1"
-	vsockCIDHost      = unix.VMADDR_CID_HOST  // CID 2 = host
-	vsockReadyPort    = 4065                  // must match conchd side
-	vsockReadyTimeout = 30 * time.Second      // timeout for ready signal loop
-	vsockRetryBase    = 50 * time.Millisecond // base retry interval
-	vsockRetryJitter  = 25 * time.Millisecond // max jitter (+/- 25ms)
+	ServerPort     = ":4064"
+	ServerVersion  = "0.0.2"
+	vsockReadyPort = 4065
 )
 
 var (
 	currentSandboxID string
-	agentLogger      ulog.Logger
+	rootLogger       ulog.Logger
 	mu               sync.Mutex
+	isSafe           = true
 )
 
-// updateSandboxID reads sandbox_id from cmdline and updates global logger context
-func updateSandboxID() {
-	mu.Lock()
-	defer mu.Unlock()
-
-	id := getSandboxIDFromCmdline()
-	if id == "" {
-		return
-	}
-
-	// Always update if it's the first time or if it changed
-	if id == currentSandboxID {
-		return
-	}
-
-	currentSandboxID = id
-	// Update the global logger with the new sandboxId field.
-	// ulog.With returns a new logger instance with the added field.
-	agentLogger = ulog.With(ulog.F("sandboxId", id))
-	ulog.SetLogger(agentLogger)
-
-	agentLogger.Info("Updated sandbox_id from cmdline", ulog.F("sandbox_id", id))
-}
-
-// monitorTimeDrift detects snapshot resume by monitoring system clock jumps
-func monitorTimeDrift() {
-	lastTick := time.Now()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		<-ticker.C
-		now := time.Now()
-		elapsed := now.Sub(lastTick)
-
-		// If elapsed time since last tick is significantly larger than expected interval (500ms),
-		// it indicates the VM was likely frozen/resumed.
-		if elapsed > 2*time.Second {
-			ulog.Info("Snapshot boot or significant time jump detected", ulog.F("elapsed", elapsed))
-			updateSandboxID()
-		}
-		lastTick = now
-	}
-}
-
-// getSandboxIDFromCmdline reads conch.sandbox_id from /proc/cmdline
 func getSandboxIDFromCmdline() string {
 	data, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
@@ -94,63 +43,76 @@ func getSandboxIDFromCmdline() string {
 	return ""
 }
 
-// vsockDial connects to the host via AF_VSOCK using unix package
-func vsockDial(cid uint32, port uint32) (int, error) {
+func createVsockListener(port uint32) (int, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
-		return -1, fmt.Errorf("socket: %w", err)
+		return -1, fmt.Errorf("failed to create vsock socket: %w", err)
 	}
 
 	sa := &unix.SockaddrVM{
-		CID:  cid,
+		CID:  unix.VMADDR_CID_ANY,
 		Port: port,
 	}
 
-	err = unix.Connect(fd, sa)
-	if err != nil {
+	if err := unix.Bind(fd, sa); err != nil {
 		unix.Close(fd)
-		return -1, err
+		return -1, fmt.Errorf("failed to bind vsock socket to port %d: %w", port, err)
+	}
+
+	if err := unix.Listen(fd, 5); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("failed to listen on vsock port %d: %w", port, err)
 	}
 
 	return fd, nil
 }
 
-// sendReadySignalLoop sends ready signal to host via vsock.
-// Runs a loop with 50ms interval until ACK received or timeout:
-//   - Fresh create: signals within ~50ms after gRPC is bound.
-//   - Snapshot restore: goroutine resumes from freeze, signals within ~50ms.
-//
-// After wait for ACK from conchd, the listener socket is removed.
-// Subsequent vsockDial attempts fail immediately (ECONNREFUSED in kernel),
-// costing ~20 failed syscalls/second — negligible overhead, zero network traffic.
-func sendReadySignalLoop(logger ulog.Logger, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
+func acceptVsockConnection(fd int) (int, error) {
+	nfd, _, err := unix.Accept(fd)
+	if err != nil {
+		return -1, fmt.Errorf("failed to accept vsock connection: %w", err)
+	}
+	return nfd, nil
+}
+
+func listenVsockLoop(handler VsockHandler) {
+	logger := ulog.GetLogger()
+	logger.Info("Starting vsock listener loop", ulog.F("port", vsockReadyPort))
+
+	fd, err := createVsockListener(vsockReadyPort)
+	if err != nil {
+		logger.Error("Failed to create vsock listener", ulog.F("error", err))
+		return
+	}
+	defer unix.Close(fd)
+
+	logger.Info("Vsock listener started", ulog.F("port", vsockReadyPort))
+
 	for {
-		if time.Now().After(deadline) {
-			logger.Warn("vsock ready signal loop timed out", ulog.F("timeout", timeout))
-			return
+		connFd, err := acceptVsockConnection(fd)
+		if err != nil {
+			logger.Error("Failed to accept vsock connection", ulog.F("error", err))
+			continue
 		}
 
-		fd, err := vsockDial(vsockCIDHost, vsockReadyPort)
-		if err == nil {
-			logger.Info("Sent agent readiness signal via vsock")
+		buf := make([]byte, 1024)
+		n, err := unix.Read(connFd, buf)
+		if err != nil {
+			logger.Error("Failed to read from vsock connection", ulog.F("error", err))
+		} else if n > 0 {
+			message := string(buf[:n])
+			logger.Info("Received message via vsock", ulog.F("message", message))
 
-			// Send the signal payload
-			unix.Write(fd, []byte("READY\n"))
-
-			// Wait for ACK from conchd. When received, it means the host has
-			// successfully recorded our readiness and we can stop the loop.
-			buf := make([]byte, 8)
-			n, _ := unix.Read(fd, buf)
-			if n > 0 && string(buf[:n]) == "ACK" {
-				logger.Info("Received ACK from host, stopping vsock signal loop")
-				unix.Close(fd)
-				return
+			response := handler.HandleMessage(message)
+			if response != "" {
+				unix.Write(connFd, []byte(response))
 			}
-			unix.Close(fd)
 		}
-		jitter := time.Duration(rand.Int63n(int64(vsockRetryJitter)*2)) - vsockRetryJitter
-		time.Sleep(vsockRetryBase + jitter)
+		logger = ulog.GetLogger()
+		if err := unix.Close(connFd); err != nil {
+			logger.Error("Failed to close vsock connection", ulog.F("error", err))
+		}
+		logger.Info("Continuing to listen for next signal via vsock")
 	}
 }
 
@@ -170,14 +132,23 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	rootLogger = ulog.GetLogger()
 	defer func() {
-		logger := ulog.GetLogger()
-		if closer, ok := logger.(interface{ Close() error }); ok {
+		if closer, ok := rootLogger.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
 	}()
 
-	updateSandboxID()
+	// Get initial sandbox ID from cmdline
+	initialSandboxID := getSandboxIDFromCmdline()
+	if initialSandboxID != "" {
+		mu.Lock()
+		currentSandboxID = initialSandboxID
+		mu.Unlock()
+	}
+
+	ulog.SetLogger(rootLogger.With(ulog.F("sandboxId", currentSandboxID)))
 	logger := ulog.GetLogger()
 
 	logger.Info("Starting conch-agent",
@@ -223,21 +194,18 @@ func main() {
 	pb.RegisterAgentServiceServer(grpcServer, &AgentServer{Version: ServerVersion})
 
 	reflection.Register(grpcServer)
-	logger.Info("Agent gRPC server listening",
-		ulog.F("address", listener.Addr()),
-		ulog.F("version", ServerVersion),
-	)
 
-	// Start vsock ready signal loop AFTER gRPC is bound
-	go sendReadySignalLoop(logger, vsockReadyTimeout)
+	go func() {
+		logger.Info("gRPC server starting", ulog.F("address", listener.Addr()))
 
-	// Start snapshot boot monitor
-	go monitorTimeDrift()
+		if err := grpcServer.Serve(listener); err != nil {
+			mu.Lock()
+			isSafe = false
+			mu.Unlock()
+			logger.Error("gRPC server failed", ulog.F("error", err))
+		}
+	}()
 
-	if err := grpcServer.Serve(listener); err != nil {
-		logger.Fatal("Failed to serve gRPC",
-			ulog.F("error", err),
-		)
-	}
-
+	vsockHandler := NewVsockHandler(ServerVersion, checkGRPCHealth)
+	listenVsockLoop(vsockHandler)
 }

@@ -33,3 +33,8 @@ containerd:
 image:
   # Default multi-arch kernel image used when converting a standard OCI image via `conch pull`
   default_kernel_image: hub.oepkgs.net/conch/kernel:6.6.0
+
+sandbox:
+  vsock_signal_retry: 10ms
+  vsock_signal_timeout: 60s
+  request_timeout: 60s

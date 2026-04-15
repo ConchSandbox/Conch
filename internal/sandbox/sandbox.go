@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 
 	"github.com/openeuler/Conch/internal/sandbox/network"
@@ -20,8 +22,12 @@ const (
 )
 
 // SandboxVsockSocketPath returns the vsock socket path for a sandbox.
-func SandboxVsockSocketPath(sandboxId string) string {
-	return filepath.Join(VsockSocketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId))
+func SandboxVsockSocketPath(sandboxId string) (string, error) {
+	if err := os.MkdirAll(VsockSocketDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create vsock socket directory: %w", err)
+	}
+
+	return filepath.Join(VsockSocketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId)), nil
 }
 
 type Execution struct {
@@ -34,12 +40,14 @@ type Sandbox struct {
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
 	slot         *network.Slot
+	vsockConn    net.Conn
 }
 
 func ResumeSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
 	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 	cleanup := NewCleanup()
 	defer func() {
@@ -65,16 +73,18 @@ func ResumeSandbox(
 	snapfilePath := snapshotConf.SnapDir()
 
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:      defaultCPUBoot,
-		CPUMax:       vcpuNum,
-		MemorySize:   snapshotConf.MemSize,
-		MemoryPath:   snapshotConf.SnapshotMemFile(),
-		NamespaceID:  slot.NamespaceID(),
-		TapName:      slot.TapName(),
-		KernelPath:   snapshotConf.KernelFile(),
-		SnapfilePath: snapfilePath,
-		InitrdPath:   snapshotConf.InitrdFile(),
-		PmemPaths:    snapshotConf.PmemFiles(),
+		CPUBoot:         defaultCPUBoot,
+		CPUMax:          vcpuNum,
+		MemorySize:      snapshotConf.MemSize,
+		MemoryPath:      snapshotConf.SnapshotMemFile(),
+		NamespaceID:     slot.NamespaceID(),
+		TapName:         slot.TapName(),
+		KernelPath:      snapshotConf.KernelFile(),
+		SnapfilePath:    snapfilePath,
+		InitrdPath:      snapshotConf.InitrdFile(),
+		PmemPaths:       snapshotConf.PmemFiles(),
+		VsockCID:        vsockCID,
+		VsockSocketPath: vsockSocketPath,
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
@@ -98,7 +108,7 @@ func ResumeSandbox(
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(sbx.process.VmmSocketPath)
+		filesErr := cleanupFiles(sbx.process.VmmSocketPath, sbx.process.VsockSocketPath)
 		if filesErr != nil {
 			return fmt.Errorf("failed to cleanup files: %w", filesErr)
 		}
@@ -117,6 +127,7 @@ func CreateSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
 	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 
 	cleanup := NewCleanup()
@@ -150,8 +161,8 @@ func CreateSandbox(
 		KernelPath:      snapshotConf.KernelFile(),
 		InitrdPath:      snapshotConf.InitrdFile(),
 		PmemPaths:       snapshotConf.PmemFiles(),
-		VsockCID:        uint32(slot.Idx + vsockCIDOffset),
-		VsockSocketPath: SandboxVsockSocketPath(sandboxId),
+		VsockCID:        vsockCID,
+		VsockSocketPath: vsockSocketPath,
 		SandboxId:       sandboxId,
 	}
 
@@ -206,6 +217,10 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 }
 
 func (s *Sandbox) Close(ctx context.Context) error {
+	if s.vsockConn != nil {
+		s.vsockConn.Close()
+		s.vsockConn = nil
+	}
 	err := s.cleanup.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup sandbox: %w", err)
