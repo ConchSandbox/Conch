@@ -60,6 +60,7 @@ type Logger interface {
 	Fatal(msg string, fields ...Field)
 	With(fields ...Field) Logger
 	WithContext(ctx context.Context) Logger
+	ReplaceField(key string, value interface{}) Logger
 }
 
 // Field represents a key-value pair for structured logging
@@ -81,6 +82,7 @@ type ulog struct {
 	filePath    string
 	writer      writer
 	fields      []Field
+	sandboxId   string
 	maxFileSize int64
 	rotation    int
 }
@@ -372,6 +374,11 @@ func WithContext(ctx context.Context) Logger {
 	return GetLogger().WithContext(ctx)
 }
 
+// ReplaceField returns a new logger with the specified field replaced
+func ReplaceField(key string, value interface{}) Logger {
+	return GetLogger().ReplaceField(key, value)
+}
+
 // log formats and writes a log entry
 func (l *ulog) log(level LogLevel, msg string, fields ...Field) {
 	if l.level > level {
@@ -400,13 +407,10 @@ func (l *ulog) log(level LogLevel, msg string, fields ...Field) {
 	}
 
 	// SandboxId (as a fixed part if present)
-	for _, f := range l.fields {
-		if f.Key == "sandboxId" {
-			b.WriteString("[")
-			b.WriteString(fmt.Sprintf("%v", f.Value))
-			b.WriteString("] ")
-			break
-		}
+	if l.sandboxId != "" {
+		b.WriteString("[")
+		b.WriteString(l.sandboxId)
+		b.WriteString("] ")
 	}
 
 	// Message
@@ -417,6 +421,7 @@ func (l *ulog) log(level LogLevel, msg string, fields ...Field) {
 		allFields := make([]Field, 0, len(fields)+len(l.fields))
 		allFields = append(allFields, l.fields...)
 		allFields = append(allFields, fields...)
+
 		b.WriteString(" ")
 		for i, f := range allFields {
 			if i > 0 {
@@ -511,23 +516,64 @@ func (l *ulog) Fatal(msg string, fields ...Field) {
 // With returns a new logger with additional fields
 func (l *ulog) With(fields ...Field) Logger {
 	newLogger := &ulog{
-		level:    l.level,
-		output:   l.output,
-		filePath: l.filePath,
-		writer:   l.writer,
+		level:     l.level,
+		output:    l.output,
+		filePath:  l.filePath,
+		writer:    l.writer,
+		sandboxId: l.sandboxId,
 	}
-	newLogger.fields = append([]Field{}, l.fields...)
-	newLogger.fields = append(newLogger.fields, fields...)
+	newLogger.fields = make([]Field, 0, len(l.fields)+len(fields))
+	newLogger.fields = append(newLogger.fields, l.fields...)
+	for _, f := range fields {
+		if f.Key == "sandboxId" {
+			newLogger.sandboxId = fmt.Sprintf("%v", f.Value)
+		} else {
+			newLogger.fields = append(newLogger.fields, f)
+		}
+	}
+	return newLogger
+}
+
+// ReplaceField returns a new logger with the specified field replaced.
+// If the field key doesn't exist, it adds the field.
+func (l *ulog) ReplaceField(key string, value interface{}) Logger {
+	newLogger := &ulog{
+		level:     l.level,
+		output:    l.output,
+		filePath:  l.filePath,
+		writer:    l.writer,
+		sandboxId: l.sandboxId,
+	}
+	if key == "sandboxId" {
+		newLogger.sandboxId = fmt.Sprintf("%v", value)
+		newLogger.fields = append([]Field{}, l.fields...)
+		return newLogger
+	}
+
+	newLogger.fields = make([]Field, 0, len(l.fields))
+	found := false
+	for _, f := range l.fields {
+		if f.Key == key {
+			newLogger.fields = append(newLogger.fields, F(key, value))
+			found = true
+		} else {
+			newLogger.fields = append(newLogger.fields, f)
+		}
+	}
+	if !found {
+		newLogger.fields = append(newLogger.fields, F(key, value))
+	}
 	return newLogger
 }
 
 // WithContext returns a new logger with context fields
 func (l *ulog) WithContext(ctx context.Context) Logger {
 	newLogger := &ulog{
-		level:    l.level,
-		output:   l.output,
-		filePath: l.filePath,
-		writer:   l.writer,
+		level:     l.level,
+		output:    l.output,
+		filePath:  l.filePath,
+		writer:    l.writer,
+		sandboxId: l.sandboxId,
 	}
 	newLogger.fields = append([]Field{}, l.fields...)
 

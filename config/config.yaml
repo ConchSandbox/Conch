@@ -29,3 +29,8 @@ network:
 containerd:
   socket: /run/containerd/containerd.sock
   default_namespace: default
+
+sandbox:
+  vsock_signal_retry: 10ms
+  vsock_signal_timeout: 60s
+  request_timeout: 60s

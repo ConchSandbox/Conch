@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 	"gopkg.in/yaml.v3"
@@ -16,6 +17,7 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Network    NetworkConfig    `yaml:"network"`
 	Containerd ContainerdConfig `yaml:"containerd"`
+	Sandbox    SandboxConfig    `yaml:"sandbox"`
 }
 
 // AppConfig holds application-specific configuration
@@ -52,6 +54,12 @@ type ContainerdConfig struct {
 	DefaultNamespace string `yaml:"default_namespace"`
 }
 
+type SandboxConfig struct {
+	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
+	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
+	RequestTimeout     time.Duration `yaml:"request_timeout"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	defaultUnixSocket := "/var/run/conchd/conchd.sock"
@@ -81,6 +89,11 @@ func DefaultConfig() *Config {
 		Containerd: ContainerdConfig{
 			Socket:           "/run/containerd/containerd.sock",
 			DefaultNamespace: "default",
+		},
+		Sandbox: SandboxConfig{
+			VsockSignalRetry:   10 * time.Millisecond,
+			VsockSignalTimeout: 60 * time.Second,
+			RequestTimeout:     60 * time.Second,
 		},
 	}
 }
@@ -149,7 +162,15 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Containerd.DefaultNamespace == "" {
 		cfg.Containerd.DefaultNamespace = defaultCfg.Containerd.DefaultNamespace
 	}
-
+	if cfg.Sandbox.VsockSignalRetry == 0 {
+		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
+	}
+	if cfg.Sandbox.VsockSignalTimeout == 0 {
+		cfg.Sandbox.VsockSignalTimeout = defaultCfg.Sandbox.VsockSignalTimeout
+	}
+	if cfg.Sandbox.RequestTimeout == 0 {
+		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
+	}
 	return &cfg, nil
 }
 
