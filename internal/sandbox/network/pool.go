@@ -33,8 +33,6 @@ import (
 
 const (
 	defaultPoolSize = 250
-	cleanupTimeout  = 10
-	bridgeName      = "conch_bridge"
 	prefillWorkers  = 16
 )
 
@@ -51,38 +49,6 @@ type Pool struct {
 	inUseMu            sync.Mutex
 }
 
-func initBridge() (retErr error) {
-	// Create hostns bridge
-	bridge := &netlink.Bridge{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: bridgeName,
-			MTU:  1500,
-		},
-	}
-	if err := netlink.LinkAdd(bridge); err != nil {
-		getLogger().Error("failed to create bridge", ulog.F("error", err))
-		return fmt.Errorf("error create bridge: %w", err)
-	}
-	defer func() {
-		if retErr != nil {
-			deleteBridge()
-		}
-	}()
-
-	bridgeLink, err := netlink.LinkByName(bridgeName)
-	if err != nil {
-		getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
-		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
-	}
-	err = netlink.LinkSetUp(bridgeLink)
-	if err != nil {
-		getLogger().Error("failed to set vpeer device up", ulog.F("error", err))
-		return fmt.Errorf("error setting vpeer device up: %w", err)
-	}
-
-	return nil
-}
-
 func initHostMasquerade() error {
 	tables, err := iptables.New()
 	if err != nil {
@@ -90,20 +56,6 @@ func initHostMasquerade() error {
 	}
 	if err := tables.AppendUnique("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
 		return fmt.Errorf("error creating postrouting rule: %w", err)
-	}
-	return nil
-}
-
-func deleteBridge() error {
-	veth, err := netlink.LinkByName(bridgeName)
-	if err != nil {
-		getLogger().Error("failed to find bridge", ulog.F("error", err))
-		return fmt.Errorf("error finding bridge: %w", err)
-	}
-	err = netlink.LinkDel(veth)
-	if err != nil {
-		getLogger().Error("failed to delete bridge device", ulog.F("error", err))
-		return fmt.Errorf("error delete bridge device: %w", err)
 	}
 	return nil
 }
@@ -119,13 +71,26 @@ func deleteHostMasquerade() error {
 	return nil
 }
 
-func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int) (*Pool, error) {
+func normalizeAndValidatePoolSize(poolSize int) (int, error) {
 	if poolSize <= 0 {
 		poolSize = defaultPoolSize
 	}
-
+	if !bridgeLayoutReady || maxVrtSlotsSize == invaildSlotSize {
+		return 0, fmt.Errorf("bridge layout capacity is not initialized")
+	}
 	if poolSize > maxVrtSlotsSize {
-		return nil, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, maxVrtSlotsSize)
+		return 0, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, maxVrtSlotsSize)
+	}
+	return poolSize, nil
+}
+
+func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP string, tapMask int) (*Pool, error) {
+	if err := initConfigureBridgeLayout(bridgeCount); err != nil {
+		return nil, fmt.Errorf("invalid bridge layout: %w", err)
+	}
+	poolSize, err := normalizeAndValidatePoolSize(poolSize)
+	if err != nil {
+		return nil, err
 	}
 	if err := configureTapNetwork(tapIP, tapMask); err != nil {
 		return nil, fmt.Errorf("invalid tap network config: %w", err)
@@ -137,11 +102,11 @@ func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int) (
 		return nil, fmt.Errorf("failed to create new storage: %w", err)
 	}
 
-	if err := initBridge(); err != nil {
-		return nil, fmt.Errorf("failed to init bridge: %w", err)
+	if err := initAllBridges(); err != nil {
+		return nil, fmt.Errorf("failed to init bridges: %w", err)
 	}
 	if err := initHostMasquerade(); err != nil {
-		_ = deleteBridge()
+		_ = deleteAllBridges()
 		return nil, fmt.Errorf("failed to init host masquerade: %w", err)
 	}
 
@@ -413,6 +378,13 @@ func slotHealth(slot *Slot) error {
 	if veth.Attrs() == nil || veth.Attrs().MasterIndex == 0 {
 		return fmt.Errorf("veth is not attached to bridge")
 	}
+	bridge, err := netlink.LinkByName(slot.BridgeName())
+	if err != nil {
+		return fmt.Errorf("bridge missing: %w", err)
+	}
+	if veth.Attrs().MasterIndex != bridge.Attrs().Index {
+		return fmt.Errorf("veth is attached to unexpected bridge")
+	}
 	return nil
 }
 
@@ -455,7 +427,7 @@ func (p *Pool) Cleanup() error {
 	if err := deleteHostMasquerade(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := deleteBridge(); err != nil {
+	if err := deleteAllBridges(); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

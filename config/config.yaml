@@ -17,10 +17,14 @@ server:
   port: 4063
 
 network:
-  # CIDR capacity: 4093 slots; practical max depends on host/kernel/network setup. Default: 250
+  # CIDR capacity is at most: (4096-3*bridge_count) slots; practical max depends on host/kernel/network setup. Default: 250
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false
+  # Number of bridges. Power-of-two values use the parent subnet most efficiently; non-power-of-two values are rounded up internally for subnet sizing.
+  # Non-power-of-two bridge_count is rounded up to the next power of two for clean non-overlapping subnets, so tail address space is intentionally left unused.
+  # Multi-bridge mode allocates slot IPs round-robin across bridge subnets, so addresses are spread across bridges rather than contiguous in the parent subnet.
+  bridge_count: 1
   # Tap interface address inside the sandbox network namespace
   tap_ip: 192.168.100.2
   # CIDR mask for tap_ip
