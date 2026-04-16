@@ -95,7 +95,7 @@ sandbox.execute(cmd, content=None, **kwargs) -> Execution
 **参数：**
 - `cmd`: 命令（如 `python3`、`sh`）
 - `content`: 要执行的脚本内容
-- `cwd`: 执行目录（默认工作目录）
+ - `cwd`: 执行目录（不指定时使用用户家目录）
 - `env`: 环境变量字典
 - `timeout`: 超时时间（秒）
 
@@ -189,9 +189,9 @@ Sandbox.delete_sandbox("sandbox_abc")
 |------|------|--------|
 | `get_info()` | 获取沙箱信息 | `SandboxInfo` |
 | `health_check()` | 健康检查 | `dict` |
-| `upload(local, remote)` | 上传文件 | `dict` |
-| `download(remote, local)` | 下载文件 | `dict` |
-| `list_files()` | 列出工作目录文件 | `list[str]` |
+| `upload(local, remote)` | 上传文件（支持绝对路径和相对路径） | `dict` |
+| `download(remote, local)` | 下载文件（支持绝对路径和相对路径） | `dict` |
+| `list_files(path=None)` | 列出目录文件（不指定 path 时列当前目录） | `list[str]` |
 
 **注意：** 所有方法失败时都会抛出 `RuntimeError` 异常
 
@@ -201,8 +201,8 @@ Sandbox.delete_sandbox("sandbox_abc")
 
 ```python
 Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
-         namespace=None, snapshot_id=None, vcpu_num=None,
-         ram_mb=None, workdir=None, config_path=None, use_snapshot=False)
+          namespace=None, snapshot_id=None, vcpu_num=None,
+          ram_mb=None, config_path=None, use_snapshot=False)
 ```
 
 **主要参数：**
