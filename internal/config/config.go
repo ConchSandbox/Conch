@@ -17,6 +17,7 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Network    NetworkConfig    `yaml:"network"`
 	Containerd ContainerdConfig `yaml:"containerd"`
+	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 }
 
@@ -54,6 +55,13 @@ type ContainerdConfig struct {
 	DefaultNamespace string `yaml:"default_namespace"`
 }
 
+// ImageConfig holds image workflow defaults.
+type ImageConfig struct {
+	DefaultKernelImage string `yaml:"default_kernel_image"`
+}
+
+const DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
+
 type SandboxConfig struct {
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
@@ -89,6 +97,9 @@ func DefaultConfig() *Config {
 		Containerd: ContainerdConfig{
 			Socket:           "/run/containerd/containerd.sock",
 			DefaultNamespace: "default",
+		},
+		Image: ImageConfig{
+			DefaultKernelImage: DefaultKernelImage,
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,
@@ -162,6 +173,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Containerd.DefaultNamespace == "" {
 		cfg.Containerd.DefaultNamespace = defaultCfg.Containerd.DefaultNamespace
 	}
+	if cfg.Image.DefaultKernelImage == "" {
+		cfg.Image.DefaultKernelImage = defaultCfg.Image.DefaultKernelImage
+	}
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
 	}
@@ -171,6 +185,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
 	}
+
 	return &cfg, nil
 }
 
@@ -211,8 +226,9 @@ func (c *Config) GetServerAddress() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
+// GetServerUnixSocket returns the configured unix socket path when explicitly set.
 func (c *Config) GetServerUnixSocket() string {
-	if c.Server.UnixSocket == nil {
+	if c == nil || c.Server.UnixSocket == nil {
 		return ""
 	}
 	return *c.Server.UnixSocket

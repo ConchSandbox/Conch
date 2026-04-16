@@ -104,6 +104,26 @@ func getImageIndex(ctx context.Context, client *containerd.Client, imageName str
 	return &index, nil
 }
 
+// ValidateConchImageIndex verifies that the image is a Conch native OCI index
+// containing at least rootfs and sandbox components.
+func ValidateConchImageIndex(ctx context.Context, client *containerd.Client, imageName string) error {
+	index, err := getImageIndex(ctx, client, imageName)
+	if err != nil {
+		return err
+	}
+
+	kinds := make(map[string]string, len(index.Manifests))
+	for _, manifestDesc := range index.Manifests {
+		kind := getKind(manifestDesc)
+		if kind == KindUnknown {
+			continue
+		}
+		kinds[kind] = manifestDesc.Digest.String()
+	}
+
+	return validateRequiredKinds(kinds)
+}
+
 func getKind(manifestDesc ocispec.Descriptor) string {
 	if kind := manifestDesc.Annotations["io.conch.kind"]; kind != "" {
 		return kind

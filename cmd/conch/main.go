@@ -1,10 +1,10 @@
-// conch build: KERNEL/SNAP Dockerfile extensions are preprocessed and post-processed in internal/image.
+// conch build: KERNEL/INDEX/SNAP Dockerfile extensions are preprocessed and post-processed in internal/image.
+// conch push: Conch OCI indexes are pushed through buildah manifest push.
 // conch unpack: boot OCI index components are unpacked into containerd and linked via snapshot labels.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
 	"go.podman.io/storage/pkg/reexec"
 
 	"github.com/openeuler/Conch/internal/image"
@@ -27,14 +25,20 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  conch build [buildah-bud-args...]")
+	fmt.Fprintln(out, "  conch push [options] <local-image> <remote-image>")
+	fmt.Fprintln(out, "  conch pull [options] <image-name>")
 	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
 	fmt.Fprintln(out, "  conch --help")
 	fmt.Fprintln(out, "  conch build --help")
+	fmt.Fprintln(out, "  conch push --help")
+	fmt.Fprintln(out, "  conch pull --help")
 	fmt.Fprintln(out, "  conch unpack --help")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  build   Forward arguments to `buildah bud` and consume Dockerfile")
-	fmt.Fprintln(out, "          extensions `KERNEL` and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "          extensions `KERNEL`, `INDEX`, and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "  push    Push a Conch OCI index using `buildah manifest push --all`.")
+	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Environment:")
@@ -44,27 +48,13 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  CONTAINERD_ADDRESS       containerd socket path")
 }
 
-func printUnpackHelp(out io.Writer) {
-	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Options:")
-	fmt.Fprintln(out, "  -n, --namespace string")
-	fmt.Fprintln(out, "        containerd namespace (default: default)")
-	fmt.Fprintln(out, "  -address string")
-	fmt.Fprintf(out, "        containerd socket address (default: %s)\n", defaultContainerdAddress)
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1")
-}
-
 func printBuildHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  conch build [buildah-bud-args...]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
 	fmt.Fprintln(out, "  Forward arguments to `buildah bud` and consume Dockerfile")
-	fmt.Fprintln(out, "  extensions `KERNEL` and `SNAP` in the Conch pipeline.")
+	fmt.Fprintln(out, "  extensions `KERNEL`, `INDEX`, and `SNAP` in the Conch pipeline.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -config, --config string")
@@ -143,61 +133,6 @@ func parseBuildConfigArg(args []string) (string, []string, error) {
 	}
 	return configPath, forward, nil
 }
-
-func runUnpack(ctx context.Context, args []string) error {
-	if err := initUnpackLogger(); err != nil {
-		return err
-	}
-	defer func() {
-		logger := ulog.GetLogger()
-		if closer, ok := logger.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}()
-
-	fs := flag.NewFlagSet("unpack", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	addr := fs.String("address", "", "containerd socket address")
-	namespace := fs.String("namespace", "default", "containerd namespace")
-	fs.StringVar(namespace, "n", "default", "containerd namespace")
-	fs.Usage = func() { printUnpackHelp(os.Stderr) }
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		fs.Usage()
-		return fmt.Errorf("conch unpack: exactly one image name is required")
-	}
-	imageName := fs.Arg(0)
-
-	containerdAddr := defaultContainerdAddress
-	if v := os.Getenv("CONTAINERD_ADDRESS"); v != "" {
-		containerdAddr = v
-	}
-	if *addr != "" {
-		containerdAddr = *addr
-	}
-
-	client, err := containerd.New(containerdAddr)
-	if err != nil {
-		return fmt.Errorf("connect to containerd: %w", err)
-	}
-	defer client.Close()
-
-	unpackCtx := namespaces.WithNamespace(ctx, *namespace)
-	fmt.Println("------------------------------------------------------------")
-	results, err := image.UnpackAllSubImages(unpackCtx, client, imageName)
-	if err != nil {
-		return fmt.Errorf("conch unpack: %w", err)
-	}
-	fmt.Println("------------------------------------------------------------")
-	fmt.Println("All sub-images processed successfully. Summary:")
-	for kind, sid := range results {
-		fmt.Printf("Type: %-15s | SnapshotID: %s\n", kind, sid)
-	}
-	return nil
-}
-
 func main() {
 	if reexec.Init() {
 		return
@@ -223,6 +158,18 @@ func main() {
 			return
 		}
 		err = runBuild(ctx, os.Args[2:])
+	case "pull":
+		if len(os.Args) >= 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
+			printPullHelp(os.Stdout)
+			return
+		}
+		err = runPull(ctx, os.Args[2:])
+	case "push":
+		if len(os.Args) >= 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
+			printPushHelp(os.Stdout)
+			return
+		}
+		err = runPush(ctx, os.Args[2:])
 	case "unpack":
 		if len(os.Args) >= 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
 			printUnpackHelp(os.Stdout)

@@ -50,10 +50,6 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	if len(opts.KernelArgs) != 2 {
 		return Result{}, fmt.Errorf("SNAP instruction requires KERNEL instruction; add KERNEL <kernel_file> <initrd_file> before SNAP (e.g. KERNEL vmlinuz conch.initrd)")
 	}
-	kernelPath, _, err := client.ResolveKernelPaths(opts.ContextDir, opts.KernelArgs[0], opts.KernelArgs[1])
-	if err != nil {
-		return Result{}, fmt.Errorf("resolving kernel paths: %w", err)
-	}
 
 	containerdAddr, containerdNamespace := resolveContainerdRuntime(opts.ConfigPath)
 	ctrdClient, err := containerd.New(containerdAddr)
@@ -64,7 +60,8 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 
 	snapCtx := namespaces.WithNamespace(ctx, containerdNamespace)
 
-	// Always convert OCI rootfs to EROFS and use it as VM DiskPath.
+	// Always convert OCI rootfs to EROFS; conchd resolves the runtime paths from
+	// the synced image snapshots during image_name-based sandbox creation.
 	// If CONCH_EROFS_OUTPUT_DIR is empty, create a temp output directory for this build.
 	erofsOut := os.Getenv("CONCH_EROFS_OUTPUT_DIR")
 	cleanupErofsOut := false
@@ -88,7 +85,6 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		}()
 	}
 
-	var diskPathForVM string
 	var rootfsLayers []string
 	if os.Getenv("CONCH_EROFS_PER_LAYER") == "1" {
 		logrus.Infof("[conch build] EROFS mode: per-layer (output=%s)", erofsOut)
@@ -102,9 +98,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		}
 		logrus.Infof("OCI→EROFS conversion complete: %d layers in %s", len(layers), erofsOut)
 		rootfsLayers = append(rootfsLayers, layers...)
-		// Keep existing behavior: pass first layer as VM disk path.
-		diskPathForVM = layers[0]
-		logrus.Infof("[conch build] EROFS disk path: %s", diskPathForVM)
+		logrus.Infof("[conch build] EROFS disk path: %s", layers[0])
 	} else {
 		logrus.Infof("[conch build] EROFS mode: direct (output=%s)", erofsOut)
 		// Direct: mount merged rootfs and run mkfs.erofs on directory.
@@ -114,8 +108,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		}
 		logrus.Infof("OCI→EROFS conversion complete: %s", destPath)
 		rootfsLayers = append(rootfsLayers, destPath)
-		diskPathForVM = destPath
-		logrus.Infof("[conch build] EROFS disk path: %s", diskPathForVM)
+		logrus.Infof("[conch build] EROFS disk path: %s", destPath)
 	}
 
 	rootfsImageRef := "localhost/conch/pmem-rootfs:latest"
@@ -145,7 +138,7 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	conchClient := client.NewClientWithConfig(opts.ConchAPIBaseURL, opts.ConfigPath)
 	sandboxID := client.GenSandboxID()
 
-	if err := conchClient.CreateSandbox(rootfsImageName, sandboxID, kernelPath, diskPathForVM, client.DefaultRamMB); err != nil {
+	if err := conchClient.CreateSandbox(rootfsImageName, sandboxID, client.DefaultRamMB); err != nil {
 		return Result{}, fmt.Errorf("Conch CreateSandbox failed: %w", err)
 	}
 	logrus.Infof("Conch sandbox %s created, VM started", sandboxID)
