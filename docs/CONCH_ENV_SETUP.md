@@ -12,7 +12,7 @@
 
 ## 使用前提
 在执行脚本前，请确保系统满足以下条件，否则可能导致脚本执行失败：
-1. 系统要求：支持 openEuler（推荐）、CentOS、Ubuntu 等主流 Linux 发行版，仅适配 x86_64 架构
+1. 系统要求：支持 openEuler（推荐）、CentOS、Ubuntu 等主流 Linux 发行版，适配 x86_64 和 aarch64 架构
 2. 前置工具：系统已安装 `git`、`make`、`wget`、`tar` 基础工具（可通过 `yum install -y git make wget tar` 或 `apt-get install -y git make wget tar` 快速安装）
 3. 网络要求：能够正常访问 GitHub（用于下载 containerd、cloud-hypervisor 依赖）和 hub.oepkgs.net（用于拉取 Conch 项目镜像）
 4. 目录要求：已克隆 Conch 项目代码并进入根目录（脚本依赖项目根目录路径进行文件挂载、编译输出）
@@ -40,7 +40,7 @@
 
 #### 2. pull 命令
 功能：拉取功能镜像并执行解包。
-逻辑：拉取 `main_image` -> 调用 `conch unpack`。
+逻辑：调用 `conch pull` 拉取并处理 `main_image`。
 
 使用示例：
 ```bash
@@ -70,7 +70,7 @@
 
 #### 5. install 命令（快速上手）
 功能：一键完成环境底座与应用准备。
-逻辑：依次执行 `provisioning` → `pull` → `sdk`。适合不需要重新编译项目，只需运行环境和 SDK 的用户。
+逻辑：依次执行 `provisioning` → `build` → `pull` → `sdk`。适合需要完整编译流程和运行环境的用户。
 
 使用示例：
 ```bash
@@ -79,7 +79,7 @@
 
 #### 6. all 命令（全流程执行）
 功能：一键执行全流程操作。
-逻辑：按顺序自动运行 `provisioning → pull → build → sdk`。
+逻辑：按顺序自动运行 `provisioning → build → pull → sdk`。
 适合首次从源码搭建环境并需要完整编译流程的场景。
 
 使用示例：
@@ -120,15 +120,15 @@
 #### 2. --main_image 参数
 
 功能：指定 Conch 项目的功能/分析镜像地址和标签，替换默认的 main_image。
-默认值：hub.oepkgs.net/conch/conch-index:v0.1
+默认值：hub.oepkgs.net/conch/openeuler:odd-x86（x86_64 架构）或 hub.oepkgs.net/conch/openeuler:odd-aarch（aarch64 架构）
 
 使用示例：
 ```
 # 拉取自定义版本的功能镜像
-./scripts/conch-env-setup.sh pull --main_image=hub.oepkgs.net/conch/conch-index:v0.2
+./scripts/conch-env-setup.sh pull --main_image=hub.oepkgs.net/conch/openeuler:odd-x86
 
-# 执行镜像解包，使用自定义功能镜像
-./scripts/conch-env-setup.sh process --main_image=my-registry/conch-index:latest
+# 使用自定义功能镜像
+./scripts/conch-env-setup.sh all --main_image=my-registry/openeuler:latest
 
 ```
 #### 3. 参数使用说明
@@ -138,7 +138,7 @@
 
 组合参数使用示例：
 ```
-./scripts/conch-env-setup.sh all --build_image=hub.oepkgs.net/conch/conch-builder:v0.2 --main_image=hub.oepkgs.net/conch/conch-index:v0.2
+./scripts/conch-env-setup.sh all --build_image=hub.oepkgs.net/conch/conch-builder:v0.2 --main_image=hub.oepkgs.net/conch/openeuler:odd-x86
 ```
 ## 常见问题与解决方案
 
@@ -153,17 +153,29 @@
 - 检查网络是否正常，能否访问 GitHub（可通过 ping github.com 测试）
 - 若网络受限，可手动下载对应版本的依赖包至 Conch 项目根目录，重新执行脚本（脚本会检测本地文件，跳过下载步骤）
 - 手动下载地址：
-  - x86环境 containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
-  - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
+  - x86_64 环境：
+    - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
+    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
+  - aarch64 环境：
+    - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-arm64.tar.gz
+    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static-aarch64
 
+<<<<<<< feature/update-functional-images-and-scripts
+问题 2：执行 pull 命令提示「./bin/conch 不存在」
+
+报错示例：Error: ./bin/conch executable not found.
+
+解决方案：先执行 `build` 命令完成容器化编译，生成 conch 工具后再执行 pull 命令，示例：
+=======
 问题 2：执行 pull/process 命令提示「./bin/conch 不存在」
 
 报错示例：Error: ./bin/conch executable not found.
 
 解决方案：先执行 `build` 命令完成容器化编译，生成 `conch` 工具后再执行 pull/process 命令，示例：
+>>>>>>> dev
 ```
 ./scripts/conch-env-setup.sh build
-./scripts/conch-env-setup.sh process
+./scripts/conch-env-setup.sh pull
 ```
 
 问题 3：拉取镜像失败（提示证书验证失败或无法连接仓库）

@@ -21,17 +21,40 @@
 #   Customization: Use --build_image or --main_image to switch versions on the fly.
 ###############################################################################
 
-B_IMG_DEFAULT="hub.oepkgs.net/conch/conch-builder:v0.1"
-F_IMG_DEFAULT="hub.oepkgs.net/conch/conch-boot-x86:v0.1"
-CNTD_VER="2.2.1"
+###############################################################################
+# Architecture Detection and Image Selection
+# - x86_64  -> -x86 suffix for images, amd64 for containerd, cloud-hypervisor-static
+# - aarch64 -> -aarch suffix for images, arm64 for containerd, cloud-hypervisor-static-aarch64
+###############################################################################
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64)  CNTD_ARCH="amd64" ;;
-    aarch64) CNTD_ARCH="arm64" ;;
-    *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    x86_64)  
+        ARCH_SUFFIX="x86"
+        CNTD_ARCH="amd64"
+        CLH_BINARY="cloud-hypervisor-static"
+        ;;
+    aarch64) 
+        ARCH_SUFFIX="aarch"
+        CNTD_ARCH="arm64"
+        CLH_BINARY="cloud-hypervisor-static-aarch64"
+        ;;
+    *)       
+        echo "Unsupported architecture: $ARCH"; exit 1 
+        ;;
 esac
+
+# Image defaults with architecture suffix
+B_IMG_DEFAULT="hub.oepkgs.net/conch/conch-builder:v0.1-${ARCH_SUFFIX}"
+F_IMG_DEFAULT="hub.oepkgs.net/conch/openeuler:odd-${ARCH_SUFFIX}"
+
+# Containerd version and download URL
+CNTD_VER="2.2.1"
 CNTD_TAR="containerd-${CNTD_VER}-linux-${CNTD_ARCH}.tar.gz"
 CNTD_URL="https://github.com/containerd/containerd/releases/download/v${CNTD_VER}/${CNTD_TAR}"
+
+# Cloud-Hypervisor version and download URL
+CLH_VER="51"
+CLH_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${CLH_VER}.0/${CLH_BINARY}"
 
 show_help() {
     echo "Usage: $0 [COMMAND] [OPTIONS]"
@@ -66,9 +89,13 @@ install_clh() {
     echo "--- Checking Cloud-Hypervisor ---"
     CLH_MIN_VER=51
     CLH_NEED_INSTALL=0
+    CLH_BIN_PATH=""
 
-    if command -v cloud-hypervisor >/dev/null 2>&1; then
-        CLH_VER_STR=$(cloud-hypervisor --version 2>&1 | awk '{print $2}' | sed 's/v//')
+    # Check if cloud-hypervisor exists in PATH and is a valid executable
+    CLH_BIN_PATH=$(command -v cloud-hypervisor 2>/dev/null)
+    if [ -n "$CLH_BIN_PATH" ] && [ -s "$CLH_BIN_PATH" ] && [ -x "$CLH_BIN_PATH" ]; then
+        # File exists, is non-empty, and is executable - verify it actually works
+        CLH_VER_STR=$($CLH_BIN_PATH --version 2>&1 | awk '{print $2}' | sed 's/v//')
         CLH_MAJOR=$(echo "$CLH_VER_STR" | cut -d'.' -f1)
         if [ -z "$CLH_MAJOR" ] || [ "$CLH_MAJOR" -lt "$CLH_MIN_VER" ] 2>/dev/null; then
             echo "cloud-hypervisor version v${CLH_VER_STR:-unknown} is below the required v${CLH_MIN_VER}.0, reinstalling..."
@@ -77,19 +104,28 @@ install_clh() {
             echo "cloud-hypervisor v${CLH_VER_STR} already installed and meets the minimum version requirement (>= v${CLH_MIN_VER}.0)."
         fi
     else
-        echo "cloud-hypervisor not found, installing..."
+        # command not found, or file is empty/invalid
+        if [ -f "$CLH_BIN_PATH" ]; then
+            echo "cloud-hypervisor exists but is invalid (empty or not executable), reinstalling..."
+        else
+            echo "cloud-hypervisor not found, installing..."
+        fi
         CLH_NEED_INSTALL=1
     fi
 
     if [ "$CLH_NEED_INSTALL" -eq 1 ]; then
-        wget -q https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static -O /usr/local/bin/cloud-hypervisor
+        # Remove potentially invalid binary first
+        rm -f /usr/local/bin/cloud-hypervisor
+        echo "Downloading cloud-hypervisor v${CLH_VER}.0 for ${ARCH}..."
+        echo "URL: $CLH_URL"
+        wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1
         if [ $? -ne 0 ]; then
             echo "Error: Failed to download cloud-hypervisor."
             echo "Manual download: https://github.com/cloud-hypervisor/cloud-hypervisor/releases"
             return 1
         fi
         chmod +x /usr/local/bin/cloud-hypervisor
-        echo "cloud-hypervisor v51.0 installed successfully."
+        echo "cloud-hypervisor v${CLH_VER}.0 installed successfully for ${ARCH}."
     fi
 }
 
@@ -98,12 +134,16 @@ install_containerd() {
     if command -v containerd >/dev/null 2>&1; then
         echo "containerd already exists. Skipping."
     else
-        echo "Installing containerd v$CNTD_VER..."
-        [ ! -f "$CNTD_TAR" ] && wget -q "$CNTD_URL"
-        if [ $? -ne 0 ]; then
-            echo "Error: Failed to download containerd."
-            echo "Manual download: https://github.com/containerd/containerd/releases"
-            return 1
+        echo "Installing containerd v$CNTD_VER for ${ARCH}..."
+        if [ ! -f "$CNTD_TAR" ]; then
+            echo "URL: $CNTD_URL"
+            wget --progress=bar:force "$CNTD_URL" -O "$CNTD_TAR" 2>&1
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to download containerd."
+                echo "Manual download: https://github.com/containerd/containerd/releases"
+                rm -f "$CNTD_TAR"
+                return 1
+            fi
         fi
         rm -rf ./bin_tmp && mkdir ./bin_tmp
         tar -zxf "$CNTD_TAR" -C ./bin_tmp
@@ -142,6 +182,30 @@ EOF
     hash -r
 }
 
+install_buildah_erofs() {
+    echo "--- Installing Buildah and EROFS Utils ---"
+    if command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y buildah erofs-utils
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y buildah erofs-utils
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y buildah erofs-utils
+    else
+        echo "unsupported package manager; please install buildah and erofs-utils manually" >&2
+        exit 1
+    fi
+
+    # Verify installation
+    for bin in buildah mkfs.erofs; do
+        if ! command -v "$bin" >/dev/null 2>&1; then
+            echo "missing required command: $bin" >&2
+            exit 1
+        fi
+    done
+    echo "buildah and erofs-utils installed and verified successfully."
+}
+
 setup_certs() {
     local IMG=$1
     DOMAIN=$(echo "$IMG" | cut -d/ -f1)
@@ -159,9 +223,13 @@ pull_builder() {
 }
 
 pull_function() {
-    echo "--- Pulling Function Image ---"
-    setup_certs "$MAIN_IMG"
-    ctr -n default images pull "$MAIN_IMG"
+    echo "--- Pulling Function Image via conch ---"
+    if [ -x "./bin/conch" ]; then
+        ./bin/conch pull "$MAIN_IMG"
+    else
+        echo "Error: ./bin/conch executable not found."
+        return 1
+    fi
 }
 
 run_build() {
@@ -172,16 +240,6 @@ run_build() {
       "$BUILD_IMG" \
       "build-$(date +%s)" \
       sh -c "cd /build && make build-offline"
-}
-
-run_unpack() {
-    echo "--- Unpacking $MAIN_IMG ---"
-    if [ -x "./bin/conch" ]; then
-        ./bin/conch unpack "$MAIN_IMG"
-    else
-        echo "Error: ./bin/conch executable not found."
-        return 1
-    fi
 }
 
 install_sdk() {
@@ -208,11 +266,11 @@ install_sdk() {
 }
 
 case "$COMMAND" in
-    provisioning) install_clh && install_containerd ;;
-    pull)    pull_function && run_unpack ;;
+    provisioning) install_clh && install_containerd && install_buildah_erofs ;;
+    pull)    pull_function ;;
     build)   install_containerd && pull_builder && run_build ;;
     sdk)     install_sdk ;;
-    install) install_clh && install_containerd && pull_function && run_unpack && install_sdk;;
-    all)     install_clh && install_containerd && pull_builder && pull_function && run_build && run_unpack && install_sdk;;
+    install) install_clh && install_containerd && install_buildah_erofs && run_build && pull_function && install_sdk;;
+    all)     install_clh && install_containerd && install_buildah_erofs && pull_builder && run_build && pull_function && install_sdk;;
     help|*)  show_help ;;
 esac
