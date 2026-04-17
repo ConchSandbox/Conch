@@ -33,7 +33,6 @@ CFG_SNAPSHOT_SECTION = "snapshot"
 CFG_IMAGE_SECTION = "image"
 CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
-CFG_WORKDIR_PREFIX_KEY = "workdir_prefix"
 CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
@@ -42,7 +41,6 @@ SANDBOX_DELETE_PATH = "/api/sandbox/delete"
 SANDBOX_PAUSE_PATH = "/api/sandbox/pause"
 
 RANDOM_ID_HEX_BYTES = 12
-WORKDIR_UUID_SUFFIX_LEN = 8
 UNKNOWN_EXIT_CODE = -1
 
 def generate_random_id(prefix: str = "sandbox_") -> str:
@@ -85,7 +83,6 @@ class Sandbox:
             self,
             unix_socket: Optional[str] = None,
             api_url: Optional[str] = None,
-            workdir: Optional[str] = None,
             sandbox_id: Optional[str] = None,
             image_name: Optional[str] = None,
             namespace: Optional[str] = None,
@@ -103,7 +100,6 @@ class Sandbox:
         self.unix_socket = unix_socket if unix_socket is not None else configured_unix_socket
         self.api_url = api_url.rstrip('/') if api_url else configured_api_url.rstrip('/')
         self._session = requests_unixsocket.Session() if self.unix_socket else requests.Session()
-        self.workdir: str = workdir or self._generate_workdir()
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
@@ -120,8 +116,6 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.ram_mb = ram_mb
 
-    def _generate_workdir(self) -> str:
-        return f"{self._config[CFG_SANDBOX_SECTION][CFG_WORKDIR_PREFIX_KEY]}{uuid.uuid4().hex[:WORKDIR_UUID_SUFFIX_LEN]}"
 
     def _build_control_plane_url(self, path: str) -> str:
         if self.unix_socket:
@@ -264,7 +258,6 @@ class Sandbox:
             **kwargs
     ) -> Execution:
         # Execute command in sandbox
-        final_cwd = cwd if cwd is not None else self.workdir
         args = kwargs.pop('args', [])
         env = kwargs.pop('env', {})
         timeout = kwargs.pop('timeout', None)
@@ -272,7 +265,7 @@ class Sandbox:
 
         request_kwargs = {
             "cmd": cmd,
-            "cwd": final_cwd,
+            "cwd": cwd,
             "env": env,
             "args": args,
         }
@@ -300,28 +293,24 @@ class Sandbox:
             }
 
     def upload(self, *args, **kwargs) -> Dict[str, Any]:
-        # Upload files to sandbox working dir
+        # Upload files to sandbox
         files = []
         if len(args) == 2:
             local_path, remote_path = args
-            full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
             if not os.path.exists(local_path):
                 return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Local file not found: {local_path}"}
             if not os.path.isfile(local_path):
                 return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Not a file: {local_path}"}
             with open(local_path, "rb") as f:
                 content = f.read()
-            files.append({"filepath": full_remote, "content": content})
+            files.append({"filepath": remote_path, "content": content})
 
         elif len(args) == 1 and isinstance(args[0], (list, tuple)):
             file_specs = args[0]
             for item in file_specs:
                 if not isinstance(item, dict) or "filepath" not in item or "content" not in item:
                     return {STATUS_KEY: AgentClient.STATUS_FAILED, MESSAGE_KEY: f"Invalid file spec: {item}"}
-                remote_path = item["filepath"]
-                content = item["content"]
-                full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
-                files.append({"filepath": full_remote, "content": content})
+                files.append({"filepath": item["filepath"], "content": item["content"]})
 
         else:
             return {
@@ -332,13 +321,13 @@ class Sandbox:
         return self.client.post_files(files=files, **kwargs)
 
     def download(self, remote_path: str, local_path: str, **kwargs) -> Dict[str, Any]:
-        # Download file from sandbox working dir
-        full_remote = f"{self.workdir}/{remote_path.lstrip('/')}"
-        return self.client.get_file(remote_path=full_remote, local_path=local_path, **kwargs)
+        # Download file from sandbox
+        return self.client.get_file(remote_path=remote_path, local_path=local_path, **kwargs)
 
-    def list_files(self) -> List[str]:
-        # List all files in sandbox working dir
-        res = self.execute(cmd="sh", args=["-c", "find . -type f || echo 'find not available'"])
+    def list_files(self, path: Optional[str] = None) -> List[str]:
+        # List all files in sandbox directory
+        target_path = path if path is not None else "."
+        res = self.execute(cmd="sh", args=["-c", f"find {target_path} -type f || echo 'find not available'"])
         stdout = res.stdout.strip()
         stderr = res.stderr.strip()
         exit_code = res.exit_code

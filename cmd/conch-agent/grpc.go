@@ -56,19 +56,21 @@ func buildErrorResponse(errMsg string) *pb.StartProcessResponse {
 	}
 }
 
-func (s *AgentServer) prepareWorkDir(cwd string) (string, bool, error) {
+func (s *AgentServer) prepareWorkDir(cwd string) (string, error) {
 	if cwd == "" {
-		tempDir, err := os.MkdirTemp("", "agent-job-")
+		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return "", false, err
+			return "", err
 		}
-		return tempDir, true, nil
+		if err := os.MkdirAll(homeDir, DirPerm); err != nil {
+			return "", err
+		}
+		return homeDir, nil
 	}
-
 	if err := os.MkdirAll(cwd, DirPerm); err != nil {
-		return "", false, err
+		return "", err
 	}
-	return cwd, false, nil
+	return cwd, nil
 }
 
 // Write script file and return script path (if content exists)
@@ -154,16 +156,10 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 		ulog.F("has_content", req.Content != ""))
 
 	// Prepare work dir
-	workDir, isTempDir, err := s.prepareWorkDir(req.Cwd)
+	workDir, err := s.prepareWorkDir(req.Cwd)
 	if err != nil {
 		errMsg := "failed to prepare working directory: " + err.Error()
 		return buildErrorResponse(errMsg), nil
-	}
-
-	if isTempDir {
-		defer func() {
-			os.RemoveAll(workDir)
-		}()
 	}
 
 	// Write script file
