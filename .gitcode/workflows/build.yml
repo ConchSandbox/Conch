@@ -1,0 +1,30 @@
+name: pipeline-test
+
+on:
+  pull_request:
+    branches: ["master", "dev"]
+  push:
+    branches: ["master", "dev"]
+
+jobs:
+  hello:
+    runs-on: euleros-2.10.1
+    steps:
+      - uses: checkout-action@0.0.1
+
+      - name: Setup Go
+        uses: setup-go@0.0.1
+        with:
+          go-version: "1.24.6"
+
+      - name: Show Workspace
+        run: pwd && ls -la && cd repo_workspace && pwd && ls -la
+
+      - name: Show Go Version
+        run: cd repo_workspace && go version
+
+      - name: Show Go Environment
+        run: cd repo_workspace && go env GOMOD GOOS GOARCH GOPATH
+
+      - name: Hello
+        run: cd repo_workspace && echo "Hello from Conch CI"
