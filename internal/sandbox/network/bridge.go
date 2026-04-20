@@ -1,5 +1,5 @@
 /*
-Copyright the e2b-dev Authors
+Copyright the Conch Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,8 +12,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-[MODIFIED] - Changes made on 2025-12-24 by Team conch: Bridge layout helpers for multi-bridge sharding
 */
 package network
 
