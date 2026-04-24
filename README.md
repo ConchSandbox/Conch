@@ -68,14 +68,66 @@ conch unpack hub.oepkgs.net/conch/conch-index:v0.1
 
 详细用法见 [Conch Image Guide](docs/guide/image.md)。
 
+### SDK 配置
+
+SDK 需要通过配置文件指定 conchd 的连接方式和沙箱参数。项目提供了默认配置模板 `config/sdk-config.yaml`：
+
+```yaml
+sandbox:
+  unix_socket: "/var/run/conchd/conchd.sock"   # 优先使用 Unix Socket 连接
+  api_url: "http://localhost:4063"              # unix_socket 为空时使用 HTTP 连接
+  sandbox_id: ""                                # 留空则自动生成
+
+snapshot:
+  snapshot_id: ""                               # 快照 ID (可选：快照启动)
+  vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
+  vcpu_num: 1                                   # 虚拟 CPU 数量
+  ram_mb: 1024                                  # 内存大小（MB）
+
+image:
+  image_name: "hub.oepkgs.net/conch/openeuler:odd-x86"  # 镜像名称，可替换为所需镜像
+  # image_name: "hub.oepkgs.net/conch/openeuler:odd-aarch"  # aarch64 架构镜像
+  use_snapshot: false                           # 设为 true 时作为快照镜像启动
+  vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
+  vcpu_num: 1                                   # 虚拟 CPU 数量
+  ram_mb: 1024                                  # 内存大小（MB）
+```
+
+安装 SDK 后可通过命令初始化系统级配置（可选）：
+
+```bash
+sudo conch-sdk-init-config        # 复制模板到 /etc/conch/sdk-config.yaml
+sudo conch-sdk-init-config -f     # 强制覆盖已有配置
+```
+
+配置文件加载优先级（由高到低）：
+
+| 优先级 | 方式 | 说明 |
+|--------|------|------|
+| 1 | `Sandbox.create(config_path="...")` | 代码中直接指定，跳过自动搜索 |
+| 2 | `$CONCH_SDK_CONFIG` 环境变量 | 环境变量指定路径 |
+| 3 | `~/.config/conch/sdk-config.yaml` | 用户级配置 |
+| 4 | `/etc/conch/sdk-config.yaml` | 系统级配置 |
+| 5 | `<repo>/config/sdk-config.yaml` | 仓库内置模板 |
+
 ### Python SDK 示例
+
 ```python
 from conch import Sandbox
 
 try:
     sandbox = Sandbox.create()
     print(f"Sandbox created: {sandbox.sandbox_id}")
+
+    # 获取沙箱信息
+    sandbox.get_info()
+
+    # 执行 Python 脚本
     result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
+    print(result)
+
+    # 执行带参数的系统命令
+    result = sandbox.execute(cmd="ls", args=["-l", "/root"])
     print(result)
 except RuntimeError as e:
     print(f"Error: {e}")
@@ -84,6 +136,8 @@ finally:
 ```
 
 调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
+
+更多 SDK 用法详见 [Python SDK API 文档](docs/python-api.md)。
 
 ## 许可证
 

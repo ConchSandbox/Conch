@@ -260,8 +260,6 @@ class Sandbox:
         # Execute command in sandbox
         args = kwargs.pop('args', [])
         env = kwargs.pop('env', {})
-        timeout = kwargs.pop('timeout', None)
-        user = kwargs.pop('user', None)
 
         request_kwargs = {
             "cmd": cmd,
@@ -274,10 +272,6 @@ class Sandbox:
             if not args:
                 filename = kwargs.get("filename", "main.py")
                 request_kwargs["args"] = [filename]
-        if timeout is not None:
-            request_kwargs["timeout"] = timeout
-        if user is not None:
-            request_kwargs["user"] = user
 
         result = self.client.start_process(**request_kwargs)
         return Execution(result)
