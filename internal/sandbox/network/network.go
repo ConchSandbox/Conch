@@ -58,9 +58,9 @@ func (s *Slot) addVethToBridge(veth *netlink.Veth, hostNS netns.NsHandle) error 
 	if err != nil {
 		return fmt.Errorf("error setting veth device up: %w", err)
 	}
-	bridgeLink, err := netlink.LinkByName(bridgeName)
+	bridgeLink, err := netlink.LinkByName(s.BridgeName())
 	if err != nil {
-		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
+		return fmt.Errorf("error finding bridge %s: %w", s.BridgeName(), err)
 	}
 	if err := netlink.LinkSetMaster(vethInHost, bridgeLink); err != nil {
 		return fmt.Errorf("error add veth %v into bridge %v: %w", vethInHost, bridgeLink, err)

@@ -45,6 +45,7 @@ type ServerConfig struct {
 type NetworkConfig struct {
 	PoolSize           int    `yaml:"pool_size"`
 	DynamicReservation bool   `yaml:"dynamic_reservation"`
+	BridgeCount        int    `yaml:"bridge_count"`
 	TapIP              string `yaml:"tap_ip"`
 	TapMask            int    `yaml:"tap_mask"`
 }
@@ -91,6 +92,7 @@ func DefaultConfig() *Config {
 		Network: NetworkConfig{
 			PoolSize:           250,
 			DynamicReservation: false,
+			BridgeCount:        1,
 			TapIP:              "192.168.100.2",
 			TapMask:            24,
 		},
@@ -160,6 +162,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Network.PoolSize == 0 {
 		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	}
+	if cfg.Network.BridgeCount == 0 {
+		cfg.Network.BridgeCount = defaultCfg.Network.BridgeCount
 	}
 	if cfg.Network.TapIP == "" {
 		cfg.Network.TapIP = defaultCfg.Network.TapIP

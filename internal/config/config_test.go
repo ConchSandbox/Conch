@@ -125,7 +125,7 @@ func TestLoadConfig(t *testing.T) {
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  socket: /run/custom-containerd.sock\n  default_namespace: team-a\n" +
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n" +
-			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -166,6 +166,9 @@ func TestLoadConfig(t *testing.T) {
 	if !cfg.Network.DynamicReservation {
 		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
 	}
+	if cfg.Network.BridgeCount != 7 {
+		t.Errorf("LoadConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 7)
+	}
 	if cfg.Network.TapIP != "192.168.100.10" {
 		t.Errorf("LoadConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.10")
 	}
@@ -188,6 +191,9 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 
 	if cfg.Network.TapIP != "192.168.100.2" {
 		t.Errorf("DefaultConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.2")
+	}
+	if cfg.Network.BridgeCount != 1 {
+		t.Errorf("DefaultConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 1)
 	}
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)

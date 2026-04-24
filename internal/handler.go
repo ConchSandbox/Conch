@@ -111,7 +111,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 
 	// Initialize sandbox manager
-	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation, cfg.Network.TapIP, cfg.Network.TapMask)
+	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation, cfg.Network.BridgeCount, cfg.Network.TapIP, cfg.Network.TapMask)
 	if err != nil {
 		logger.Error("Failed to initialize network pool; sandbox APIs will return errors", ulog.F("error", err))
 		_ = daemonClient.Close()
