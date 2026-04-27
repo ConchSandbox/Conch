@@ -30,6 +30,9 @@ dependencies = [
     "grpcio-tools>=1.57.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0.0"]
+
 [project.urls]
 Homepage = "https://atomgit.com/openeuler/Conch"
 Repository = "https://atomgit.com/openeuler/Conch"
