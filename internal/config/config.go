@@ -10,6 +10,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var WorkDir = defaultWorkDir
+
+const defaultWorkDir = "/var/run/conch"
+
 // Config holds the application configuration
 type Config struct {
 	App        AppConfig        `yaml:"app"`
@@ -189,6 +193,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
+	}
+
+	if cfg.Server.WorkDir != "" {
+		WorkDir = cfg.Server.WorkDir
 	}
 
 	return &cfg, nil

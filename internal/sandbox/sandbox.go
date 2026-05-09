@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 
 	"github.com/openeuler/Conch/internal/sandbox/network"
@@ -17,17 +16,14 @@ const (
 	minVCPUNum = 1
 	// CID 0 = hypervisor, 1 = reserved, 2 = host
 	vsockCIDOffset = 3
-	// VsockSocketDir is the directory for vsock socket files
-	VsockSocketDir = "/var/run/conch"
 )
 
-// SandboxVsockSocketPath returns the vsock socket path for a sandbox.
 func SandboxVsockSocketPath(sandboxId string) (string, error) {
-	if err := os.MkdirAll(VsockSocketDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create vsock socket directory: %w", err)
+	socketDir, err := vmm.EnsureWorkSubDir("vsock")
+	if err != nil {
+		return "", err
 	}
-
-	return filepath.Join(VsockSocketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId)), nil
+	return filepath.Join(socketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId)), nil
 }
 
 func validateVCPUNum(vcpuNum, vcpuMax int64) error {
