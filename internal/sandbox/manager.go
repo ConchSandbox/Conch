@@ -45,6 +45,7 @@ type SandboxCreateRequest struct {
 	VmmName     string `json:"vmm_name"`
 	SandboxId   string `json:"sandbox_id"`
 	VcpuNum     int64  `json:"vcpu_num"`
+	VcpuMax     int64  `json:"vcpu_max"`
 	RamMB       int64  `json:"ram_mb"`
 }
 
@@ -67,15 +68,15 @@ func sandboxMapKey(namespace, sandboxID string) string {
 	return namespace + ":" + sandboxID
 }
 
-func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
 	var sbx *Sandbox
 	var createErr error
 	if resume {
-		sbx, createErr = ResumeSandbox(ctx, snapshotConf, namespace, vmmName, sandboxId, vcpuNum, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = ResumeSandbox(ctx, snapshotConf, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, snapshotConf, namespace, vmmName, sandboxId, vcpuNum, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = CreateSandbox(ctx, snapshotConf, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -239,6 +240,11 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 		return "", fmt.Errorf("failed to create sandbox: vsock socket path error: %v", err)
 	}
 
+	vcpuMax := req.VcpuMax
+	if vcpuMax == 0 {
+		vcpuMax = req.VcpuNum
+	}
+
 	if resume {
 		logger.Debug("creating sandbox by snapshotId")
 		snapshotConf, err = snapshot.AcquireResumeWorkspace(context.Background(), namespace, key, parentIDs, vsockCID, vsockSocketPath, memOpt)
@@ -261,7 +267,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 		}
 	}()
 
-	sbx, err = createSandboxWithVsockSend(ctx, snapshotConf, namespace, req.VmmName, req.SandboxId, req.VcpuNum, m.pool, m.vsockSignalRetry, m.vsockSignalTimeout, resume, vsockCID, vsockSocketPath)
+	sbx, err = createSandboxWithVsockSend(ctx, snapshotConf, namespace, req.VmmName, req.SandboxId, req.VcpuNum, vcpuMax, m.pool, m.vsockSignalRetry, m.vsockSignalTimeout, resume, vsockCID, vsockSocketPath)
 
 	if err != nil {
 		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {

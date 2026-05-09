@@ -11,10 +11,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const waitInterval = 10 * time.Millisecond
+
+const SocketDirPerm = 0755
+
+// EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
+func EnsureWorkSubDir(subDir string) (string, error) {
+	workDir := config.WorkDir
+	if !filepath.IsAbs(workDir) {
+		return "", fmt.Errorf("WorkDir must be an absolute path, got: %s", workDir)
+	}
+	dir := filepath.Join(workDir, subDir)
+	if err := os.MkdirAll(dir, SocketDirPerm); err != nil {
+		return "", fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	return dir, nil
+}
 
 type Process struct {
 	cmd             *exec.Cmd
@@ -24,12 +40,16 @@ type Process struct {
 	kernelPath      string
 	initrdPath      string
 	// Exit *utils.SetOnce[struct{}]
-	client        vmmClient
+	client     vmmClient
 	exitSignal chan error
 }
 
-func SandboxVmmSocketPath(sandboxId string) string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("conch-vmm-%s.sock", sandboxId))
+func SandboxVmmSocketPath(sandboxId string) (string, error) {
+	socketDir, err := EnsureWorkSubDir("vmm")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(socketDir, fmt.Sprintf("conch-vmm-%s.sock", sandboxId)), nil
 }
 
 func NewProcess(
@@ -38,13 +58,18 @@ func NewProcess(
 ) (*Process, error) {
 	logger := ulog.GetLogger()
 
+	vmmSocketPath, err := SandboxVmmSocketPath(sandboxId)
+	if err != nil {
+		logger.Error("Failed to get VMM socket path", ulog.F("error", err))
+		return nil, err
+	}
+
 	vmmType, exists := GetVmmType(vmmName)
 	if !exists {
 		logger.Error("Invalid VMM type", ulog.F("vmm_name", vmmName))
 		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
 	}
 
-	vmmSocketPath := SandboxVmmSocketPath(sandboxId)
 	client, err := newVmmClient(vmmType, vmmSocketPath)
 	if err != nil {
 		logger.Error("Failed to create VMM client",

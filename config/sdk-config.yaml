@@ -6,8 +6,9 @@ sandbox:
 snapshot:
   snapshot_id: ""                                 # Snapshot ID (default:auto generate)
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
-  vcpu_num: 1                                     # *Number of virtual CPUs
-  ram_mb: 1024                                    # *Memory size in MB
+  vcpu_num: 2                                     # *Number of virtual CPUs
+  vcpu_max: 2                                     # *Max number of virtual CPUs (default: same as vcpu_num)
+  ram_mb: 4096                                    # *Memory size in MB
 
 image:
   # For x86_64 architecture use: hub.oepkgs.net/conch/openeuler:odd-x86
@@ -15,5 +16,6 @@ image:
   image_name: "hub.oepkgs.net/conch/openeuler:odd-x86"
   use_snapshot: false                              # When true, treat image_name as a snapshot-start image and use the snapshot startup path
   vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
-  vcpu_num: 1                                     # *Number of virtual CPUs
-  ram_mb: 1024                                    # *Memory size in MB
+  vcpu_num: 2                                     # *Number of virtual CPUs
+  vcpu_max: 2                                     # *Max number of virtual CPUs (default: same as vcpu_num)
+  ram_mb: 4096                                    # *Memory size in MB

@@ -160,19 +160,11 @@
     - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-arm64.tar.gz
     - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static-aarch64
 
-<<<<<<< feature/update-functional-images-and-scripts
-问题 2：执行 pull 命令提示「./bin/conch 不存在」
-
-报错示例：Error: ./bin/conch executable not found.
-
-解决方案：先执行 `build` 命令完成容器化编译，生成 conch 工具后再执行 pull 命令，示例：
-=======
 问题 2：执行 pull/process 命令提示「./bin/conch 不存在」
 
 报错示例：Error: ./bin/conch executable not found.
 
 解决方案：先执行 `build` 命令完成容器化编译，生成 `conch` 工具后再执行 pull/process 命令，示例：
->>>>>>> dev
 ```
 ./scripts/conch-env-setup.sh build
 ./scripts/conch-env-setup.sh pull
