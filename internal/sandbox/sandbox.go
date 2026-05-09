@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultCPUBoot = 1
+	minVCPUNum = 1
 	// CID 0 = hypervisor, 1 = reserved, 2 = host
 	vsockCIDOffset = 3
 	// VsockSocketDir is the directory for vsock socket files
@@ -28,6 +28,16 @@ func SandboxVsockSocketPath(sandboxId string) (string, error) {
 	}
 
 	return filepath.Join(VsockSocketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId)), nil
+}
+
+func validateVCPUNum(vcpuNum, vcpuMax int64) error {
+	if vcpuNum < minVCPUNum {
+		return fmt.Errorf("vcpu_num must be at least %d, got %d", minVCPUNum, vcpuNum)
+	}
+	if vcpuMax < vcpuNum {
+		return fmt.Errorf("vcpu_max must be at least vcpu_num (%d), got %d", vcpuNum, vcpuMax)
+	}
+	return nil
 }
 
 type Execution struct {
@@ -46,9 +56,13 @@ type Sandbox struct {
 func ResumeSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
+	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
+		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
+	}
+
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
@@ -73,8 +87,8 @@ func ResumeSandbox(
 	snapfilePath := snapshotConf.SnapDir()
 
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         defaultCPUBoot,
-		CPUMax:          vcpuNum,
+		CPUBoot:         vcpuNum,
+		CPUMax:          vcpuMax,
 		MemorySize:      snapshotConf.MemSize,
 		MemoryPath:      snapshotConf.SnapshotMemFile(),
 		NamespaceID:     slot.NamespaceID(),
@@ -126,9 +140,13 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	namespace, vmmName, sandboxId string, vcpuNum int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
+
+	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
+		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
+	}
 
 	cleanup := NewCleanup()
 	defer func() {
@@ -152,8 +170,8 @@ func CreateSandbox(
 	})
 
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         defaultCPUBoot,
-		CPUMax:          vcpuNum,
+		CPUBoot:         vcpuNum,
+		CPUMax:          vcpuMax,
 		MemorySize:      snapshotConf.MemSize,
 		MemoryPath:      snapshotConf.SnapshotMemFile(),
 		NamespaceID:     slot.NamespaceID(),
