@@ -137,7 +137,7 @@ finally:
 
 You must call `Sandbox.create()` successfully before `execute()`, and make sure `./bin/conchd` is already running; otherwise the `Sandbox` instance has not been bound to an available Agent client.
 
-For more SDK usage, see [Python SDK API Documentation](docs/python-api.md).
+For more SDK usage, see [Python SDK API Documentation](docs/guide/python-api.md).
 
 ## License
 
