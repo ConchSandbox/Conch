@@ -28,11 +28,13 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch push [options] <local-image> <remote-image>")
 	fmt.Fprintln(out, "  conch pull [options] <image-name>")
 	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
+	fmt.Fprintln(out, "  conch snapshot export [options]")
 	fmt.Fprintln(out, "  conch --help")
 	fmt.Fprintln(out, "  conch build --help")
 	fmt.Fprintln(out, "  conch push --help")
 	fmt.Fprintln(out, "  conch pull --help")
 	fmt.Fprintln(out, "  conch unpack --help")
+	fmt.Fprintln(out, "  conch snapshot --help")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  build   Forward arguments to `buildah bud` and consume Dockerfile")
@@ -40,6 +42,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  push    Push a Conch OCI index using `buildah manifest push --all`.")
 	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
+	fmt.Fprintln(out, "  snapshot Export a sandbox-snapshot image from an existing snapshot or sandbox.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Environment:")
 	fmt.Fprintln(out, "  CONCH_BUILDAH_BIN        buildah binary path (default: buildah)")
@@ -176,6 +179,8 @@ func main() {
 			return
 		}
 		err = runUnpack(ctx, os.Args[2:])
+	case "snapshot":
+		err = runSnapshot(ctx, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", sub)
 		printHelp(os.Stderr)

@@ -9,6 +9,7 @@
 - `conch build`
 - `conch push`
 - `conch pull`
+- `conch snapshot export`
 - `conch pack`
 - `conch unpack`
 
@@ -76,9 +77,10 @@ Conch image 模块覆盖从构建到运行前准备的完整链路：
 4. 构建 kernel 镜像
 5. 组装 `sandbox-image` 或 `sandbox-snapshot`
 6. 推送镜像
-7. 拉取镜像
-8. 解包到本地 containerd
-9. 恢复本地 snapshot 关系，供运行侧使用
+7. 从本地 snapshot 导出 `sandbox-snapshot`
+8. 拉取镜像
+9. 解包到本地 containerd
+10. 恢复本地 snapshot 关系，供运行侧使用
 
 ## 4. 命令与职责
 
@@ -139,7 +141,28 @@ conch push <local-conch-image> <registry>/<repo>:<tag>
 - 调试与排障
 - 作为 `conch pull` 的底层能力复用
 
-### 4.5 `conch pack`
+### 4.5 `conch snapshot export`
+
+`conch snapshot export` 用于将本地已有 snapshot 重新封装为 Conch 原生的 `sandbox-snapshot`。
+
+支持两类输入：
+
+1. `rootfs snapshot id`
+2. `sandbox id`
+
+建议形式：
+
+```bash
+conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-name>
+conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-name>
+```
+
+其中：
+
+- 当输入为 `snapshot-id` 时，直接解析 rootfs/mem/vm snapshot 关系并发布镜像
+- 当输入为 `sandbox-id` 时，先调用 pause 生成 rootfs snapshot，再执行后续导出
+
+### 4.6 `conch pack`
 
 `conch pack` 面向本地已有输入，用于将标准 OCI rootfs 或已有 rootfs/kernel 产物加工为 Conch 原生的 `sandbox-image`。
 
@@ -366,12 +389,54 @@ image 相关命令统一遵循以下优先级：
 
 - `conch unpack`
 - `conch pull`
+- `conch snapshot export`
 - `conch pack`
 - `conch build` 中涉及 containerd / snapshot 的流程
 
-## 9. `conch pack` 详细设计
+## 9. `conch snapshot export` 详细设计
 
-### 9.1 默认命名规则
+### 9.1 输入语义
+
+`conch snapshot export` 面向本地已存在的运行态快照资源，统一导出为 `sandbox-snapshot`。
+
+支持以下两种输入：
+
+1. `--snapshot-id`
+- 直接指定 rootfs snapshot id
+- 要求该 rootfs snapshot 已关联 mem/vm snapshot
+
+2. `--sandbox-id`
+- 指定运行中的 sandbox id
+- 由命令先调用 pause 生成 rootfs snapshot，再继续导出
+
+### 9.2 内部流程
+
+当输入为 `snapshot-id` 时，内部流程包括：
+
+1. 读取 rootfs snapshot 元信息
+2. 解析 rootfs 关联的 mem/vm snapshot
+3. 递归收集 rootfs、mem、vm 三类 snapshot chain 路径
+4. 将三类 chain 发布为 Conch 原生 `sandbox-snapshot`
+
+当输入为 `sandbox-id` 时，内部流程包括：
+
+1. 调用 conchd pause 生成 rootfs snapshot
+2. 复用 `snapshot-id` 导出流程
+
+### 9.3 与 `SNAP` 的关系
+
+`conch build` 中的 `KERNEL + SNAP` 与 `conch snapshot export` 在快照导出阶段复用相同的后处理逻辑。
+
+其中：
+
+- `KERNEL + SNAP` 负责从 Dockerfile 构建 rootfs，并通过 create/pause 生成快照
+- `conch snapshot export` 负责从本地已有 snapshot 或 sandbox 直接进入导出阶段
+
+两者最终产物均为 `sandbox-snapshot`。
+
+## 10. `conch pack` 详细设计
+
+### 10.1 默认命名规则
 
 当未指定 `-t` 时，可基于输入镜像生成默认名称，例如：
 
@@ -381,7 +446,7 @@ sandbox-image-<source-name>:<source-tag>
 
 不额外引入新的 `conch-` 前缀。
 
-### 9.2 内部流程
+### 10.2 内部流程
 
 `conch pack` 的内部流程包括：
 
@@ -392,7 +457,7 @@ sandbox-image-<source-name>:<source-tag>
 5. 构建或复用 kernel 镜像
 6. 组装 `sandbox-image`
 
-### 9.3 `conch-agent` 增量替换场景
+### 10.3 `conch-agent` 增量替换场景
 
 对于已有老镜像，但只希望替换 `conch-agent` 或其他少量文件、重新验证运行的场景，也纳入 `conch pack` 能力统一考虑。
 
@@ -408,7 +473,7 @@ sandbox-image-<source-name>:<source-tag>
 - 更新 kernel/initrd 或相关运行时内容
 - 重新组装为新的 `sandbox-image`
 
-## 10. Dockerfile 扩展设计
+## 11. Dockerfile 扩展设计
 
 `conch build` 的 Dockerfile 扩展采用以下语义：
 
@@ -425,13 +490,14 @@ sandbox-image-<source-name>:<source-tag>
 
 这样可以使构建命令与最终产物类型保持直接对应。
 
-## 11. 总结
+## 12. 总结
 
 Conch image 模块覆盖从构建侧到运行侧的完整链路：
 
 - 从 OCI rootfs / EROFS rootfs 构建产物
 - 生成 kernel 镜像
 - 组装 `sandbox-image` / `sandbox-snapshot`
+- 支持从本地 snapshot 导出 `sandbox-snapshot`
 - 统一 push / pull / unpack 入口
 - 在目标机侧恢复为可运行状态
 

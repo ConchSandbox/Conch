@@ -53,6 +53,7 @@ type CreateResponse struct {
 
 // PauseRequest matches Conch SandboxPauseRequest
 type PauseRequest struct {
+	Namespace string `json:"namespace,omitempty"`
 	SandboxId string `json:"sandbox_id"`
 }
 
@@ -167,8 +168,11 @@ func (c *Client) CreateSandbox(rootfsImageName, sandboxID string, ramMB int64) e
 }
 
 // PauseSandbox calls POST /api/sandbox/pause, returns the rootfs snapshot name (snapshotId)
-func (c *Client) PauseSandbox(sandboxID string) (string, error) {
-	req := PauseRequest{SandboxId: sandboxID}
+func (c *Client) PauseSandbox(sandboxID, namespace string) (string, error) {
+	req := PauseRequest{
+		Namespace: strings.TrimSpace(namespace),
+		SandboxId: sandboxID,
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshaling pause request: %w", err)

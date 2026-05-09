@@ -1,6 +1,6 @@
 # Conch Image Guide
 
-本文档介绍 Conch 镜像管理的常用命令，包括构建、发布、拉取和解包。
+本文档介绍 Conch 镜像管理的常用命令，包括构建、快照导出、发布、拉取和解包。
 
 ## 1. conch build
 
@@ -88,17 +88,47 @@ conch push --plain-http localhost/demo-sandbox:latest conch.example.com/conch/de
 conch push localhost/conch/kernel:6.6.0 hub.oepkgs.net/conch/kernel:6.6.0
 ```
 
-## 3. conch pull
+## 3. conch snapshot export
+
+`conch snapshot export` 用于将本地已有的 rootfs snapshot 或 sandbox 运行态导出为 `sandbox-snapshot` 镜像。
+
+### 3.1 根据 rootfs snapshot 导出
+
+当 rootfs snapshot 已存在且已经关联好 mem/vm snapshot 时，可直接导出：
+
+```bash
+conch snapshot export \
+  --snapshot-id sha256:xxxxxxxx \
+  -t localhost/conch/sandbox-snapshot:latest
+```
+
+### 3.2 根据 sandbox 导出
+
+当 sandbox 仍在运行时，可通过 sandbox ID 触发 pause，再将生成的快照导出为镜像：
+
+```bash
+conch snapshot export \
+  --sandbox-id sandbox-123 \
+  -t localhost/conch/sandbox-snapshot:latest
+```
+
+说明：
+
+- `--snapshot-id` 与 `--sandbox-id` 二选一
+- `-t` / `--tag` 必填，用于指定输出的 `sandbox-snapshot` 镜像名
+- `--config` 可用于指定 conchd 与 containerd 配置文件
+
+## 4. conch pull
 
 `conch pull` 用于拉取 Conch 镜像，并在本地自动完成 unpack。
 
-### 3.1 拉取 Conch 原生镜像
+### 4.1 拉取 Conch 原生镜像
 
 ```bash
 conch pull hub.oepkgs.net/conch/sandbox-snapshot:latest
 ```
 
-### 3.2 拉取普通 OCI 镜像并转换
+### 4.2 拉取普通 OCI 镜像并转换
 
 对于标准 OCI 镜像，`conch pull` 会将其转换为 Conch 可运行输入后，再在本地完成 unpack。
 
@@ -125,7 +155,7 @@ conch pull --kernel-plain-http --kernel-user <username:password> docker.io/libra
 
 其中，标准 OCI 镜像转换流程还会使用默认的 kernel 镜像配置。默认配置使用 `hub.oepkgs.net/conch/kernel:6.6.0`，该 tag 应发布为 multi-arch 镜像，由镜像仓库和本地拉取工具自动选择对应架构。
 
-## 4. conch unpack
+## 5. conch unpack
 
 `conch unpack` 用于把 Conch boot OCI index 解包到 containerd，并回写 rootfs 与 vm/mem snapshot 的关联。
 
@@ -137,7 +167,7 @@ conch unpack hub.oepkgs.net/conch/conch-index:v0.1
 conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-## 5. 相关文档
+## 6. 相关文档
 
 - 镜像工作流设计：`docs/design/image-workflow.md`
 - 构建脚本设计：`docs/design/build-conch-images-script.md`

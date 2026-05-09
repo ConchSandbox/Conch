@@ -24,6 +24,7 @@ func (p *SnapshotPublisher) PublishSnapshotBundleFromPath(
 
 	// 1. Publish RootFS chain as a multi-layer OCI image.
 	rootfsTag := bootIndexTag + "-rootfs-internal"
+	fmt.Printf("  - publishing rootfs chain (%d layers)\n", len(rootfsChainPaths))
 	rootfsImg, err := p.PublishComponentChain(ctx, rootfsChainPaths, rootfsTag, "rootfs")
 	if err != nil {
 		return "", fmt.Errorf("failed to publish rootfs component: %w", err)
@@ -31,6 +32,7 @@ func (p *SnapshotPublisher) PublishSnapshotBundleFromPath(
 
 	// 2. Publish Memory Snapshot chain as a multi-layer OCI image.
 	memTag := bootIndexTag + "-mem-internal"
+	fmt.Printf("  - publishing mem-snapshot chain (%d layers)\n", len(memChainPaths))
 	memImg, err := p.PublishComponentChain(ctx, memChainPaths, memTag, "mem-snapshot")
 	if err != nil {
 		return "", fmt.Errorf("failed to publish memory component: %w", err)
@@ -38,6 +40,7 @@ func (p *SnapshotPublisher) PublishSnapshotBundleFromPath(
 
 	// 3. Publish VM Snapshot chain as a multi-layer OCI image.
 	vmTag := bootIndexTag + "-vm-internal"
+	fmt.Printf("  - publishing sandbox chain (%d layers)\n", len(vmChainPaths))
 	vmImg, err := p.PublishComponentChain(ctx, vmChainPaths, vmTag, "sandbox")
 	if err != nil {
 		return "", fmt.Errorf("failed to publish vm component: %w", err)
@@ -45,6 +48,7 @@ func (p *SnapshotPublisher) PublishSnapshotBundleFromPath(
 
 	// 4. Assemble components into the final boot OCI index using buildah's
 	// native manifest commands so the result can be pushed with manifest push.
+	fmt.Printf("  - assembling final boot index %s\n", bootIndexTag)
 	return PublishBootIndex(
 		ctx,
 		p.store,
