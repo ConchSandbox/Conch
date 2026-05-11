@@ -254,7 +254,10 @@ func (s *Slot) RemoveNetwork() error {
 	// delete veth device
 	veth, err := netlink.LinkByName(s.VethName())
 	if err != nil {
-		errs = append(errs, fmt.Errorf("error finding veth: %w", err))
+		var linkNotFound netlink.LinkNotFoundError
+		if !errors.As(err, &linkNotFound) {
+			errs = append(errs, fmt.Errorf("error finding veth: %w", err))
+		}
 	} else {
 		err = netlink.LinkDel(veth)
 		if err != nil {
@@ -263,7 +266,7 @@ func (s *Slot) RemoveNetwork() error {
 	}
 	// delete ns
 	err = netns.DeleteNamed(s.NamespaceID())
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("error deleting namespace: %w", err))
 	}
 

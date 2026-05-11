@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -84,6 +85,20 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status 400") {
 		t.Fatalf("error = %v, want status 400", err)
+	}
+}
+
+func TestConchAPITimeoutEnv(t *testing.T) {
+	t.Setenv("CONCH_API_TIMEOUT", "5m")
+	c := NewClient("http://127.0.0.1:4063")
+	if c.httpClient.Timeout != 5*time.Minute {
+		t.Fatalf("timeout = %s, want 5m", c.httpClient.Timeout)
+	}
+
+	t.Setenv("CONCH_API_TIMEOUT", "bad")
+	c = NewClient("http://127.0.0.1:4063")
+	if c.httpClient.Timeout != defaultHTTPTimeout {
+		t.Fatalf("timeout = %s, want default %s", c.httpClient.Timeout, defaultHTTPTimeout)
 	}
 }
 

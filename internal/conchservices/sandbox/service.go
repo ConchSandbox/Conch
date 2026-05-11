@@ -28,7 +28,10 @@ type Config struct {
 }
 
 type Service struct {
-	manager *conchsandbox.Manager
+	manager  *conchsandbox.Manager
+	closeMu  sync.Mutex
+	closeErr error
+	closed   bool
 }
 
 func New(ctx context.Context, client *daemon.Client, cfg Config) (*Service, error) {
@@ -77,7 +80,14 @@ func (s *Service) Close() error {
 	if s == nil || s.manager == nil {
 		return nil
 	}
-	return errors.Join(s.manager.CleanupPool(), s.manager.CleanupCIDMap())
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return s.closeErr
+	}
+	s.closed = true
+	s.closeErr = errors.Join(s.manager.CleanupPool(), s.manager.CleanupCIDMap())
+	return s.closeErr
 }
 
 var (

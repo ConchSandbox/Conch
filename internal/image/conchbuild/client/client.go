@@ -32,7 +32,7 @@ const (
 	linkSnapshotVM     = "/api/snapshot/link-vm"
 	snapshotInfo       = "/api/snapshot/info"
 	snapshotChain      = "/api/snapshot/chain"
-	requestTimeout     = 120 * time.Second
+	defaultHTTPTimeout = 120 * time.Second
 	sandboxIDPrefix    = "buildah-snap-"
 )
 
@@ -148,12 +148,13 @@ func NewClientWithConfig(baseURL, configPath string) *Client {
 }
 
 func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
+	timeout := resolveHTTPTimeout()
 	if strings.TrimSpace(baseURL) != "" {
-		return baseURL, &http.Client{Timeout: requestTimeout}
+		return baseURL, &http.Client{Timeout: timeout}
 	}
 
 	if u := strings.TrimSpace(os.Getenv("BUILDAH_CONCH_API_URL")); u != "" {
-		return u, &http.Client{Timeout: requestTimeout}
+		return u, &http.Client{Timeout: timeout}
 	}
 
 	cfgPath := configPath
@@ -162,12 +163,12 @@ func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 	}
 	if cfg, err := config.LoadConfig(cfgPath); err == nil {
 		if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
-			return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket)
+			return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket, timeout)
 		}
 		host := strings.TrimSpace(cfg.Server.Host)
 		port := cfg.Server.Port
 		if host != "" && port > 0 {
-			return fmt.Sprintf("http://%s:%d", host, port), &http.Client{Timeout: requestTimeout}
+			return fmt.Sprintf("http://%s:%d", host, port), &http.Client{Timeout: timeout}
 		}
 	}
 
@@ -177,13 +178,25 @@ func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 		if port == "" {
 			port = "4063"
 		}
-		return fmt.Sprintf("http://%s:%s", host, port), &http.Client{Timeout: requestTimeout}
+		return fmt.Sprintf("http://%s:%s", host, port), &http.Client{Timeout: timeout}
 	}
 
-	return DefaultConchAPIURL, &http.Client{Timeout: requestTimeout}
+	return DefaultConchAPIURL, &http.Client{Timeout: timeout}
 }
 
-func newUnixSocketHTTPClient(socketPath string) *http.Client {
+func resolveHTTPTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CONCH_API_TIMEOUT"))
+	if raw == "" {
+		return defaultHTTPTimeout
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return defaultHTTPTimeout
+	}
+	return timeout
+}
+
+func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -191,7 +204,7 @@ func newUnixSocketHTTPClient(socketPath string) *http.Client {
 		},
 	}
 	return &http.Client{
-		Timeout:   requestTimeout,
+		Timeout:   timeout,
 		Transport: transport,
 	}
 }

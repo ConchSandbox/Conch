@@ -47,6 +47,11 @@
 ./scripts/conch-env-setup.sh pull
 ```
 
+大镜像拉取、解包或转换可能超过默认 API 超时。此时可按需调大 `CONCH_API_TIMEOUT`，例如：
+```bash
+CONCH_API_TIMEOUT=10m ./scripts/conch-env-setup.sh pull --main_image=hub.oepkgs.net/conch/openeuler:odd-x86
+```
+
 #### 3. build 命令
 功能：执行项目编译。
 逻辑：在本机执行 protobuf 代码生成并通过 `go build` 编译各命令。编译产物输出至宿主机的 `./bin` 目录。

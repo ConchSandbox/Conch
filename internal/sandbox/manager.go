@@ -82,11 +82,14 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
 
-	readyCh := make(chan struct{}, 1)
+	readyCh := make(chan error, 1)
 	go waitForVsockAgentReady(ctx, sbx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout, readyCh)
 
 	select {
-	case <-readyCh:
+	case err := <-readyCh:
+		if err != nil {
+			return sbx, err
+		}
 		logger.Info("Vsock signal sent successfully", ulog.F("sandboxId", sandboxId))
 	case <-ctx.Done():
 		return sbx, ctx.Err()
@@ -94,7 +97,7 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 	return sbx, nil
 }
 
-func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, readyCh chan struct{}) {
+func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, readyCh chan error) {
 	logger := ulog.GetLogger()
 	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxId)
 
@@ -104,9 +107,12 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 	for {
 		select {
 		case <-timer.C:
+			err := fmt.Errorf("vsock signal attempts timed out after %s", vsockSignalTimeout)
 			logger.Error("vsock signal attempts timed out", ulog.F("sandboxId", sandboxId), ulog.F("timeout", vsockSignalTimeout))
+			readyCh <- err
 			return
 		case <-ctx.Done():
+			readyCh <- ctx.Err()
 			return
 		default:
 			conn, err := net.Dial("unix", vsockSocketPath)
@@ -192,7 +198,7 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 
 				conn.SetReadDeadline(time.Time{})
 				sbx.vsockConn = conn
-				close(readyCh)
+				readyCh <- nil
 				return
 			}
 			logger.Warn("Received unknown message from Agent", ulog.F("msg", agentMsg))
@@ -270,6 +276,14 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	sbx, err = createSandboxWithVsockSend(ctx, snapshotConf, namespace, req.VmmName, req.SandboxId, req.VcpuNum, vcpuMax, m.pool, m.vsockSignalRetry, m.vsockSignalTimeout, resume, vsockCID, vsockSocketPath)
 
 	if err != nil {
+		if sbx != nil {
+			if closeErr := sbx.Close(context.Background()); closeErr != nil {
+				logger.Warn("failed to cleanup sandbox after create failure",
+					ulog.F("sandbox_id", req.SandboxId),
+					ulog.F("error", closeErr),
+				)
+			}
+		}
 		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
 			logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
 		}
