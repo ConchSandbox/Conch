@@ -299,18 +299,11 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
 
-		cleanupErr := sbx.Close(ctx)
-		if cleanupErr != nil {
-			logger.Warn("failed to cleanup sandbox, will remove from cache", ulog.F("error", cleanupErr))
+		if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+			return
 		}
 
-		snapshot.Remove(context.Background(), sbx.namespace, req.SandboxId)
-
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
-
-		m.sandboxes.Delete(mapKey)
+		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 	}()
 
 	logger.Debug("created sandbox in manager")
@@ -353,12 +346,30 @@ func (m *Manager) resolveNamespace(namespace string) string {
 	return m.daemonClient.DefaultNamespace()
 }
 
-func (m *Manager) Delete(req SandboxDeleteRequest) error {
+func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) {
 	logger := ulog.GetLogger()
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
-	defer cancel()
+	if err := sbx.Close(ctx); err != nil {
+		logger.Warn("failed to cleanup sandbox, will remove from cache",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("error", err),
+		)
+	}
 
+	if err := snapshot.Remove(context.Background(), sbx.namespace, sandboxID); err != nil {
+		logger.Warn("failed to remove sandbox snapshot",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("namespace", sbx.namespace),
+			ulog.F("error", err),
+		)
+	}
+
+	if releaseErr := m.ReleaseCID(sandboxID); releaseErr != nil {
+		logger.Warn("failed to release CID", ulog.F("sandbox_id", sandboxID), ulog.F("error", releaseErr))
+	}
+}
+
+func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxId)
 	sbxVal, exists := m.sandboxes.Load(mapKey)
@@ -371,16 +382,12 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
 
-	m.sandboxes.Delete(mapKey)
-	go func() {
-		err := sbx.Stop(ctx)
-		if err != nil {
-			logger.Error("sandbox stop error", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
-		}
+	if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+		return nil
+	}
 
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
+	go func() {
+		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 	}()
 	return nil
 }
