@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,8 +15,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/containerd/containerd"
+	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/containerdhost"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandbox/network"
@@ -30,11 +32,14 @@ const (
 type Server struct {
 	router         *http.ServeMux
 	sandboxManager sandboxManager
+	imageService   imageService
+	containerdHost *containerdhost.Host
 	daemonClient   *daemon.Client
 	httpServer     *http.Server
 	listener       net.Listener
 	unixSocketPath string
 	cleanupOnce    sync.Once
+	defaultKernel  string
 
 	// TODO: need ListCachedBuilds()
 }
@@ -43,6 +48,11 @@ type sandboxManager interface {
 	Create(req sandbox.SandboxCreateRequest) (string, error)
 	Delete(req sandbox.SandboxDeleteRequest) error
 	Pause(req sandbox.SandboxPauseRequest) (string, error)
+}
+
+type imageService interface {
+	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
+	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
 }
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
@@ -90,21 +100,26 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 	logger := ulog.GetLogger()
 
-	daemonClient, err := daemon.New(
-		cfg.Containerd.Socket,
-		containerd.WithDefaultNamespace(cfg.Containerd.DefaultNamespace),
-	)
+	host, err := containerdhost.Start(ctx, containerdhost.Config{
+		RootDir:          cfg.Containerd.RootDir,
+		StateDir:         cfg.Containerd.StateDir,
+		DefaultNamespace: cfg.Containerd.DefaultNamespace,
+	})
 	if err != nil {
-		logger.Error("Failed to init containerd manager", ulog.F("error", err))
 		cancel()
-		return nil, fmt.Errorf("failed to init containerd manager: %w", err)
+		logger.Error("Failed to init embedded containerd host", ulog.F("error", err))
+		return nil, fmt.Errorf("failed to init embedded containerd host: %w", err)
 	}
+	s.containerdHost = host
+	daemonClient := host.Client()
 	s.daemonClient = daemonClient
+	s.imageService = host.ImageService()
+	s.defaultKernel = cfg.Image.DefaultKernelImage
 
 	// Initialize snapshot server
 	err = snapshot.NewServer(cfg.Server.WorkDir, daemonClient)
 	if err != nil {
-		_ = daemonClient.Close()
+		_ = host.Close()
 		cancel()
 		logger.Error("Failed to init snapshot manager", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to init snapshot manager: %w", err)
@@ -114,7 +129,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation, cfg.Network.BridgeCount, cfg.Network.TapIP, cfg.Network.TapMask)
 	if err != nil {
 		logger.Error("Failed to initialize network pool; sandbox APIs will return errors", ulog.F("error", err))
-		_ = daemonClient.Close()
+		_ = host.Close()
 		cancel()
 		_ = snapshot.Close()
 		return nil, fmt.Errorf("failed to init network pool: %w", err)
@@ -139,6 +154,8 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/pause", s.handlePauseSandbox)
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
+	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
+	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 }
 
 func (s *Server) Start(addr string, unixSocket string) error {
@@ -225,8 +242,14 @@ func (s *Server) Cleanup() {
 		if err := snapshot.Close(); err != nil {
 			logger.Error("Snapshot cleanup error", ulog.F("error", err))
 		}
-		if err := s.daemonClient.Close(); err != nil {
-			logger.Error("Containerd cleanup error", ulog.F("error", err))
+		if s.containerdHost != nil {
+			if err := s.containerdHost.Close(); err != nil {
+				logger.Error("Containerd cleanup error", ulog.F("error", err))
+			}
+		} else if s.daemonClient != nil {
+			if err := s.daemonClient.Close(); err != nil {
+				logger.Error("Containerd cleanup error", ulog.F("error", err))
+			}
 		}
 		logger.Info("Cleanup completed")
 	})
@@ -338,6 +361,92 @@ func (s *Server) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 		"status":     "ok",
 		"snapshotId": snapshotId,
 	})
+}
+
+func (s *Server) handlePullImage(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling pull image request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.imageService == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req imageSvc.PullRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.DefaultKernelImage == "" {
+		req.DefaultKernelImage = s.defaultKernel
+	}
+
+	results, err := s.imageService.Pull(r.Context(), req)
+	if err != nil {
+		logger.Error("Failed to pull image",
+			ulog.F("image_name", req.ImageName),
+			ulog.F("error", err),
+		)
+		writeImageError(w, "Failed to pull image", err)
+		return
+	}
+
+	logger.Info("Image pulled successfully", ulog.F("image_name", req.ImageName))
+	writeImageResults(w, results)
+}
+
+func (s *Server) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling unpack image request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.imageService == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req imageSvc.UnpackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	results, err := s.imageService.Unpack(r.Context(), req)
+	if err != nil {
+		logger.Error("Failed to unpack image",
+			ulog.F("image_name", req.ImageName),
+			ulog.F("error", err),
+		)
+		writeImageError(w, "Failed to unpack image", err)
+		return
+	}
+
+	logger.Info("Image unpacked successfully", ulog.F("image_name", req.ImageName))
+	writeImageResults(w, results)
+}
+
+func writeImageResults(w http.ResponseWriter, results map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]map[string]string{
+		"results": results,
+	})
+}
+
+func writeImageError(w http.ResponseWriter, prefix string, err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, imageSvc.ErrInvalidRequest) || errors.Is(err, imageSvc.ErrOCIConversionFailed) {
+		status = http.StatusBadRequest
+	}
+	http.Error(w, prefix+": "+err.Error(), status)
 }
 
 // TODO return available snapshot_id

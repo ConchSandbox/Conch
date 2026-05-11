@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
+	containerd "github.com/containerd/containerd/v2/client"
 )
 
 type SnapshotMeta struct {

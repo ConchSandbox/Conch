@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/images"
-	"github.com/openeuler/Conch/internal/image/conchbuild/export"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/opencontainers/image-spec/identity"
+	"github.com/openeuler/Conch/internal/image/conchbuild/export"
 	"github.com/sirupsen/logrus"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"

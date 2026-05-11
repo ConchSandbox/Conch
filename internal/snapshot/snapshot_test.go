@@ -23,7 +23,12 @@ func TestPrepare(t *testing.T) {
 	ns := "default"
 	key := "hello"
 	parent := "sha256:9864188ae7e73d7d0e5e4f52441721380a1564c262a0fbf5795a594c281bf737"
-	conf, err := Prepare(context.Background(), ns, key, parent)
+	parents := ParentSnapshotIDs{
+		Rootfs: parent,
+		Mem:    parent,
+		VM:     parent,
+	}
+	conf, err := Prepare(context.Background(), ns, key, parents)
 	if err != nil {
 		t.Fatalf("get error: %v\n", err)
 	}

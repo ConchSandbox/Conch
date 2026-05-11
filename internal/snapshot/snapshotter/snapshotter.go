@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/defaults"
 
 	"github.com/openeuler/Conch/internal/daemon"
 )
@@ -47,7 +47,7 @@ func (c *ContainerdSnap) getSnapshotterAndContext(ctx context.Context, namespace
 	if err != nil {
 		return nil, nil, fmt.Errorf("create namespace context: %w", err)
 	}
-	sn := c.client.SnapshotService(containerd.DefaultSnapshotter)
+	sn := c.client.SnapshotService(defaults.DefaultSnapshotter)
 	return sn, nsCtx, nil
 }
 
