@@ -152,6 +152,7 @@ pull_function() {
 
 run_build() {
     echo "--- Building Conch binaries locally ---"
+    GO_TAGS="${GO_TAGS:-exclude_graphdriver_btrfs}"
     make gen-proto
     mkdir -p bin
     for dir in cmd/*; do
@@ -159,7 +160,7 @@ run_build() {
         name=$(basename "$dir")
         [ "$name" = "conch-unpack" ] && continue
         echo "building $name..."
-        go build -o "bin/$name" "./cmd/$name"
+        go build -tags "$GO_TAGS" -o "bin/$name" "./cmd/$name"
     done
 }
 

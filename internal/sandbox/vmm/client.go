@@ -74,11 +74,11 @@ func newVmmClient(vmmType int, vmmSocketPath string) (vmmClient, error) {
 		ulog.GetLogger().Error("Unsupported VMM type",
 			ulog.F("type", vmmType),
 		)
-		return nil, fmt.Errorf("unsupported VMM type: %s", vmmType)
+		return nil, fmt.Errorf("unsupported VMM type: %d", vmmType)
 	default:
 		ulog.GetLogger().Error("Unknown VMM type",
 			ulog.F("type", vmmType),
 		)
-		return nil, fmt.Errorf("unknown VMM type: %s", vmmType)
+		return nil, fmt.Errorf("unknown VMM type: %d", vmmType)
 	}
 }

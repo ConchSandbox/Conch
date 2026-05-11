@@ -10,6 +10,8 @@ GOCLEAN := $(GOCMD) clean
 GOTEST := $(GOCMD) test
 GOGET := $(GOCMD) get
 GOMOD := $(GOCMD) mod
+GO_TAGS ?= exclude_graphdriver_btrfs
+GO_TAG_FLAGS := $(if $(strip $(GO_TAGS)),-tags $(GO_TAGS),)
 
 # binary output directory
 BIN_DIR := bin
@@ -74,14 +76,14 @@ build-offline: gen-proto
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
 		echo "building cmd/$$cmd..."; \
-		$(GOBUILD) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
+			$(GOBUILD) $(GO_TAG_FLAGS) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
 	done
 	@git checkout go.mod go.sum 2>/dev/null || true
 
 build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $(BIN_DIR)/$* ./cmd/$*
+	$(GOBUILD) $(GO_TAG_FLAGS) -o $(BIN_DIR)/$* ./cmd/$*
 
 clean: ## Clean build artifacts
 	@echo "cleaning build artifacts..."
@@ -93,11 +95,11 @@ clean: ## Clean build artifacts
 
 test: ## Run all tests
 	@echo "running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST) $(GO_TAG_FLAGS) -v ./...
 
 test-coverage: ## Run tests with coverage report
 	@echo "running tests and generating coverage report..."
-	$(GOTEST) -v -coverprofile=coverage.out ./...
+	$(GOTEST) $(GO_TAG_FLAGS) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "coverage report generated: coverage.html"
 
@@ -108,7 +110,7 @@ fmt: cleancode ## Format code (go fmt + cleancode)
 
 vet: ## Run go vet
 	@echo "running go vet..."
-	$(GOCMD) vet ./...
+	$(GOCMD) vet $(GO_TAG_FLAGS) ./...
 
 lint: fmt vet ## Tidy go modules
 

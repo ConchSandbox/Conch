@@ -220,7 +220,6 @@ func GetVrtNetworkCIDR() *net.IPNet {
 	_, vrtIP, err := net.ParseCIDR(defaultVrtNetworkCIDR)
 	if err != nil {
 		getLogger().Error("failed to parse vrt network CIDR", ulog.F("cidr", defaultVrtNetworkCIDR), ulog.F("error", err))
-		fmt.Errorf("failed to get vrtNetworkAddr, err is %v", err)
 		return nil
 	}
 	return vrtIP

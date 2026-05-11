@@ -163,12 +163,12 @@ func (s *Slot) CreateNetwork() (retErr error) {
 	defer func() {
 		err = netns.Set(hostNS)
 		if err != nil {
-			fmt.Errorf("error resetting network namespace back to the host namespace, %w", err)
+			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace: %w", err))
 		}
 
 		err = hostNS.Close()
 		if err != nil {
-			fmt.Errorf("error closing host network namespace, %w", err)
+			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
 		}
 	}()
 
@@ -182,7 +182,7 @@ func (s *Slot) CreateNetwork() (retErr error) {
 		if retErr != nil {
 			nsErr := netns.DeleteNamed(s.NamespaceID())
 			if nsErr != nil {
-				fmt.Errorf("error deleting namespace: %w", nsErr)
+				retErr = errors.Join(retErr, fmt.Errorf("error deleting namespace: %w", nsErr))
 			}
 		}
 	}()
@@ -202,12 +202,12 @@ func (s *Slot) CreateNetwork() (retErr error) {
 		if retErr != nil {
 			err = netns.Set(hostNS)
 			if err != nil {
-				fmt.Errorf("error setting host network namespace: %w", err)
+				retErr = errors.Join(retErr, fmt.Errorf("error setting host network namespace: %w", err))
 				return
 			}
 			if link, err := netlink.LinkByName(s.VethName()); err == nil {
 				if err := netlink.LinkDel(link); err != nil && !os.IsNotExist(err) {
-					fmt.Errorf("delete veth failed: %w", err)
+					retErr = errors.Join(retErr, fmt.Errorf("delete veth failed: %w", err))
 				}
 			}
 		}
