@@ -7,7 +7,13 @@ const (
 	HostPluginID               = "containerd-host"
 	HostPluginURI              = string(HostPluginType) + "." + HostPluginID
 
-	ServicePluginType plugin.Type = "io.conch.service.v1"
-	ImageServiceID                = "image"
-	ImageServiceURI               = string(ServicePluginType) + "." + ImageServiceID
+	ImageServicePluginType    plugin.Type = "io.conch.image.v1"
+	ImageServiceID                        = "image"
+	ImageServiceURI                       = string(ImageServicePluginType) + "." + ImageServiceID
+	SnapshotServicePluginType plugin.Type = "io.conch.snapshot.v1"
+	SnapshotServiceID                     = "snapshot"
+	SnapshotServiceURI                    = string(SnapshotServicePluginType) + "." + SnapshotServiceID
+	SandboxServicePluginType  plugin.Type = "io.conch.sandbox.v1"
+	SandboxServiceID                      = "sandbox"
+	SandboxServiceURI                     = string(SandboxServicePluginType) + "." + SandboxServiceID
 )

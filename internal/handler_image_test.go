@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
+	snapshotSvc "github.com/openeuler/Conch/internal/conchservices/snapshot"
 )
 
 type fakeImageService struct {
@@ -22,6 +23,15 @@ type fakeImageService struct {
 	results   map[string]string
 	importReq imageSvc.ImportArchiveRequest
 	importRaw string
+}
+
+type fakeSnapshotService struct {
+	linkReq  snapshotSvc.LinkVMRequest
+	infoReq  snapshotSvc.InfoRequest
+	chainReq snapshotSvc.InfoRequest
+	linkErr  error
+	infoErr  error
+	chainErr error
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req imageSvc.PullRequest) (map[string]string, error) {
@@ -55,6 +65,46 @@ func newImageHandlerServer(svc imageService) *Server {
 	}
 	s.routes()
 	return s
+}
+
+func newSnapshotHandlerServer(svc snapshotService) *Server {
+	s := &Server{
+		router:          http.NewServeMux(),
+		snapshotService: svc,
+	}
+	s.routes()
+	return s
+}
+
+func (f *fakeSnapshotService) LinkVM(_ context.Context, req snapshotSvc.LinkVMRequest) error {
+	f.linkReq = req
+	return f.linkErr
+}
+
+func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {
+	f.infoReq = req
+	if f.infoErr != nil {
+		return snapshotSvc.Meta{}, f.infoErr
+	}
+	return snapshotSvc.Meta{
+		Key:         req.Key,
+		Parent:      "parent-id",
+		StoragePath: "/snap/rootfs",
+	}, nil
+}
+
+func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Chain, error) {
+	f.chainReq = req
+	if f.chainErr != nil {
+		return snapshotSvc.Chain{}, f.chainErr
+	}
+	return snapshotSvc.Chain{
+		Info: snapshotSvc.Meta{
+			Key:         req.Key,
+			StoragePath: "/snap/rootfs",
+		},
+		ChainPaths: []string{"/snap/parent", "/snap/rootfs"},
+	}, nil
 }
 
 func TestHandlePullImageUsesDefaultKernel(t *testing.T) {
@@ -177,6 +227,92 @@ func TestHandleImportImage(t *testing.T) {
 	}
 	if got.SnapshotKey != "rootfs-id" || got.ImageName != "image:latest" {
 		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHandleLinkSnapshotVM(t *testing.T) {
+	svc := &fakeSnapshotService{}
+	server := newSnapshotHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/link-vm", bytes.NewBufferString(`{"rootfs_snapshot_id":"rootfs-id","vm_snapshot_id":"vm-id","namespace":"team-a"}`))
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.linkReq.RootfsSnapshotID != "rootfs-id" || svc.linkReq.VMSnapshotID != "vm-id" || svc.linkReq.Namespace != "team-a" {
+		t.Fatalf("link request = %#v", svc.linkReq)
+	}
+}
+
+func TestHandleLinkSnapshotVMValidatesRequest(t *testing.T) {
+	server := newSnapshotHandlerServer(&fakeSnapshotService{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/link-vm", bytes.NewBufferString(`{"rootfs_snapshot_id":"rootfs-id"}`))
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSnapshotInfo(t *testing.T) {
+	svc := &fakeSnapshotService{}
+	server := newSnapshotHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"key":"rootfs-id","namespace":"team-a"}`))
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.infoReq.Key != "rootfs-id" || svc.infoReq.Namespace != "team-a" {
+		t.Fatalf("info request = %#v", svc.infoReq)
+	}
+	var got snapshotSvc.Meta
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Key != "rootfs-id" || got.StoragePath != "/snap/rootfs" {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHandleSnapshotChain(t *testing.T) {
+	svc := &fakeSnapshotService{}
+	server := newSnapshotHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/chain", bytes.NewBufferString(`{"key":"rootfs-id","namespace":"team-a"}`))
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.chainReq.Key != "rootfs-id" || svc.chainReq.Namespace != "team-a" {
+		t.Fatalf("chain request = %#v", svc.chainReq)
+	}
+	var got snapshotSvc.Chain
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got.ChainPaths) != 2 || got.ChainPaths[1] != "/snap/rootfs" {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHandleSnapshotServiceUnavailable(t *testing.T) {
+	server := newSnapshotHandlerServer(nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"key":"rootfs-id"}`))
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

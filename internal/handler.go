@@ -11,21 +11,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/snapshots"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"golang.org/x/sys/unix"
 
 	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
+	snapshotSvc "github.com/openeuler/Conch/internal/conchservices/snapshot"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/containerdhost"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/sandbox/network"
-	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -34,16 +30,17 @@ const (
 )
 
 type Server struct {
-	router         *http.ServeMux
-	sandboxManager sandboxManager
-	imageService   imageService
-	containerdHost *containerdhost.Host
-	daemonClient   *daemon.Client
-	httpServer     *http.Server
-	listener       net.Listener
-	unixSocketPath string
-	cleanupOnce    sync.Once
-	defaultKernel  string
+	router          *http.ServeMux
+	sandboxManager  sandboxManager
+	imageService    imageService
+	snapshotService snapshotService
+	containerdHost  *containerdhost.Host
+	daemonClient    *daemon.Client
+	httpServer      *http.Server
+	listener        net.Listener
+	unixSocketPath  string
+	cleanupOnce     sync.Once
+	defaultKernel   string
 
 	// TODO: need ListCachedBuilds()
 }
@@ -58,6 +55,12 @@ type imageService interface {
 	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
 	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
 	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
+}
+
+type snapshotService interface {
+	LinkVM(context.Context, snapshotSvc.LinkVMRequest) error
+	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
+	Chain(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Chain, error)
 }
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
@@ -109,6 +112,20 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		RootDir:          cfg.Containerd.RootDir,
 		StateDir:         cfg.Containerd.StateDir,
 		DefaultNamespace: cfg.Containerd.DefaultNamespace,
+		Snapshot: containerdhost.SnapshotConfig{
+			Enabled: true,
+			WorkDir: cfg.Server.WorkDir,
+		},
+		Sandbox: &containerdhost.SandboxConfig{
+			PoolSize:           cfg.Network.PoolSize,
+			DynamicReservation: cfg.Network.DynamicReservation,
+			BridgeCount:        cfg.Network.BridgeCount,
+			TapIP:              cfg.Network.TapIP,
+			TapMask:            cfg.Network.TapMask,
+			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
+			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
+			RequestTimeout:     cfg.Sandbox.RequestTimeout,
+		},
 	})
 	if err != nil {
 		cancel()
@@ -119,29 +136,9 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 	s.imageService = host.ImageService()
+	s.snapshotService = host.SnapshotService()
+	s.SetSandboxManager(host.SandboxService())
 	s.defaultKernel = cfg.Image.DefaultKernelImage
-
-	// Initialize snapshot server
-	err = snapshot.NewServer(cfg.Server.WorkDir, daemonClient)
-	if err != nil {
-		_ = host.Close()
-		cancel()
-		logger.Error("Failed to init snapshot manager", ulog.F("error", err))
-		return nil, fmt.Errorf("failed to init snapshot manager: %w", err)
-	}
-
-	// Initialize sandbox manager
-	pool, err := network.NewPool(cfg.Network.PoolSize, cfg.Network.DynamicReservation, cfg.Network.BridgeCount, cfg.Network.TapIP, cfg.Network.TapMask)
-	if err != nil {
-		logger.Error("Failed to initialize network pool; sandbox APIs will return errors", ulog.F("error", err))
-		_ = host.Close()
-		cancel()
-		_ = snapshot.Close()
-		return nil, fmt.Errorf("failed to init network pool: %w", err)
-	}
-
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Sandbox.VsockSignalRetry, cfg.Sandbox.VsockSignalTimeout, cfg.Sandbox.RequestTimeout))
-	go pool.Populate(ctx)
 
 	handleSignals(ctx, cancel, s)
 
@@ -239,18 +236,6 @@ func (s *Server) Cleanup() {
 			}
 		}
 
-		if m, ok := s.sandboxManager.(*sandbox.Manager); ok {
-			if err := m.CleanupPool(); err != nil {
-				logger.Error("Server cleanup error", ulog.F("error", err))
-			}
-			if err := m.CleanupCIDMap(); err != nil {
-				logger.Error("CID map cleanup error", ulog.F("error", err))
-			}
-		}
-		snapshot.CleanupAllViews()
-		if err := snapshot.Close(); err != nil {
-			logger.Error("Snapshot cleanup error", ulog.F("error", err))
-		}
 		if s.containerdHost != nil {
 			if err := s.containerdHost.Close(); err != nil {
 				logger.Error("Containerd cleanup error", ulog.F("error", err))
@@ -507,18 +492,6 @@ type snapshotInfoRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-type snapshotMetaResponse struct {
-	Key         string            `json:"key"`
-	Parent      string            `json:"parent,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	StoragePath string            `json:"storage_path,omitempty"`
-}
-
-type snapshotChainResponse struct {
-	Info       snapshotMetaResponse `json:"info"`
-	ChainPaths []string             `json:"chain_paths"`
-}
-
 func (s *Server) handleLinkSnapshotVM(w http.ResponseWriter, r *http.Request) {
 	logger := ulog.GetLogger()
 	logger.Debug("Handling link snapshot VM request")
@@ -536,15 +509,16 @@ func (s *Server) handleLinkSnapshotVM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rootfs_snapshot_id and vm_snapshot_id are required", http.StatusBadRequest)
 		return
 	}
+	if s.snapshotService == nil {
+		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
-	ctx := snapshotNamespaceContext(r.Context(), s.daemonClient, req.Namespace)
-	snapshotter := s.daemonClient.SnapshotService("overlayfs")
-	if _, err := snapshotter.Update(ctx, snapshots.Info{
-		Name: req.RootfsSnapshotID,
-		Labels: map[string]string{
-			imageSvc.SnapshotLabelVMSnapshot: req.VMSnapshotID,
-		},
-	}, "labels."+imageSvc.SnapshotLabelVMSnapshot); err != nil {
+	if err := s.snapshotService.LinkVM(r.Context(), snapshotSvc.LinkVMRequest{
+		RootfsSnapshotID: req.RootfsSnapshotID,
+		VMSnapshotID:     req.VMSnapshotID,
+		Namespace:        req.Namespace,
+	}); err != nil {
 		logger.Error("Failed to link snapshot VM",
 			ulog.F("rootfs_snapshot_id", req.RootfsSnapshotID),
 			ulog.F("vm_snapshot_id", req.VMSnapshotID),
@@ -572,8 +546,15 @@ func (s *Server) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
+	if s.snapshotService == nil {
+		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
-	info, err := s.getSnapshotInfo(r.Context(), req.Namespace, req.Key)
+	info, err := s.snapshotService.Info(r.Context(), snapshotSvc.InfoRequest{
+		Key:       req.Key,
+		Namespace: req.Namespace,
+	})
 	if err != nil {
 		http.Error(w, "Failed to get snapshot info: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -596,97 +577,21 @@ func (s *Server) handleSnapshotChain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
+	if s.snapshotService == nil {
+		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
-	info, chain, err := s.getSnapshotChain(r.Context(), req.Namespace, req.Key)
+	chain, err := s.snapshotService.Chain(r.Context(), snapshotSvc.InfoRequest{
+		Key:       req.Key,
+		Namespace: req.Namespace,
+	})
 	if err != nil {
 		http.Error(w, "Failed to get snapshot chain: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(snapshotChainResponse{
-		Info:       info,
-		ChainPaths: chain,
-	})
-}
-
-func (s *Server) getSnapshotChain(ctx context.Context, namespace, key string) (snapshotMetaResponse, []string, error) {
-	var rev []string
-	var first snapshotMetaResponse
-	cur := key
-	for cur != "" {
-		info, err := s.getSnapshotInfo(ctx, namespace, cur)
-		if err != nil {
-			return snapshotMetaResponse{}, nil, fmt.Errorf("snapshot %s: %w", cur, err)
-		}
-		if first.Key == "" {
-			first = info
-		}
-		if info.StoragePath == "" {
-			return snapshotMetaResponse{}, nil, fmt.Errorf("snapshot %s has empty storage path", cur)
-		}
-		rev = append(rev, info.StoragePath)
-		cur = info.Parent
-	}
-
-	out := make([]string, 0, len(rev))
-	for i := len(rev) - 1; i >= 0; i-- {
-		out = append(out, rev[i])
-	}
-	return first, out, nil
-}
-
-func (s *Server) getSnapshotInfo(ctx context.Context, namespace, key string) (snapshotMetaResponse, error) {
-	snapshotter := s.daemonClient.SnapshotService("overlayfs")
-	snapshotCtx := snapshotNamespaceContext(ctx, s.daemonClient, namespace)
-
-	stat, err := snapshotter.Stat(snapshotCtx, key)
-	if err != nil {
-		return snapshotMetaResponse{}, fmt.Errorf("stat failed for key %s: %w", key, err)
-	}
-
-	mounts, err := snapshotter.Mounts(snapshotCtx, key)
-	if err != nil || len(mounts) == 0 || len(mounts[0].Options) == 0 {
-		viewID := fmt.Sprintf("tmp-v-%d-%s", time.Now().UnixNano(), key)
-		mounts, err = snapshotter.View(snapshotCtx, viewID, key)
-		if err != nil {
-			return snapshotMetaResponse{}, fmt.Errorf("failed to resolve storage path via mounts or view: %w", err)
-		}
-		defer snapshotter.Remove(snapshotCtx, viewID)
-	}
-
-	storagePath := ""
-	if len(mounts) > 0 {
-		for _, opt := range mounts[0].Options {
-			if strings.HasPrefix(opt, "upperdir=") {
-				storagePath = strings.TrimPrefix(opt, "upperdir=")
-				break
-			}
-			if strings.HasPrefix(opt, "lowerdir=") && storagePath == "" {
-				storagePath = strings.Split(strings.TrimPrefix(opt, "lowerdir="), ":")[0]
-			}
-		}
-		if storagePath == "" || storagePath == "overlay" {
-			storagePath = mounts[0].Source
-		}
-	}
-
-	return snapshotMetaResponse{
-		Key:         stat.Name,
-		Parent:      stat.Parent,
-		Labels:      stat.Labels,
-		StoragePath: storagePath,
-	}, nil
-}
-
-func snapshotNamespaceContext(ctx context.Context, client *daemon.Client, namespace string) context.Context {
-	ns := namespace
-	if ns == "" && client != nil {
-		ns = client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	return namespaces.WithNamespace(ctx, ns)
+	_ = json.NewEncoder(w).Encode(chain)
 }
 
 // TODO return available snapshot_id

@@ -24,4 +24,6 @@ import (
 	_ "github.com/containerd/containerd/v2/plugins/transfer"
 
 	_ "github.com/openeuler/Conch/internal/conchservices/image"
+	_ "github.com/openeuler/Conch/internal/conchservices/sandbox"
+	_ "github.com/openeuler/Conch/internal/conchservices/snapshot"
 )

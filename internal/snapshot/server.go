@@ -10,6 +10,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/defaults"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/daemon"
@@ -30,7 +31,14 @@ var gServer server
 
 // NewServer initializes the snapshot server with containerd client.
 func NewServer(workDir string, daemonClient *daemon.Client) error {
-	sn, err := snapshotter.NewContainerdSnap(daemonClient)
+	if daemonClient == nil {
+		return fmt.Errorf("containerd client is nil")
+	}
+	sn, err := snapshotter.NewContainerdSnap(
+		daemonClient.SnapshotService(defaults.DefaultSnapshotter),
+		daemonClient.NamespaceService(),
+		daemonClient.DefaultNamespace(),
+	)
 	if err != nil {
 		return err
 	}

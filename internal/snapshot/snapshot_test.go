@@ -1,47 +1,190 @@
-package snapshot
+package snapshot_test
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
-	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+
+	"github.com/openeuler/Conch/internal/containerdhost"
+	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 func TestPrepare(t *testing.T) {
-	workDir := "/tmp/snapshot"
-	daemonClient, err := daemon.New(common.ContainerdSock)
-	if err != nil {
-		t.Fatalf("init daemon client: %v", err)
+	if os.Geteuid() != 0 {
+		t.Skip("overlayfs snapshot integration test requires root privileges")
 	}
-	defer daemonClient.Close()
-	err = NewServer(workDir, daemonClient)
+
+	host, err := containerdhost.Start(context.Background(), containerdhost.Config{
+		RootDir:          t.TempDir(),
+		StateDir:         t.TempDir(),
+		DefaultNamespace: "default",
+	})
 	if err != nil {
-		t.Fatalf("init server with: %s, get err: %v", workDir, err)
+		t.Fatalf("start embedded containerd: %v", err)
 	}
+	defer host.Close()
+
+	workDir := t.TempDir()
+	if err := snapshot.NewServer(workDir, host.Client()); err != nil {
+		t.Fatalf("init server with %s: %v", workDir, err)
+	}
+	defer snapshot.Close()
+	defer snapshot.CleanupAllViews()
+
 	ns := "default"
-	key := "hello"
-	parent := "sha256:9864188ae7e73d7d0e5e4f52441721380a1564c262a0fbf5795a594c281bf737"
-	parents := ParentSnapshotIDs{
-		Rootfs: parent,
-		Mem:    parent,
-		VM:     parent,
+	rootfsParent := "test-rootfs-parent"
+	memParent := "test-mem-parent"
+	vmParent := "test-vm-parent"
+	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, rootfsParent, populateRootfsParent); err != nil {
+		if isMountPermissionError(err) {
+			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+		}
+		t.Fatalf("create rootfs parent snapshot: %v", err)
 	}
-	conf, err := Prepare(context.Background(), ns, key, parents)
+	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, memParent, populateMemParent); err != nil {
+		if isMountPermissionError(err) {
+			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+		}
+		t.Fatalf("create mem parent snapshot: %v", err)
+	}
+	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, vmParent, populateVMParent); err != nil {
+		if isMountPermissionError(err) {
+			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+		}
+		t.Fatalf("create vm parent snapshot: %v", err)
+	}
+
+	key := "hello"
+	parents := snapshot.ParentSnapshotIDs{
+		Rootfs: rootfsParent,
+		Mem:    memParent,
+		VM:     vmParent,
+	}
+	conf, err := snapshot.Prepare(context.Background(), ns, key, parents)
 	if err != nil {
+		if isMountPermissionError(err) {
+			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+		}
 		t.Fatalf("get error: %v\n", err)
 	}
+	activePrepared := true
+	defer func() {
+		if activePrepared {
+			_ = snapshot.Remove(context.Background(), ns, key)
+		}
+	}()
 	t.Logf("prepare snapshot result: %v\n", conf)
+
 	newKey := "hello-commit"
-	if err := Commit(context.Background(), ns, newKey, key); err != nil {
+	if err := snapshot.Commit(context.Background(), ns, newKey, key); err != nil {
 		t.Fatalf("commit snapshot failed: %v\n", err)
 	}
 	t.Logf("finish commit snapshot: %s\n", newKey)
+	if _, err := snapshot.Stat(context.Background(), ns, newKey); err != nil {
+		t.Fatalf("stat committed snapshot failed: %v\n", err)
+	}
 
-	time.Sleep(time.Second * 1)
-	t.Logf("run remove snapshot: %s\n", newKey)
-	if err := Remove(context.Background(), ns, newKey); err != nil {
+	t.Logf("run remove active snapshot: %s\n", key)
+	if err := snapshot.Remove(context.Background(), ns, key); err != nil {
 		t.Fatalf("remove snapshot failed: %v\n", err)
 	}
+	activePrepared = false
+}
+
+func createCommittedParent(ctx context.Context, snapshotter snapshots.Snapshotter, namespace, parent string, populate func(string) error) error {
+	ctx = namespaces.WithNamespace(ctx, namespace)
+	active := parent + "-active"
+	mounts, err := snapshotter.Prepare(ctx, active, "")
+	if err != nil {
+		return err
+	}
+	defer snapshotter.Remove(ctx, active)
+
+	mountPoint, err := os.MkdirTemp("", "conch-snapshot-parent-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(mountPoint)
+
+	if len(mounts) > 0 {
+		if err := mounts[0].Mount(mountPoint); err != nil {
+			return err
+		}
+		defer mount.Unmount(mountPoint, 0)
+		if populate != nil {
+			if err := populate(mountPoint); err != nil {
+				return err
+			}
+		}
+	}
+	return snapshotter.Commit(ctx, parent, active)
+}
+
+func populateRootfsParent(mountPoint string) error {
+	return os.WriteFile(mountPoint+"/layer0.erofs", []byte("test"), 0o644)
+}
+
+func populateMemParent(mountPoint string) error {
+	snapshotDir := mountPoint + "/conch/snapshot"
+	if err := os.MkdirAll(snapshotDir, 0o750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(mountPoint+"/"+common.MemFileName, []byte("mem"), 0o640); err != nil {
+		return err
+	}
+	config := []byte(`{
+  "payload": {
+    "kernel": "/old/kernel",
+    "initramfs": "/old/initrd"
+  },
+  "memory": {
+    "zones": [
+      {
+        "file": "/old/mem",
+        "shared": true
+      }
+    ]
+  },
+  "pmem": [
+    {
+      "file": "/old/rootfs",
+      "discard_writes": false
+    }
+  ],
+  "vsock": {
+    "cid": 3,
+    "socket": "/old/vsock"
+  }
+}`)
+	return os.WriteFile(snapshotDir+"/"+common.SnapshotConfigFileName, config, 0o640)
+}
+
+func populateVMParent(mountPoint string) error {
+	if err := os.MkdirAll(mountPoint+"/boot", 0o750); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(mountPoint+"/data", 0o750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(mountPoint+"/"+common.VmKernelRelativePath, []byte("kernel"), 0o640); err != nil {
+		return err
+	}
+	return os.WriteFile(mountPoint+"/"+common.VmInitrdRelativePath, []byte("initrd"), 0o640)
+}
+
+func isMountPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return errors.Is(err, os.ErrPermission) ||
+		strings.Contains(msg, "operation not permitted") ||
+		strings.Contains(msg, "permission denied")
 }

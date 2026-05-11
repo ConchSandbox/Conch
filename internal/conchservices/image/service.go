@@ -244,7 +244,7 @@ type daemonClientProvider interface {
 
 func init() {
 	registry.Register(&plugin.Registration{
-		Type: conchplugins.ServicePluginType,
+		Type: conchplugins.ImageServicePluginType,
 		ID:   conchplugins.ImageServiceID,
 		Requires: []plugin.Type{
 			conchplugins.HostPluginType,

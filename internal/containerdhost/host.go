@@ -19,6 +19,8 @@ import (
 
 	"github.com/openeuler/Conch/internal/conchplugins"
 	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
+	sandboxSvc "github.com/openeuler/Conch/internal/conchservices/sandbox"
+	snapshotSvc "github.com/openeuler/Conch/internal/conchservices/snapshot"
 	"github.com/openeuler/Conch/internal/daemon"
 )
 
@@ -35,14 +37,34 @@ type Config struct {
 	RootDir          string
 	StateDir         string
 	DefaultNamespace string
+	Snapshot         SnapshotConfig
+	Sandbox          *SandboxConfig
+}
+
+type SnapshotConfig struct {
+	Enabled bool
+	WorkDir string
+}
+
+type SandboxConfig struct {
+	PoolSize           int
+	DynamicReservation bool
+	BridgeCount        int
+	TapIP              string
+	TapMask            int
+	VsockSignalRetry   time.Duration
+	VsockSignalTimeout time.Duration
+	RequestTimeout     time.Duration
 }
 
 type Host struct {
-	server       *containerdserver.Server
-	client       *daemon.Client
-	imageService *imageSvc.Service
-	cancel       context.CancelFunc
-	once         sync.Once
+	server          *containerdserver.Server
+	client          *daemon.Client
+	imageService    *imageSvc.Service
+	snapshotService *snapshotSvc.Service
+	sandboxService  *sandboxSvc.Service
+	cancel          context.CancelFunc
+	once            sync.Once
 }
 
 func (h *Host) Client() *daemon.Client {
@@ -53,23 +75,37 @@ func (h *Host) ImageService() *imageSvc.Service {
 	return h.imageService
 }
 
+func (h *Host) SnapshotService() *snapshotSvc.Service {
+	return h.snapshotService
+}
+
+func (h *Host) SandboxService() *sandboxSvc.Service {
+	return h.sandboxService
+}
+
 func (h *Host) Close() error {
 	if h == nil {
 		return nil
 	}
-	var err error
+	var errs []error
 	h.once.Do(func() {
 		if h.cancel != nil {
 			h.cancel()
 		}
+		if h.sandboxService != nil {
+			errs = append(errs, h.sandboxService.Close())
+		}
+		if h.snapshotService != nil {
+			errs = append(errs, h.snapshotService.Close())
+		}
+		if h.client != nil {
+			errs = append(errs, h.client.Close())
+		}
 		if h.server != nil {
 			h.server.Stop()
 		}
-		if h.client != nil {
-			err = h.client.Close()
-		}
 	})
-	return err
+	return errors.Join(errs...)
 }
 
 func Start(ctx context.Context, cfg Config) (*Host, error) {
@@ -91,26 +127,58 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 
 	ready := make(chan *bootstrapInstance, 1)
 	imageReady := make(chan *imageSvc.Service, 1)
+	snapshotReady := make(chan *snapshotSvc.Service, 1)
+	sandboxReady := make(chan *sandboxSvc.Service, 1)
 	setBootstrapChannel(ready)
 	imageSvc.SetReadyChannel(imageReady)
+	snapshotSvc.SetReadyChannel(snapshotReady)
+	sandboxSvc.SetReadyChannel(sandboxReady)
 	defer setBootstrapChannel(nil)
 	defer imageSvc.SetReadyChannel(nil)
+	defer snapshotSvc.SetReadyChannel(nil)
+	defer sandboxSvc.SetReadyChannel(nil)
 	hostCtx, cancel := context.WithCancel(ctx)
 
+	requiredPlugins := []string{
+		PluginURI,
+		conchplugins.ImageServiceURI,
+	}
+	var disabledPlugins []string
+	if cfg.Snapshot.Enabled {
+		requiredPlugins = append(requiredPlugins, conchplugins.SnapshotServiceURI)
+	} else {
+		disabledPlugins = append(disabledPlugins, conchplugins.SnapshotServiceURI)
+	}
+	if cfg.Sandbox != nil {
+		if !cfg.Snapshot.Enabled {
+			cancel()
+			return nil, fmt.Errorf("sandbox service requires snapshot service")
+		}
+		requiredPlugins = append(requiredPlugins, conchplugins.SandboxServiceURI)
+	} else {
+		disabledPlugins = append(disabledPlugins, conchplugins.SandboxServiceURI)
+	}
+
+	pluginConfigs := map[string]any{
+		PluginURI: map[string]any{
+			"default_namespace": cfg.DefaultNamespace,
+		},
+		conchplugins.SnapshotServiceURI: map[string]any{
+			"enabled":  cfg.Snapshot.Enabled,
+			"work_dir": cfg.Snapshot.WorkDir,
+		},
+	}
+	if cfg.Sandbox != nil {
+		pluginConfigs[conchplugins.SandboxServiceURI] = sandboxPluginConfig(cfg.Sandbox)
+	}
 	serverCfg := &serverconfig.Config{
-		Version: version.ConfigVersion,
-		Root:    filepath.Clean(cfg.RootDir),
-		State:   filepath.Clean(cfg.StateDir),
-		TempDir: filepath.Join(filepath.Clean(cfg.StateDir), "tmp"),
-		RequiredPlugins: []string{
-			PluginURI,
-			conchplugins.ImageServiceURI,
-		},
-		Plugins: map[string]any{
-			PluginURI: map[string]any{
-				"default_namespace": cfg.DefaultNamespace,
-			},
-		},
+		Version:         version.ConfigVersion,
+		Root:            filepath.Clean(cfg.RootDir),
+		State:           filepath.Clean(cfg.StateDir),
+		TempDir:         filepath.Join(filepath.Clean(cfg.StateDir), "tmp"),
+		DisabledPlugins: disabledPlugins,
+		RequiredPlugins: requiredPlugins,
+		Plugins:         pluginConfigs,
 	}
 
 	srv, err := containerdserver.New(hostCtx, serverCfg)
@@ -120,14 +188,18 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	var (
-		inst    *bootstrapInstance
-		image   *imageSvc.Service
-		timeout = time.After(startTimeout)
+		inst     *bootstrapInstance
+		image    *imageSvc.Service
+		snapshot *snapshotSvc.Service
+		sandbox  *sandboxSvc.Service
+		timeout  = time.After(startTimeout)
 	)
-	for inst == nil || image == nil {
+	for inst == nil || image == nil || (cfg.Snapshot.Enabled && snapshot == nil) || (cfg.Sandbox != nil && sandbox == nil) {
 		select {
 		case inst = <-ready:
 		case image = <-imageReady:
+		case snapshot = <-snapshotReady:
+		case sandbox = <-sandboxReady:
 		case <-ctx.Done():
 			cancel()
 			srv.Stop()
@@ -139,11 +211,29 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		}
 	}
 	return &Host{
-		server:       srv,
-		client:       inst.client,
-		imageService: image,
-		cancel:       cancel,
+		server:          srv,
+		client:          inst.client,
+		imageService:    image,
+		snapshotService: snapshot,
+		sandboxService:  sandbox,
+		cancel:          cancel,
 	}, nil
+}
+
+func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	return map[string]any{
+		"pool_size":            cfg.PoolSize,
+		"dynamic_reservation":  cfg.DynamicReservation,
+		"bridge_count":         cfg.BridgeCount,
+		"tap_ip":               cfg.TapIP,
+		"tap_mask":             cfg.TapMask,
+		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
+		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
+		"request_timeout":      cfg.RequestTimeout.String(),
+	}
 }
 
 type bootstrapConfig struct {

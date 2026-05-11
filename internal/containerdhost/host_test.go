@@ -13,6 +13,10 @@ func TestStartAndClose(t *testing.T) {
 		RootDir:          rootDir,
 		StateDir:         stateDir,
 		DefaultNamespace: "test",
+		Snapshot: SnapshotConfig{
+			Enabled: true,
+			WorkDir: t.TempDir(),
+		},
 	})
 	if err != nil {
 		t.Fatalf("start host: %v", err)
@@ -22,6 +26,9 @@ func TestStartAndClose(t *testing.T) {
 	}
 	if host.ImageService() == nil {
 		t.Fatal("image service is nil")
+	}
+	if host.SnapshotService() == nil {
+		t.Fatal("snapshot service is nil")
 	}
 	if got := host.Client().DefaultNamespace(); got != "test" {
 		t.Fatalf("default namespace = %q, want %q", got, "test")
@@ -37,6 +44,10 @@ func TestStartAndClose(t *testing.T) {
 		RootDir:          t.TempDir(),
 		StateDir:         t.TempDir(),
 		DefaultNamespace: "test",
+		Snapshot: SnapshotConfig{
+			Enabled: true,
+			WorkDir: t.TempDir(),
+		},
 	})
 	if err != nil {
 		t.Fatalf("restart host: %v", err)
