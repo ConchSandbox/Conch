@@ -7,10 +7,7 @@ import (
 	"io"
 	"os"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
-
-	"github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/image/conchbuild/client"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -21,8 +18,10 @@ func printUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -n, --namespace string")
 	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
+	fmt.Fprintln(out, "  -api-url string")
+	fmt.Fprintln(out, "        conchd API base URL (default: config server endpoint or http://localhost:4063)")
 	fmt.Fprintln(out, "  -address string")
-	fmt.Fprintf(out, "        containerd socket address (default: config containerd.socket or %s)\n", defaultContainerdAddress)
+	fmt.Fprintln(out, "        deprecated alias for -api-url")
 	fmt.Fprintln(out, "  -config string")
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "")
@@ -43,7 +42,8 @@ func runUnpack(ctx context.Context, args []string) error {
 
 	fs := flag.NewFlagSet("unpack", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	addr := fs.String("address", "", "containerd socket address")
+	apiURL := fs.String("api-url", "", "conchd API base URL")
+	addr := fs.String("address", "", "deprecated alias for -api-url")
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
@@ -61,17 +61,14 @@ func runUnpack(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch unpack: load config: %w", err)
 	}
-	containerdAddr, ns := resolveContainerdRuntime(cfg, *addr, *namespace)
+	ns := resolveConchNamespace(cfg, *namespace)
 
-	client, err := containerd.New(containerdAddr)
-	if err != nil {
-		return fmt.Errorf("connect to containerd: %w", err)
-	}
-	defer client.Close()
-
-	unpackCtx := namespaces.WithNamespace(ctx, ns)
+	conchClient := client.NewClientWithConfig(resolveConchAPIURL(*apiURL, *addr), *configPath)
 	fmt.Println("------------------------------------------------------------")
-	results, err := image.UnpackAllSubImages(unpackCtx, client, imageName)
+	results, err := conchClient.UnpackImage(ctx, client.UnpackImageRequest{
+		ImageName: imageName,
+		Namespace: ns,
+	})
 	if err != nil {
 		return fmt.Errorf("conch unpack: %w", err)
 	}

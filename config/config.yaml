@@ -31,7 +31,6 @@ network:
   tap_mask: 24
 
 containerd:
-  socket: /run/containerd/containerd.sock
   root_dir: /var/lib/conch/containerd
   state_dir: /run/conch/containerd
   default_namespace: default

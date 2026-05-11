@@ -56,7 +56,6 @@ type NetworkConfig struct {
 
 // ContainerdConfig holds containerd runtime configuration
 type ContainerdConfig struct {
-	Socket           string `yaml:"socket"`
 	RootDir          string `yaml:"root_dir"`
 	StateDir         string `yaml:"state_dir"`
 	DefaultNamespace string `yaml:"default_namespace"`
@@ -103,7 +102,6 @@ func DefaultConfig() *Config {
 			TapMask:            24,
 		},
 		Containerd: ContainerdConfig{
-			Socket:           "/run/containerd/containerd.sock",
 			RootDir:          "/var/lib/conch/containerd",
 			StateDir:         "/run/conch/containerd",
 			DefaultNamespace: "default",
@@ -179,9 +177,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Network.TapMask == 0 {
 		cfg.Network.TapMask = defaultCfg.Network.TapMask
-	}
-	if cfg.Containerd.Socket == "" {
-		cfg.Containerd.Socket = defaultCfg.Containerd.Socket
 	}
 	if cfg.Containerd.RootDir == "" {
 		cfg.Containerd.RootDir = defaultCfg.Containerd.RootDir

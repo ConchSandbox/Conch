@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/openeuler/Conch/internal/config"
 )
@@ -20,18 +19,14 @@ func loadConchConfig(configPath string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func resolveContainerdRuntime(cfg *config.Config, addrOverride, namespaceOverride string) (string, string) {
-	containerdAddr := cfg.Containerd.Socket
-	if containerdAddr == "" {
-		containerdAddr = defaultContainerdAddress
+func resolveConchAPIURL(apiURLOverride, addressAlias string) string {
+	if apiURLOverride != "" {
+		return apiURLOverride
 	}
-	if v := os.Getenv("CONTAINERD_ADDRESS"); v != "" {
-		containerdAddr = v
-	}
-	if addrOverride != "" {
-		containerdAddr = addrOverride
-	}
+	return addressAlias
+}
 
+func resolveConchNamespace(cfg *config.Config, namespaceOverride string) string {
 	namespace := cfg.Containerd.DefaultNamespace
 	if namespaceOverride != "" {
 		namespace = namespaceOverride
@@ -39,8 +34,7 @@ func resolveContainerdRuntime(cfg *config.Config, addrOverride, namespaceOverrid
 	if namespace == "" {
 		namespace = "default"
 	}
-
-	return containerdAddr, namespace
+	return namespace
 }
 
 func printUnpackSummary(results map[string]string) {

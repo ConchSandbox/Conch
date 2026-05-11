@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
+	"github.com/opencontainers/image-spec/identity"
 
 	"github.com/openeuler/Conch/internal/conchplugins"
 	"github.com/openeuler/Conch/internal/daemon"
@@ -21,6 +24,8 @@ var (
 	ErrInvalidRequest      = errors.New("invalid image request")
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
 )
+
+const SnapshotLabelVMSnapshot = "conch/snapshotter/vm-snapshot"
 
 type PullRequest struct {
 	ImageName              string `json:"image_name"`
@@ -37,6 +42,16 @@ type PullRequest struct {
 type UnpackRequest struct {
 	ImageName string `json:"image_name"`
 	Namespace string `json:"namespace,omitempty"`
+}
+
+type ImportArchiveRequest struct {
+	Namespace   string `json:"namespace,omitempty"`
+	ImportedTag string `json:"imported_tag,omitempty"`
+}
+
+type ImportArchiveResponse struct {
+	SnapshotKey string `json:"snapshot_key"`
+	ImageName   string `json:"image_name"`
 }
 
 type Service struct {
@@ -125,6 +140,78 @@ func (s *Service) Unpack(ctx context.Context, req UnpackRequest) (map[string]str
 		return nil, err
 	}
 	return results, nil
+}
+
+func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req ImportArchiveRequest) (ImportArchiveResponse, error) {
+	if s == nil || s.client == nil {
+		return ImportArchiveResponse{}, fmt.Errorf("image service has no containerd client")
+	}
+	if archive == nil {
+		return ImportArchiveResponse{}, fmt.Errorf("%w: archive is required", ErrInvalidRequest)
+	}
+
+	ns := req.Namespace
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	importCtx := namespaces.WithNamespace(ctx, ns)
+	importedImages, err := s.client.Import(importCtx, archive)
+	if err != nil {
+		return ImportArchiveResponse{}, fmt.Errorf("containerd import failed: %w", err)
+	}
+	if len(importedImages) == 0 {
+		return ImportArchiveResponse{}, fmt.Errorf("no images were imported")
+	}
+
+	snapshotter := s.client.SnapshotService("overlayfs")
+	var finalSnapshotKey string
+	var finalImageName string
+	for _, imgInfo := range reorderImportedImages(importedImages, req.ImportedTag) {
+		img := containerd.NewImage(s.client.Client, imgInfo)
+		if err := img.Unpack(importCtx, "overlayfs"); err != nil {
+			return ImportArchiveResponse{}, fmt.Errorf("failed to unpack image %s: %w", imgInfo.Name, err)
+		}
+
+		diffIDs, err := img.RootFS(importCtx)
+		if err != nil {
+			return ImportArchiveResponse{}, fmt.Errorf("failed to get rootfs: %w", err)
+		}
+		finalSnapshotKey = identity.ChainID(diffIDs).String()
+		finalImageName = imgInfo.Name
+		if _, err := snapshotter.Stat(importCtx, finalSnapshotKey); err != nil {
+			continue
+		}
+		break
+	}
+
+	if finalSnapshotKey == "" {
+		return ImportArchiveResponse{}, fmt.Errorf("no snapshot key generated")
+	}
+	return ImportArchiveResponse{
+		SnapshotKey: finalSnapshotKey,
+		ImageName:   finalImageName,
+	}, nil
+}
+
+func reorderImportedImages(imported []images.Image, preferredName string) []images.Image {
+	if preferredName == "" || len(imported) <= 1 {
+		return imported
+	}
+	out := make([]images.Image, 0, len(imported))
+	for _, img := range imported {
+		if img.Name == preferredName {
+			out = append(out, img)
+		}
+	}
+	for _, img := range imported {
+		if img.Name != preferredName {
+			out = append(out, img)
+		}
+	}
+	return out
 }
 
 var (

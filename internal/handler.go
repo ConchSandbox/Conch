@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"golang.org/x/sys/unix"
 
 	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
@@ -53,6 +57,7 @@ type sandboxManager interface {
 type imageService interface {
 	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
 	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
+	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
 }
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Server) {
@@ -156,6 +161,10 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
+	s.router.HandleFunc("/api/image/import", s.handleImportImage)
+	s.router.HandleFunc("/api/snapshot/link-vm", s.handleLinkSnapshotVM)
+	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
+	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
 
 func (s *Server) Start(addr string, unixSocket string) error {
@@ -434,6 +443,44 @@ func (s *Server) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 	writeImageResults(w, results)
 }
 
+func (s *Server) handleImportImage(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling import image request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.imageService == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "Invalid multipart body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("archive")
+	if err != nil {
+		http.Error(w, "Missing archive file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	resp, err := s.imageService.ImportArchive(r.Context(), file, imageSvc.ImportArchiveRequest{
+		Namespace:   r.FormValue("namespace"),
+		ImportedTag: r.FormValue("imported_tag"),
+	})
+	if err != nil {
+		logger.Error("Failed to import image archive", ulog.F("error", err))
+		writeImageError(w, "Failed to import image archive", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func writeImageResults(w http.ResponseWriter, results map[string]string) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]map[string]string{
@@ -447,6 +494,199 @@ func writeImageError(w http.ResponseWriter, prefix string, err error) {
 		status = http.StatusBadRequest
 	}
 	http.Error(w, prefix+": "+err.Error(), status)
+}
+
+type linkSnapshotVMRequest struct {
+	RootfsSnapshotID string `json:"rootfs_snapshot_id"`
+	VMSnapshotID     string `json:"vm_snapshot_id"`
+	Namespace        string `json:"namespace,omitempty"`
+}
+
+type snapshotInfoRequest struct {
+	Key       string `json:"key"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+type snapshotMetaResponse struct {
+	Key         string            `json:"key"`
+	Parent      string            `json:"parent,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	StoragePath string            `json:"storage_path,omitempty"`
+}
+
+type snapshotChainResponse struct {
+	Info       snapshotMetaResponse `json:"info"`
+	ChainPaths []string             `json:"chain_paths"`
+}
+
+func (s *Server) handleLinkSnapshotVM(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling link snapshot VM request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req linkSnapshotVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RootfsSnapshotID == "" || req.VMSnapshotID == "" {
+		http.Error(w, "rootfs_snapshot_id and vm_snapshot_id are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := snapshotNamespaceContext(r.Context(), s.daemonClient, req.Namespace)
+	snapshotter := s.daemonClient.SnapshotService("overlayfs")
+	if _, err := snapshotter.Update(ctx, snapshots.Info{
+		Name: req.RootfsSnapshotID,
+		Labels: map[string]string{
+			imageSvc.SnapshotLabelVMSnapshot: req.VMSnapshotID,
+		},
+	}, "labels."+imageSvc.SnapshotLabelVMSnapshot); err != nil {
+		logger.Error("Failed to link snapshot VM",
+			ulog.F("rootfs_snapshot_id", req.RootfsSnapshotID),
+			ulog.F("vm_snapshot_id", req.VMSnapshotID),
+			ulog.F("error", err),
+		)
+		http.Error(w, "Failed to link snapshot VM: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req snapshotInfoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	info, err := s.getSnapshotInfo(r.Context(), req.Namespace, req.Key)
+	if err != nil {
+		http.Error(w, "Failed to get snapshot info: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(info)
+}
+
+func (s *Server) handleSnapshotChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req snapshotInfoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	info, chain, err := s.getSnapshotChain(r.Context(), req.Namespace, req.Key)
+	if err != nil {
+		http.Error(w, "Failed to get snapshot chain: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snapshotChainResponse{
+		Info:       info,
+		ChainPaths: chain,
+	})
+}
+
+func (s *Server) getSnapshotChain(ctx context.Context, namespace, key string) (snapshotMetaResponse, []string, error) {
+	var rev []string
+	var first snapshotMetaResponse
+	cur := key
+	for cur != "" {
+		info, err := s.getSnapshotInfo(ctx, namespace, cur)
+		if err != nil {
+			return snapshotMetaResponse{}, nil, fmt.Errorf("snapshot %s: %w", cur, err)
+		}
+		if first.Key == "" {
+			first = info
+		}
+		if info.StoragePath == "" {
+			return snapshotMetaResponse{}, nil, fmt.Errorf("snapshot %s has empty storage path", cur)
+		}
+		rev = append(rev, info.StoragePath)
+		cur = info.Parent
+	}
+
+	out := make([]string, 0, len(rev))
+	for i := len(rev) - 1; i >= 0; i-- {
+		out = append(out, rev[i])
+	}
+	return first, out, nil
+}
+
+func (s *Server) getSnapshotInfo(ctx context.Context, namespace, key string) (snapshotMetaResponse, error) {
+	snapshotter := s.daemonClient.SnapshotService("overlayfs")
+	snapshotCtx := snapshotNamespaceContext(ctx, s.daemonClient, namespace)
+
+	stat, err := snapshotter.Stat(snapshotCtx, key)
+	if err != nil {
+		return snapshotMetaResponse{}, fmt.Errorf("stat failed for key %s: %w", key, err)
+	}
+
+	mounts, err := snapshotter.Mounts(snapshotCtx, key)
+	if err != nil || len(mounts) == 0 || len(mounts[0].Options) == 0 {
+		viewID := fmt.Sprintf("tmp-v-%d-%s", time.Now().UnixNano(), key)
+		mounts, err = snapshotter.View(snapshotCtx, viewID, key)
+		if err != nil {
+			return snapshotMetaResponse{}, fmt.Errorf("failed to resolve storage path via mounts or view: %w", err)
+		}
+		defer snapshotter.Remove(snapshotCtx, viewID)
+	}
+
+	storagePath := ""
+	if len(mounts) > 0 {
+		for _, opt := range mounts[0].Options {
+			if strings.HasPrefix(opt, "upperdir=") {
+				storagePath = strings.TrimPrefix(opt, "upperdir=")
+				break
+			}
+			if strings.HasPrefix(opt, "lowerdir=") && storagePath == "" {
+				storagePath = strings.Split(strings.TrimPrefix(opt, "lowerdir="), ":")[0]
+			}
+		}
+		if storagePath == "" || storagePath == "overlay" {
+			storagePath = mounts[0].Source
+		}
+	}
+
+	return snapshotMetaResponse{
+		Key:         stat.Name,
+		Parent:      stat.Parent,
+		Labels:      stat.Labels,
+		StoragePath: storagePath,
+	}, nil
+}
+
+func snapshotNamespaceContext(ctx context.Context, client *daemon.Client, namespace string) context.Context {
+	ns := namespace
+	if ns == "" && client != nil {
+		ns = client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	return namespaces.WithNamespace(ctx, ns)
 }
 
 // TODO return available snapshot_id

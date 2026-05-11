@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,6 +20,8 @@ type fakeImageService struct {
 	pullErr   error
 	unpackErr error
 	results   map[string]string
+	importReq imageSvc.ImportArchiveRequest
+	importRaw string
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req imageSvc.PullRequest) (map[string]string, error) {
@@ -34,6 +38,13 @@ func (f *fakeImageService) Unpack(_ context.Context, req imageSvc.UnpackRequest)
 		return nil, f.unpackErr
 	}
 	return f.results, nil
+}
+
+func (f *fakeImageService) ImportArchive(_ context.Context, archive io.Reader, req imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error) {
+	f.importReq = req
+	raw, _ := io.ReadAll(archive)
+	f.importRaw = string(raw)
+	return imageSvc.ImportArchiveResponse{SnapshotKey: "rootfs-id", ImageName: "image:latest"}, nil
 }
 
 func newImageHandlerServer(svc imageService) *Server {
@@ -124,6 +135,48 @@ func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleImportImage(t *testing.T) {
+	svc := &fakeImageService{}
+	server := newImageHandlerServer(svc)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("namespace", "team-a")
+	_ = writer.WriteField("imported_tag", "buildah-oci-rootfs:latest")
+	part, err := writer.CreateFormFile("archive", "image.tar")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write([]byte("archive-content")); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/image/import", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.importReq.Namespace != "team-a" || svc.importReq.ImportedTag != "buildah-oci-rootfs:latest" {
+		t.Fatalf("import request = %#v", svc.importReq)
+	}
+	if svc.importRaw != "archive-content" {
+		t.Fatalf("archive = %q", svc.importRaw)
+	}
+	var got imageSvc.ImportArchiveResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.SnapshotKey != "rootfs-id" || got.ImageName != "image:latest" {
+		t.Fatalf("response = %#v", got)
 	}
 }
 

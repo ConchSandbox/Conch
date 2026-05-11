@@ -280,27 +280,28 @@ conch push localhost/conch/kernel:6.6.0 hub.oepkgs.net/conch/kernel:6.6.0
 
 执行：
 
-1. `ctr pull`
-2. `conch unpack`
+1. CLI 调用 conchd image API 拉取目标 Conch 原生镜像
+2. conchd 将镜像写入进程内 containerd store
+3. conchd 执行 unpack，在本地形成可运行状态
 
 #### B. 输入为标准 OCI 镜像
 
 执行：
 
-1. 将标准 OCI 镜像拉取到本地镜像存储
+1. CLI 调用 conchd image API，将标准 OCI 镜像拉取到进程内 containerd store
 2. 判断该镜像不属于 Conch 原生镜像格式
 3. 读取默认配置中的 kernel 镜像，并结合命令行拉取参数
 4. 将 OCI rootfs 转换为 EROFS rootfs，并执行 2MB 对齐
 5. 构建 rootfs 镜像
 6. 结合 kernel 镜像组装为 `sandbox-image`
-7. 将生成的 `sandbox-image` 导入 containerd
+7. 将生成的 `sandbox-image` 导入进程内 containerd store
 8. 执行 unpack，在本地形成可运行状态
 
 ### 6.3 `conch pull` 的配置来源
 
 `conch pull` 与 `conch unpack` 统一使用以下配置：
 
-- `containerd.socket`
+- `server.unix_socket` 或 `server.host`/`server.port`
 - `containerd.default_namespace`
 
 对于标准 OCI 镜像转换路径，还使用以下 image 配置：

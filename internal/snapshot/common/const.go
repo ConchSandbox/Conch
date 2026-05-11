@@ -15,8 +15,6 @@ const (
 	PmemPrefix             = "layer"
 	PemSuffix              = ".erofs"
 
-	ContainerdSock = "/run/containerd/containerd.sock"
-
 	SnapshotMountRootfs = "rootfs"
 	SnapshotMountMem    = "mem"
 	SnapshotMountVM     = "vm"
