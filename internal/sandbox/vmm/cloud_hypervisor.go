@@ -238,6 +238,9 @@ func (c *CLHClient) CreateSnapshot(snapfilePath string) error {
 	logger.Info("Creating snapshot",
 		ulog.F("path", snapfilePath),
 	)
+	if err := os.MkdirAll(snapfilePath, 0o750); err != nil {
+		return fmt.Errorf("create snapshot directory: %w", err)
+	}
 
 	requestBody := struct {
 		DestinationURL string `json:"destination_url"`
