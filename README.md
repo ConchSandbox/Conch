@@ -137,7 +137,7 @@ finally:
 
 调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
 
-更多 SDK 用法详见 [Python SDK API 文档](docs/python-api.md)。
+更多 SDK 用法详见 [Python SDK API 文档](docs/guide/python-api.md)。
 
 ## 许可证
 
