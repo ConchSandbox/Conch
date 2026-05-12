@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 ###############################################################################
 # Script Name: conch-env-setup.sh
@@ -62,12 +63,14 @@ show_help() {
 }
 
 MAIN_IMG=$F_IMG_DEFAULT
-COMMAND=$1
-shift
+COMMAND=${1:-help}
+if [ "$#" -gt 0 ]; then
+    shift
+fi
 
 for i in "$@"; do
     case $i in
-        --main_image=*)  MAIN_IMG="${i#*=}"; shift ;;
+        --main_image=*)  MAIN_IMG="${i#*=}" ;;
     esac
 done
 
@@ -78,7 +81,7 @@ install_clh() {
     CLH_BIN_PATH=""
 
     # Check if cloud-hypervisor exists in PATH and is a valid executable
-    CLH_BIN_PATH=$(command -v cloud-hypervisor 2>/dev/null)
+    CLH_BIN_PATH=$(command -v cloud-hypervisor 2>/dev/null || true)
     if [ -n "$CLH_BIN_PATH" ] && [ -s "$CLH_BIN_PATH" ] && [ -x "$CLH_BIN_PATH" ]; then
         # File exists, is non-empty, and is executable - verify it actually works
         CLH_VER_STR=$($CLH_BIN_PATH --version 2>&1 | awk '{print $2}' | sed 's/v//')
@@ -104,8 +107,7 @@ install_clh() {
         rm -f /usr/local/bin/cloud-hypervisor
         echo "Downloading cloud-hypervisor v${CLH_VER}.0 for ${ARCH}..."
         echo "URL: $CLH_URL"
-        wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1
-        if [ $? -ne 0 ]; then
+        if ! wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1; then
             echo "Error: Failed to download cloud-hypervisor."
             echo "Manual download: https://github.com/cloud-hypervisor/cloud-hypervisor/releases"
             return 1
@@ -167,8 +169,7 @@ run_build() {
 install_sdk() {
     echo "--- Installing Python SDK ---"
     if [ -d "./sdk" ]; then
-        pip install -e ./sdk --break-system-packages  --ignore-installed typing-extensions
-        if [ $? -ne 0 ]; then
+        if ! pip install -e ./sdk --break-system-packages  --ignore-installed typing-extensions; then
             echo "Error: Failed to install SDK with pip."
             return 1
         fi
