@@ -7,6 +7,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/opencontainers/image-spec/identity"
@@ -153,6 +154,10 @@ func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshott
 		return "", fmt.Errorf("get RootFS for %s: %w", kind, err)
 	}
 	snapshotID := identity.ChainID(diffIDs).String()
+	preExisting, err := snapshotExists(ctx, snapshotter, snapshotID)
+	if err != nil {
+		return "", fmt.Errorf("check snapshot %s before unpack for %s: %w", snapshotID, kind, err)
+	}
 
 	if err := subImg.Unpack(ctx, "overlayfs"); err != nil {
 		return "", fmt.Errorf("unpack sub-image %s (kind: %s): %w", manifestDesc.Digest, kind, err)
@@ -162,8 +167,26 @@ func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshott
 	if _, err := snapshotter.Stat(ctx, snapshotID); err != nil {
 		return "", fmt.Errorf("verify unpacked snapshot %s for %s: %w", snapshotID, kind, err)
 	}
-	*createdSnapshotIDs = append(*createdSnapshotIDs, snapshotID)
+	recordCreatedSnapshot(createdSnapshotIDs, snapshotID, preExisting)
 	return snapshotID, nil
+}
+
+func snapshotExists(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotID string) (bool, error) {
+	_, err := snapshotter.Stat(ctx, snapshotID)
+	if err == nil {
+		return true, nil
+	}
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func recordCreatedSnapshot(createdSnapshotIDs *[]string, snapshotID string, preExisting bool) {
+	if preExisting {
+		return
+	}
+	*createdSnapshotIDs = append(*createdSnapshotIDs, snapshotID)
 }
 
 func linkSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotMap map[string]string) error {

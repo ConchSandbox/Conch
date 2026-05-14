@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/snapshots"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -15,10 +16,19 @@ type recordingSnapshotter struct {
 	updatedInfo       snapshots.Info
 	updatedFieldpaths []string
 	updateErr         error
+	statInfo          map[string]snapshots.Info
+	statErr           map[string]error
+	removed           []string
 }
 
-func (r *recordingSnapshotter) Stat(context.Context, string) (snapshots.Info, error) {
-	return snapshots.Info{}, nil
+func (r *recordingSnapshotter) Stat(_ context.Context, key string) (snapshots.Info, error) {
+	if err, ok := r.statErr[key]; ok {
+		return snapshots.Info{}, err
+	}
+	if info, ok := r.statInfo[key]; ok {
+		return info, nil
+	}
+	return snapshots.Info{}, errdefs.ErrNotFound
 }
 
 func (r *recordingSnapshotter) Update(_ context.Context, info snapshots.Info, fieldpaths ...string) (snapshots.Info, error) {
@@ -50,7 +60,8 @@ func (r *recordingSnapshotter) Commit(context.Context, string, string, ...snapsh
 	return nil
 }
 
-func (r *recordingSnapshotter) Remove(context.Context, string) error {
+func (r *recordingSnapshotter) Remove(_ context.Context, key string) error {
+	r.removed = append(r.removed, key)
 	return nil
 }
 
@@ -137,5 +148,50 @@ func TestLinkSnapshotLabelsWrapsUpdateError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to link component SnapshotIDs to rootfs") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSnapshotExists(t *testing.T) {
+	snapshotter := &recordingSnapshotter{
+		statInfo: map[string]snapshots.Info{
+			"existing": {Name: "existing"},
+		},
+	}
+
+	exists, err := snapshotExists(context.Background(), snapshotter, "existing")
+	if err != nil {
+		t.Fatalf("snapshotExists(existing): %v", err)
+	}
+	if !exists {
+		t.Fatal("expected existing snapshot to be reported as present")
+	}
+
+	exists, err = snapshotExists(context.Background(), snapshotter, "missing")
+	if err != nil {
+		t.Fatalf("snapshotExists(missing): %v", err)
+	}
+	if exists {
+		t.Fatal("expected missing snapshot to be reported as absent")
+	}
+}
+
+func TestRecordCreatedSnapshotOnlyTracksNewSnapshots(t *testing.T) {
+	var created []string
+
+	recordCreatedSnapshot(&created, "existing", true)
+	recordCreatedSnapshot(&created, "newly-created", false)
+
+	if got, want := strings.Join(created, "\x00"), "newly-created"; got != want {
+		t.Fatalf("created snapshots = %#v, want %#v", created, []string{"newly-created"})
+	}
+}
+
+func TestCleanupSnapshotsRemovesRecordedSnapshots(t *testing.T) {
+	snapshotter := &recordingSnapshotter{}
+
+	cleanupSnapshots([]string{"snap-a", "snap-b"}, snapshotter, context.Background())
+
+	if got, want := strings.Join(snapshotter.removed, "\x00"), strings.Join([]string{"snap-a", "snap-b"}, "\x00"); got != want {
+		t.Fatalf("removed snapshots = %#v, want %#v", snapshotter.removed, []string{"snap-a", "snap-b"})
 	}
 }
