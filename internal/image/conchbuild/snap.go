@@ -44,6 +44,23 @@ type Result struct {
 	PmemRootfsRef   string
 }
 
+// SnapshotExportOpts holds parameters for exporting an existing rootfs snapshot
+// or sandbox into a sandbox-snapshot image.
+type SnapshotExportOpts struct {
+	Store            storage.Store
+	BootIndexTag     string
+	ConfigPath       string
+	ConchAPIBaseURL  string
+	RootfsSnapshotID string
+	SandboxID        string
+}
+
+func progressf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	logrus.Infof("%s", msg)
+	fmt.Fprintln(os.Stdout, msg)
+}
+
 // ExecuteSNAP runs the full SNAP flow: sync to containerd, call Conch Create/Pause,
 // resolve rootfs/mem/vm paths, and publish a sandbox snapshot image. Returns the new imageID (index digest).
 func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) {
@@ -143,44 +160,86 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	}
 	logrus.Infof("Conch sandbox %s created, VM started", sandboxID)
 
-	rootfsCommitName, err := conchClient.PauseSandbox(sandboxID)
+	rootfsCommitName, err := conchClient.PauseSandbox(sandboxID, containerdNamespace)
 	if err != nil {
 		return Result{}, fmt.Errorf("Conch PauseSandbox failed: %w", err)
 	}
 	logrus.Infof("Conch Pause complete. Rootfs snapshot: %s", rootfsCommitName)
 	logrus.Infof("[conch build] conch pause rootfs snapshot: %s", rootfsCommitName)
 
-	rootfsInfo, err := sn.GetSnapshotInfo(snapCtx, ctrdClient, rootfsCommitName)
+	exported, err := exportSnapshotBundleFromRootfs(snapCtx, ctrdClient, opts.Store, rootfsCommitName, opts.BootIndexTag)
 	if err != nil {
-		return Result{}, fmt.Errorf("failed to get rootfs snapshot info for %s: %w", rootfsCommitName, err)
+		return Result{}, err
 	}
-	rootfsChainPaths, err := collectSnapshotChainPaths(snapCtx, ctrdClient, rootfsCommitName)
+	exported.PmemRootfsRef = rootfsImageRef
+	return exported, nil
+}
+
+// ExportSnapshot exports a sandbox-snapshot image from an existing rootfs
+// snapshot ID or by pausing an existing sandbox ID.
+func ExportSnapshot(ctx context.Context, opts SnapshotExportOpts) (Result, error) {
+	if opts.Store == nil {
+		return Result{}, fmt.Errorf("storage store is required")
+	}
+	if (opts.RootfsSnapshotID == "") == (opts.SandboxID == "") {
+		return Result{}, fmt.Errorf("exactly one of --snapshot-id or --sandbox-id is required")
+	}
+
+	containerdAddr, containerdNamespace := resolveContainerdRuntime(opts.ConfigPath)
+	ctrdClient, err := containerd.New(containerdAddr)
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to connect to containerd: %w", err)
+	}
+	defer ctrdClient.Close()
+
+	snapCtx := namespaces.WithNamespace(ctx, containerdNamespace)
+	rootfsSnapshotID := opts.RootfsSnapshotID
+	if rootfsSnapshotID == "" {
+		progressf("[1/5] pausing sandbox %s to create rootfs snapshot...", opts.SandboxID)
+		conchClient := client.NewClientWithConfig(opts.ConchAPIBaseURL, opts.ConfigPath)
+		rootfsSnapshotID, err = conchClient.PauseSandbox(opts.SandboxID, containerdNamespace)
+		if err != nil {
+			return Result{}, fmt.Errorf("Conch PauseSandbox failed: %w", err)
+		}
+		logrus.Infof("[conch snapshot export] conch pause rootfs snapshot: %s", rootfsSnapshotID)
+	} else {
+		progressf("[1/5] using existing rootfs snapshot %s...", rootfsSnapshotID)
+	}
+
+	return exportSnapshotBundleFromRootfs(snapCtx, ctrdClient, opts.Store, rootfsSnapshotID, opts.BootIndexTag)
+}
+
+func exportSnapshotBundleFromRootfs(ctx context.Context, ctrdClient *containerd.Client, store storage.Store, rootfsSnapshotID, bootIndexTag string) (Result, error) {
+	progressf("[2/5] resolving rootfs snapshot metadata...")
+	rootfsInfo, err := sn.GetSnapshotInfo(ctx, ctrdClient, rootfsSnapshotID)
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to get rootfs snapshot info for %s: %w", rootfsSnapshotID, err)
+	}
+	progressf("[3/5] collecting rootfs snapshot chain...")
+	rootfsChainPaths, err := collectSnapshotChainPaths(ctx, ctrdClient, rootfsSnapshotID)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve rootfs snapshot chain: %w", err)
 	}
 
-	memName, ok := rootfsInfo.Labels[SnapshotLabelMemSnapshot]
-	if !ok {
-		return Result{}, fmt.Errorf("rootfs snapshot missing mem association (label %s)", SnapshotLabelMemSnapshot)
+	memName, vmName, err := resolveSnapshotComponentIDs(rootfsInfo)
+	if err != nil {
+		return Result{}, err
 	}
 
-	memInfo, err := sn.GetSnapshotInfo(snapCtx, ctrdClient, memName)
+	progressf("[4/5] collecting mem/vm snapshot chains...")
+	memInfo, err := sn.GetSnapshotInfo(ctx, ctrdClient, memName)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to get mem snapshot info for %s: %w", memName, err)
 	}
-	memChainPaths, err := collectSnapshotChainPaths(snapCtx, ctrdClient, memName)
+	memChainPaths, err := collectSnapshotChainPaths(ctx, ctrdClient, memName)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve mem snapshot chain: %w", err)
 	}
-	vmName, ok := rootfsInfo.Labels[SnapshotLabelVMSnapshot]
-	if !ok {
-		return Result{}, fmt.Errorf("rootfs snapshot missing sandbox association (label %s)", SnapshotLabelVMSnapshot)
-	}
-	vmInfo, err := sn.GetSnapshotInfo(snapCtx, ctrdClient, vmName)
+	vmInfo, err := sn.GetSnapshotInfo(ctx, ctrdClient, vmName)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to get sandbox snapshot info for %s: %w", vmName, err)
 	}
-	vmChainPaths, err := collectSnapshotChainPaths(snapCtx, ctrdClient, vmName)
+	vmChainPaths, err := collectSnapshotChainPaths(ctx, ctrdClient, vmName)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve sandbox snapshot chain: %w", err)
 	}
@@ -192,14 +251,14 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 	logrus.Debugf("Sandbox Storage Path: %s", vmInfo.StoragePath)
 	logrus.Debugf("Sandbox chain paths: %v", vmChainPaths)
 
-	publisher := ocipublisher.NewSnapshotPublisher(opts.Store)
-	bootIndexTag := opts.BootIndexTag
+	publisher := ocipublisher.NewSnapshotPublisher(store)
 	if bootIndexTag == "" {
 		bootIndexTag = "localhost/conch/sandbox-snapshot:latest"
 	}
 
+	progressf("[5/5] publishing sandbox-snapshot image %s...", bootIndexTag)
 	bootIndexDigest, err := publisher.PublishSnapshotBundleFromPath(
-		snapCtx,
+		ctx,
 		rootfsChainPaths,
 		memChainPaths,
 		vmChainPaths,
@@ -209,13 +268,12 @@ func ExecuteSNAP(ctx context.Context, opts SNAPOpts) (result Result, err error) 
 		return Result{}, fmt.Errorf("failed to publish boot index from snapshot paths: %w", err)
 	}
 
-	logrus.Infof("[conch build] snapshot top keys: rootfs=%s sandbox=%s mem=%s", rootfsCommitName, vmName, memName)
-	logrus.Infof("[conch build] boot index tag: %s", bootIndexTag)
+	logrus.Infof("[conch snapshot export] snapshot top keys: rootfs=%s sandbox=%s mem=%s", rootfsSnapshotID, vmName, memName)
+	logrus.Infof("[conch snapshot export] boot index tag: %s", bootIndexTag)
 	logrus.Infof("Final boot OCI index published: %s", bootIndexDigest.String())
 	return Result{
 		BootIndexDigest: bootIndexDigest.Encoded(),
 		BootIndexTag:    bootIndexTag,
-		PmemRootfsRef:   rootfsImageRef,
 	}, nil
 }
 
@@ -264,10 +322,21 @@ func linkRootfsSnapshotToVM(ctx context.Context, ctrdClient *containerd.Client, 
 }
 
 func collectSnapshotChainPaths(ctx context.Context, ctrdClient *containerd.Client, topKey string) ([]string, error) {
+	return collectSnapshotChainPathsWithGetter(topKey, func(key string) (*sn.SnapshotMeta, error) {
+		return sn.GetSnapshotInfo(ctx, ctrdClient, key)
+	})
+}
+
+func collectSnapshotChainPathsWithGetter(topKey string, getInfo func(string) (*sn.SnapshotMeta, error)) ([]string, error) {
 	var rev []string
 	cur := topKey
+	seen := make(map[string]struct{})
 	for cur != "" {
-		info, err := sn.GetSnapshotInfo(ctx, ctrdClient, cur)
+		if _, ok := seen[cur]; ok {
+			return nil, fmt.Errorf("snapshot chain cycle detected at %s", cur)
+		}
+		seen[cur] = struct{}{}
+		info, err := getInfo(cur)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", cur, err)
 		}
@@ -283,4 +352,22 @@ func collectSnapshotChainPaths(ctx context.Context, ctrdClient *containerd.Clien
 		out = append(out, rev[i])
 	}
 	return out, nil
+}
+
+func resolveSnapshotComponentIDs(rootfsInfo *sn.SnapshotMeta) (string, string, error) {
+	if rootfsInfo == nil {
+		return "", "", fmt.Errorf("rootfs snapshot metadata is required")
+	}
+
+	memName, ok := rootfsInfo.Labels[SnapshotLabelMemSnapshot]
+	if !ok || strings.TrimSpace(memName) == "" {
+		return "", "", fmt.Errorf("rootfs snapshot missing mem association (label %s)", SnapshotLabelMemSnapshot)
+	}
+
+	vmName, ok := rootfsInfo.Labels[SnapshotLabelVMSnapshot]
+	if !ok || strings.TrimSpace(vmName) == "" {
+		return "", "", fmt.Errorf("rootfs snapshot missing sandbox association (label %s)", SnapshotLabelVMSnapshot)
+	}
+
+	return memName, vmName, nil
 }

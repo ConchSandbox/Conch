@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestPrintHelpIncludesBuildPushPullAndUnpack(t *testing.T) {
+func TestPrintHelpIncludesBuildPushPullUnpackAndSnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	printHelp(&buf)
 
@@ -17,6 +17,7 @@ func TestPrintHelpIncludesBuildPushPullAndUnpack(t *testing.T) {
 		"conch push [options] <local-image> <remote-image>",
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
+		"conch snapshot export [options]",
 		"Subcommands:",
 	} {
 		if !strings.Contains(got, want) {
@@ -236,6 +237,106 @@ func TestPrintBuildHelpIncludesUsageAndEnv(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("build help output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestPrintSnapshotHelpIncludesExport(t *testing.T) {
+	var buf bytes.Buffer
+	printSnapshotHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch snapshot export [options]",
+		"export  Export a sandbox-snapshot image",
+		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
+		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshot help output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestPrintSnapshotExportHelpIncludesExamples(t *testing.T) {
+	var buf bytes.Buffer
+	fs, _ := newSnapshotExportFlagSet(&buf)
+	printSnapshotExportHelp(&buf, fs)
+
+	got := buf.String()
+	for _, want := range []string{
+		"-snapshot-id string",
+		"-sandbox-id string",
+		"-tag string",
+		"-t string",
+		"Either one of --snapshot-id or --sandbox-id is required.",
+		"conch snapshot export --snapshot-id sha256:abc -t localhost/conch/sandbox-snapshot:latest",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshot export help output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParseSnapshotExportArgs(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantSnapshot string
+		wantSandbox  string
+		wantTag      string
+		wantConfig   string
+		wantErrText  string
+		wantErr      bool
+	}{
+		{
+			name:         "snapshot id",
+			args:         []string{"--snapshot-id", "sha256:abc", "-t", "localhost/conch/sandbox-snapshot:latest"},
+			wantSnapshot: "sha256:abc",
+			wantTag:      "localhost/conch/sandbox-snapshot:latest",
+		},
+		{
+			name:        "sandbox id with config",
+			args:        []string{"--sandbox-id", "sandbox-123", "--tag", "localhost/conch/demo:latest", "--config", "/tmp/config.yaml"},
+			wantSandbox: "sandbox-123",
+			wantTag:     "localhost/conch/demo:latest",
+			wantConfig:  "/tmp/config.yaml",
+		},
+		{
+			name:        "missing tag",
+			args:        []string{"--snapshot-id", "sha256:abc"},
+			wantErr:     true,
+			wantErrText: "output tag is required",
+		},
+		{
+			name:        "missing source",
+			args:        []string{"-t", "localhost/conch/demo:latest"},
+			wantErr:     true,
+			wantErrText: "exactly one of --snapshot-id or --sandbox-id is required",
+		},
+		{
+			name:        "both sources",
+			args:        []string{"--snapshot-id", "sha256:abc", "--sandbox-id", "sandbox-123", "-t", "localhost/conch/demo:latest"},
+			wantErr:     true,
+			wantErrText: "exactly one of --snapshot-id or --sandbox-id is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseSnapshotExportArgs(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseSnapshotExportArgs() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("parseSnapshotExportArgs() error = %q, want substring %q", err.Error(), tt.wantErrText)
+				}
+				return
+			}
+			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig {
+				t.Fatalf("parseSnapshotExportArgs() = %#v", got)
+			}
+		})
 	}
 }
 

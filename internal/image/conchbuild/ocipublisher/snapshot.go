@@ -81,11 +81,13 @@ func (p *SnapshotPublisher) PublishComponentChain(ctx context.Context, paths []s
 	}
 	metas := make([]layerMeta, 0, len(paths))
 	var parentLayerID string
-	for _, pth := range paths {
+	for i, pth := range paths {
+		fmt.Printf("    > [%s %d/%d] archiving %s\n", componentType, i+1, len(paths), pth)
 		archivePath, err := createContainerLayerArchive(pth)
 		if err != nil {
 			return nil, fmt.Errorf("create layer archive from %s: %w", pth, err)
 		}
+		fmt.Printf("    > [%s %d/%d] importing archive into local storage\n", componentType, i+1, len(paths))
 		layer, err := writeSnapshotLayerWithParent(p.store, archivePath, parentLayerID)
 		_ = os.Remove(archivePath)
 		if err != nil {
@@ -130,6 +132,7 @@ func (p *SnapshotPublisher) PublishComponentChain(ctx context.Context, paths []s
 
 	// Top layer represents the image's top root.
 	top := metas[len(metas)-1].layer
+	fmt.Printf("    > [%s] committing image %s\n", componentType, tag)
 	img, _, err := CommitConchArtifact(p.store, top, rawConfigJSON, rawManifestJSON, []string{tag})
 	return img, err
 }
