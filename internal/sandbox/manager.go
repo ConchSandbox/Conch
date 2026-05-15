@@ -82,11 +82,14 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
 
-	readyCh := make(chan struct{}, 1)
+	readyCh := make(chan error, 1)
 	go waitForVsockAgentReady(ctx, sbx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout, readyCh)
 
 	select {
-	case <-readyCh:
+	case err := <-readyCh:
+		if err != nil {
+			return sbx, err
+		}
 		logger.Info("Vsock signal sent successfully", ulog.F("sandboxId", sandboxId))
 	case <-ctx.Done():
 		return sbx, ctx.Err()
@@ -94,7 +97,7 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 	return sbx, nil
 }
 
-func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, readyCh chan struct{}) {
+func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, readyCh chan error) {
 	logger := ulog.GetLogger()
 	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxId)
 
@@ -104,9 +107,12 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 	for {
 		select {
 		case <-timer.C:
+			err := fmt.Errorf("vsock signal attempts timed out after %s", vsockSignalTimeout)
 			logger.Error("vsock signal attempts timed out", ulog.F("sandboxId", sandboxId), ulog.F("timeout", vsockSignalTimeout))
+			readyCh <- err
 			return
 		case <-ctx.Done():
+			readyCh <- ctx.Err()
 			return
 		default:
 			conn, err := net.Dial("unix", vsockSocketPath)
@@ -192,7 +198,7 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 
 				conn.SetReadDeadline(time.Time{})
 				sbx.vsockConn = conn
-				close(readyCh)
+				readyCh <- nil
 				return
 			}
 			logger.Warn("Received unknown message from Agent", ulog.F("msg", agentMsg))
@@ -270,6 +276,14 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	sbx, err = createSandboxWithVsockSend(ctx, snapshotConf, namespace, req.VmmName, req.SandboxId, req.VcpuNum, vcpuMax, m.pool, m.vsockSignalRetry, m.vsockSignalTimeout, resume, vsockCID, vsockSocketPath)
 
 	if err != nil {
+		if sbx != nil {
+			if closeErr := sbx.Close(context.Background()); closeErr != nil {
+				logger.Warn("failed to cleanup sandbox after create failure",
+					ulog.F("sandbox_id", req.SandboxId),
+					ulog.F("error", closeErr),
+				)
+			}
+		}
 		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
 			logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
 		}
@@ -285,18 +299,11 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
 
-		cleanupErr := sbx.Close(ctx)
-		if cleanupErr != nil {
-			logger.Warn("failed to cleanup sandbox, will remove from cache", ulog.F("error", cleanupErr))
+		if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+			return
 		}
 
-		snapshot.Remove(context.Background(), sbx.namespace, req.SandboxId)
-
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
-
-		m.sandboxes.Delete(mapKey)
+		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 	}()
 
 	logger.Debug("created sandbox in manager")
@@ -339,12 +346,30 @@ func (m *Manager) resolveNamespace(namespace string) string {
 	return m.daemonClient.DefaultNamespace()
 }
 
-func (m *Manager) Delete(req SandboxDeleteRequest) error {
+func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) {
 	logger := ulog.GetLogger()
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
-	defer cancel()
+	if err := sbx.Close(ctx); err != nil {
+		logger.Warn("failed to cleanup sandbox, will remove from cache",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("error", err),
+		)
+	}
 
+	if err := snapshot.Remove(context.Background(), sbx.namespace, sandboxID); err != nil {
+		logger.Warn("failed to remove sandbox snapshot",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("namespace", sbx.namespace),
+			ulog.F("error", err),
+		)
+	}
+
+	if releaseErr := m.ReleaseCID(sandboxID); releaseErr != nil {
+		logger.Warn("failed to release CID", ulog.F("sandbox_id", sandboxID), ulog.F("error", releaseErr))
+	}
+}
+
+func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxId)
 	sbxVal, exists := m.sandboxes.Load(mapKey)
@@ -357,16 +382,12 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
 
-	m.sandboxes.Delete(mapKey)
-	go func() {
-		err := sbx.Stop(ctx)
-		if err != nil {
-			logger.Error("sandbox stop error", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
-		}
+	if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+		return nil
+	}
 
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
+	go func() {
+		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 	}()
 	return nil
 }

@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/leases"
-	"golang.org/x/sys/unix"
+	"github.com/containerd/containerd/v2/core/leases"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/plugin"
 )
 
 // session represents a namespace session with context and cancellation
@@ -28,9 +27,11 @@ type Client struct {
 	mu                 sync.RWMutex        // protects sessions
 }
 
-// New creates and connects to containerd daemon
-func New(address string, opts ...containerd.ClientOpt) (*Client, error) {
-	cli, err := initClient(address, opts...)
+// NewInMemory creates a client backed by containerd services in the current
+// process. It is intended for conchd's embedded containerd host path.
+func NewInMemory(ic *plugin.InitContext, opts ...containerd.Opt) (*Client, error) {
+	opts = append(opts, containerd.WithInMemoryServices(ic))
+	cli, err := containerd.New("", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,22 +108,4 @@ func (c *Client) Close() error {
 // DefaultNamespace returns the default namespace
 func (c *Client) DefaultNamespace() string {
 	return c.Client.DefaultNamespace()
-}
-
-// checkSocket checks if the containerd socket file is accessible
-func checkSocket(s string) error {
-	return unix.Faccessat(-1, s, unix.R_OK|unix.W_OK, unix.AT_EACCESS)
-}
-
-// initClient initializes containerd client connection
-func initClient(address string, opts ...containerd.ClientOpt) (*containerd.Client, error) {
-	address = strings.TrimPrefix(address, "unix://")
-	if err := checkSocket(address); err != nil {
-		return nil, fmt.Errorf("access containerd socket %q: %w", address, err)
-	}
-	cli, err := containerd.New(address, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return cli, nil
 }

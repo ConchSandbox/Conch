@@ -18,8 +18,6 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-const defaultContainerdAddress = "/run/containerd/containerd.sock"
-
 func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "conch - Conch image tool")
 	fmt.Fprintln(out, "")
@@ -48,7 +46,6 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  CONCH_BUILDAH_BIN        buildah binary path (default: buildah)")
 	fmt.Fprintln(out, "  BUILDAH_CONCH_API_URL    conchd API base URL")
 	fmt.Fprintln(out, "  CONCHD_HOST/CONCHD_PORT  fallback for conchd API URL")
-	fmt.Fprintln(out, "  CONTAINERD_ADDRESS       containerd socket path")
 }
 
 func printBuildHelp(out io.Writer) {
@@ -67,7 +64,6 @@ func printBuildHelp(out io.Writer) {
 	fmt.Fprintln(out, "  CONCH_BUILDAH_BIN        buildah binary path (default: buildah)")
 	fmt.Fprintln(out, "  BUILDAH_CONCH_API_URL    conchd API base URL")
 	fmt.Fprintln(out, "  CONCHD_HOST/CONCHD_PORT  fallback for conchd API URL")
-	fmt.Fprintln(out, "  CONTAINERD_ADDRESS       containerd socket path")
 }
 
 func initUnpackLogger() error {

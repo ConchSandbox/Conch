@@ -1,41 +1,38 @@
 #!/bin/bash
+set -euo pipefail
 
 ###############################################################################
 # Script Name: conch-env-setup.sh
 # Description: Automates Conch environment setup with one-click execution
 # Core Features:
-#   1. Check and install runtime dependencies (containerd & cloud-hypervisor)
-#   2. Configure registry mirror and SSL skip-verify for image pulling
-#   3. Pull builder and function images with customizable tags
-#   4. Execute containerized offline builds and image unpacking
+#   1. Check and install runtime dependencies (cloud-hypervisor, buildah, erofs-utils)
+#   2. Build Conch binaries locally
+#   3. Pull function images through conchd
 #
 # MUST run in Conch project directory:
 #   From Conch root: ./scripts/conch-env-setup.sh
 #
 # Usage:
-#   install: Installs containerd and cloud-hypervisor only if they are missing.
-#   pull: Configures registry access and pulls the required images.
-#   build: Runs an offline compilation inside a container to keep your host clean.
-#   process: Uses the compiled tool to unpack and analyze the target image.
-#   all: Executes the full workflow (install → pull → build → process) automatically.
-#   Customization: Use --build_image or --main_image to switch versions on the fly.
+#   install: Installs cloud-hypervisor, buildah, erofs-utils, builds Conch, and installs SDK.
+#   pull: Pulls the required image through a running conchd.
+#   build: Builds Conch binaries locally.
+#   all: Executes all setup steps: provisioning, local build, and SDK setup.
+#   Customization: Use --main_image to switch the default image on the fly.
 ###############################################################################
 
 ###############################################################################
 # Architecture Detection and Image Selection
-# - x86_64  -> -x86 suffix for images, amd64 for containerd, cloud-hypervisor-static
-# - aarch64 -> -aarch suffix for images, arm64 for containerd, cloud-hypervisor-static-aarch64
+# - x86_64  -> -x86 suffix for images, cloud-hypervisor-static
+# - aarch64 -> -aarch suffix for images, cloud-hypervisor-static-aarch64
 ###############################################################################
 ARCH=$(uname -m)
 case $ARCH in
     x86_64)  
         ARCH_SUFFIX="x86"
-        CNTD_ARCH="amd64"
         CLH_BINARY="cloud-hypervisor-static"
         ;;
     aarch64) 
         ARCH_SUFFIX="aarch"
-        CNTD_ARCH="arm64"
         CLH_BINARY="cloud-hypervisor-static-aarch64"
         ;;
     *)       
@@ -43,14 +40,7 @@ case $ARCH in
         ;;
 esac
 
-# Image defaults with architecture suffix
-B_IMG_DEFAULT="hub.oepkgs.net/conch/conch-builder:v0.1-${ARCH_SUFFIX}"
 F_IMG_DEFAULT="hub.oepkgs.net/conch/openeuler:odd-${ARCH_SUFFIX}"
-
-# Containerd version and download URL
-CNTD_VER="2.2.1"
-CNTD_TAR="containerd-${CNTD_VER}-linux-${CNTD_ARCH}.tar.gz"
-CNTD_URL="https://github.com/containerd/containerd/releases/download/v${CNTD_VER}/${CNTD_TAR}"
 
 # Cloud-Hypervisor version and download URL
 CLH_VER="51"
@@ -60,28 +50,27 @@ show_help() {
     echo "Usage: $0 [COMMAND] [OPTIONS]"
     echo ""
     echo "Commands:"
-    echo "  provisioning           Install cloud-hypervisor and containerd"
+    echo "  provisioning           Install cloud-hypervisor, buildah, and erofs-utils"
     echo "  pull                   Pull function image and run unpack"
-    echo "  build                  Install containerd, pull builder, and run build"
+    echo "  build                  Build Conch binaries locally"
     echo "  sdk                    Install Python SDK in editable mode"
-    echo "  install                Quick setup (provisioning + pull + sdk)"
-    echo "  all                    Run full flow (provisioning, pull, build, sdk)"
+    echo "  install                Quick setup (provisioning + build + sdk)"
+    echo "  all                    Run all setup steps (provisioning + build + sdk)"
     echo "  help                   Show this help message"
     echo ""
     echo "Options:"
-    echo "  --build_image=VALUE    Specify the builder image (default: $B_IMG_DEFAULT)"
     echo "  --main_image=VALUE     Specify the main/function image (default: $F_IMG_DEFAULT)"
 }
 
-BUILD_IMG=$B_IMG_DEFAULT
 MAIN_IMG=$F_IMG_DEFAULT
-COMMAND=$1
-shift
+COMMAND=${1:-help}
+if [ "$#" -gt 0 ]; then
+    shift
+fi
 
 for i in "$@"; do
     case $i in
-        --build_image=*) BUILD_IMG="${i#*=}"; shift ;;
-        --main_image=*)  MAIN_IMG="${i#*=}"; shift ;;
+        --main_image=*)  MAIN_IMG="${i#*=}" ;;
     esac
 done
 
@@ -92,7 +81,7 @@ install_clh() {
     CLH_BIN_PATH=""
 
     # Check if cloud-hypervisor exists in PATH and is a valid executable
-    CLH_BIN_PATH=$(command -v cloud-hypervisor 2>/dev/null)
+    CLH_BIN_PATH=$(command -v cloud-hypervisor 2>/dev/null || true)
     if [ -n "$CLH_BIN_PATH" ] && [ -s "$CLH_BIN_PATH" ] && [ -x "$CLH_BIN_PATH" ]; then
         # File exists, is non-empty, and is executable - verify it actually works
         CLH_VER_STR=$($CLH_BIN_PATH --version 2>&1 | awk '{print $2}' | sed 's/v//')
@@ -118,8 +107,7 @@ install_clh() {
         rm -f /usr/local/bin/cloud-hypervisor
         echo "Downloading cloud-hypervisor v${CLH_VER}.0 for ${ARCH}..."
         echo "URL: $CLH_URL"
-        wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1
-        if [ $? -ne 0 ]; then
+        if ! wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1; then
             echo "Error: Failed to download cloud-hypervisor."
             echo "Manual download: https://github.com/cloud-hypervisor/cloud-hypervisor/releases"
             return 1
@@ -127,59 +115,6 @@ install_clh() {
         chmod +x /usr/local/bin/cloud-hypervisor
         echo "cloud-hypervisor v${CLH_VER}.0 installed successfully for ${ARCH}."
     fi
-}
-
-install_containerd() {
-    echo "--- Checking Containerd ---"
-    if command -v containerd >/dev/null 2>&1; then
-        echo "containerd already exists. Skipping."
-    else
-        echo "Installing containerd v$CNTD_VER for ${ARCH}..."
-        if [ ! -f "$CNTD_TAR" ]; then
-            echo "URL: $CNTD_URL"
-            wget --progress=bar:force "$CNTD_URL" -O "$CNTD_TAR" 2>&1
-            if [ $? -ne 0 ]; then
-                echo "Error: Failed to download containerd."
-                echo "Manual download: https://github.com/containerd/containerd/releases"
-                rm -f "$CNTD_TAR"
-                return 1
-            fi
-        fi
-        rm -rf ./bin_tmp && mkdir ./bin_tmp
-        tar -zxf "$CNTD_TAR" -C ./bin_tmp
-        cp -f ./bin_tmp/bin/* /usr/local/bin/ && chmod +x /usr/local/bin/containerd* /usr/local/bin/ctr
-        ln -sf /usr/local/bin/containerd /usr/bin/containerd
-        ln -sf /usr/local/bin/ctr /usr/bin/ctr
-
-        mkdir -p /etc/containerd
-        /usr/local/bin/containerd config default > /etc/containerd/config.toml
-
-        cat <<EOF > /etc/systemd/system/containerd.service
-[Unit]
-Description=containerd container runtime
-Documentation=https://containerd.io
-After=network.target local-fs.target dbus.service
-
-[Service]
-ExecStartPre=-/sbin/modprobe overlay
-ExecStart=/usr/local/bin/containerd
-Type=notify
-Delegate=yes
-KillMode=process
-Restart=always
-RestartSec=5
-LimitNOFILE=infinity
-OOMScoreAdjust=-999
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload && systemctl enable --now containerd && systemctl restart containerd
-        rm -rf ./bin_tmp
-        rm -f "$CNTD_TAR"
-        echo "containerd setup completed."
-    fi
-    hash -r
 }
 
 install_buildah_erofs() {
@@ -206,24 +141,9 @@ install_buildah_erofs() {
     echo "buildah and erofs-utils installed and verified successfully."
 }
 
-setup_certs() {
-    local IMG=$1
-    DOMAIN=$(echo "$IMG" | cut -d/ -f1)
-    CERT_DIR="/etc/containerd/certs.d/$DOMAIN"
-    if [ ! -d "$CERT_DIR" ]; then
-        mkdir -p "$CERT_DIR"
-        echo -e "server = \"https://$DOMAIN\"\n[host.\"https://$DOMAIN\"]\n  capabilities = [\"pull\", \"resolve\"]\n  skip_verify = true" > "$CERT_DIR/hosts.toml"
-    fi
-}
-
-pull_builder() {
-    echo "--- Pulling Builder Image ---"
-    setup_certs "$BUILD_IMG"
-    ctr -n default images pull "$BUILD_IMG"
-}
-
 pull_function() {
     echo "--- Pulling Function Image via conch ---"
+    echo "Note: conchd must be running before pull; conch talks to conchd over the configured API endpoint."
     if [ -x "./bin/conch" ]; then
         ./bin/conch pull "$MAIN_IMG"
     else
@@ -233,20 +153,23 @@ pull_function() {
 }
 
 run_build() {
-    echo "--- Compiling with $BUILD_IMG ---"
-    ctr -n default run --rm --net-host \
-      --mount type=bind,src=$(pwd),dst=/build,options=rbind:rw \
-      --env GOPATH=/go \
-      "$BUILD_IMG" \
-      "build-$(date +%s)" \
-      sh -c "cd /build && make build-offline"
+    echo "--- Building Conch binaries locally ---"
+    GO_TAGS="${GO_TAGS:-exclude_graphdriver_btrfs}"
+    make gen-proto
+    mkdir -p bin
+    for dir in cmd/*; do
+        [ -d "$dir" ] || continue
+        name=$(basename "$dir")
+        [ "$name" = "conch-unpack" ] && continue
+        echo "building $name..."
+        go build -tags "$GO_TAGS" -o "bin/$name" "./cmd/$name"
+    done
 }
 
 install_sdk() {
     echo "--- Installing Python SDK ---"
     if [ -d "./sdk" ]; then
-        pip install -e ./sdk --break-system-packages  --ignore-installed typing-extensions
-        if [ $? -ne 0 ]; then
+        if ! pip install -e ./sdk --break-system-packages  --ignore-installed typing-extensions; then
             echo "Error: Failed to install SDK with pip."
             return 1
         fi
@@ -266,11 +189,11 @@ install_sdk() {
 }
 
 case "$COMMAND" in
-    provisioning) install_clh && install_containerd && install_buildah_erofs ;;
+    provisioning) install_clh && install_buildah_erofs ;;
     pull)    pull_function ;;
-    build)   install_containerd && pull_builder && run_build ;;
+    build)   run_build ;;
     sdk)     install_sdk ;;
-    install) install_clh && install_containerd && install_buildah_erofs && run_build && pull_function && install_sdk;;
-    all)     install_clh && install_containerd && install_buildah_erofs && pull_builder && run_build && pull_function && install_sdk;;
+    install) install_clh && install_buildah_erofs && run_build && install_sdk;;
+    all)     install_clh && install_buildah_erofs && run_build && install_sdk;;
     help|*)  show_help ;;
 esac

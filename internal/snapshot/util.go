@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/opencontainers/go-digest"
 
 	"github.com/openeuler/Conch/internal/snapshot/common"

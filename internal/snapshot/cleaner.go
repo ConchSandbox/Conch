@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/v2/core/mount"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"

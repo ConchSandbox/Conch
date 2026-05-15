@@ -148,16 +148,16 @@ conch pull --plain-http --user <username:password> docker.io/library/nginx:lates
 conch pull --kernel-plain-http --kernel-user <username:password> docker.io/library/nginx:latest
 ```
 
-`conch pull` 与 `conch unpack` 均支持通过 config 读取：
+`conch pull` 与 `conch unpack` 通过 conchd API 操作 conchd 进程内的 containerd store，均支持通过 config 读取：
 
-- `containerd.socket`
+- `server.unix_socket` 或 `server.host`/`server.port`
 - `containerd.default_namespace`
 
 其中，标准 OCI 镜像转换流程还会使用默认的 kernel 镜像配置。默认配置使用 `hub.oepkgs.net/conch/kernel:6.6.0`，该 tag 应发布为 multi-arch 镜像，由镜像仓库和本地拉取工具自动选择对应架构。
 
 ## 5. conch unpack
 
-`conch unpack` 用于把 Conch boot OCI index 解包到 containerd，并回写 rootfs 与 vm/mem snapshot 的关联。
+`conch unpack` 用于把 Conch boot OCI index 发送给 conchd 解包到进程内 containerd，并回写 rootfs 与 vm/mem snapshot 的关联。
 
 ```bash
 # 解包 boot OCI index（默认 namespace: default）

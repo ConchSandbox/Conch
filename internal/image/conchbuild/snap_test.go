@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	sn "github.com/openeuler/Conch/internal/image/conchbuild/snapshot"
+	"github.com/openeuler/Conch/internal/image/conchbuild/client"
 )
 
 func TestResolveSnapshotComponentIDs(t *testing.T) {
-	meta := &sn.SnapshotMeta{
+	meta := &client.SnapshotMeta{
 		Labels: map[string]string{
 			SnapshotLabelMemSnapshot: "mem-top",
 			SnapshotLabelVMSnapshot:  "vm-top",
@@ -26,7 +26,7 @@ func TestResolveSnapshotComponentIDs(t *testing.T) {
 }
 
 func TestResolveSnapshotComponentIDsRequiresLabels(t *testing.T) {
-	_, _, err := resolveSnapshotComponentIDs(&sn.SnapshotMeta{
+	_, _, err := resolveSnapshotComponentIDs(&client.SnapshotMeta{
 		Labels: map[string]string{
 			SnapshotLabelVMSnapshot: "vm-top",
 		},
@@ -40,14 +40,14 @@ func TestResolveSnapshotComponentIDsRequiresLabels(t *testing.T) {
 }
 
 func TestCollectSnapshotChainPathsWithGetter(t *testing.T) {
-	chain := map[string]*sn.SnapshotMeta{
+	chain := map[string]*client.SnapshotMeta{
 		"top":    {Parent: "mid", StoragePath: "/snap/top"},
 		"mid":    {Parent: "base", StoragePath: "/snap/mid"},
 		"base":   {Parent: "", StoragePath: "/snap/base"},
 		"broken": {Parent: "", StoragePath: ""},
 	}
 
-	got, err := collectSnapshotChainPathsWithGetter("top", func(key string) (*sn.SnapshotMeta, error) {
+	got, err := collectSnapshotChainPathsWithGetter("top", func(key string) (*client.SnapshotMeta, error) {
 		meta, ok := chain[key]
 		if !ok {
 			return nil, errors.New("not found")
@@ -65,8 +65,8 @@ func TestCollectSnapshotChainPathsWithGetter(t *testing.T) {
 }
 
 func TestCollectSnapshotChainPathsWithGetterRejectsEmptyStoragePath(t *testing.T) {
-	_, err := collectSnapshotChainPathsWithGetter("broken", func(key string) (*sn.SnapshotMeta, error) {
-		return &sn.SnapshotMeta{StoragePath: ""}, nil
+	_, err := collectSnapshotChainPathsWithGetter("broken", func(key string) (*client.SnapshotMeta, error) {
+		return &client.SnapshotMeta{StoragePath: ""}, nil
 	})
 	if err == nil {
 		t.Fatal("expected empty storage path to fail")
@@ -77,13 +77,13 @@ func TestCollectSnapshotChainPathsWithGetterRejectsEmptyStoragePath(t *testing.T
 }
 
 func TestCollectSnapshotChainPathsWithGetterRejectsCycle(t *testing.T) {
-	chain := map[string]*sn.SnapshotMeta{
+	chain := map[string]*client.SnapshotMeta{
 		"top":  {Parent: "mid", StoragePath: "/snap/top"},
 		"mid":  {Parent: "base", StoragePath: "/snap/mid"},
 		"base": {Parent: "top", StoragePath: "/snap/base"},
 	}
 
-	_, err := collectSnapshotChainPathsWithGetter("top", func(key string) (*sn.SnapshotMeta, error) {
+	_, err := collectSnapshotChainPathsWithGetter("top", func(key string) (*client.SnapshotMeta, error) {
 		meta, ok := chain[key]
 		if !ok {
 			return nil, errors.New("not found")

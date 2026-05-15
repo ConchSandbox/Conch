@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/snapshots"
-
-	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	ctdnamespaces "github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
 // Snapshotter defines the snapshot management operation interface
@@ -25,30 +23,44 @@ type Snapshotter interface {
 
 // ContainerdSnap is the containerd implementation of Snapshotter
 type ContainerdSnap struct {
-	client *daemon.Client
+	snapshotter      snapshots.Snapshotter
+	namespaceStore   ctdnamespaces.Store
+	defaultNamespace string
 }
 
 // NewContainerdSnap creates a containerd snapshotter instance
-func NewContainerdSnap(client *daemon.Client) (Snapshotter, error) {
-	if client == nil {
-		return nil, fmt.Errorf("containerd client is nil")
+func NewContainerdSnap(snapshotter snapshots.Snapshotter, namespaceStore ctdnamespaces.Store, defaultNamespace string) (Snapshotter, error) {
+	if snapshotter == nil {
+		return nil, fmt.Errorf("containerd snapshotter is nil")
 	}
-	return &ContainerdSnap{client: client}, nil
+	if namespaceStore == nil {
+		return nil, fmt.Errorf("containerd namespace store is nil")
+	}
+	if defaultNamespace == "" {
+		defaultNamespace = "default"
+	}
+	return &ContainerdSnap{
+		snapshotter:      snapshotter,
+		namespaceStore:   namespaceStore,
+		defaultNamespace: defaultNamespace,
+	}, nil
 }
 
 // Close releases resources
 func (c *ContainerdSnap) Close() error {
-	return nil
+	return c.snapshotter.Close()
 }
 
 // getSnapshotterAndContext gets the snapshotter instance and namespace context
 func (c *ContainerdSnap) getSnapshotterAndContext(ctx context.Context, namespace string) (snapshots.Snapshotter, context.Context, error) {
-	nsCtx, err := c.client.WithNamespace(ctx, namespace)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create namespace context: %w", err)
+	ns := namespace
+	if ns == "" {
+		ns = c.defaultNamespace
 	}
-	sn := c.client.SnapshotService(containerd.DefaultSnapshotter)
-	return sn, nsCtx, nil
+	if ns == "" {
+		ns = "default"
+	}
+	return c.snapshotter, ctdnamespaces.WithNamespace(ctx, ns), nil
 }
 
 // Prepare creates a writable snapshot
@@ -98,8 +110,7 @@ func (c *ContainerdSnap) Stat(ctx context.Context, namespace, key string) (snaps
 
 // ListNamespaces lists all namespaces
 func (c *ContainerdSnap) ListNamespaces(ctx context.Context) ([]string, error) {
-	nss := c.client.NamespaceService()
-	items, err := nss.List(ctx)
+	items, err := c.namespaceStore.List(ctx)
 	if err != nil {
 		return nil, err
 	}

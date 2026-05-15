@@ -12,6 +12,9 @@ func TestPrintHelpIncludesBuildPushPullUnpackAndSnapshot(t *testing.T) {
 	printHelp(&buf)
 
 	got := buf.String()
+	if strings.Contains(got, "CONTAINERD_ADDRESS") {
+		t.Fatalf("help output still references CONTAINERD_ADDRESS:\n%s", got)
+	}
 	for _, want := range []string{
 		"conch build [buildah-bud-args...]",
 		"conch push [options] <local-image> <remote-image>",
@@ -126,6 +129,7 @@ func TestPrintPullHelpIncludesExample(t *testing.T) {
 	for _, want := range []string{
 		"conch pull [options] <image-name>",
 		"containerd namespace",
+		"conchd API base URL",
 		"config file path",
 		"--plain-http",
 		"--user string",
@@ -178,7 +182,7 @@ func TestPrintUnpackHelpIncludesExample(t *testing.T) {
 	for _, want := range []string{
 		"conch unpack [options] <image-name>",
 		"containerd namespace",
-		"containerd socket address",
+		"conchd API base URL",
 		"config file path",
 		"conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1",
 	} {
@@ -188,14 +192,13 @@ func TestPrintUnpackHelpIncludesExample(t *testing.T) {
 	}
 }
 
-func TestResolveContainerdRuntimeUsesConfigAndOverrides(t *testing.T) {
-	t.Setenv("CONTAINERD_ADDRESS", "")
+func TestResolveConchNamespaceUsesConfigAndOverride(t *testing.T) {
+	t.Setenv("CONTAINERD_ADDRESS", "unix:///must/not/be/used.sock")
 
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
-  socket: /run/containerd/custom.sock
   default_namespace: team-a
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -205,20 +208,21 @@ containerd:
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	addr, ns := resolveContainerdRuntime(cfg, "", "")
-	if addr != "/run/containerd/custom.sock" {
-		t.Fatalf("addr = %q, want %q", addr, "/run/containerd/custom.sock")
-	}
+	ns := resolveConchNamespace(cfg, "")
 	if ns != "team-a" {
 		t.Fatalf("namespace = %q, want %q", ns, "team-a")
 	}
 
-	addr, ns = resolveContainerdRuntime(cfg, "/run/containerd/override.sock", "override-ns")
-	if addr != "/run/containerd/override.sock" {
-		t.Fatalf("override addr = %q, want %q", addr, "/run/containerd/override.sock")
-	}
+	ns = resolveConchNamespace(cfg, "override-ns")
 	if ns != "override-ns" {
 		t.Fatalf("override namespace = %q, want %q", ns, "override-ns")
+	}
+
+	if got := resolveConchAPIURL("http://explicit", "http://alias"); got != "http://explicit" {
+		t.Fatalf("api url = %q, want explicit", got)
+	}
+	if got := resolveConchAPIURL("", "http://alias"); got != "http://alias" {
+		t.Fatalf("api url alias = %q, want alias", got)
 	}
 }
 

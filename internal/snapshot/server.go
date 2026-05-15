@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/defaults"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/daemon"
@@ -30,7 +31,14 @@ var gServer server
 
 // NewServer initializes the snapshot server with containerd client.
 func NewServer(workDir string, daemonClient *daemon.Client) error {
-	sn, err := snapshotter.NewContainerdSnap(daemonClient)
+	if daemonClient == nil {
+		return fmt.Errorf("containerd client is nil")
+	}
+	sn, err := snapshotter.NewContainerdSnap(
+		daemonClient.SnapshotService(defaults.DefaultSnapshotter),
+		daemonClient.NamespaceService(),
+		daemonClient.DefaultNamespace(),
+	)
 	if err != nil {
 		return err
 	}
@@ -435,7 +443,7 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
-	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles(),0,""); err != nil {
+	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles(), 0, ""); err != nil {
 		return fmt.Errorf("update snapshot config failed: %v", err)
 	}
 

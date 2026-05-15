@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/snapshots"
 
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
@@ -115,7 +115,6 @@ func AcquireResumeWorkspace(ctx context.Context, namespace, key string, parents 
 	}
 	return gServer.AcquireResumeWorkspace(ctx, namespace, key, parents, cid, socketPath, opts...)
 }
-
 
 // ResolveParentSnapshotIDs resolves parent mem/vm snapshots from rootfs snapshot.
 func ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {

@@ -8,11 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/remotes/docker"
-
-	"github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/image/conchbuild/client"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -27,8 +23,10 @@ func printPullHelp(out io.Writer) {
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -n, --namespace string")
 	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
+	fmt.Fprintln(out, "  -api-url string")
+	fmt.Fprintln(out, "        conchd API base URL (default: config server endpoint or http://localhost:4063)")
 	fmt.Fprintln(out, "  -address string")
-	fmt.Fprintf(out, "        containerd socket address (default: config containerd.socket or %s)\n", defaultContainerdAddress)
+	fmt.Fprintln(out, "        deprecated alias for -api-url")
 	fmt.Fprintln(out, "  -config string")
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "  --plain-http")
@@ -58,7 +56,8 @@ func runPull(ctx context.Context, args []string) error {
 
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	addr := fs.String("address", "", "containerd socket address")
+	apiURL := fs.String("api-url", "", "conchd API base URL")
+	addr := fs.String("address", "", "deprecated alias for -api-url")
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	plainHTTP := fs.Bool("plain-http", false, "allow plain HTTP / disable TLS verification for source image pulls")
@@ -80,7 +79,7 @@ func runPull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch pull: load config: %w", err)
 	}
-	containerdAddr, ns := resolveContainerdRuntime(cfg, *addr, *namespace)
+	ns := resolveConchNamespace(cfg, *namespace)
 	username, password, err := parseRegistryUser(*user)
 	if err != nil {
 		return fmt.Errorf("conch pull: %w", err)
@@ -90,53 +89,22 @@ func runPull(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch pull: %w", err)
 	}
 
-	client, err := containerd.New(containerdAddr)
-	if err != nil {
-		return fmt.Errorf("connect to containerd: %w", err)
-	}
-	defer client.Close()
-
-	pullCtx := namespaces.WithNamespace(ctx, ns)
+	conchClient := client.NewClientWithConfig(resolveConchAPIURL(*apiURL, *addr), *configPath)
 	fmt.Println("------------------------------------------------------------")
 	fmt.Printf("Pulling image: %s\n", imageName)
-	resolver := docker.NewResolver(docker.ResolverOptions{
-		PlainHTTP: *plainHTTP,
-		Credentials: func(string) (string, string, error) {
-			return username, password, nil
-		},
+	results, err := conchClient.PullImage(ctx, client.PullImageRequest{
+		ImageName:          imageName,
+		Namespace:          ns,
+		PlainHTTP:          *plainHTTP,
+		Username:           username,
+		Password:           password,
+		DefaultKernelImage: cfg.Image.DefaultKernelImage,
+		KernelPlainHTTP:    *kernelPlainHTTP,
+		KernelUsername:     kernelUsername,
+		KernelPassword:     kernelPassword,
 	})
-	pullOpts := []containerd.RemoteOpt{
-		containerd.WithResolver(resolver),
-	}
-	if _, err := client.Pull(pullCtx, imageName, pullOpts...); err != nil {
-		return fmt.Errorf("conch pull: pull image %s: %w", imageName, err)
-	}
-
-	if err := image.ValidateConchImageIndex(pullCtx, client, imageName); err != nil {
-		results, convErr := image.PullAndUnpackOCIImage(pullCtx, client, image.PullOCIImageOptions{
-			SourceImage:            imageName,
-			DefaultKernelImage:     cfg.Image.DefaultKernelImage,
-			SourcePlainHTTP:        *plainHTTP,
-			SourceRegistryUsername: username,
-			SourceRegistryPassword: password,
-			KernelPlainHTTP:        *kernelPlainHTTP,
-			KernelRegistryUsername: kernelUsername,
-			KernelRegistryPassword: kernelPassword,
-		})
-		if convErr != nil {
-			return fmt.Errorf("conch pull: image %s is not a supported Conch image and OCI conversion failed: %w", imageName, convErr)
-		}
-		printUnpackSummary(results)
-		return nil
-	}
-
-	if _, err := client.Fetch(pullCtx, imageName, containerd.WithResolver(resolver)); err != nil {
-		return fmt.Errorf("conch pull: fetch all Conch image content: %w", err)
-	}
-
-	results, err := image.UnpackAllSubImages(pullCtx, client, imageName)
 	if err != nil {
-		return fmt.Errorf("conch pull: unpack pulled image: %w", err)
+		return fmt.Errorf("conch pull: %w", err)
 	}
 	printUnpackSummary(results)
 	return nil

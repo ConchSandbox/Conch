@@ -61,7 +61,8 @@ func main() {
 		ulog.F("server.work_dir", cfg.Server.WorkDir),
 		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
 		ulog.F("server.pid_file", cfg.Server.PIDFile),
-		ulog.F("containerd.socket", cfg.Containerd.Socket),
+		ulog.F("containerd.root_dir", cfg.Containerd.RootDir),
+		ulog.F("containerd.state_dir", cfg.Containerd.StateDir),
 		ulog.F("containerd.default_namespace", cfg.Containerd.DefaultNamespace),
 		ulog.F("network.pool_size", cfg.Network.PoolSize),
 	)

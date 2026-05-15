@@ -1,6 +1,6 @@
 <img src="./docs/assets/Conch-logo.jpg" alt="Conch logo" style="width:200px;" />
 
-<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.23+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
+<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
 
 # Conch - Agent Sandbox Engine
 
@@ -21,11 +21,13 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 
 ### 环境要求
 
-- Go 1.23+
-- Containerd 2.2.1+
-- Cloud-Hypervisor v48.0+
+- Go 1.26+
+- Cloud-Hypervisor v51.0+
+- Buildah 与 erofs-utils
 - Iptables 网络配置工具
 - Linux 5.10+
+
+Conchd 会在进程内初始化 containerd 服务和 Conch 插件，不需要单独启动系统 `containerd` 守护进程。
 
 ### 一键编译安装
 
@@ -36,10 +38,8 @@ git clone https://atomgit.com/openeuler/Conch.git
 cd Conch
 git checkout demo
 
-# 一键执行全流程
-./scripts/conch-env-setup.sh all
-
-pip install -e ./sdk
+# 安装运行依赖、构建二进制并安装 SDK
+./scripts/conch-env-setup.sh install
 ```
 
 ### 运行服务

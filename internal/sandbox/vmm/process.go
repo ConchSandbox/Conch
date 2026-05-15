@@ -288,10 +288,17 @@ func getProcessState(pid int) (string, error) {
 }
 
 func (p *Process) Stop() error {
+	var errs []error
+	if _, err := os.Stat(p.VmmSocketPath); err == nil {
+		if deleteErr := p.client.DeleteVM(); deleteErr != nil {
+			errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
+		}
+	}
+
 	select {
 	case <-p.exitSignal:
 		// Already exited
-		return nil
+		return errors.Join(errs...)
 	default:
 	}
 
@@ -318,7 +325,8 @@ func (p *Process) Stop() error {
 			ulog.F("pid", p.cmd.Process.Pid),
 			ulog.F("error", err),
 		)
-		return fmt.Errorf("failed to send SIGTERM to vmm process, %s: %w", p.cmd.Process.Pid, err)
+		errs = append(errs, fmt.Errorf("failed to send SIGTERM to vmm process, %d: %w", p.cmd.Process.Pid, err))
+		return errors.Join(errs...)
 	}
 
 	logger.Debug("Sent SIGTERM to VMM process",
@@ -326,7 +334,7 @@ func (p *Process) Stop() error {
 	)
 
 	<-p.exitSignal
-	return nil
+	return errors.Join(errs...)
 }
 
 func (p *Process) Pid() int {
@@ -365,6 +373,18 @@ func (p *Process) Wait() error {
 		logger.Error("VMM process wait error",
 			ulog.F("error", err),
 		)
+		return err
 	}
-	return err
+
+	ticker := time.NewTicker(waitInterval)
+	defer ticker.Stop()
+	for {
+		if _, statErr := os.Stat(p.VmmSocketPath); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return nil
+			}
+			return fmt.Errorf("stat vmm socket: %w", statErr)
+		}
+		<-ticker.C
+	}
 }
