@@ -2,10 +2,7 @@ package image
 
 import (
 	"context"
-	"os"
-
-	"github.com/openeuler/Conch/internal/image/conchbuild"
-	"go.podman.io/storage"
+	"fmt"
 )
 
 // SnapshotExportRequest is the unified input for exporting a snapshot-backed
@@ -27,35 +24,7 @@ type SnapshotExportResult struct {
 // ExportSnapshot exports a sandbox-snapshot image from an existing rootfs
 // snapshot or sandbox.
 func ExportSnapshot(ctx context.Context, req SnapshotExportRequest) (SnapshotExportResult, error) {
-	storeOpts, err := storage.DefaultStoreOptions()
-	if err != nil {
-		return SnapshotExportResult{}, err
-	}
-	store, err := storage.GetStore(storeOpts)
-	if err != nil {
-		return SnapshotExportResult{}, err
-	}
-	defer func() { _, _ = store.Shutdown(false) }()
-
-	apiBase := req.ConchAPIBaseURL
-	if apiBase == "" {
-		apiBase = os.Getenv("BUILDAH_CONCH_API_URL")
-	}
-
-	res, err := conchbuild.ExportSnapshot(ctx, conchbuild.SnapshotExportOpts{
-		Store:            store,
-		BootIndexTag:     req.BootIndexTag,
-		ConfigPath:       req.ConfigPath,
-		ConchAPIBaseURL:  apiBase,
-		RootfsSnapshotID: req.RootfsSnapshotID,
-		SandboxID:        req.SandboxID,
-	})
-	if err != nil {
-		return SnapshotExportResult{}, err
-	}
-
-	return SnapshotExportResult{
-		BootIndexDigest: res.BootIndexDigest,
-		BootIndexTag:    res.BootIndexTag,
-	}, nil
+	_ = ctx
+	_ = req
+	return SnapshotExportResult{}, fmt.Errorf("snapshot export requires the native convert workflow")
 }

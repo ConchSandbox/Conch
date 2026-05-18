@@ -92,20 +92,7 @@ func (s *Service) Pull(ctx context.Context, req PullRequest) (map[string]string,
 	}
 
 	if err := conchimage.ValidateConchImageIndex(pullCtx, s.client.Client, req.ImageName); err != nil {
-		results, convErr := conchimage.PullAndUnpackOCIImage(pullCtx, s.client.Client, conchimage.PullOCIImageOptions{
-			SourceImage:            req.ImageName,
-			DefaultKernelImage:     req.DefaultKernelImage,
-			SourcePlainHTTP:        req.PlainHTTP,
-			SourceRegistryUsername: req.Username,
-			SourceRegistryPassword: req.Password,
-			KernelPlainHTTP:        req.KernelPlainHTTP,
-			KernelRegistryUsername: req.KernelRegistryUsername,
-			KernelRegistryPassword: req.KernelRegistryPassword,
-		})
-		if convErr != nil {
-			return nil, fmt.Errorf("%w: image %s is not a supported Conch image and OCI conversion failed: %v", ErrOCIConversionFailed, req.ImageName, convErr)
-		}
-		return results, nil
+		return nil, fmt.Errorf("image %s is not a supported Conch image: %w", req.ImageName, err)
 	}
 
 	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestPrintHelpIncludesBuildPushPullUnpackAndSnapshot(t *testing.T) {
+func TestPrintHelpIncludesPushPullUnpackAndSnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	printHelp(&buf)
 
@@ -16,7 +16,6 @@ func TestPrintHelpIncludesBuildPushPullUnpackAndSnapshot(t *testing.T) {
 		t.Fatalf("help output still references CONTAINERD_ADDRESS:\n%s", got)
 	}
 	for _, want := range []string{
-		"conch build [buildah-bud-args...]",
 		"conch push [options] <local-image> <remote-image>",
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
@@ -226,24 +225,6 @@ containerd:
 	}
 }
 
-func TestPrintBuildHelpIncludesUsageAndEnv(t *testing.T) {
-	var buf bytes.Buffer
-	printBuildHelp(&buf)
-
-	got := buf.String()
-	for _, want := range []string{
-		"conch build [buildah-bud-args...]",
-		"Forward arguments to `buildah bud`",
-		"--config string",
-		"`KERNEL`, `INDEX`, and `SNAP`",
-		"CONCH_BUILDAH_BIN",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("build help output missing %q:\n%s", want, got)
-		}
-	}
-}
-
 func TestPrintSnapshotHelpIncludesExport(t *testing.T) {
 	var buf bytes.Buffer
 	printSnapshotHelp(&buf)
@@ -339,58 +320,6 @@ func TestParseSnapshotExportArgs(t *testing.T) {
 			}
 			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig {
 				t.Fatalf("parseSnapshotExportArgs() = %#v", got)
-			}
-		})
-	}
-}
-
-func TestParseBuildConfigArg(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		wantConfig string
-		wantArgs   []string
-		wantErr    bool
-	}{
-		{
-			name:       "long separate",
-			args:       []string{"--config", "/tmp/config.yaml", "-f", "Dockerfile", "-t", "demo:latest", "."},
-			wantConfig: "/tmp/config.yaml",
-			wantArgs:   []string{"-f", "Dockerfile", "-t", "demo:latest", "."},
-		},
-		{
-			name:       "long equals",
-			args:       []string{"--config=/tmp/config.yaml", "-f", "Dockerfile", "."},
-			wantConfig: "/tmp/config.yaml",
-			wantArgs:   []string{"-f", "Dockerfile", "."},
-		},
-		{
-			name:       "short equals",
-			args:       []string{"-config=/tmp/config.yaml", "."},
-			wantConfig: "/tmp/config.yaml",
-			wantArgs:   []string{"."},
-		},
-		{
-			name:    "missing value",
-			args:    []string{"--config"},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotConfig, gotArgs, err := parseBuildConfigArg(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseBuildConfigArg() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if gotConfig != tt.wantConfig {
-				t.Fatalf("config: got %q want %q", gotConfig, tt.wantConfig)
-			}
-			if strings.Join(gotArgs, "\x00") != strings.Join(tt.wantArgs, "\x00") {
-				t.Fatalf("args: got %#v want %#v", gotArgs, tt.wantArgs)
 			}
 		})
 	}

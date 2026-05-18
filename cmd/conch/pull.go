@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/openeuler/Conch/internal/image/conchbuild/client"
+	"github.com/openeuler/Conch/internal/image/client"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
