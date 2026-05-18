@@ -75,6 +75,8 @@ github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymF
 github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
 github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1mIlRU8Am5FuJP05cCM98=
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
+github.com/erofs/erofs-container-toolkit v0.0.0-20260123120957-823f29fa15cb h1:7vKePzKt0EAmf8rRhbNYmwi7vg/qifABCDCu61RhrVI=
+github.com/erofs/erofs-container-toolkit v0.0.0-20260123120957-823f29fa15cb/go.mod h1:sKfJUZbNBldeOCLU687i6Sm1XMuYvbCk4XoCVUxRqEk=
 github.com/erofs/go-erofs v0.3.0 h1:o/W5ABAA3sHYl97WL93dacKEfeDpJhdFf3c2snAti7I=
 github.com/erofs/go-erofs v0.3.0/go.mod h1:XkSeN9MHszGd4+3gcEjadJLYHCQpWzJ7/8yznzMuzJs=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=

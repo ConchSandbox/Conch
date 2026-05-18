@@ -8,6 +8,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.4
 	github.com/containerd/plugin v1.1.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/erofs/erofs-container-toolkit v0.0.0-20260123120957-823f29fa15cb
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/sirupsen/logrus v1.9.4
