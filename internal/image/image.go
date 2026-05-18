@@ -102,6 +102,10 @@ func resolveConfigDesc(ctx context.Context, store content.Store, desc ocispec.De
 		var chosen *ocispec.Descriptor
 		for i := range probe.Manifests {
 			m := probe.Manifests[i]
+			if m.Annotations["io.conch.kind"] == "rootfs" {
+				chosen = &m
+				break
+			}
 			if m.Platform != nil && matcher.Match(*m.Platform) {
 				chosen = &m
 				break

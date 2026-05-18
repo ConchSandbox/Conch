@@ -33,4 +33,6 @@ const (
 	SnapshotLabelMemSnapshot    = "conch/snapshotter/mem-snapshot"
 	SnapshotLabelRootfsSnapshot = "conch/snapshotter/rootfs-snapshot"
 	SnapshotLabelVMSnapshot     = "conch/snapshotter/vm-snapshot"
+	SnapshotLabelRootfsImage    = "conch/snapshotter/rootfs-image"
+	SnapshotLabelRootfsManifest = "conch/snapshotter/rootfs-manifest"
 )

@@ -22,21 +22,19 @@ const (
 	DefaultConchAPIURL = "http://localhost:4063"
 	defaultUnixAPIURL  = "http://conchd-unix"
 	defaultVmmName     = "cloud-hypervisor"
-	DefaultRamMB       = 256 // Exported for SNAP CreateSandbox; override via SNAPOpts if needed
+	DefaultRamMB       = 256
 	defaultRamMB       = DefaultRamMB
 	createSandbox      = "/api/sandbox/create"
 	pauseSandbox       = "/api/sandbox/pause"
 	pullImage          = "/api/image/pull"
+	pushImage          = "/api/image/push"
 	unpackImage        = "/api/image/unpack"
-	importImage        = "/api/image/import"
-	linkSnapshotVM     = "/api/snapshot/link-vm"
-	snapshotInfo       = "/api/snapshot/info"
-	snapshotChain      = "/api/snapshot/chain"
+	convertImage       = "/api/image/convert"
+	snapshotExport     = "/api/snapshot/export"
 	defaultHTTPTimeout = 120 * time.Second
-	sandboxIDPrefix    = "buildah-snap-"
 )
 
-// ResolveBaseURL returns conchd base URL: BUILDAH_CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
+// ResolveBaseURL returns conchd base URL: CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
 func ResolveBaseURL() string {
 	baseURL, _ := resolveClientTransport("", "")
 	return baseURL
@@ -44,6 +42,7 @@ func ResolveBaseURL() string {
 
 // CreateRequest matches Conch SandboxCreateRequest (image_name for image-based startup).
 type CreateRequest struct {
+	Namespace  string `json:"namespace,omitempty"`
 	SnapshotId string `json:"snapshot_id,omitempty"`
 	ImageName  string `json:"image_name"`
 	VmmName    string `json:"vmm_name"`
@@ -93,38 +92,46 @@ type ImageResponse struct {
 	Results map[string]string `json:"results"`
 }
 
-type ImportImageRequest struct {
-	ArchivePath string
-	Namespace   string
-	ImportedTag string
+type ConvertImageRequest struct {
+	Source       string
+	KernelPath   string
+	InitrdPath   string
+	BootIndexTag string
+	Namespace    string
+	PlainHTTP    bool
+	Username     string
+	Password     string
+	Snapshot     bool
 }
 
-type ImportImageResponse struct {
-	SnapshotKey string `json:"snapshot_key"`
-	ImageName   string `json:"image_name"`
+type ConvertImageMetadata struct {
+	Source       string `json:"source"`
+	Namespace    string `json:"namespace,omitempty"`
+	BootIndexTag string `json:"boot_index_tag"`
+	PlainHTTP    bool   `json:"plain_http,omitempty"`
+	Username     string `json:"username,omitempty"`
+	Password     string `json:"password,omitempty"`
+	Snapshot     bool   `json:"snapshot,omitempty"`
 }
 
-type LinkSnapshotVMRequest struct {
-	RootfsSnapshotID string `json:"rootfs_snapshot_id"`
-	VMSnapshotID     string `json:"vm_snapshot_id"`
+type ConvertImageResponse struct {
+	BootIndexDigest string `json:"boot_index_digest"`
+	BootIndexTag    string `json:"boot_index_tag"`
+	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
+	KernelImageRef  string `json:"kernel_image_ref,omitempty"`
+	SourceImageRef  string `json:"source_image_ref,omitempty"`
+}
+
+type SnapshotExportRequest struct {
 	Namespace        string `json:"namespace,omitempty"`
+	BootIndexTag     string `json:"boot_index_tag"`
+	RootfsSnapshotID string `json:"snapshot_id,omitempty"`
+	SandboxID        string `json:"sandbox_id,omitempty"`
 }
 
-type SnapshotInfoRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type SnapshotMeta struct {
-	Key         string            `json:"key"`
-	Parent      string            `json:"parent,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	StoragePath string            `json:"storage_path,omitempty"`
-}
-
-type SnapshotChainResponse struct {
-	Info       SnapshotMeta `json:"info"`
-	ChainPaths []string     `json:"chain_paths"`
+type SnapshotExportResponse struct {
+	BootIndexDigest string `json:"boot_index_digest"`
+	BootIndexTag    string `json:"boot_index_tag"`
 }
 
 // Client communicates with Conch conchd HTTP API
@@ -153,7 +160,7 @@ func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 		return baseURL, &http.Client{Timeout: timeout}
 	}
 
-	if u := strings.TrimSpace(os.Getenv("BUILDAH_CONCH_API_URL")); u != "" {
+	if u := strings.TrimSpace(os.Getenv("CONCH_API_URL")); u != "" {
 		return u, &http.Client{Timeout: timeout}
 	}
 
@@ -184,6 +191,15 @@ func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 	return DefaultConchAPIURL, &http.Client{Timeout: timeout}
 }
 
+type PushImageRequest struct {
+	LocalImage  string `json:"local_image"`
+	RemoteImage string `json:"remote_image"`
+	Namespace   string `json:"namespace,omitempty"`
+	PlainHTTP   bool   `json:"plain_http,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+}
+
 func resolveHTTPTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("CONCH_API_TIMEOUT"))
 	if raw == "" {
@@ -210,11 +226,12 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 }
 
 // CreateSandbox calls POST /api/sandbox/create using image_name-based startup.
-func (c *Client) CreateSandbox(rootfsImageName, sandboxID string, ramMB int64) error {
+func (c *Client) CreateSandbox(rootfsImageName, sandboxID, namespace string, ramMB int64) error {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
 	}
 	req := CreateRequest{
+		Namespace: strings.TrimSpace(namespace),
 		ImageName: rootfsImageName,
 		SandboxId: sandboxID,
 		VmmName:   defaultVmmName,
@@ -282,6 +299,11 @@ func (c *Client) PullImage(ctx context.Context, req PullImageRequest) (map[strin
 	return resp.Results, nil
 }
 
+func (c *Client) PushImage(ctx context.Context, req PushImageRequest) error {
+	var resp map[string]string
+	return c.postJSON(ctx, pushImage, req, &resp)
+}
+
 // UnpackImage calls POST /api/image/unpack and returns snapshot IDs by component kind.
 func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[string]string, error) {
 	var resp ImageResponse
@@ -291,16 +313,36 @@ func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[s
 	return resp.Results, nil
 }
 
-func (c *Client) ImportImageArchive(ctx context.Context, req ImportImageRequest) (ImportImageResponse, error) {
-	if req.ArchivePath == "" {
-		return ImportImageResponse{}, fmt.Errorf("archive path is required")
+func (c *Client) ConvertImage(ctx context.Context, req ConvertImageRequest) (ConvertImageResponse, error) {
+	if req.KernelPath == "" {
+		return ConvertImageResponse{}, fmt.Errorf("kernel path is required")
 	}
-	file, err := os.Open(req.ArchivePath)
+	if req.InitrdPath == "" {
+		return ConvertImageResponse{}, fmt.Errorf("initrd path is required")
+	}
+	kernel, err := os.Open(req.KernelPath)
 	if err != nil {
-		return ImportImageResponse{}, fmt.Errorf("open archive: %w", err)
+		return ConvertImageResponse{}, fmt.Errorf("open kernel: %w", err)
 	}
-	defer file.Close()
+	defer kernel.Close()
+	initrd, err := os.Open(req.InitrdPath)
+	if err != nil {
+		return ConvertImageResponse{}, fmt.Errorf("open initrd: %w", err)
+	}
+	defer initrd.Close()
 
+	metadata, err := json.Marshal(ConvertImageMetadata{
+		Source:       req.Source,
+		Namespace:    req.Namespace,
+		BootIndexTag: req.BootIndexTag,
+		PlainHTTP:    req.PlainHTTP,
+		Username:     req.Username,
+		Password:     req.Password,
+		Snapshot:     req.Snapshot,
+	})
+	if err != nil {
+		return ConvertImageResponse{}, fmt.Errorf("marshaling convert metadata: %w", err)
+	}
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 	go func() {
@@ -312,67 +354,53 @@ func (c *Client) ImportImageArchive(ctx context.Context, req ImportImageRequest)
 			}
 			_ = pw.Close()
 		}()
-		if req.Namespace != "" {
-			if err = writer.WriteField("namespace", req.Namespace); err != nil {
-				return
-			}
-		}
-		if req.ImportedTag != "" {
-			if err = writer.WriteField("imported_tag", req.ImportedTag); err != nil {
-				return
-			}
+		if err = writer.WriteField("metadata", string(metadata)); err != nil {
+			return
 		}
 		var part io.Writer
-		part, err = writer.CreateFormFile("archive", filepath.Base(req.ArchivePath))
+		part, err = writer.CreateFormFile("kernel", filepath.Base(req.KernelPath))
 		if err != nil {
 			return
 		}
-		if _, err = io.Copy(part, file); err != nil {
+		if _, err = io.Copy(part, kernel); err != nil {
+			return
+		}
+		part, err = writer.CreateFormFile("initrd", filepath.Base(req.InitrdPath))
+		if err != nil {
+			return
+		}
+		if _, err = io.Copy(part, initrd); err != nil {
 			return
 		}
 		err = writer.Close()
 	}()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+importImage, pr)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+convertImage, pr)
 	if err != nil {
 		_ = pr.Close()
-		return ImportImageResponse{}, fmt.Errorf("create request %s: %w", importImage, err)
+		return ConvertImageResponse{}, fmt.Errorf("create request %s: %w", convertImage, err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return ImportImageResponse{}, fmt.Errorf("POST %s: %w", importImage, err)
+		return ConvertImageResponse{}, fmt.Errorf("POST %s: %w", convertImage, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return ImportImageResponse{}, fmt.Errorf("%s returned status %d: %s", importImage, resp.StatusCode, string(body))
+		return ConvertImageResponse{}, fmt.Errorf("%s returned status %d: %s", convertImage, resp.StatusCode, string(body))
 	}
-	var out ImportImageResponse
+	var out ConvertImageResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ImportImageResponse{}, fmt.Errorf("decoding %s response: %w", importImage, err)
+		return ConvertImageResponse{}, fmt.Errorf("decoding %s response: %w", convertImage, err)
 	}
 	return out, nil
 }
 
-func (c *Client) LinkRootfsSnapshotToVM(ctx context.Context, req LinkSnapshotVMRequest) error {
-	return c.postJSON(ctx, linkSnapshotVM, req, &struct {
-		Status string `json:"status"`
-	}{})
-}
-
-func (c *Client) SnapshotInfo(ctx context.Context, req SnapshotInfoRequest) (SnapshotMeta, error) {
-	var out SnapshotMeta
-	if err := c.postJSON(ctx, snapshotInfo, req, &out); err != nil {
-		return SnapshotMeta{}, err
-	}
-	return out, nil
-}
-
-func (c *Client) SnapshotChain(ctx context.Context, req SnapshotInfoRequest) (SnapshotChainResponse, error) {
-	var out SnapshotChainResponse
-	if err := c.postJSON(ctx, snapshotChain, req, &out); err != nil {
-		return SnapshotChainResponse{}, err
+func (c *Client) ExportSnapshot(ctx context.Context, req SnapshotExportRequest) (SnapshotExportResponse, error) {
+	var out SnapshotExportResponse
+	if err := c.postJSON(ctx, snapshotExport, req, &out); err != nil {
+		return SnapshotExportResponse{}, err
 	}
 	return out, nil
 }
@@ -400,38 +428,4 @@ func (c *Client) postJSON(ctx context.Context, path string, payload any, out any
 		return fmt.Errorf("decoding %s response: %w", path, err)
 	}
 	return nil
-}
-
-// GenSandboxID returns a unique sandbox ID for buildah SNAP
-func GenSandboxID() string {
-	return sandboxIDPrefix + fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-// ResolveKernelPaths resolves kernel and initrd paths from filenames under contextDir.
-// KERNEL kernel_file initrd_file - both files must exist in the Dockerfile context directory.
-func ResolveKernelPaths(contextDir string, kernelFile, initrdFile string) (kernelPath, diskPath string, err error) {
-	if kernelFile == "" || initrdFile == "" {
-		return "", "", fmt.Errorf("KERNEL instruction requires exactly two arguments: kernel filename and initrd filename (e.g. KERNEL vmlinuz conch.initrd)")
-	}
-	absContext, err := filepath.Abs(contextDir)
-	if err != nil {
-		return "", "", fmt.Errorf("context directory: %w", err)
-	}
-	kernelPath = filepath.Clean(filepath.Join(absContext, kernelFile))
-	diskPath = filepath.Clean(filepath.Join(absContext, initrdFile))
-
-	// Ensure paths stay within context (prevent path traversal)
-	for name, p := range map[string]string{"kernel": kernelPath, "initrd": diskPath} {
-		rel, relErr := filepath.Rel(absContext, p)
-		if relErr != nil || strings.HasPrefix(rel, "..") {
-			return "", "", fmt.Errorf("KERNEL file path escapes context: %s", name)
-		}
-		if _, statErr := os.Stat(p); statErr != nil {
-			if os.IsNotExist(statErr) {
-				return "", "", fmt.Errorf("KERNEL file not found in context: %s (expected at %s)", name, p)
-			}
-			return "", "", fmt.Errorf("cannot access %s: %w", p, statErr)
-		}
-	}
-	return kernelPath, diskPath, nil
 }
