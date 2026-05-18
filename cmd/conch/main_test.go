@@ -2,12 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/openeuler/Conch/internal/image/client"
 )
 
-func TestPrintHelpIncludesPushPullUnpackAndSnapshot(t *testing.T) {
+func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	printHelp(&buf)
 
@@ -16,6 +22,7 @@ func TestPrintHelpIncludesPushPullUnpackAndSnapshot(t *testing.T) {
 		t.Fatalf("help output still references CONTAINERD_ADDRESS:\n%s", got)
 	}
 	for _, want := range []string{
+		"conch convert [options]",
 		"conch push [options] <local-image> <remote-image>",
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
@@ -35,10 +42,10 @@ func TestPrintPushHelpIncludesExample(t *testing.T) {
 	got := buf.String()
 	for _, want := range []string{
 		"conch push [options] <local-image> <remote-image>",
-		"buildah manifest push --all",
+		"conchd/containerd",
 		"--plain-http",
-		"--tls-verify bool",
-		"buildah login",
+		"--username string",
+		"containerd namespace",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("push help output missing %q:\n%s", want, got)
@@ -52,7 +59,8 @@ func TestParsePushArgs(t *testing.T) {
 		args       []string
 		wantLocal  string
 		wantRemote string
-		wantTLS    bool
+		wantPlain  bool
+		wantNS     string
 		wantErr    bool
 	}{
 		{
@@ -60,21 +68,21 @@ func TestParsePushArgs(t *testing.T) {
 			args:       []string{"localhost/demo:latest", "hub.oepkgs.net/conch/demo:latest"},
 			wantLocal:  "localhost/demo:latest",
 			wantRemote: "hub.oepkgs.net/conch/demo:latest",
-			wantTLS:    true,
 		},
 		{
 			name:       "plain http",
-			args:       []string{"--plain-http", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			args:       []string{"--plain-http", "-n", "team-a", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
 			wantLocal:  "localhost/demo:latest",
 			wantRemote: "conch.example.com/conch/demo:latest",
-			wantTLS:    false,
+			wantPlain:  true,
+			wantNS:     "team-a",
 		},
 		{
-			name:       "tls verify false",
-			args:       []string{"--tls-verify=false", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			name:       "namespace equals",
+			args:       []string{"--namespace=team-b", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
 			wantLocal:  "localhost/demo:latest",
 			wantRemote: "conch.example.com/conch/demo:latest",
-			wantTLS:    false,
+			wantNS:     "team-b",
 		},
 		{
 			name:    "missing image",
@@ -97,26 +105,45 @@ func TestParsePushArgs(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.tlsVerify != tt.wantTLS {
+			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.plainHTTP != tt.wantPlain || got.namespace != tt.wantNS {
 				t.Fatalf("parsePushArgs() = %#v", got)
 			}
 		})
 	}
 }
 
-func TestBuildPushCommandArgs(t *testing.T) {
-	got := buildPushCommandArgs(pushOptions{
-		localImage:  "localhost/demo:latest",
-		remoteImage: "conch.example.com/conch/demo:latest",
-		tlsVerify:   false,
-	})
-	want := []string{
-		"manifest", "push", "--all", "--tls-verify=false",
-		"localhost/demo:latest",
-		"docker://conch.example.com/conch/demo:latest",
+func TestRunPushPassesResolvedNamespace(t *testing.T) {
+	var got client.PushImageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/image/push" {
+			t.Fatalf("path = %q, want /api/image/push", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode push request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+	t.Setenv("CONCH_API_URL", server.URL)
+
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte(`
+containerd:
+  default_namespace: team-a
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("buildPushCommandArgs() = %#v, want %#v", got, want)
+
+	err := runPush(context.Background(), []string{"--config", cfgPath, "localhost/demo:latest", "remote/demo:latest"})
+	if err != nil {
+		t.Fatalf("runPush: %v", err)
+	}
+	if got.LocalImage != "localhost/demo:latest" || got.RemoteImage != "remote/demo:latest" {
+		t.Fatalf("push request = %#v", got)
+	}
+	if got.Namespace != "team-a" {
+		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
 	}
 }
 
@@ -222,6 +249,84 @@ containerd:
 	}
 	if got := resolveConchAPIURL("", "http://alias"); got != "http://alias" {
 		t.Fatalf("api url alias = %q, want alias", got)
+	}
+}
+
+func TestPrintConvertHelpIncludesUsageAndInputs(t *testing.T) {
+	var buf bytes.Buffer
+	printConvertHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch convert [options]",
+		"--source string",
+		"--kernel string",
+		"--initrd string",
+		"--snapshot",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("convert help output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"--archive", "--source-tag", "--source-image"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("convert help output still contains %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestParseConvertArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    convertOptions
+		wantErr bool
+	}{
+		{
+			name: "registry source",
+			args: []string{"--source", "docker.io/library/nginx:latest", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/nginx:latest"},
+			want: convertOptions{source: "docker.io/library/nginx:latest", kernel: "./bzImage", initrd: "./conch.initrd", tag: "localhost/conch/nginx:latest"},
+		},
+		{
+			name:    "missing source",
+			args:    []string{"--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
+			wantErr: true,
+		},
+		{
+			name:    "source image unsupported",
+			args:    []string{"--source-image", "localhost/source:latest", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
+			wantErr: true,
+		},
+		{
+			name:    "archive source unsupported",
+			args:    []string{"--archive", "./rootfs.oci.tar", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
+			wantErr: true,
+		},
+		{
+			name:    "missing kernel",
+			args:    []string{"--source", "nginx:latest", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
+			wantErr: true,
+		},
+		{
+			name:    "missing initrd",
+			args:    []string{"--source", "nginx:latest", "--kernel", "./bzImage", "-t", "localhost/conch/demo:latest"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseConvertArgs(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseConvertArgs() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got.source != tt.want.source || got.kernel != tt.want.kernel || got.initrd != tt.want.initrd || got.tag != tt.want.tag || got.snapshot != tt.want.snapshot {
+				t.Fatalf("parseConvertArgs() = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
