@@ -37,6 +37,23 @@ func (cu *configUpdater) updateSnapshotConfig(configFilePath, kernelPath, initrd
 	return nil
 }
 
+func readSnapshotPmemDeviceCount(configFilePath string) (int, error) {
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return 0, fmt.Errorf("error open snapshot config file %s : %w", configFilePath, err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, fmt.Errorf("error unmarshal snapshot config file %s : %w", configFilePath, err)
+	}
+	pmem, ok := config["pmem"].([]interface{})
+	if !ok {
+		return 0, nil
+	}
+	return len(pmem), nil
+}
+
 // updatePayloadPaths updates kernel and initramfs paths in payload section.
 func (cu *configUpdater) updatePayloadPaths(config map[string]interface{}, kernelPath, initrdPath string) {
 	payload, ok := config["payload"].(map[string]interface{})

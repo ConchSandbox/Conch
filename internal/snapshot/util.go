@@ -188,6 +188,9 @@ func cleanupEmptySnapshotParents(mountPoint string) error {
 		if base == "." || base == string(filepath.Separator) || base == "snapshot" {
 			return nil
 		}
+		if filepath.Base(filepath.Dir(dir)) == "snapshot" {
+			return nil
+		}
 
 		err := os.Remove(dir)
 		if err == nil {

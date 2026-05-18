@@ -2,6 +2,7 @@ package containerdhost
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,10 @@ func TestStartAndClose(t *testing.T) {
 		},
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "containerd snapshotter is nil") ||
+			strings.Contains(err.Error(), "EROFS unsupported") {
+			t.Skipf("erofs snapshotter unavailable in test environment: %v", err)
+		}
 		t.Fatalf("start host: %v", err)
 	}
 	if host.Client() == nil {
@@ -50,6 +55,10 @@ func TestStartAndClose(t *testing.T) {
 		},
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "containerd snapshotter is nil") ||
+			strings.Contains(err.Error(), "EROFS unsupported") {
+			t.Skipf("erofs snapshotter unavailable in test environment: %v", err)
+		}
 		t.Fatalf("restart host: %v", err)
 	}
 	if err := host.Close(); err != nil {

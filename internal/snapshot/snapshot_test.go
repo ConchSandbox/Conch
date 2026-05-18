@@ -18,7 +18,7 @@ import (
 
 func TestPrepare(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("overlayfs snapshot integration test requires root privileges")
+		t.Skip("erofs snapshot integration test requires root privileges")
 	}
 
 	host, err := containerdhost.Start(context.Background(), containerdhost.Config{
@@ -42,21 +42,25 @@ func TestPrepare(t *testing.T) {
 	rootfsParent := "test-rootfs-parent"
 	memParent := "test-mem-parent"
 	vmParent := "test-vm-parent"
-	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, rootfsParent, populateRootfsParent); err != nil {
+	parentCtx, err := host.Client().WithNamespace(context.Background(), ns)
+	if err != nil {
+		t.Fatalf("create namespace session: %v", err)
+	}
+	if err := createCommittedParent(parentCtx, host.Client().SnapshotService("erofs"), ns, rootfsParent, populateRootfsParent); err != nil {
 		if isMountPermissionError(err) {
-			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
 		}
 		t.Fatalf("create rootfs parent snapshot: %v", err)
 	}
-	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, memParent, populateMemParent); err != nil {
+	if err := createCommittedParent(parentCtx, host.Client().SnapshotService("erofs"), ns, memParent, populateMemParent); err != nil {
 		if isMountPermissionError(err) {
-			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
 		}
 		t.Fatalf("create mem parent snapshot: %v", err)
 	}
-	if err := createCommittedParent(context.Background(), host.Client().SnapshotService("overlayfs"), ns, vmParent, populateVMParent); err != nil {
+	if err := createCommittedParent(parentCtx, host.Client().SnapshotService("erofs"), ns, vmParent, populateVMParent); err != nil {
 		if isMountPermissionError(err) {
-			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
 		}
 		t.Fatalf("create vm parent snapshot: %v", err)
 	}
@@ -70,7 +74,7 @@ func TestPrepare(t *testing.T) {
 	conf, err := snapshot.Prepare(context.Background(), ns, key, parents)
 	if err != nil {
 		if isMountPermissionError(err) {
-			t.Skipf("overlayfs snapshot integration test requires mount privileges: %v", err)
+			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
 		}
 		t.Fatalf("get error: %v\n", err)
 	}
@@ -83,7 +87,7 @@ func TestPrepare(t *testing.T) {
 	t.Logf("prepare snapshot result: %v\n", conf)
 
 	newKey := "hello-commit"
-	if err := snapshot.Commit(context.Background(), ns, newKey, key); err != nil {
+	if _, err := snapshot.Commit(context.Background(), ns, newKey, key); err != nil {
 		t.Fatalf("commit snapshot failed: %v\n", err)
 	}
 	t.Logf("finish commit snapshot: %s\n", newKey)

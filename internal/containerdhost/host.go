@@ -13,7 +13,9 @@ import (
 	containerdserver "github.com/containerd/containerd/v2/cmd/containerd/server"
 	serverconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/containerd/v2/plugins/services"
 	"github.com/containerd/containerd/v2/version"
+	"github.com/containerd/platforms"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
@@ -162,6 +164,21 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	pluginConfigs := map[string]any{
 		PluginURI: map[string]any{
 			"default_namespace": cfg.DefaultNamespace,
+		},
+		string(plugins.ServicePlugin) + "." + services.DiffService: map[string]any{
+			"default": []string{"erofs", "walking"},
+		},
+		string(plugins.TransferPlugin) + ".local": map[string]any{
+			"unpack_config": []map[string]any{
+				{
+					"platform":    platforms.Format(platforms.DefaultSpec()),
+					"snapshotter": "erofs",
+					"differ":      "erofs",
+				},
+			},
+		},
+		string(plugins.DiffPlugin) + ".erofs": map[string]any{
+			"mkfs_options": []string{"--fsalignblks=512"},
 		},
 		conchplugins.SnapshotServiceURI: map[string]any{
 			"enabled":  cfg.Snapshot.Enabled,

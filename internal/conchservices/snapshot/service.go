@@ -70,8 +70,12 @@ func (s *Service) LinkVM(ctx context.Context, req LinkVMRequest) error {
 	if req.RootfsSnapshotID == "" || req.VMSnapshotID == "" {
 		return fmt.Errorf("rootfs and sandbox snapshot IDs are required")
 	}
-	snapshotter := s.client.SnapshotService("overlayfs")
-	_, err := snapshotter.Update(snapshotNamespaceContext(ctx, s.client, req.Namespace), snapshots.Info{
+	snapshotter := s.client.SnapshotService("erofs")
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	if err != nil {
+		return err
+	}
+	_, err = snapshotter.Update(snapshotCtx, snapshots.Info{
 		Name: req.RootfsSnapshotID,
 		Labels: map[string]string{
 			SnapshotLabelVMSnapshot: req.VMSnapshotID,
@@ -84,8 +88,11 @@ func (s *Service) Info(ctx context.Context, req InfoRequest) (Meta, error) {
 	if req.Key == "" {
 		return Meta{}, fmt.Errorf("key is required")
 	}
-	snapshotter := s.client.SnapshotService("overlayfs")
-	snapshotCtx := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	snapshotter := s.client.SnapshotService("erofs")
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	if err != nil {
+		return Meta{}, err
+	}
 
 	stat, err := snapshotter.Stat(snapshotCtx, req.Key)
 	if err != nil {
@@ -152,7 +159,7 @@ func (s *Service) Chain(ctx context.Context, req InfoRequest) (Chain, error) {
 	return Chain{Info: first, ChainPaths: out}, nil
 }
 
-func snapshotNamespaceContext(ctx context.Context, client *daemon.Client, namespace string) context.Context {
+func snapshotNamespaceContext(ctx context.Context, client *daemon.Client, namespace string) (context.Context, error) {
 	ns := namespace
 	if ns == "" && client != nil {
 		ns = client.DefaultNamespace()
@@ -160,7 +167,10 @@ func snapshotNamespaceContext(ctx context.Context, client *daemon.Client, namesp
 	if ns == "" {
 		ns = "default"
 	}
-	return namespaces.WithNamespace(ctx, ns)
+	if client != nil {
+		return client.WithNamespace(ctx, ns)
+	}
+	return namespaces.WithNamespace(ctx, ns), nil
 }
 
 var (
