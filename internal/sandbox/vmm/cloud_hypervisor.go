@@ -24,7 +24,7 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --cpus boot={{ .CPUBoot }},max={{ .CPUMax }},max_phys_bits=42 \
 --kernel {{ .KernelPath }} \
 --initramfs {{ .InitrdPath }} \
---pmem file={{ .PmemPath }},discard_writes=on \
+{{ .PmemArgs }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
 --cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}" \
@@ -50,7 +50,7 @@ type StartScriptCLHArgs struct {
 	MemoryPath      string
 	KernelPath      string
 	InitrdPath      string
-	PmemPath        string
+	PmemArgs        string
 	NamespaceID     string
 	TapName         string
 	VmmSocket       string
@@ -114,7 +114,7 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 		MemoryPath:      args.MemoryPath,
 		KernelPath:      args.KernelPath,
 		InitrdPath:      args.InitrdPath,
-		PmemPath:        strings.Join(args.PmemPaths, " file="),
+		PmemArgs:        buildPmemArgs(args.PmemPaths),
 		NamespaceID:     args.NamespaceID,
 		TapName:         args.TapName,
 		VmmSocket:       clh.socketPath,
@@ -154,6 +154,18 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 	script := scriptBuffer.String()
 	logger.Debug("Build start command", ulog.F("script", script))
 	return script, nil
+}
+
+func buildPmemArgs(paths []string) string {
+	args := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		args = append(args, fmt.Sprintf("--pmem file=%s,discard_writes=on", path))
+	}
+	return strings.Join(args, " \\\n")
 }
 
 func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
