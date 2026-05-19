@@ -34,18 +34,20 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
 --cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}" \
---api-socket {{ .VmmSocket }} \
+--api-socket fd={{ .ApiSocketFd }} \
 --console null \
 --net "tap={{ .TapName }}" \
 --vsock "cid={{ .VsockCID }},socket={{ .VsockSocketPath }}" \
+--event-monitor fd={{ .EventMonitorFd }} \
 --seccomp false`
 
 // -vv use for printing log when test
 // Current VM lifecycle is bound to Conch; Conch exit causes VM process termination. Detachment needed for follow-up.
 
 const resumeScriptCLH = `ip netns exec {{ .NamespaceID }} \
-{{ .VmmBinaryPath }} --api-socket \
-{{ .VmmSocket }} \
+{{ .VmmBinaryPath }} \
+--api-socket fd={{ .ApiSocketFd }} \
+--event-monitor fd={{ .EventMonitorFd }} \
 --seccomp false`
 
 type StartScriptCLHArgs struct {
@@ -60,10 +62,11 @@ type StartScriptCLHArgs struct {
 	PmemArgs        string
 	NamespaceID     string
 	TapName         string
-	VmmSocket       string
 	VsockCID        uint32
 	VsockSocketPath string
 	SandboxId       string
+	EventMonitorFd  int
+	ApiSocketFd     int
 }
 
 type CLHClient struct {
@@ -125,10 +128,11 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 		PmemArgs:        buildPmemArgs(args.PmemPaths),
 		NamespaceID:     args.NamespaceID,
 		TapName:         args.TapName,
-		VmmSocket:       clh.socketPath,
 		VsockCID:        args.VsockCID,
 		VsockSocketPath: args.VsockSocketPath,
 		SandboxId:       args.SandboxId,
+		EventMonitorFd:  args.EventMonitorFd,
+		ApiSocketFd:     args.ApiSocketFd,
 	}
 
 	_, err := os.Stat(clhArgs.VmmBinaryPath)
