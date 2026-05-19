@@ -82,11 +82,14 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
 
-	readyCh := make(chan struct{}, 1)
-	go waitForVsockAgentReady(ctx, sbx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout, readyCh)
+	errCh := make(chan error, 1)
+	go waitForVsockAgentReady(ctx, sbx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout, errCh)
 
 	select {
-	case <-readyCh:
+	case err := <-errCh:
+		if err != nil {
+			return sbx, err
+		}
 		logger.Info("Vsock signal sent successfully", ulog.F("sandboxId", sandboxId))
 	case <-ctx.Done():
 		return sbx, ctx.Err()
@@ -94,7 +97,7 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 	return sbx, nil
 }
 
-func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, readyCh chan struct{}) {
+func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, errCh chan error) {
 	logger := ulog.GetLogger()
 	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxId)
 
@@ -105,8 +108,10 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 		select {
 		case <-timer.C:
 			logger.Error("vsock signal attempts timed out", ulog.F("sandboxId", sandboxId), ulog.F("timeout", vsockSignalTimeout))
+			errCh <- fmt.Errorf("vsock signal timeout after %v", vsockSignalTimeout)
 			return
 		case <-ctx.Done():
+			errCh <- ctx.Err()
 			return
 		default:
 			conn, err := net.Dial("unix", vsockSocketPath)
@@ -192,7 +197,7 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 
 				conn.SetReadDeadline(time.Time{})
 				sbx.vsockConn = conn
-				close(readyCh)
+				errCh <- nil
 				return
 			}
 			logger.Warn("Received unknown message from Agent", ulog.F("msg", agentMsg))
