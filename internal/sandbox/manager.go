@@ -137,13 +137,11 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 				continue
 			}
 
-			logger.Debug("payload sent, waiting for OK receipt", ulog.F("sandboxId", sandboxId))
 			conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
 			respBuf := make([]byte, 64)
 			n, readErr := conn.Read(respBuf)
 			if readErr != nil {
-				logger.Debug("failed to read receipt, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", readErr))
 				conn.Close()
 				time.Sleep(vsockSignalRetry)
 				continue
