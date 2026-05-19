@@ -192,6 +192,7 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, na
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
 
+	// WaitReady returns timeout and context cancellation errors directly.
 	conn, err := hostconn.WaitReady(ctx, sandboxId, agentToken, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout)
 	if err != nil {
 		return sbx, err
