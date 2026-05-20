@@ -318,7 +318,7 @@ func (p *Process) Stop() error {
 			ulog.F("pid", p.cmd.Process.Pid),
 			ulog.F("error", err),
 		)
-		return fmt.Errorf("failed to send SIGTERM to vmm process, %s: %w", p.cmd.Process.Pid, err)
+		return fmt.Errorf("failed to send SIGTERM to vmm process, pid %d: %w", p.cmd.Process.Pid, err)
 	}
 
 	logger.Debug("Sent SIGTERM to VMM process",

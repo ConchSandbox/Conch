@@ -34,6 +34,7 @@ CFG_IMAGE_SECTION = "image"
 CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
 CFG_USE_SNAPSHOT_KEY = "use_snapshot"
+CFG_DEFAULT_VMM_KEY = "default_vmm"
 
 # API paths
 SANDBOX_CREATE_PATH = "/api/sandbox/create"
@@ -139,6 +140,16 @@ class Sandbox:
             return self._config[CFG_SNAPSHOT_SECTION]
         return self._config[CFG_IMAGE_SECTION]
 
+    def _get_vmm_name(self) -> str:
+        config = self._startup_config()
+        vmm_name = config.get(VMM_NAME_KEY, "")
+        if vmm_name:
+            return vmm_name
+        default_vmm = self._config.get(CFG_DEFAULT_VMM_KEY, "")
+        if not default_vmm:
+            raise ValueError(f"vmm_name not set in config section and no default_vmm defined")
+        return default_vmm
+
     def _build_create_payload(self) -> Dict[str, Any]:
         if not self.snapshot_id and not self.image_name:
             raise ValueError("image_name is required when snapshot_id is empty")
@@ -150,7 +161,7 @@ class Sandbox:
             SNAPSHOT_ID_KEY: self.snapshot_id or "",
             IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
             USE_SNAPSHOT_KEY: use_snapshot_image,
-            VMM_NAME_KEY: config[VMM_NAME_KEY],
+            VMM_NAME_KEY: self._get_vmm_name(),
             SANDBOX_ID_KEY: self.sandbox_id,
             VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
             RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],

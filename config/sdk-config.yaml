@@ -3,19 +3,21 @@ sandbox:
   api_url: "http://localhost:4063"                # Fallback: used only when unix_socket is empty
   sandbox_id: ""                                  # Optional: sandbox ID (default:auto generate)
 
+default_vmm: "stratovirt"                          # Default VMM for both snapshot and image modes
+
 snapshot:
   snapshot_id: ""                                 # Snapshot ID (default:auto generate)
-  vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
-  vcpu_num: 2                                     # *Number of virtual CPUs
-  vcpu_max: 2                                     # *Max number of virtual CPUs (default: same as vcpu_num)
-  ram_mb: 4096                                    # *Memory size in MB
+  # vmm_name: ""                                  # Optional: overrides default_vmm if set
+  vcpu_num: 2                                     # Number of virtual CPUs
+  vcpu_max: 2                                     # Max number of virtual CPUs (default: same as vcpu_num)
+  ram_mb: 4096                                    # Memory size in MB
 
 image:
   # For x86_64 architecture use: hub.oepkgs.net/conch/openeuler:odd-x86
   # For aarch64 architecture use: hub.oepkgs.net/conch/openeuler:odd-aarch
   image_name: "hub.oepkgs.net/conch/openeuler:odd-x86"
   use_snapshot: false                              # When true, treat image_name as a snapshot-start image and use the snapshot startup path
-  vmm_name: "cloud-hypervisor"                    # *Virtual machine monitor name
-  vcpu_num: 2                                     # *Number of virtual CPUs
-  vcpu_max: 2                                     # *Max number of virtual CPUs (default: same as vcpu_num)
-  ram_mb: 4096                                    # *Memory size in MB
+  # vmm_name: ""                                  # Optional: overrides default_vmm if set
+  vcpu_num: 2                                     # Number of virtual CPUs
+  vcpu_max: 2                                     # Max number of virtual CPUs (default: same as vcpu_num)
+  ram_mb: 4096                                    # Memory size in MB
