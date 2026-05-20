@@ -41,6 +41,7 @@ type SnapshotExportOpts struct {
 	BootIndexTag     string
 	ConfigPath       string
 	ConchAPIBaseURL  string
+	Namespace        string
 	RootfsSnapshotID string
 	SandboxID        string
 }
@@ -91,7 +92,7 @@ func ExportSnapshot(ctx context.Context, opts SnapshotExportOpts) (Result, error
 	}
 	conchClient := client.NewClientWithConfig(opts.ConchAPIBaseURL, opts.ConfigPath)
 	resp, err := conchClient.ExportSnapshot(ctx, client.SnapshotExportRequest{
-		Namespace:        resolveConchNamespace(opts.ConfigPath, ""),
+		Namespace:        resolveConchNamespace(opts.ConfigPath, opts.Namespace),
 		BootIndexTag:     opts.BootIndexTag,
 		RootfsSnapshotID: opts.RootfsSnapshotID,
 		SandboxID:        opts.SandboxID,

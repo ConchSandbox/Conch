@@ -13,6 +13,7 @@ type SnapshotExportRequest struct {
 	BootIndexTag     string
 	ConfigPath       string
 	ConchAPIBaseURL  string
+	Namespace        string
 	RootfsSnapshotID string
 	SandboxID        string
 }
@@ -35,6 +36,7 @@ func ExportSnapshot(ctx context.Context, req SnapshotExportRequest) (SnapshotExp
 		BootIndexTag:     req.BootIndexTag,
 		ConfigPath:       req.ConfigPath,
 		ConchAPIBaseURL:  apiBase,
+		Namespace:        req.Namespace,
 		RootfsSnapshotID: req.RootfsSnapshotID,
 		SandboxID:        req.SandboxID,
 	})

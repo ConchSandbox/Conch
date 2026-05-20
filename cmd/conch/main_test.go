@@ -356,6 +356,8 @@ func TestPrintSnapshotExportHelpIncludesExamples(t *testing.T) {
 	for _, want := range []string{
 		"-snapshot-id string",
 		"-sandbox-id string",
+		"-namespace string",
+		"-n string",
 		"-tag string",
 		"-t string",
 		"Either one of --snapshot-id or --sandbox-id is required.",
@@ -375,6 +377,7 @@ func TestParseSnapshotExportArgs(t *testing.T) {
 		wantSandbox  string
 		wantTag      string
 		wantConfig   string
+		wantNS       string
 		wantErrText  string
 		wantErr      bool
 	}{
@@ -385,11 +388,12 @@ func TestParseSnapshotExportArgs(t *testing.T) {
 			wantTag:      "localhost/conch/sandbox-snapshot:latest",
 		},
 		{
-			name:        "sandbox id with config",
-			args:        []string{"--sandbox-id", "sandbox-123", "--tag", "localhost/conch/demo:latest", "--config", "/tmp/config.yaml"},
+			name:        "sandbox id with config and namespace",
+			args:        []string{"--sandbox-id", "sandbox-123", "--tag", "localhost/conch/demo:latest", "--config", "/tmp/config.yaml", "-n", "team-a"},
 			wantSandbox: "sandbox-123",
 			wantTag:     "localhost/conch/demo:latest",
 			wantConfig:  "/tmp/config.yaml",
+			wantNS:      "team-a",
 		},
 		{
 			name:        "missing tag",
@@ -423,7 +427,7 @@ func TestParseSnapshotExportArgs(t *testing.T) {
 				}
 				return
 			}
-			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig {
+			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig || got.namespace != tt.wantNS {
 				t.Fatalf("parseSnapshotExportArgs() = %#v", got)
 			}
 		})
