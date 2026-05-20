@@ -5,7 +5,7 @@ set -euo pipefail
 # Script Name: conch-env-setup.sh
 # Description: Automates Conch environment setup with one-click execution
 # Core Features:
-#   1. Check and install runtime dependencies (cloud-hypervisor, buildah, erofs-utils)
+#   1. Check and install runtime dependencies (cloud-hypervisor, erofs-utils)
 #   2. Build Conch binaries locally
 #   3. Pull function images through conchd
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 #   From Conch root: ./scripts/conch-env-setup.sh
 #
 # Usage:
-#   install: Installs cloud-hypervisor, buildah, erofs-utils, builds Conch, and installs SDK.
+#   install: Installs cloud-hypervisor, erofs-utils, builds Conch, and installs SDK.
 #   pull: Pulls the required image through a running conchd.
 #   build: Builds Conch binaries locally.
 #   all: Executes all setup steps: provisioning, local build, and SDK setup.
@@ -50,7 +50,7 @@ show_help() {
     echo "Usage: $0 [COMMAND] [OPTIONS]"
     echo ""
     echo "Commands:"
-    echo "  provisioning           Install cloud-hypervisor, buildah, and erofs-utils"
+    echo "  provisioning           Install cloud-hypervisor and erofs-utils"
     echo "  pull                   Pull function image and run unpack"
     echo "  build                  Build Conch binaries locally"
     echo "  sdk                    Install Python SDK in editable mode"
@@ -117,28 +117,29 @@ install_clh() {
     fi
 }
 
-install_buildah_erofs() {
-    echo "--- Installing Buildah and EROFS Utils ---"
+install_erofs() {
+    echo "--- Installing EROFS Utils ---"
     if command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y buildah erofs-utils
+        sudo dnf install -y erofs-utils
     elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y buildah erofs-utils
+        sudo yum install -y erofs-utils
     elif command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update
-        sudo apt-get install -y buildah erofs-utils
+        sudo apt-get install -y erofs-utils
     else
-        echo "unsupported package manager; please install buildah and erofs-utils manually" >&2
+        echo "unsupported package manager; please install erofs-utils manually" >&2
         exit 1
     fi
 
-    # Verify installation
-    for bin in buildah mkfs.erofs; do
-        if ! command -v "$bin" >/dev/null 2>&1; then
-            echo "missing required command: $bin" >&2
-            exit 1
-        fi
-    done
-    echo "buildah and erofs-utils installed and verified successfully."
+    if ! command -v mkfs.erofs >/dev/null 2>&1; then
+        echo "missing required command: mkfs.erofs" >&2
+        exit 1
+    fi
+    if ! mkfs.erofs --help 2>&1 | grep -q -- "--fsalignblks"; then
+        echo "mkfs.erofs does not support --fsalignblks; please install erofs-utils 1.9 or newer." >&2
+        exit 1
+    fi
+    echo "erofs-utils installed and verified successfully."
 }
 
 pull_function() {
@@ -189,11 +190,11 @@ install_sdk() {
 }
 
 case "$COMMAND" in
-    provisioning) install_clh && install_buildah_erofs ;;
+    provisioning) install_clh && install_erofs ;;
     pull)    pull_function ;;
     build)   run_build ;;
     sdk)     install_sdk ;;
-    install) install_clh && install_buildah_erofs && run_build && install_sdk;;
-    all)     install_clh && install_buildah_erofs && run_build && install_sdk;;
+    install) install_clh && install_erofs && run_build && install_sdk;;
+    all)     install_clh && install_erofs && run_build && install_sdk;;
     help|*)  show_help ;;
 esac
