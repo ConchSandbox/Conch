@@ -11,7 +11,7 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 
-	"github.com/openeuler/Conch/internal/containerdhost"
+	"github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )

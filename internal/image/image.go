@@ -12,12 +12,12 @@ import (
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
 
 // GetSnapshotID resolves image name and returns rootfs snapshot ID (chainID)
 // Supports both regular images and OCI Image Index (multi-architecture images)
-func GetSnapshotID(ctx context.Context, client *daemon.Client, namespace, imageName string) (string, error) {
+func GetSnapshotID(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (string, error) {
 	nsCtx, err := client.WithNamespace(ctx, namespace)
 	if err != nil {
 		return "", fmt.Errorf("create namespace context: %w", err)
