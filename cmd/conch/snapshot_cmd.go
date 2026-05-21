@@ -12,6 +12,7 @@ import (
 
 type snapshotExportOptions struct {
 	configPath string
+	namespace  string
 	snapshotID string
 	sandboxID  string
 	tag        string
@@ -58,6 +59,8 @@ func newSnapshotExportFlagSet(out io.Writer) (*flag.FlagSet, *snapshotExportOpti
 	fs.StringVar(&opts.sandboxID, "sandbox-id", "", "sandbox ID to pause and export")
 	fs.StringVar(&opts.tag, "t", "", "output sandbox-snapshot image tag")
 	fs.StringVar(&opts.tag, "tag", "", "output sandbox-snapshot image tag")
+	fs.StringVar(&opts.namespace, "namespace", "", "containerd namespace")
+	fs.StringVar(&opts.namespace, "n", "", "containerd namespace")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.Usage = func() { printSnapshotExportHelp(out, fs) }
 	return fs, &opts
@@ -92,6 +95,7 @@ func runSnapshotExport(ctx context.Context, args []string) error {
 	res, err := image.ExportSnapshot(ctx, image.SnapshotExportRequest{
 		BootIndexTag:     opts.tag,
 		ConfigPath:       opts.configPath,
+		Namespace:        opts.namespace,
 		RootfsSnapshotID: opts.snapshotID,
 		SandboxID:        opts.sandboxID,
 	})

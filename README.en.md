@@ -21,11 +21,13 @@ The project is developed around the following new sandbox requirements of Agents
 
 ### Prerequisites
 
-- Go 1.23+
-- Containerd 2.2.1+
-- Cloud-Hypervisor v48.0+
+- Go 1.26+
+- Cloud-Hypervisor v51.0+
+- erofs-utils 1.9+ (`mkfs.erofs --fsalignblks` is required)
 - Iptables network configuration tool
 - Linux 5.10+
+
+Conchd initializes containerd services and Conch plugins in process, so a standalone system `containerd` daemon is not required.
 
 ### One-Click Compilation and Installation
 
@@ -52,21 +54,24 @@ After compilation, the binary files are located in the `bin/` directory. Start t
 
 ### Image Management
 
-Conch provides unified image management commands for building, pushing, pulling, and unpacking Conch images:
+Conch provides unified image management commands for converting an existing OCI rootfs image into a Conch native EROFS image, then pushing, pulling, and unpacking it:
 
 ```bash
-conch build -f Dockerfile -t localhost/demo-sandbox:latest .
-conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
-conch pull hub.oepkgs.net/conch/demo-sandbox:latest
-conch pull docker.io/library/nginx:latest
+conch convert --source docker.io/library/nginx:latest \
+  --kernel ./bzImage \
+  --initrd ./conch.initrd \
+  -t localhost/conch/nginx:latest
+
+conch push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
+conch pull hub.oepkgs.net/conch/nginx:latest
 
 # Unpack a local Conch image separately
 conch unpack hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-`conch pull` automatically unpacks after pulling; `conch unpack` is mainly for separately unpacking local Conch images or troubleshooting.
+`conch convert` converts a standard OCI rootfs image into a native EROFS rootfs and combines it with the kernel/initrd component into a Conch boot index. `conch pull` automatically unpacks after pulling; `conch unpack` is mainly for separately unpacking local Conch images or troubleshooting.
 
-For detailed usage, see [Conch Image Guide](docs/guide/image.md).
+For detailed design, see [Conch Image Workflow Design](docs/design/image-workflow.md).
 
 ### SDK Configuration
 

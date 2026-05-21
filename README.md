@@ -23,7 +23,7 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 
 - Go 1.26+
 - Cloud-Hypervisor v51.0+
-- Buildah 与 erofs-utils
+- erofs-utils 1.9+（需要 `mkfs.erofs --fsalignblks`）
 - Iptables 网络配置工具
 - Linux 5.10+
 
@@ -52,21 +52,24 @@ git checkout demo
 
 ### 镜像管理
 
-Conch 提供统一的镜像管理命令，用于构建、发布、拉取和解包 Conch 镜像：
+Conch 提供统一的镜像管理命令，用于将已有 OCI rootfs 镜像转换为 Conch 原生 EROFS 镜像，并支持发布、拉取和解包：
 
 ```bash
-conch build -f Dockerfile -t localhost/demo-sandbox:latest .
-conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
-conch pull hub.oepkgs.net/conch/demo-sandbox:latest
-conch pull docker.io/library/nginx:latest
+conch convert --source docker.io/library/nginx:latest \
+  --kernel ./bzImage \
+  --initrd ./conch.initrd \
+  -t localhost/conch/nginx:latest
+
+conch push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
+conch pull hub.oepkgs.net/conch/nginx:latest
 
 # 本地已有 Conch 镜像时可单独解包
 conch unpack hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-其中 `conch pull` 会在拉取后自动完成本地 unpack；`conch unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。
+其中 `conch convert` 会将标准 OCI rootfs 镜像转换为 native EROFS rootfs，并与 kernel/initrd 组件组装为 Conch boot index；`conch pull` 会在拉取后自动完成本地 unpack；`conch unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。
 
-详细用法见 [Conch Image Guide](docs/guide/image.md)。
+详细设计见 [Conch Image Workflow Design](docs/design/image-workflow.md)。
 
 ### SDK 配置
 

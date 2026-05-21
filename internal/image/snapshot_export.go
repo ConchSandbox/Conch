@@ -4,8 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/openeuler/Conch/internal/image/conchbuild"
-	"go.podman.io/storage"
+	"github.com/openeuler/Conch/internal/image/conchconvert"
 )
 
 // SnapshotExportRequest is the unified input for exporting a snapshot-backed
@@ -14,6 +13,7 @@ type SnapshotExportRequest struct {
 	BootIndexTag     string
 	ConfigPath       string
 	ConchAPIBaseURL  string
+	Namespace        string
 	RootfsSnapshotID string
 	SandboxID        string
 }
@@ -27,26 +27,16 @@ type SnapshotExportResult struct {
 // ExportSnapshot exports a sandbox-snapshot image from an existing rootfs
 // snapshot or sandbox.
 func ExportSnapshot(ctx context.Context, req SnapshotExportRequest) (SnapshotExportResult, error) {
-	storeOpts, err := storage.DefaultStoreOptions()
-	if err != nil {
-		return SnapshotExportResult{}, err
-	}
-	store, err := storage.GetStore(storeOpts)
-	if err != nil {
-		return SnapshotExportResult{}, err
-	}
-	defer func() { _, _ = store.Shutdown(false) }()
-
 	apiBase := req.ConchAPIBaseURL
 	if apiBase == "" {
-		apiBase = os.Getenv("BUILDAH_CONCH_API_URL")
+		apiBase = os.Getenv("CONCH_API_URL")
 	}
 
-	res, err := conchbuild.ExportSnapshot(ctx, conchbuild.SnapshotExportOpts{
-		Store:            store,
+	res, err := conchconvert.ExportSnapshot(ctx, conchconvert.SnapshotExportOpts{
 		BootIndexTag:     req.BootIndexTag,
 		ConfigPath:       req.ConfigPath,
 		ConchAPIBaseURL:  apiBase,
+		Namespace:        req.Namespace,
 		RootfsSnapshotID: req.RootfsSnapshotID,
 		SandboxID:        req.SandboxID,
 	})

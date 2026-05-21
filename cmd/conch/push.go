@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 
-	"github.com/openeuler/Conch/internal/image/conchbuild/buildahcli"
+	"github.com/openeuler/Conch/internal/image/client"
 )
 
 type pushOptions struct {
 	localImage  string
 	remoteImage string
-	tlsVerify   bool
+	plainHTTP   bool
+	username    string
+	password    string
+	namespace   string
+	configPath  string
 }
 
 func printPushHelp(out io.Writer) {
@@ -22,14 +25,19 @@ func printPushHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch push [options] <local-image> <remote-image>")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
-	fmt.Fprintln(out, "  Push a Conch OCI index with `buildah manifest push --all`.")
-	fmt.Fprintln(out, "  Registry authentication is handled by buildah, for example `buildah login <registry>`.")
+	fmt.Fprintln(out, "  Push a Conch OCI index from conchd/containerd to a registry.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  --plain-http")
-	fmt.Fprintln(out, "        allow plain HTTP / disable TLS verification for the destination registry")
-	fmt.Fprintln(out, "  --tls-verify bool")
-	fmt.Fprintln(out, "        verify TLS certificates for the destination registry (default: true)")
+	fmt.Fprintln(out, "        allow plain HTTP for the destination registry")
+	fmt.Fprintln(out, "  --username string")
+	fmt.Fprintln(out, "        registry username")
+	fmt.Fprintln(out, "  --password string")
+	fmt.Fprintln(out, "        registry password")
+	fmt.Fprintln(out, "  -n, --namespace string")
+	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
+	fmt.Fprintln(out, "  --config string")
+	fmt.Fprintln(out, "        config file path for conchd API discovery")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
 	fmt.Fprintln(out, "  conch push localhost/demo-index:latest hub.oepkgs.net/conch/demo-index:latest")
@@ -41,45 +49,69 @@ func runPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	cmdArgs := buildPushCommandArgs(opts)
-	cmd := exec.CommandContext(ctx, buildahcli.Bin(), cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("conch push: buildah %s: %w", strings.Join(cmdArgs, " "), err)
+	cfg, err := loadConchConfig(opts.configPath)
+	if err != nil {
+		return fmt.Errorf("conch push: load config: %w", err)
 	}
-
-	fmt.Printf("Pushed image: %s -> %s\n", opts.localImage, opts.remoteImage)
+	ns := resolveConchNamespace(cfg, opts.namespace)
+	conchClient := client.NewClientWithConfig("", opts.configPath)
+	if err := conchClient.PushImage(ctx, client.PushImageRequest{
+		LocalImage:  opts.localImage,
+		RemoteImage: opts.remoteImage,
+		Namespace:   ns,
+		PlainHTTP:   opts.plainHTTP,
+		Username:    opts.username,
+		Password:    opts.password,
+	}); err != nil {
+		return fmt.Errorf("conch push: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Pushed image: %s -> %s\n", opts.localImage, opts.remoteImage)
 	return nil
 }
 
 func parsePushArgs(args []string) (pushOptions, error) {
-	opts := pushOptions{tlsVerify: true}
+	opts := pushOptions{}
 	images := make([]string, 0, 2)
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--plain-http":
-			opts.tlsVerify = false
-		case arg == "--tls-verify":
+			opts.plainHTTP = true
+		case arg == "--username":
 			if i+1 >= len(args) {
 				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)
 			}
-			value, err := parseBoolFlagValue(args[i+1], arg)
-			if err != nil {
-				return pushOptions{}, err
-			}
-			opts.tlsVerify = value
+			opts.username = args[i+1]
 			i++
-		case strings.HasPrefix(arg, "--tls-verify="):
-			value, err := parseBoolFlagValue(strings.TrimPrefix(arg, "--tls-verify="), "--tls-verify")
-			if err != nil {
-				return pushOptions{}, err
+		case strings.HasPrefix(arg, "--username="):
+			opts.username = strings.TrimPrefix(arg, "--username=")
+		case arg == "--password":
+			if i+1 >= len(args) {
+				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)
 			}
-			opts.tlsVerify = value
+			opts.password = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--password="):
+			opts.password = strings.TrimPrefix(arg, "--password=")
+		case arg == "--namespace" || arg == "-n":
+			if i+1 >= len(args) {
+				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)
+			}
+			opts.namespace = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--namespace="):
+			opts.namespace = strings.TrimPrefix(arg, "--namespace=")
+		case strings.HasPrefix(arg, "-n="):
+			opts.namespace = strings.TrimPrefix(arg, "-n=")
+		case arg == "--config":
+			if i+1 >= len(args) {
+				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)
+			}
+			opts.configPath = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--config="):
+			opts.configPath = strings.TrimPrefix(arg, "--config=")
 		case strings.HasPrefix(arg, "-"):
 			return pushOptions{}, fmt.Errorf("conch push: unknown option %s", arg)
 		default:
@@ -93,31 +125,4 @@ func parsePushArgs(args []string) (pushOptions, error) {
 	opts.localImage = images[0]
 	opts.remoteImage = images[1]
 	return opts, nil
-}
-
-func parseBoolFlagValue(value, flagName string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "t", "true", "y", "yes":
-		return true, nil
-	case "0", "f", "false", "n", "no":
-		return false, nil
-	default:
-		return false, fmt.Errorf("conch push: invalid %s value %q", flagName, value)
-	}
-}
-
-func buildPushCommandArgs(opts pushOptions) []string {
-	args := []string{"manifest", "push", "--all"}
-	if !opts.tlsVerify {
-		args = append(args, "--tls-verify=false")
-	}
-	args = append(args, opts.localImage, ensureDockerTransport(opts.remoteImage))
-	return args
-}
-
-func ensureDockerTransport(imageName string) string {
-	if strings.Contains(imageName, "://") {
-		return imageName
-	}
-	return "docker://" + imageName
 }

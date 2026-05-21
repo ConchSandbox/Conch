@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
@@ -16,9 +18,11 @@ type snapshotCleaner struct {
 	ctx        context.Context
 	viewMgr    *viewManager
 	snt        snapshotter.Snapshotter
+	mountMgr   mount.Manager
 	namespace  string
 	key        string
 	mountPoint string
+	accessPath string
 
 	prepared   bool
 	viewed     bool
@@ -26,6 +30,7 @@ type snapshotCleaner struct {
 	mounted    bool
 
 	parentSnapshotID string
+	activationKey    string
 }
 
 // Cleanup releases all resources held by the snapshot.
@@ -33,14 +38,22 @@ func (sc *snapshotCleaner) Cleanup() {
 	if sc.viewed {
 		if sc.viewMgr != nil {
 			sc.viewMgr.removeViewAlias(sc.namespace, sc.key)
-			sc.viewMgr.releaseViewMount(sc.snt, sc.namespace, sc.parentSnapshotID)
+			sc.viewMgr.releaseViewMount(sc.snt, sc.mountMgr, sc.namespace, sc.parentSnapshotID)
 		}
 		return
 	}
 
 	if sc.mounted {
-		if unmountErr := mount.Unmount(sc.mountPoint, unix.MNT_FORCE); unmountErr != nil {
+		if unmountErr := mount.UnmountAll(sc.mountPoint, unix.MNT_FORCE); unmountErr != nil {
 			slog.Warn("failed to unmount", "mountPoint", sc.mountPoint, "err", unmountErr)
+		}
+	}
+	if sc.activationKey != "" && sc.mountMgr != nil {
+		ctx := namespaces.WithNamespace(sc.ctx, sc.namespace)
+		if deactivateErr := sc.mountMgr.Deactivate(ctx, sc.activationKey); deactivateErr != nil {
+			if !errdefs.IsNotFound(deactivateErr) {
+				slog.Warn("failed to deactivate mount", "key", sc.activationKey, "err", deactivateErr)
+			}
 		}
 	}
 	if sc.dirCreated {

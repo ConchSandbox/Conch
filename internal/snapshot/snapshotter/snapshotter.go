@@ -13,7 +13,9 @@ import (
 type Snapshotter interface {
 	Prepare(ctx context.Context, namespace, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error)
 	View(ctx context.Context, namespace, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error)
+	Mounts(ctx context.Context, namespace, key string) ([]mount.Mount, error)
 	Commit(ctx context.Context, namespace, key, snapshotID string, opts ...snapshots.Opt) error
+	Update(ctx context.Context, namespace string, info snapshots.Info, fieldpaths ...string) (snapshots.Info, error)
 	Remove(ctx context.Context, namespace, key string) error
 	Stat(ctx context.Context, namespace, key string) (snapshots.Info, error)
 	List(ctx context.Context, namespace string, result map[string]*snapshots.Info, filters ...string) error
@@ -26,10 +28,11 @@ type ContainerdSnap struct {
 	snapshotter      snapshots.Snapshotter
 	namespaceStore   ctdnamespaces.Store
 	defaultNamespace string
+	withNamespace    func(context.Context, string) (context.Context, error)
 }
 
 // NewContainerdSnap creates a containerd snapshotter instance
-func NewContainerdSnap(snapshotter snapshots.Snapshotter, namespaceStore ctdnamespaces.Store, defaultNamespace string) (Snapshotter, error) {
+func NewContainerdSnap(snapshotter snapshots.Snapshotter, namespaceStore ctdnamespaces.Store, defaultNamespace string, opts ...ContainerdSnapOpt) (Snapshotter, error) {
 	if snapshotter == nil {
 		return nil, fmt.Errorf("containerd snapshotter is nil")
 	}
@@ -39,11 +42,23 @@ func NewContainerdSnap(snapshotter snapshots.Snapshotter, namespaceStore ctdname
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
-	return &ContainerdSnap{
+	c := &ContainerdSnap{
 		snapshotter:      snapshotter,
 		namespaceStore:   namespaceStore,
 		defaultNamespace: defaultNamespace,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+type ContainerdSnapOpt func(*ContainerdSnap)
+
+func WithNamespaceContext(fn func(context.Context, string) (context.Context, error)) ContainerdSnapOpt {
+	return func(c *ContainerdSnap) {
+		c.withNamespace = fn
+	}
 }
 
 // Close releases resources
@@ -59,6 +74,13 @@ func (c *ContainerdSnap) getSnapshotterAndContext(ctx context.Context, namespace
 	}
 	if ns == "" {
 		ns = "default"
+	}
+	if c.withNamespace != nil {
+		nsCtx, err := c.withNamespace(ctx, ns)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c.snapshotter, nsCtx, nil
 	}
 	return c.snapshotter, ctdnamespaces.WithNamespace(ctx, ns), nil
 }
@@ -81,6 +103,14 @@ func (c *ContainerdSnap) View(ctx context.Context, namespace, key, parent string
 	return sn.View(nsCtx, key, parent, opts...)
 }
 
+func (c *ContainerdSnap) Mounts(ctx context.Context, namespace, key string) ([]mount.Mount, error) {
+	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return sn.Mounts(nsCtx, key)
+}
+
 // Commit commits an active snapshot to a persistent snapshot
 func (c *ContainerdSnap) Commit(ctx context.Context, namespace, key, snapshotID string, opts ...snapshots.Opt) error {
 	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
@@ -88,6 +118,14 @@ func (c *ContainerdSnap) Commit(ctx context.Context, namespace, key, snapshotID 
 		return err
 	}
 	return sn.Commit(nsCtx, snapshotID, key, opts...)
+}
+
+func (c *ContainerdSnap) Update(ctx context.Context, namespace string, info snapshots.Info, fieldpaths ...string) (snapshots.Info, error) {
+	sn, nsCtx, err := c.getSnapshotterAndContext(ctx, namespace)
+	if err != nil {
+		return snapshots.Info{}, err
+	}
+	return sn.Update(nsCtx, info, fieldpaths...)
 }
 
 // Remove removes a snapshot

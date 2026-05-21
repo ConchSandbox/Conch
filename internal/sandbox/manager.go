@@ -18,6 +18,7 @@ import (
 
 type Manager struct {
 	sandboxes          sync.Map
+	lifecycleMu        sync.Mutex
 	pool               *network.Pool
 	daemonClient       *daemon.Client
 	vsockSignalRetry   time.Duration
@@ -215,6 +216,9 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	var sbx *Sandbox
 	var peerIP string
 	namespace := m.resolveNamespace(req.Namespace)
@@ -299,6 +303,8 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
 
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
 		if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
 			return
 		}
@@ -372,21 +378,28 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxId)
+	m.lifecycleMu.Lock()
 	sbxVal, exists := m.sandboxes.Load(mapKey)
 	if !exists {
+		m.lifecycleMu.Unlock()
 		return fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
 
 	sbx, ok := sbxVal.(*Sandbox)
 	if !ok {
+		m.lifecycleMu.Unlock()
 		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
 
 	if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+		m.lifecycleMu.Unlock()
 		return nil
 	}
+	m.lifecycleMu.Unlock()
 
 	go func() {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
 		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 	}()
 	return nil
@@ -399,7 +412,10 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	defer cancel()
 
 	namespace := m.resolveNamespace(req.Namespace)
-	sbxVal, exists := m.sandboxes.Load(sandboxMapKey(namespace, req.SandboxId))
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	sbxVal, exists := m.sandboxes.LoadAndDelete(sandboxMapKey(namespace, req.SandboxId))
 	if !exists {
 		return "", fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
@@ -409,7 +425,6 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		return "", fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
 
-	m.sandboxes.Delete(sandboxMapKey(sbx.namespace, req.SandboxId))
 	defer func() {
 		logger.Info("sandbox stop in pause", ulog.F("sandboxId", req.SandboxId))
 		if err := sbx.Stop(ctx); err != nil {
@@ -442,7 +457,10 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		return "", fmt.Errorf("failed to calculate snapshot id: %w", err)
 	}
 
-	err = snapshot.Commit(context.Background(), sbx.namespace, snapshotId, key)
+	snapshotId, err = snapshot.Commit(context.Background(), sbx.namespace, snapshotId, key, func(conf *snapshot.SnapshotConfig) error {
+		conf.MemDir = sbx.snapshotConf.MemDir
+		return nil
+	})
 	if err != nil {
 		return "", fmt.Errorf("error committing snapshot %s: %v", req.SandboxId, err)
 	}

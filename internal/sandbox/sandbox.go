@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/openeuler/Conch/internal/sandbox/network"
 	"github.com/openeuler/Conch/internal/sandbox/vmm"
@@ -243,14 +246,99 @@ func (s *Sandbox) Close(ctx context.Context) error {
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {
+	stagingDir, err := os.MkdirTemp("", "conch-vm-snapshot-*")
+	if err != nil {
+		return fmt.Errorf("create snapshot staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingDir)
+
 	if err := s.process.Pause(ctx); err != nil {
 		return fmt.Errorf("failed to pause VM: %w", err)
 	}
 
-	err := s.process.CreateSnapshot(ctx, s.snapshotConf.SnapDir())
-	if err != nil {
+	if err := s.process.CreateSnapshot(ctx, stagingDir); err != nil {
 		return fmt.Errorf("error creating snapshot: %w", err)
+	}
+	if err := s.Stop(ctx); err != nil {
+		return fmt.Errorf("failed to stop VM after snapshot: %w", err)
+	}
+	if err := replaceDirWithRetry(stagingDir, s.snapshotConf.SnapDir(), time.Second, 20*time.Millisecond); err != nil {
+		return fmt.Errorf("stage snapshot into mem snapshot: %w", err)
 	}
 
 	return nil
+}
+
+func replaceDirWithRetry(src, dst string, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := replaceDir(src, dst); err != nil {
+			lastErr = err
+		} else {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(interval)
+	}
+}
+
+func replaceDir(src, dst string) error {
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	return copyDir(src, dst)
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case entry.Type()&os.ModeSymlink != 0:
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target)
+		case entry.Type().IsRegular():
+			return copyFile(path, target, info.Mode().Perm())
+		default:
+			return nil
+		}
+	})
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }

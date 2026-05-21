@@ -93,7 +93,7 @@ clean: ## Clean build artifacts
 	rm -rf $(CONCH_PY_PROTO_DIR)
 	@echo "cleaning completed"
 
-test: ## Run all tests
+test: gen-proto-go ## Run all tests
 	@echo "running tests..."
 	$(GOTEST) $(GO_TAG_FLAGS) -v ./...
 

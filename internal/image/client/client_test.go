@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,60 +101,75 @@ func TestConchAPITimeoutEnv(t *testing.T) {
 	}
 }
 
-func TestImportAndSnapshotAPIMethods(t *testing.T) {
-	archive, err := os.CreateTemp(t.TempDir(), "image-*.tar")
+func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
+	kernel, err := os.CreateTemp(t.TempDir(), "kernel-*")
 	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
+		t.Fatalf("CreateTemp kernel: %v", err)
 	}
-	if _, err := archive.WriteString("archive-content"); err != nil {
-		t.Fatalf("write archive: %v", err)
+	if _, err := kernel.WriteString("kernel-content"); err != nil {
+		t.Fatalf("write kernel: %v", err)
 	}
-	if err := archive.Close(); err != nil {
-		t.Fatalf("close archive: %v", err)
+	if err := kernel.Close(); err != nil {
+		t.Fatalf("close kernel: %v", err)
+	}
+	initrd, err := os.CreateTemp(t.TempDir(), "initrd-*")
+	if err != nil {
+		t.Fatalf("CreateTemp initrd: %v", err)
+	}
+	if _, err := initrd.WriteString("initrd-content"); err != nil {
+		t.Fatalf("write initrd: %v", err)
+	}
+	if err := initrd.Close(); err != nil {
+		t.Fatalf("close initrd: %v", err)
 	}
 
-	var linkReq LinkSnapshotVMRequest
-	var infoReq SnapshotInfoRequest
-	var chainReq SnapshotInfoRequest
-	var importedTag string
-	var importedNamespace string
-	var archiveBody string
+	var metadata ConvertImageMetadata
+	var snapshotReq SnapshotExportRequest
+	var kernelBody string
+	var initrdBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case importImage:
-			if err := r.ParseMultipartForm(1024); err != nil {
+		case convertImage:
+			if err := r.ParseMultipartForm(4096); err != nil {
 				t.Fatalf("ParseMultipartForm: %v", err)
 			}
-			importedTag = r.FormValue("imported_tag")
-			importedNamespace = r.FormValue("namespace")
-			file, _, err := r.FormFile("archive")
-			if err != nil {
-				t.Fatalf("FormFile: %v", err)
+			if err := json.Unmarshal([]byte(r.FormValue("metadata")), &metadata); err != nil {
+				t.Fatalf("decode metadata: %v", err)
 			}
-			defer file.Close()
+			file, _, err := r.FormFile("kernel")
+			if err != nil {
+				t.Fatalf("kernel FormFile: %v", err)
+			}
 			raw, err := io.ReadAll(file)
+			_ = file.Close()
 			if err != nil {
-				t.Fatalf("ReadAll: %v", err)
+				t.Fatalf("ReadAll kernel: %v", err)
 			}
-			archiveBody = string(raw)
-			_ = json.NewEncoder(w).Encode(ImportImageResponse{SnapshotKey: "snapshot-id", ImageName: "image:latest"})
-		case linkSnapshotVM:
-			if err := json.NewDecoder(r.Body).Decode(&linkReq); err != nil {
-				t.Fatalf("decode link request: %v", err)
+			kernelBody = string(raw)
+			file, _, err = r.FormFile("initrd")
+			if err != nil {
+				t.Fatalf("initrd FormFile: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case snapshotInfo:
-			if err := json.NewDecoder(r.Body).Decode(&infoReq); err != nil {
-				t.Fatalf("decode info request: %v", err)
+			raw, err = io.ReadAll(file)
+			_ = file.Close()
+			if err != nil {
+				t.Fatalf("ReadAll initrd: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(SnapshotMeta{Key: "rootfs", StoragePath: "/snap/rootfs"})
-		case snapshotChain:
-			if err := json.NewDecoder(r.Body).Decode(&chainReq); err != nil {
-				t.Fatalf("decode chain request: %v", err)
+			initrdBody = string(raw)
+			_ = json.NewEncoder(w).Encode(ConvertImageResponse{
+				BootIndexDigest: "sha256:boot",
+				BootIndexTag:    "localhost/conch/demo:latest",
+				RootfsImageRef:  "conch-erofs-rootfs:build-123",
+				KernelImageRef:  "conch-kernel:build-123",
+				SourceImageRef:  "docker.io/library/nginx:latest",
+			})
+		case snapshotExport:
+			if err := json.NewDecoder(r.Body).Decode(&snapshotReq); err != nil {
+				t.Fatalf("decode snapshot export request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(SnapshotChainResponse{
-				Info:       SnapshotMeta{Key: "rootfs", Parent: "parent"},
-				ChainPaths: []string{"/snap/parent", "/snap/rootfs"},
+			_ = json.NewEncoder(w).Encode(SnapshotExportResponse{
+				BootIndexDigest: "sha256:snapshot",
+				BootIndexTag:    snapshotReq.BootIndexTag,
 			})
 		default:
 			http.NotFound(w, r)
@@ -164,88 +178,40 @@ func TestImportAndSnapshotAPIMethods(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	importResp, err := c.ImportImageArchive(context.Background(), ImportImageRequest{
-		ArchivePath: archive.Name(),
-		Namespace:   "team-a",
-		ImportedTag: "buildah-oci-rootfs:latest",
+	convertResp, err := c.ConvertImage(context.Background(), ConvertImageRequest{
+		Source:       "docker.io/library/nginx:latest",
+		KernelPath:   kernel.Name(),
+		InitrdPath:   initrd.Name(),
+		BootIndexTag: "localhost/conch/demo:latest",
+		Namespace:    "team-a",
+		PlainHTTP:    true,
+		Username:     "user",
+		Password:     "pass",
+		Snapshot:     true,
 	})
 	if err != nil {
-		t.Fatalf("ImportImageArchive: %v", err)
+		t.Fatalf("ConvertImage: %v", err)
 	}
-	if importResp.SnapshotKey != "snapshot-id" || importResp.ImageName != "image:latest" {
-		t.Fatalf("import response = %#v", importResp)
+	if metadata.Source != "docker.io/library/nginx:latest" || metadata.Namespace != "team-a" || metadata.BootIndexTag != "localhost/conch/demo:latest" || !metadata.Snapshot || !metadata.PlainHTTP {
+		t.Fatalf("metadata = %#v", metadata)
 	}
-	if importedTag != "buildah-oci-rootfs:latest" || importedNamespace != "team-a" || archiveBody != "archive-content" {
-		t.Fatalf("multipart values tag=%q namespace=%q body=%q", importedTag, importedNamespace, archiveBody)
+	if kernelBody != "kernel-content" || initrdBody != "initrd-content" {
+		t.Fatalf("uploaded bodies kernel=%q initrd=%q", kernelBody, initrdBody)
+	}
+	if convertResp.BootIndexDigest != "sha256:boot" || convertResp.RootfsImageRef != "conch-erofs-rootfs:build-123" {
+		t.Fatalf("convert response = %#v", convertResp)
 	}
 
-	if err := c.LinkRootfsSnapshotToVM(context.Background(), LinkSnapshotVMRequest{
-		RootfsSnapshotID: "rootfs-id",
-		VMSnapshotID:     "vm-id",
+	snapshotResp, err := c.ExportSnapshot(context.Background(), SnapshotExportRequest{
 		Namespace:        "team-a",
-	}); err != nil {
-		t.Fatalf("LinkRootfsSnapshotToVM: %v", err)
-	}
-	if linkReq.RootfsSnapshotID != "rootfs-id" || linkReq.VMSnapshotID != "vm-id" || linkReq.Namespace != "team-a" {
-		t.Fatalf("link request = %#v", linkReq)
-	}
-
-	info, err := c.SnapshotInfo(context.Background(), SnapshotInfoRequest{Key: "rootfs", Namespace: "team-a"})
+		BootIndexTag:     "localhost/conch/snap:latest",
+		RootfsSnapshotID: "rootfs-id",
+	})
 	if err != nil {
-		t.Fatalf("SnapshotInfo: %v", err)
+		t.Fatalf("ExportSnapshot: %v", err)
 	}
-	if info.StoragePath != "/snap/rootfs" || infoReq.Key != "rootfs" {
-		t.Fatalf("info=%#v req=%#v", info, infoReq)
-	}
-
-	chain, err := c.SnapshotChain(context.Background(), SnapshotInfoRequest{Key: "rootfs", Namespace: "team-a"})
-	if err != nil {
-		t.Fatalf("SnapshotChain: %v", err)
-	}
-	if len(chain.ChainPaths) != 2 || chain.ChainPaths[1] != "/snap/rootfs" || chainReq.Key != "rootfs" {
-		t.Fatalf("chain=%#v req=%#v", chain, chainReq)
-	}
-}
-
-func TestResolveKernelPaths(t *testing.T) {
-	tmpDir := t.TempDir()
-	kernelFile := filepath.Join(tmpDir, "vmlinuz")
-	initrdFile := filepath.Join(tmpDir, "conch.initrd")
-
-	if err := os.WriteFile(kernelFile, []byte("kernel"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(initrdFile, []byte("initrd"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	kernelPath, diskPath, err := ResolveKernelPaths(tmpDir, "vmlinuz", "conch.initrd")
-	if err != nil {
-		t.Fatalf("ResolveKernelPaths: %v", err)
-	}
-	if kernelPath != kernelFile {
-		t.Errorf("kernel path: got %s, want %s", kernelPath, kernelFile)
-	}
-	if diskPath != initrdFile {
-		t.Errorf("disk path: got %s, want %s", diskPath, initrdFile)
-	}
-}
-
-func TestResolveKernelPaths_MissingFile(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	_, _, err := ResolveKernelPaths(tmpDir, "missing-vmlinuz", "missing-initrd")
-	if err == nil {
-		t.Error("expected error for missing files")
-	}
-}
-
-func TestResolveKernelPaths_PathTraversal(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	_, _, err := ResolveKernelPaths(tmpDir, "vmlinuz", "../../../etc/passwd")
-	if err == nil {
-		t.Error("expected error for path traversal")
+	if snapshotReq.RootfsSnapshotID != "rootfs-id" || snapshotReq.Namespace != "team-a" || snapshotResp.BootIndexDigest != "sha256:snapshot" {
+		t.Fatalf("snapshot req=%#v resp=%#v", snapshotReq, snapshotResp)
 	}
 }
 
@@ -277,6 +243,36 @@ func TestPauseSandboxIncludesNamespace(t *testing.T) {
 	}
 	if got.SandboxId != "sandbox-123" {
 		t.Fatalf("sandbox_id = %q, want %q", got.SandboxId, "sandbox-123")
+	}
+	if got.Namespace != "team-a" {
+		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
+	}
+}
+
+func TestCreateSandboxIncludesNamespace(t *testing.T) {
+	var got CreateRequest
+	c := NewClient("http://example.invalid")
+	c.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != createSandbox {
+				t.Fatalf("path = %q, want %q", r.URL.Path, createSandbox)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","ip":"192.0.2.2"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	if err := c.CreateSandbox("rootfs:latest", "sandbox-123", "team-a", DefaultRamMB); err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if got.ImageName != "rootfs:latest" || got.SandboxId != "sandbox-123" {
+		t.Fatalf("create request = %#v", got)
 	}
 	if got.Namespace != "team-a" {
 		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")

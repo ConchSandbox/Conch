@@ -9,20 +9,36 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
 	imageSvc "github.com/openeuler/Conch/internal/conchservices/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/conchservices/snapshot"
+	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type fakeImageService struct {
-	pullReq   imageSvc.PullRequest
-	unpackReq imageSvc.UnpackRequest
-	pullErr   error
-	unpackErr error
-	results   map[string]string
-	importReq imageSvc.ImportArchiveRequest
-	importRaw string
+	pullReq     imageSvc.PullRequest
+	pushReq     imageSvc.PushRequest
+	unpackReq   imageSvc.UnpackRequest
+	prepareReq  imageSvc.PrepareRootfsSourceRequest
+	convertReq  imageSvc.ConvertRootfsToErofsRequest
+	exportReq   imageSvc.ExportArchiveRequest
+	pullErr     error
+	pushErr     error
+	unpackErr   error
+	prepareErr  error
+	convertErr  error
+	exportErr   error
+	results     map[string]string
+	importReqs  []imageSvc.ImportArchiveRequest
+	importRaws  []string
+	exportRaw   string
+	prepareResp imageSvc.PrepareRootfsSourceResponse
+	convertResp imageSvc.ConvertRootfsToErofsResponse
 }
 
 type fakeSnapshotService struct {
@@ -34,12 +50,24 @@ type fakeSnapshotService struct {
 	chainErr error
 }
 
+type fakeSandboxManager struct {
+	createReq sandbox.SandboxCreateRequest
+	pauseReq  sandbox.SandboxPauseRequest
+	createErr error
+	pauseErr  error
+}
+
 func (f *fakeImageService) Pull(_ context.Context, req imageSvc.PullRequest) (map[string]string, error) {
 	f.pullReq = req
 	if f.pullErr != nil {
 		return nil, f.pullErr
 	}
 	return f.results, nil
+}
+
+func (f *fakeImageService) Push(_ context.Context, req imageSvc.PushRequest) error {
+	f.pushReq = req
+	return f.pushErr
 }
 
 func (f *fakeImageService) Unpack(_ context.Context, req imageSvc.UnpackRequest) (map[string]string, error) {
@@ -51,10 +79,53 @@ func (f *fakeImageService) Unpack(_ context.Context, req imageSvc.UnpackRequest)
 }
 
 func (f *fakeImageService) ImportArchive(_ context.Context, archive io.Reader, req imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error) {
-	f.importReq = req
+	f.importReqs = append(f.importReqs, req)
 	raw, _ := io.ReadAll(archive)
-	f.importRaw = string(raw)
-	return imageSvc.ImportArchiveResponse{SnapshotKey: "rootfs-id", ImageName: "image:latest"}, nil
+	f.importRaws = append(f.importRaws, string(raw))
+	return imageSvc.ImportArchiveResponse{SnapshotKey: req.ImportedTag + "-snapshot", ImageName: req.ImportedTag}, nil
+}
+
+func (f *fakeImageService) ExportArchive(_ context.Context, w io.Writer, req imageSvc.ExportArchiveRequest) error {
+	f.exportReq = req
+	if f.exportErr != nil {
+		return f.exportErr
+	}
+	_, _ = io.WriteString(w, "archive-content")
+	f.exportRaw = "archive-content"
+	return nil
+}
+
+func (f *fakeImageService) PrepareRootfsSource(_ context.Context, req imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error) {
+	f.prepareReq = req
+	if f.prepareErr != nil {
+		return imageSvc.PrepareRootfsSourceResponse{}, f.prepareErr
+	}
+	if f.prepareResp.ImageName != "" {
+		return f.prepareResp, nil
+	}
+	imageName := req.Source
+	if req.TargetImage != "" {
+		imageName = req.TargetImage
+	}
+	return imageSvc.PrepareRootfsSourceResponse{
+		ImageName:      imageName,
+		ManifestDigest: "sha256:manifest",
+	}, nil
+}
+
+func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req imageSvc.ConvertRootfsToErofsRequest) (imageSvc.ConvertRootfsToErofsResponse, error) {
+	f.convertReq = req
+	if f.convertErr != nil {
+		return imageSvc.ConvertRootfsToErofsResponse{}, f.convertErr
+	}
+	if f.convertResp.ImageName != "" {
+		return f.convertResp, nil
+	}
+	return imageSvc.ConvertRootfsToErofsResponse{
+		ImageName:      req.TargetImage,
+		ManifestDigest: "sha256:manifest",
+		SnapshotKey:    "rootfs-id",
+	}, nil
 }
 
 func newImageHandlerServer(svc imageService) *Server {
@@ -76,6 +147,17 @@ func newSnapshotHandlerServer(svc snapshotService) *Server {
 	return s
 }
 
+func newConvertHandlerServer(imageSvc imageService, snapshotSvc snapshotService, manager sandboxManager) *Server {
+	s := &Server{
+		router:          http.NewServeMux(),
+		imageService:    imageSvc,
+		snapshotService: snapshotSvc,
+		sandboxManager:  manager,
+	}
+	s.routes()
+	return s
+}
+
 func (f *fakeSnapshotService) LinkVM(_ context.Context, req snapshotSvc.LinkVMRequest) error {
 	f.linkReq = req
 	return f.linkErr
@@ -87,8 +169,13 @@ func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoReques
 		return snapshotSvc.Meta{}, f.infoErr
 	}
 	return snapshotSvc.Meta{
-		Key:         req.Key,
-		Parent:      "parent-id",
+		Key:    req.Key,
+		Parent: "parent-id",
+		Labels: map[string]string{
+			common.SnapshotLabelMemSnapshot: "mem-id",
+			common.SnapshotLabelVMSnapshot:  "vm-id",
+			common.SnapshotLabelRootfsImage: "rootfs-image:latest",
+		},
 		StoragePath: "/snap/rootfs",
 	}, nil
 }
@@ -105,6 +192,26 @@ func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoReque
 		},
 		ChainPaths: []string{"/snap/parent", "/snap/rootfs"},
 	}, nil
+}
+
+func (f *fakeSandboxManager) Create(req sandbox.SandboxCreateRequest) (string, error) {
+	f.createReq = req
+	if f.createErr != nil {
+		return "", f.createErr
+	}
+	return "192.0.2.2", nil
+}
+
+func (f *fakeSandboxManager) Delete(req sandbox.SandboxDeleteRequest) error {
+	return nil
+}
+
+func (f *fakeSandboxManager) Pause(req sandbox.SandboxPauseRequest) (string, error) {
+	f.pauseReq = req
+	if f.pauseErr != nil {
+		return "", f.pauseErr
+	}
+	return "paused-rootfs-id", nil
 }
 
 func TestHandlePullImageUsesDefaultKernel(t *testing.T) {
@@ -188,131 +295,113 @@ func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
 	}
 }
 
-func TestHandleImportImage(t *testing.T) {
-	svc := &fakeImageService{}
-	server := newImageHandlerServer(svc)
+func TestHandleConvertImage(t *testing.T) {
+	oldKernel := buildKernelArchiveFromFiles
+	oldBoot := buildBootIndexArchive
+	defer func() {
+		buildKernelArchiveFromFiles = oldKernel
+		buildBootIndexArchive = oldBoot
+	}()
+	buildKernelArchiveFromFiles = func(_ context.Context, _, _, _, archivePath string) (digest.Digest, error) {
+		return digest.FromString("kernel"), os.WriteFile(archivePath, []byte("kernel-archive"), 0o644)
+	}
+	buildBootIndexArchive = func(_ context.Context, opts conchimage.BootIndexOptions) (digest.Digest, error) {
+		if opts.RootfsArchivePath == "" || opts.SandboxArchivePath == "" || opts.Tag == "" {
+			t.Fatalf("boot options = %#v", opts)
+		}
+		return digest.FromString("boot"), os.WriteFile(opts.ArchivePath, []byte("boot-archive"), 0o644)
+	}
+
+	imgSvc := &fakeImageService{}
+	snapSvc := &fakeSnapshotService{}
+	server := newConvertHandlerServer(imgSvc, snapSvc, nil)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("namespace", "team-a")
-	_ = writer.WriteField("imported_tag", "buildah-oci-rootfs:latest")
-	part, err := writer.CreateFormFile("archive", "image.tar")
+	_ = writer.WriteField("metadata", `{"source":"docker.io/library/nginx:latest","namespace":"team-a","boot_index_tag":"localhost/conch/demo:latest","plain_http":true}`)
+	kernelPart, err := writer.CreateFormFile("kernel", "vmlinuz")
 	if err != nil {
-		t.Fatalf("CreateFormFile: %v", err)
+		t.Fatalf("kernel form file: %v", err)
 	}
-	if _, err := part.Write([]byte("archive-content")); err != nil {
-		t.Fatalf("write archive: %v", err)
+	_, _ = kernelPart.Write([]byte("kernel"))
+	initrdPart, err := writer.CreateFormFile("initrd", "conch.initrd")
+	if err != nil {
+		t.Fatalf("initrd form file: %v", err)
 	}
+	_, _ = initrdPart.Write([]byte("initrd"))
 	if err := writer.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
+		t.Fatalf("close multipart: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/import", &body)
+	req := httptest.NewRequest(http.MethodPost, "/api/image/convert", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	server.router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.importReq.Namespace != "team-a" || svc.importReq.ImportedTag != "buildah-oci-rootfs:latest" {
-		t.Fatalf("import request = %#v", svc.importReq)
+	if imgSvc.prepareReq.Source != "docker.io/library/nginx:latest" || imgSvc.prepareReq.Namespace != "team-a" || !imgSvc.prepareReq.PlainHTTP {
+		t.Fatalf("prepare request = %#v", imgSvc.prepareReq)
 	}
-	if svc.importRaw != "archive-content" {
-		t.Fatalf("archive = %q", svc.importRaw)
+	if imgSvc.convertReq.Namespace != "team-a" || imgSvc.convertReq.SourceImage != "docker.io/library/nginx:latest" {
+		t.Fatalf("convert request = %#v", imgSvc.convertReq)
 	}
-	var got imageSvc.ImportArchiveResponse
+	if snapSvc.linkReq.RootfsSnapshotID != "rootfs-id" || snapSvc.linkReq.VMSnapshotID == "" || snapSvc.linkReq.Namespace != "team-a" {
+		t.Fatalf("link request = %#v", snapSvc.linkReq)
+	}
+	if len(imgSvc.importReqs) != 2 || imgSvc.importReqs[1].ImportedTag != "localhost/conch/demo:latest" {
+		t.Fatalf("import requests = %#v", imgSvc.importReqs)
+	}
+	var got convertImageResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got.SnapshotKey != "rootfs-id" || got.ImageName != "image:latest" {
+	if got.BootIndexTag != "localhost/conch/demo:latest" || got.BootIndexDigest == "" || got.RootfsImageRef == "" {
 		t.Fatalf("response = %#v", got)
 	}
 }
 
-func TestHandleLinkSnapshotVM(t *testing.T) {
-	svc := &fakeSnapshotService{}
-	server := newSnapshotHandlerServer(svc)
+func TestHandleSnapshotExport(t *testing.T) {
+	oldBoot := buildBootIndexArchive
+	defer func() { buildBootIndexArchive = oldBoot }()
+	buildBootIndexArchive = func(_ context.Context, opts conchimage.BootIndexOptions) (digest.Digest, error) {
+		if len(opts.MemChainPaths) == 0 || len(opts.SandboxChainPaths) == 0 || opts.Tag == "" {
+			t.Fatalf("boot options = %#v", opts)
+		}
+		return digest.FromString("snapshot"), os.WriteFile(opts.ArchivePath, []byte("snapshot-archive"), 0o644)
+	}
+
+	imgSvc := &fakeImageService{}
+	snapSvc := &fakeSnapshotService{}
+	manager := &fakeSandboxManager{}
+	server := newConvertHandlerServer(imgSvc, snapSvc, manager)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/link-vm", bytes.NewBufferString(`{"rootfs_snapshot_id":"rootfs-id","vm_snapshot_id":"vm-id","namespace":"team-a"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/export", bytes.NewBufferString(`{"sandbox_id":"sandbox-123","namespace":"team-a","boot_index_tag":"localhost/conch/snap:latest"}`))
 	server.router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.linkReq.RootfsSnapshotID != "rootfs-id" || svc.linkReq.VMSnapshotID != "vm-id" || svc.linkReq.Namespace != "team-a" {
-		t.Fatalf("link request = %#v", svc.linkReq)
+	if manager.pauseReq.SandboxId != "sandbox-123" || manager.pauseReq.Namespace != "team-a" {
+		t.Fatalf("pause request = %#v", manager.pauseReq)
 	}
-}
-
-func TestHandleLinkSnapshotVMValidatesRequest(t *testing.T) {
-	server := newSnapshotHandlerServer(&fakeSnapshotService{})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/link-vm", bytes.NewBufferString(`{"rootfs_snapshot_id":"rootfs-id"}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	if snapSvc.infoReq.Key != "paused-rootfs-id" || snapSvc.chainReq.Namespace != "team-a" {
+		t.Fatalf("snapshot requests info=%#v chain=%#v", snapSvc.infoReq, snapSvc.chainReq)
 	}
-}
-
-func TestHandleSnapshotInfo(t *testing.T) {
-	svc := &fakeSnapshotService{}
-	server := newSnapshotHandlerServer(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"key":"rootfs-id","namespace":"team-a"}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	if imgSvc.exportReq.ImageName != "rootfs-image:latest" || imgSvc.exportReq.Namespace != "team-a" {
+		t.Fatalf("export request = %#v", imgSvc.exportReq)
 	}
-	if svc.infoReq.Key != "rootfs-id" || svc.infoReq.Namespace != "team-a" {
-		t.Fatalf("info request = %#v", svc.infoReq)
+	if len(imgSvc.importReqs) != 1 || imgSvc.importReqs[0].ImportedTag != "localhost/conch/snap:latest" {
+		t.Fatalf("import requests = %#v", imgSvc.importReqs)
 	}
-	var got snapshotSvc.Meta
+	var got snapshotExportResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got.Key != "rootfs-id" || got.StoragePath != "/snap/rootfs" {
+	if got.BootIndexTag != "localhost/conch/snap:latest" || got.BootIndexDigest == "" {
 		t.Fatalf("response = %#v", got)
-	}
-}
-
-func TestHandleSnapshotChain(t *testing.T) {
-	svc := &fakeSnapshotService{}
-	server := newSnapshotHandlerServer(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/chain", bytes.NewBufferString(`{"key":"rootfs-id","namespace":"team-a"}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if svc.chainReq.Key != "rootfs-id" || svc.chainReq.Namespace != "team-a" {
-		t.Fatalf("chain request = %#v", svc.chainReq)
-	}
-	var got snapshotSvc.Chain
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if len(got.ChainPaths) != 2 || got.ChainPaths[1] != "/snap/rootfs" {
-		t.Fatalf("response = %#v", got)
-	}
-}
-
-func TestHandleSnapshotServiceUnavailable(t *testing.T) {
-	server := newSnapshotHandlerServer(nil)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"key":"rootfs-id"}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

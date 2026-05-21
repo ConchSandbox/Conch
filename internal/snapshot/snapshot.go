@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
 
@@ -20,9 +21,9 @@ const (
 )
 
 type SnapshotConfig struct {
-	Rootfs string // dir which mount rootfs overlayfs
-	MemDir string // dir which mount mem overlayfs
-	VmDir  string // dir which mount vm snapshot overlayfs
+	Rootfs string // dir which mounts rootfs snapshot view
+	MemDir string // dir which mounts mem snapshot view or active layer
+	VmDir  string // dir which mounts sandbox snapshot view
 
 	RootDir string // dir which save vm snapshot (inside MemDir)
 	MemSize int64  // memory size of vm, unit is mb
@@ -35,6 +36,10 @@ type SnapshotConfig struct {
 func (c *SnapshotConfig) PmemFiles() []string {
 	result := make([]string, 0, len(c.pmemFiles))
 	for _, name := range c.pmemFiles {
+		if filepath.IsAbs(name) {
+			result = append(result, name)
+			continue
+		}
 		result = append(result, filepath.Join(c.Rootfs, name))
 	}
 	return result
@@ -53,7 +58,7 @@ func (c *SnapshotConfig) KernelFile() string {
 }
 
 func (c *SnapshotConfig) SnapDir() string {
-	return filepath.Join(c.MemDir, c.RootDir)
+	return filepath.Join(c.MemDir, strings.TrimLeft(c.RootDir, string(filepath.Separator)))
 }
 
 // initDefaults sets default values for SnapshotConfig fields.
@@ -62,7 +67,7 @@ func (c *SnapshotConfig) initDefaults() {
 		c.MemSize = common.MemFileDefaultSize
 	}
 	if c.RootDir == "" {
-		c.RootDir = "/conch/snapshot"
+		c.RootDir = "conch/snapshot"
 	}
 	if c.pmemFiles == nil {
 		c.pmemFiles = make([]string, 0)
@@ -133,9 +138,9 @@ func ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs,
 	return gServer.ResolveImageParentSnapshotIDs(namespace, rootfs)
 }
 
-func Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) error {
+func Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) (string, error) {
 	if gServer.snt == nil {
-		return fmt.Errorf("server not init")
+		return "", fmt.Errorf("server not init")
 	}
 	return gServer.Commit(ctx, namespace, snapshotID, key, opts...)
 }
@@ -165,6 +170,14 @@ func Close() error {
 func Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
 	if gServer.snt == nil {
 		return snapshots.Info{}, fmt.Errorf("server not init")
+	}
+	if info := gServer.getActiveSnapshot(namespace, key); info != nil {
+		return *info, nil
+	}
+	if gServer.rootfsSnt != nil {
+		if info, err := gServer.rootfsSnt.Stat(ctx, namespace, key); err == nil {
+			return info, nil
+		}
 	}
 	return gServer.snt.Stat(ctx, namespace, key)
 }

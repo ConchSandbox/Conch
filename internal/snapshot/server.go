@@ -10,7 +10,8 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
-	"github.com/containerd/containerd/v2/defaults"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/daemon"
@@ -20,11 +21,14 @@ import (
 
 // server manages snapshot lifecycle with caching and view sharing.
 type server struct {
-	snt             snapshotter.Snapshotter
-	activeSnapshots map[string]map[string]*snapshots.Info
-	lock            sync.RWMutex
-	workDir         string
-	viewMgr         *viewManager
+	snt              snapshotter.Snapshotter
+	rootfsSnt        snapshotter.Snapshotter
+	mountMgr         mount.Manager
+	activeSnapshots  map[string]map[string]*snapshots.Info
+	activeRootfsPmem map[string]map[string][]string
+	lock             sync.RWMutex
+	workDir          string
+	viewMgr          *viewManager
 }
 
 var gServer server
@@ -34,17 +38,21 @@ func NewServer(workDir string, daemonClient *daemon.Client) error {
 	if daemonClient == nil {
 		return fmt.Errorf("containerd client is nil")
 	}
-	sn, err := snapshotter.NewContainerdSnap(
-		daemonClient.SnapshotService(defaults.DefaultSnapshotter),
+	erofsSn, err := snapshotter.NewContainerdSnap(
+		daemonClient.SnapshotService("erofs"),
 		daemonClient.NamespaceService(),
 		daemonClient.DefaultNamespace(),
+		snapshotter.WithNamespaceContext(daemonClient.WithNamespace),
 	)
 	if err != nil {
 		return err
 	}
-	gServer.snt = sn
+	gServer.snt = erofsSn
+	gServer.rootfsSnt = erofsSn
+	gServer.mountMgr = daemonClient.MountManager()
 	gServer.workDir = workDir
 	gServer.activeSnapshots = make(map[string]map[string]*snapshots.Info)
+	gServer.activeRootfsPmem = make(map[string]map[string][]string)
 	gServer.viewMgr = &viewManager{
 		viewMounts:  make(map[string]map[string]*viewMountRef),
 		viewAliases: make(map[string]map[string]string),
@@ -83,6 +91,39 @@ func (s *server) removeActiveSnapshot(ns, key string) {
 	if m, ok := s.activeSnapshots[ns]; ok {
 		delete(m, key)
 	}
+	if m, ok := s.activeRootfsPmem[ns]; ok {
+		delete(m, key)
+	}
+}
+
+func (s *server) addActiveRootfsPmem(ns, key string, files []string) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if s.activeRootfsPmem == nil {
+		s.activeRootfsPmem = make(map[string]map[string][]string)
+	}
+	if _, ok := s.activeRootfsPmem[ns]; !ok {
+		s.activeRootfsPmem[ns] = make(map[string][]string)
+	}
+	s.activeRootfsPmem[ns][key] = append([]string(nil), files...)
+}
+
+func (s *server) getActiveRootfsPmem(ns, key string) []string {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if m, ok := s.activeRootfsPmem[ns]; ok {
+		if files, ok := m[key]; ok {
+			return append([]string(nil), files...)
+		}
+	}
+	return nil
+}
+
+func (s *server) removeRootfsSnapshot(namespace, key string) {
+	if s.rootfsSnt != nil {
+		_ = s.rootfsSnt.Remove(context.Background(), namespace, key)
+	}
+	s.removeActiveSnapshot(namespace, key)
 }
 
 // mkdirAll creates a directory with common.DirMode permissions.
@@ -97,7 +138,7 @@ func (s *server) unmountPath(path string) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
-	if err := mount.Unmount(path, unix.MNT_FORCE); err != nil {
+	if err := mount.UnmountAll(path, unix.MNT_FORCE); err != nil {
 		// If unmount fails because path doesn't exist, that's ok
 		if os.IsNotExist(err) {
 			return nil
@@ -150,6 +191,9 @@ func (s *server) Prepare(
 	var vmCleaner *snapshotCleaner
 	defer func() {
 		if err != nil {
+			if parents.Rootfs != "" {
+				s.removeRootfsSnapshot(namespace, key)
+			}
 			for _, item := range activeCleanups {
 				s.removeActiveSnapshot(namespace, item.key)
 				if item.cleaner != nil {
@@ -163,21 +207,15 @@ func (s *server) Prepare(
 	}()
 
 	// Step 1: prepare rootfs
-	rootfsCleaner, err := ops.prepareAndRegisterSnapshot(
+	conf.pmemFiles, err = ops.prepareRootfsSnapshot(
 		ctx,
 		NewSnapshotLocator(namespace, key, parents.Rootfs),
-		conf.Rootfs,
 		withLabels(conf),
 	)
 	if err != nil {
 		return nil, err
 	}
-	activeCleanups = append(activeCleanups, cleanupItem{key: key, cleaner: rootfsCleaner})
-
-	conf.pmemFiles, err = listRootfsLayerErofs(conf.Rootfs)
-	if err != nil {
-		return nil, fmt.Errorf("list rootfs layer erofs failed: %v", err)
-	}
+	s.addActiveRootfsPmem(namespace, key, conf.pmemFiles)
 
 	// Step 2: view vm (read-only, shared)
 	vmCleaner, err = ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
@@ -191,6 +229,7 @@ func (s *server) Prepare(
 		return nil, err
 	}
 	activeCleanups = append(activeCleanups, cleanupItem{key: memKey, cleaner: memCleaner})
+	conf.MemDir = memCleaner.accessPath
 
 	if err = ensureMemFile(conf, conf.MemDir, true); err != nil {
 		return nil, fmt.Errorf("prepare mem.img failed: %v", err)
@@ -243,17 +282,13 @@ func (s *server) AcquireView(
 		}
 	}()
 
-	// Step 1: view rootfs
-	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs, withLabels(conf))
+	// Step 1: view rootfs and resolve EROFS PMEM files
+	rootfsCleaner, pmemFiles, err := ops.viewRootfsSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs)
 	if err != nil {
-		return nil, fmt.Errorf("view rootfs failed: %v", err)
+		return nil, fmt.Errorf("resolve rootfs erofs pmem files failed: %v", err)
 	}
 	cleanups = append(cleanups, rootfsCleaner)
-
-	conf.pmemFiles, err = listRootfsLayerErofs(conf.Rootfs)
-	if err != nil {
-		return nil, fmt.Errorf("list rootfs layer erofs failed: %v", err)
-	}
+	conf.pmemFiles = pmemFiles
 
 	// Step 2: view vm
 	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
@@ -328,16 +363,12 @@ func (s *server) AcquireResumeWorkspace(
 		}
 	}()
 
-	rootfsCleaner, err := ops.viewSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs, withLabels(conf))
+	rootfsCleaner, pmemFiles, err := ops.viewRootfsSnapshot(ctx, namespace, parents.Rootfs, rootfsViewAliasKey, rootfsViewSnapshotKey, conf.Rootfs)
 	if err != nil {
-		return nil, fmt.Errorf("view rootfs failed: %v", err)
+		return nil, fmt.Errorf("resolve rootfs erofs pmem files failed: %v", err)
 	}
 	viewCleanups = append(viewCleanups, rootfsCleaner)
-
-	conf.pmemFiles, err = listRootfsLayerErofs(conf.Rootfs)
-	if err != nil {
-		return nil, fmt.Errorf("list rootfs layer erofs failed: %v", err)
-	}
+	conf.pmemFiles = pmemFiles
 
 	vmCleaner, err := ops.viewSnapshot(ctx, namespace, parents.VM, vmViewAliasKey, vmViewSnapshotKey, conf.VmDir)
 	if err != nil {
@@ -350,6 +381,7 @@ func (s *server) AcquireResumeWorkspace(
 		return nil, err
 	}
 	activeCleanups = append(activeCleanups, cleanupItem{key: memKey, cleaner: memCleaner})
+	conf.MemDir = memCleaner.accessPath
 
 	if err = ensureMemFile(conf, conf.MemDir, false); err != nil {
 		return nil, fmt.Errorf("mem.img verification failed: %v", err)
@@ -357,6 +389,14 @@ func (s *server) AcquireResumeWorkspace(
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
+	pmemDeviceCount, err := readSnapshotPmemDeviceCount(configFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot pmem device count failed: %v", err)
+	}
+	conf.pmemFiles, err = selectSnapshotRestorePmemFiles(conf.pmemFiles, pmemDeviceCount)
+	if err != nil {
+		return nil, fmt.Errorf("select restore rootfs pmem files failed: %v", err)
+	}
 	if err = configUpdater.updateSnapshotConfig(
 		configFilePath,
 		conf.KernelFile(),
@@ -376,7 +416,7 @@ func (s *server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMe
 	if rootfs == "" {
 		return ParentSnapshotIDs{}, nil
 	}
-	info, err := s.snt.Stat(context.Background(), namespace, rootfs)
+	info, err := s.rootfsSnt.Stat(context.Background(), namespace, rootfs)
 	if err != nil {
 		return ParentSnapshotIDs{}, fmt.Errorf("rootfs snapshot %s not found (maybe not unpacked): %v", rootfs, err)
 	}
@@ -409,56 +449,57 @@ func (s *server) ResolveImageParentSnapshotIDs(namespace, rootfs string) (Parent
 }
 
 // Commit commits an active snapshot with externally calculated snapshotID.
-func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) error {
+func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) (string, error) {
 	si := s.getActiveSnapshot(namespace, key)
 	if si == nil {
-		return fmt.Errorf("snapshot [%s:%s] not found", namespace, key)
+		return "", fmt.Errorf("snapshot [%s:%s] not found", namespace, key)
 	}
 
 	memKey := getMemKeyFromRootfs(key)
 	memInfo := s.getActiveSnapshot(namespace, memKey)
 	if memInfo == nil {
-		return fmt.Errorf("mem snapshot [%s:%s] not found", namespace, memKey)
+		return "", fmt.Errorf("mem snapshot [%s:%s] not found", namespace, memKey)
 	}
 	vmViewAliasKey := getVMViewAliasKey(key)
 	parentVMSnapshotID, ok := s.viewMgr.getViewAlias(namespace, vmViewAliasKey)
 	if !ok {
-		return fmt.Errorf("vm view alias [%s:%s] not found", namespace, vmViewAliasKey)
+		return "", fmt.Errorf("vm view alias [%s:%s] not found", namespace, vmViewAliasKey)
 	}
 
 	memSnapshotID, err := CalculateSnapshotID(namespace, memKey, "")
 	if err != nil {
-		return fmt.Errorf("calculate mem snapshot id failed: %v", err)
+		return "", fmt.Errorf("calculate mem snapshot id failed: %v", err)
 	}
 
 	if snapshotID == "" {
-		return fmt.Errorf("rootfs snapshot id is required (compute externally)")
+		return "", fmt.Errorf("rootfs snapshot id is required (compute externally)")
 	}
 
 	ops := &snapshotOps{server: s}
 	conf, viewConf, err := ops.buildCommitConfigs(ctx, namespace, key, memKey, snapshotID, memSnapshotID, parentVMSnapshotID, si, opts)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
 	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles(), 0, ""); err != nil {
-		return fmt.Errorf("update snapshot config failed: %v", err)
+		return "", fmt.Errorf("update snapshot config failed: %v", err)
 	}
 
-	if err := ops.commitRootfsSnapshot(ctx, namespace, key, snapshotID, conf, memSnapshotID, parentVMSnapshotID); err != nil {
-		return err
+	finalRootfsSnapshotID, err := ops.commitRootfsSnapshot(ctx, namespace, key, snapshotID, conf, memSnapshotID, parentVMSnapshotID, si)
+	if err != nil {
+		return "", err
 	}
 
-	if err := ops.commitMemSnapshot(ctx, namespace, memKey, memSnapshotID, snapshotID); err != nil {
-		return err
+	if err := ops.commitMemSnapshot(ctx, namespace, memKey, memSnapshotID, finalRootfsSnapshotID); err != nil {
+		return "", err
 	}
-	if err := ops.prewarmViewMounts(ctx, namespace, snapshotID, parentVMSnapshotID, viewConf); err != nil {
-		return err
+	if err := ops.prewarmViewMounts(ctx, namespace, finalRootfsSnapshotID, parentVMSnapshotID, viewConf); err != nil {
+		return "", err
 	}
 
-	return nil
+	return finalRootfsSnapshotID, nil
 }
 
 // Remove removes snapshots and cleans up associated resources.
@@ -518,6 +559,12 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 		if err := ops.unmountPath(mountPoint); err != nil {
 			unmountErrs = append(unmountErrs, err)
 		}
+		if s.mountMgr != nil {
+			activationKey := mountActivationKey("active", namespace, item.key)
+			if err := s.mountMgr.Deactivate(namespaces.WithNamespace(ctx, namespace), activationKey); err != nil && !errdefs.IsNotFound(err) {
+				unmountErrs = append(unmountErrs, fmt.Errorf("deactivate mount %s: %w", activationKey, err))
+			}
+		}
 	}
 
 	// If unmount failed, don't remove/release to avoid inconsistent state.
@@ -526,7 +573,7 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 	}
 
 	if len(viewKeys) > 0 {
-		if _, releaseErr := s.viewMgr.releaseViewAliases(s.snt, namespace, viewKeys...); releaseErr != nil {
+		if _, releaseErr := s.viewMgr.releaseViewAliases(s.snt, s.mountMgr, namespace, viewKeys...); releaseErr != nil {
 			errs = append(errs, releaseErr)
 		}
 	}
@@ -546,7 +593,7 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 // CleanupAllViews unmounts and removes all view snapshots.
 // Should be called during graceful shutdown before Close().
 func (s *server) CleanupAllViews() {
-	s.viewMgr.CleanupAllViews(s.snt)
+	s.viewMgr.CleanupAllViews(s.snt, s.mountMgr)
 }
 
 // Close releases snapshot resources.
