@@ -144,9 +144,9 @@ CONCH_API_TIMEOUT=10m ./scripts/conch-env-setup.sh pull --main_image=hub.oepkgs.
 - 若网络受限，可手动下载对应版本的依赖包并安装到 `/usr/local/bin/cloud-hypervisor`
 - 手动下载地址：
   - x86_64 环境：
-    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
+    - cloud-hypervisor v52.0-conch：https://github.com/ConchSandbox/cloud-hypervisor/releases/download/v52.0-conch/cloud-hypervisor-static
   - aarch64 环境：
-    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static-aarch64
+    - cloud-hypervisor v52.0-conch：https://github.com/ConchSandbox/cloud-hypervisor/releases/download/v52.0-conch/cloud-hypervisor-static-aarch64
 
 问题 2：执行 pull/process 命令提示「./bin/conch 不存在」
 
