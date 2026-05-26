@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/openeuler/Conch/internal/sandbox/network"
-	"github.com/openeuler/Conch/internal/sandbox/vmm"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/vmm"
 )
 
 const (
@@ -48,14 +48,14 @@ type Sandbox struct {
 	process      *vmm.Process
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
-	slot         *network.Slot
+	slot         *netstack.Slot
 	vsockConn    net.Conn
 }
 
 func ResumeSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -139,7 +139,7 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	snapshotConf *snapshot.SnapshotConfig,
-	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool,
+	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 

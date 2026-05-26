@@ -14,7 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
-	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
 )
@@ -34,7 +34,7 @@ type server struct {
 var gServer server
 
 // NewServer initializes the snapshot server with containerd client.
-func NewServer(workDir string, daemonClient *daemon.Client) error {
+func NewServer(workDir string, daemonClient *containerdclient.Client) error {
 	if daemonClient == nil {
 		return fmt.Errorf("containerd client is nil")
 	}

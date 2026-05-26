@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/openeuler/Conch/internal"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -30,7 +30,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
-
 	// Initialize the process-wide logger from config once, and keep it alive for the full
 	// daemon lifetime so background goroutines do not race with a closed writer.
 	logConfig, err := cfg.GetLogConfig()
@@ -67,7 +66,7 @@ func main() {
 		ulog.F("network.pool_size", cfg.Network.PoolSize),
 	)
 
-	server, err := internal.NewServer(cfg)
+	server, err := daemon.New(cfg)
 	if err != nil {
 		logger.Fatal("Failed to initialize server", ulog.F("error", err))
 	}

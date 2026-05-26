@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openeuler/Conch/internal/daemon"
+	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/image"
-	"github.com/openeuler/Conch/internal/sandbox/network"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -19,15 +19,15 @@ import (
 type Manager struct {
 	sandboxes          sync.Map
 	lifecycleMu        sync.Mutex
-	pool               *network.Pool
-	daemonClient       *daemon.Client
+	pool               *netstack.Pool
+	daemonClient       *containerdclient.Client
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
 }
 
-func NewManager(p *network.Pool, daemonClient *daemon.Client, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) *Manager {
+func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) *Manager {
 	return &Manager{
 		pool:               p,
 		daemonClient:       daemonClient,
@@ -69,7 +69,7 @@ func sandboxMapKey(namespace, sandboxID string) string {
 	return namespace + ":" + sandboxID
 }
 
-func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *network.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
 	var sbx *Sandbox
