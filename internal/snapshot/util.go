@@ -170,16 +170,32 @@ func getRootfsViewAliasKey(sandboxID string) string {
 	return fmt.Sprintf("view-%s-%s", common.SnapshotMountRootfs, sandboxID)
 }
 
+func RootfsViewAliasKey(sandboxID string) string {
+	return getRootfsViewAliasKey(sandboxID)
+}
+
 func getMemViewAliasKey(sandboxID string) string {
 	return fmt.Sprintf("view-%s-%s", common.SnapshotMountMem, sandboxID)
+}
+
+func MemViewAliasKey(sandboxID string) string {
+	return getMemViewAliasKey(sandboxID)
 }
 
 func getVMViewAliasKey(sandboxID string) string {
 	return fmt.Sprintf("view-%s-%s", common.SnapshotMountVM, sandboxID)
 }
 
+func VMViewAliasKey(sandboxID string) string {
+	return getVMViewAliasKey(sandboxID)
+}
+
 func getSharedViewSnapshotKey(mountKind, snapshotID string) string {
 	return fmt.Sprintf("shared-%s-%s", mountKind, snapshotPathName(snapshotID))
+}
+
+func SharedViewSnapshotKey(mountKind, snapshotID string) string {
+	return getSharedViewSnapshotKey(mountKind, snapshotID)
 }
 
 // cleanupEmptySnapshotParents removes empty parent directories after a mount point

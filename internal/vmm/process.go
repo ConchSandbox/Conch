@@ -34,6 +34,8 @@ func EnsureWorkSubDir(subDir string) (string, error) {
 
 type Process struct {
 	cmd             *exec.Cmd
+	pid             int
+	attached        bool
 	VmmSocketPath   string
 	VsockSocketPath string
 	rootfsPaths     []string
@@ -129,6 +131,25 @@ func NewProcess(
 	p.cmd = cmd
 
 	return &p, nil
+}
+
+func NewAttachedProcess(vmmName, vmmSocketPath, vsockSocketPath string, pid int) (*Process, error) {
+	vmmType, exists := GetVmmType(vmmName)
+	if !exists {
+		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
+	}
+	client, err := newVmmClient(vmmType, vmmSocketPath)
+	if err != nil {
+		return nil, err
+	}
+	return &Process{
+		pid:             pid,
+		attached:        true,
+		VmmSocketPath:   vmmSocketPath,
+		VsockSocketPath: vsockSocketPath,
+		client:          client,
+		exitSignal:      make(chan error, 1),
+	}, nil
 }
 
 // waitFile waits for the given file to exist.
@@ -304,7 +325,17 @@ func (p *Process) Stop() error {
 
 	logger := ulog.GetLogger()
 
-	if p.cmd.Process == nil {
+	if p.cmd == nil || p.cmd.Process == nil {
+		if p.attached {
+			if p.pid > 0 {
+				if err := syscall.Kill(p.pid, syscall.SIGTERM); err != nil {
+					if !errors.Is(err, syscall.ESRCH) {
+						errs = append(errs, fmt.Errorf("failed to send SIGTERM to attached vmm process, %d: %w", p.pid, err))
+					}
+				}
+			}
+			return errors.Join(errs...)
+		}
 		logger.Warn("VMM process not started")
 		return fmt.Errorf("vmm process not started")
 	}
@@ -338,7 +369,10 @@ func (p *Process) Stop() error {
 }
 
 func (p *Process) Pid() int {
-	if p.cmd.Process == nil {
+	if p.pid > 0 {
+		return p.pid
+	}
+	if p.cmd == nil || p.cmd.Process == nil {
 		logger := ulog.GetLogger()
 		logger.Warn("VMM process not started")
 		return 0

@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/conchplugins"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 )
@@ -76,6 +76,13 @@ func (s *Service) Pause(req conchsandbox.SandboxPauseRequest) (string, error) {
 	return s.manager.Pause(req)
 }
 
+func (s *Service) Rehydrate(records []state.SandboxRecord) (int, error) {
+	if s == nil || s.manager == nil {
+		return 0, nil
+	}
+	return s.manager.Rehydrate(records)
+}
+
 func (s *Service) Close() error {
 	if s == nil || s.manager == nil {
 		return nil
@@ -86,7 +93,6 @@ func (s *Service) Close() error {
 		return s.closeErr
 	}
 	s.closed = true
-	s.closeErr = errors.Join(s.manager.CleanupPool(), s.manager.CleanupCIDMap())
 	return s.closeErr
 }
 

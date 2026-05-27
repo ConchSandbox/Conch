@@ -62,7 +62,6 @@ func New(client *containerdclient.Client, workDir string) (*Service, error) {
 }
 
 func (s *Service) Close() error {
-	conchsnapshot.CleanupAllViews()
 	return conchsnapshot.Close()
 }
 

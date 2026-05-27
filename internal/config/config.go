@@ -23,6 +23,7 @@ type Config struct {
 	Containerd ContainerdConfig `yaml:"containerd"`
 	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
+	State      StateConfig      `yaml:"state"`
 }
 
 // AppConfig holds application-specific configuration
@@ -79,6 +80,10 @@ type SandboxConfig struct {
 	DefaultRAMMB       int64         `yaml:"default_ram_mb"`
 }
 
+type StateConfig struct {
+	Path string `yaml:"path"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	defaultUnixSocket := "/var/run/conchd/conchd.sock"
@@ -123,6 +128,9 @@ func DefaultConfig() *Config {
 			DefaultVCPUNum:     2,
 			DefaultVCPUMax:     2,
 			DefaultRAMMB:       4096,
+		},
+		State: StateConfig{
+			Path: "/var/lib/conch/state.db",
 		},
 	}
 }
@@ -223,6 +231,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.DefaultRAMMB == 0 {
 		cfg.Sandbox.DefaultRAMMB = defaultCfg.Sandbox.DefaultRAMMB
+	}
+	if cfg.State.Path == "" {
+		cfg.State.Path = defaultCfg.State.Path
 	}
 	if cfg.Server.WorkDir != "" {
 		WorkDir = cfg.Server.WorkDir

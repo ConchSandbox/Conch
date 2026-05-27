@@ -130,7 +130,7 @@ func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req imageSvc.
 }
 
 func newRuntimeForTest(image *fakeImageService, snapshot *fakeSnapshotService, sandboxOps *fakeSandboxOps) *conchruntime.Service {
-	rt := conchruntime.New(sandboxOps, image, "default")
+	rt := conchruntime.New(sandboxOps, image, nil, "default")
 	rt.Snapshot = snapshot
 	return rt
 }

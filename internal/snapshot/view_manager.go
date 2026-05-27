@@ -46,6 +46,30 @@ func (vm *viewManager) addViewAliasWithoutLock(namespace, key, parentSnapshotID 
 	vm.viewAliases[namespace][key] = parentSnapshotID
 }
 
+func (vm *viewManager) restoreViewMount(namespace, parentSnapshotID, viewSnapshotKey, mountPoint string, refCount int) {
+	if refCount < 0 {
+		refCount = 0
+	}
+	vm.viewLock.Lock()
+	defer vm.viewLock.Unlock()
+	if _, ok := vm.viewMounts[namespace]; !ok {
+		vm.viewMounts[namespace] = make(map[string]*viewMountRef)
+	}
+	vm.viewMounts[namespace][parentSnapshotID] = &viewMountRef{
+		namespace:   namespace,
+		snapshotID:  parentSnapshotID,
+		snapshotKey: viewSnapshotKey,
+		mountPoint:  mountPoint,
+		refCount:    refCount,
+	}
+}
+
+func (vm *viewManager) restoreViewAlias(namespace, key, parentSnapshotID string) {
+	vm.viewLock.Lock()
+	defer vm.viewLock.Unlock()
+	vm.addViewAliasWithoutLock(namespace, key, parentSnapshotID)
+}
+
 // getViewAlias retrieves the parent snapshot ID for a given key.
 func (vm *viewManager) getViewAlias(namespace, key string) (string, bool) {
 	vm.viewLock.Lock()
