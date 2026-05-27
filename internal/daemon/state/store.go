@@ -10,6 +10,11 @@ type Store interface {
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
+	UpsertContainer(context.Context, ContainerRecord) error
+	GetContainer(context.Context, string) (ContainerRecord, error)
+	ListContainers(context.Context) ([]ContainerRecord, error)
+	DeleteContainer(context.Context, string) error
+
 	UpsertSnapshotRuntime(context.Context, SnapshotRuntimeRecord) error
 	ListSnapshotRuntimes(context.Context) ([]SnapshotRuntimeRecord, error)
 	DeleteSnapshotRuntime(context.Context, string, string) error

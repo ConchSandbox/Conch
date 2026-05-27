@@ -23,7 +23,7 @@ func (f *fakeLeaseClient) WithRuntimeLease(ctx context.Context, namespace, lease
 	return ctx, leaseID, nil
 }
 
-func TestReconcileDowngradesUnverifiableSandbox(t *testing.T) {
+func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 	ctx := context.Background()
 	store, err := state.OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {
@@ -39,6 +39,14 @@ func TestReconcileDowngradesUnverifiableSandbox(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
+	if err := store.UpsertContainer(ctx, state.ContainerRecord{
+		ContainerID:  "container-1",
+		PodSandboxID: "pod-1",
+		State:        state.ContainerRunning,
+	}); err != nil {
+		t.Fatalf("UpsertContainer() error = %v", err)
+	}
+
 	leases := &fakeLeaseClient{}
 	result, err := Reconcile(ctx, Config{
 		Store:            store,
@@ -50,6 +58,9 @@ func TestReconcileDowngradesUnverifiableSandbox(t *testing.T) {
 	}
 	if result.SandboxesDowngraded != 1 {
 		t.Fatalf("SandboxesDowngraded = %d, want 1", result.SandboxesDowngraded)
+	}
+	if result.ContainersDowngraded != 1 {
+		t.Fatalf("ContainersDowngraded = %d, want 1", result.ContainersDowngraded)
 	}
 	if result.RuntimeLeasesChecked != 1 {
 		t.Fatalf("RuntimeLeasesChecked = %d, want 1", result.RuntimeLeasesChecked)
@@ -67,6 +78,14 @@ func TestReconcileDowngradesUnverifiableSandbox(t *testing.T) {
 	}
 	if sandbox.LeaseID != containerdclient.RuntimeLeaseID("default") {
 		t.Fatalf("sandbox.LeaseID = %q, want runtime lease", sandbox.LeaseID)
+	}
+
+	container, err := store.GetContainer(ctx, "container-1")
+	if err != nil {
+		t.Fatalf("GetContainer() error = %v", err)
+	}
+	if container.State != state.ContainerUnknown {
+		t.Fatalf("container.State = %q, want %q", container.State, state.ContainerUnknown)
 	}
 }
 

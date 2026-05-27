@@ -24,6 +24,7 @@ type Config struct {
 	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	State      StateConfig      `yaml:"state"`
+	CRI        CRIConfig        `yaml:"cri"`
 }
 
 // AppConfig holds application-specific configuration
@@ -84,6 +85,11 @@ type StateConfig struct {
 	Path string `yaml:"path"`
 }
 
+type CRIConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Socket  string `yaml:"socket"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	defaultUnixSocket := "/var/run/conchd/conchd.sock"
@@ -131,6 +137,10 @@ func DefaultConfig() *Config {
 		},
 		State: StateConfig{
 			Path: "/var/lib/conch/state.db",
+		},
+		CRI: CRIConfig{
+			Enabled: false,
+			Socket:  "/var/run/conchd/conch-cri.sock",
 		},
 	}
 }
@@ -235,6 +245,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.State.Path == "" {
 		cfg.State.Path = defaultCfg.State.Path
 	}
+	if cfg.CRI.Socket == "" {
+		cfg.CRI.Socket = defaultCfg.CRI.Socket
+	}
+
 	if cfg.Server.WorkDir != "" {
 		WorkDir = cfg.Server.WorkDir
 	}

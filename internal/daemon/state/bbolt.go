@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("state record not found")
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
+	[]byte("containers"),
 	[]byte("snapshot_runtimes"),
 	[]byte("view_snapshots"),
 	[]byte("view_aliases"),
@@ -134,6 +135,33 @@ func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) 
 
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
+}
+
+func (s *BoltStore) UpsertContainer(ctx context.Context, rec ContainerRecord) error {
+	return s.upsert(ctx, []byte("containers"), rec.ContainerID, rec)
+}
+
+func (s *BoltStore) GetContainer(ctx context.Context, id string) (ContainerRecord, error) {
+	var rec ContainerRecord
+	err := s.get(ctx, []byte("containers"), id, &rec)
+	return rec, err
+}
+
+func (s *BoltStore) ListContainers(ctx context.Context) ([]ContainerRecord, error) {
+	var out []ContainerRecord
+	err := s.list(ctx, []byte("containers"), func(data []byte) error {
+		var rec ContainerRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		out = append(out, rec)
+		return nil
+	})
+	return out, err
+}
+
+func (s *BoltStore) DeleteContainer(ctx context.Context, id string) error {
+	return s.delete(ctx, []byte("containers"), id)
 }
 
 func (s *BoltStore) UpsertSnapshotRuntime(ctx context.Context, rec SnapshotRuntimeRecord) error {

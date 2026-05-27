@@ -358,6 +358,55 @@ func (s *Service) SnapshotChain(ctx context.Context, req snapshotSvc.InfoRequest
 	return s.Snapshot.Chain(ctx, req)
 }
 
+func (s *Service) CreateContainer(ctx context.Context, opts ContainerCreateOptions) (ContainerCreateResult, error) {
+	if opts.ContainerID == "" {
+		id, err := NewID()
+		if err != nil {
+			return ContainerCreateResult{}, err
+		}
+		opts.ContainerID = id
+	}
+	rec := state.ContainerRecord{
+		ContainerID:  opts.ContainerID,
+		PodSandboxID: opts.PodSandboxID,
+		Name:         opts.Name,
+		State:        state.ContainerCreated,
+		CreatedAt:    time.Now().UnixNano(),
+		Image:        opts.Image,
+		ImageRef:     opts.ImageRef,
+		Command:      append([]string(nil), opts.Command...),
+		Args:         append([]string(nil), opts.Args...),
+		LogPath:      opts.LogPath,
+		Labels:       copyMap(opts.Labels),
+		Annotations:  copyMap(opts.Annotations),
+	}
+	if s != nil && s.Store != nil {
+		if err := s.Store.UpsertContainer(ctx, rec); err != nil {
+			return ContainerCreateResult{}, err
+		}
+	}
+	return ContainerCreateResult{ContainerID: opts.ContainerID}, nil
+}
+
+func (s *Service) SetContainerState(ctx context.Context, containerID, next string) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	rec, err := s.Store.GetContainer(ctx, containerID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixNano()
+	rec.State = next
+	switch next {
+	case state.ContainerRunning:
+		rec.StartedAt = now
+	case state.ContainerExited:
+		rec.FinishedAt = now
+	}
+	return s.Store.UpsertContainer(ctx, rec)
+}
+
 func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) error {
 	if s == nil || s.Store == nil {
 		return nil

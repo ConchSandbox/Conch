@@ -5,6 +5,11 @@ const (
 	SandboxNotReady = "NOTREADY"
 	SandboxStopped  = "STOPPED"
 	SandboxUnknown  = "UNKNOWN"
+
+	ContainerCreated = "CREATED"
+	ContainerRunning = "RUNNING_PLACEHOLDER"
+	ContainerExited  = "EXITED"
+	ContainerUnknown = "UNKNOWN"
 )
 
 type SandboxRecord struct {
@@ -43,6 +48,25 @@ type SandboxRecord struct {
 	VMMount         string            `json:"vm_mount,omitempty"`
 	SnapshotRootDir string            `json:"snapshot_root_dir,omitempty"`
 	LastError       string            `json:"last_error,omitempty"`
+}
+
+type ContainerRecord struct {
+	ContainerID  string            `json:"container_id"`
+	PodSandboxID string            `json:"pod_sandbox_id"`
+	Name         string            `json:"name"`
+	State        string            `json:"state"`
+	CreatedAt    int64             `json:"created_at"`
+	StartedAt    int64             `json:"started_at,omitempty"`
+	FinishedAt   int64             `json:"finished_at,omitempty"`
+	Image        string            `json:"image,omitempty"`
+	ImageRef     string            `json:"image_ref,omitempty"`
+	Command      []string          `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	LogPath      string            `json:"log_path,omitempty"`
+	ExitCode     int32             `json:"exit_code,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Annotations  map[string]string `json:"annotations,omitempty"`
+	LastError    string            `json:"last_error,omitempty"`
 }
 
 type SnapshotRuntimeRecord struct {

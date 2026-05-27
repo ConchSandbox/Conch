@@ -24,6 +24,7 @@ import (
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/cri"
 	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -43,6 +44,7 @@ type Daemon struct {
 	containerdHost *containerdhost.Host
 	stateStore     state.Store
 	runtimeService *conchruntime.Service
+	criServer      *cri.Server
 	daemonClient   *containerdclient.Client
 	httpServer     *http.Server
 	listener       net.Listener
@@ -195,6 +197,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	logger.Info("State recovery reconciled",
 		ulog.F("sandboxes_checked", recoveryResult.SandboxesChecked),
 		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
+		ulog.F("containers_checked", recoveryResult.ContainersChecked),
+		ulog.F("containers_downgraded", recoveryResult.ContainersDowngraded),
 		ulog.F("snapshot_runtimes_checked", recoveryResult.SnapshotRuntimesChecked),
 		ulog.F("snapshot_runtimes_marked", recoveryResult.SnapshotRuntimesMarked),
 		ulog.F("view_snapshots_checked", recoveryResult.ViewSnapshotsChecked),
@@ -208,6 +212,20 @@ func New(cfg *config.Config) (*Daemon, error) {
 		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
 		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
 	)
+
+	if cfg.CRI.Enabled {
+		s.criServer = cri.New(cri.Config{
+			Socket:             cfg.CRI.Socket,
+			DefaultKernelImage: cfg.Image.DefaultKernelImage,
+		}, s.runtimeService, store)
+		if err := s.criServer.Start(); err != nil {
+			cancel()
+			_ = store.Close()
+			_ = host.Close()
+			return nil, fmt.Errorf("start cri server: %w", err)
+		}
+		logger.Info("CRI server initialized", ulog.F("socket", cfg.CRI.Socket))
+	}
 
 	handleSignals(ctx, cancel, s)
 
@@ -311,6 +329,11 @@ func (s *Daemon) Shutdown() {
 			} else {
 				logger.Info("Removed unix socket", ulog.F("socket", s.unixSocketPath))
 			}
+		}
+
+		if s.criServer != nil {
+			s.criServer.Stop()
+			logger.Info("CRI server stopped")
 		}
 
 		if s.stateStore != nil {
