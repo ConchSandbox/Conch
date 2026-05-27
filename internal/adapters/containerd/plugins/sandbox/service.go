@@ -10,6 +10,7 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
@@ -93,6 +94,8 @@ func (s *Service) Close() error {
 		return s.closeErr
 	}
 	s.closed = true
+	finish := cleanupdiag.Start("sandbox_service.close_preserve")
+	finish(nil)
 	return s.closeErr
 }
 

@@ -23,6 +23,7 @@ import (
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	sandboxSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
 )
 
@@ -91,20 +92,38 @@ func (h *Host) Close() error {
 	}
 	var errs []error
 	h.once.Do(func() {
+		finishHost := cleanupdiag.Start("containerd_host.close")
+		defer func() {
+			finishHost(errors.Join(errs...))
+		}()
+
 		if h.cancel != nil {
+			finish := cleanupdiag.Start("containerd_host.cancel")
 			h.cancel()
+			finish(nil)
 		}
 		if h.sandboxService != nil {
-			errs = append(errs, h.sandboxService.Close())
+			finish := cleanupdiag.Start("containerd_host.sandbox_service.close")
+			err := h.sandboxService.Close()
+			finish(err)
+			errs = append(errs, err)
 		}
 		if h.snapshotService != nil {
-			errs = append(errs, h.snapshotService.Close())
+			finish := cleanupdiag.Start("containerd_host.snapshot_service.close")
+			err := h.snapshotService.Close()
+			finish(err)
+			errs = append(errs, err)
 		}
 		if h.client != nil {
-			errs = append(errs, h.client.Close())
+			finish := cleanupdiag.Start("containerd_host.client.close")
+			err := h.client.Close()
+			finish(err)
+			errs = append(errs, err)
 		}
 		if h.server != nil {
+			finish := cleanupdiag.Start("containerd_host.server.stop")
 			h.server.Stop()
+			finish(nil)
 		}
 	})
 	return errors.Join(errs...)
