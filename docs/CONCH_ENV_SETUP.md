@@ -144,23 +144,31 @@
 
 以下是脚本执行过程中常见的问题及对应的解决方案，若遇到其他问题可先检查日志输出（脚本会实时打印执行日志）。
 
-问题 1：下载 containerd/cloud-hypervisor 失败
+问题 1：安装 containerd 失败
 
-报错示例：Error: Failed to download cloud-hypervisor. 或 wget: unable to resolve host address ‘github.com’
+报错示例：Error: Failed to download containerd. 或 wget: unable to resolve host address 'github.com'
 
 解决方案：
 
 - 检查网络是否正常，能否访问 GitHub（可通过 ping github.com 测试）
 - 若网络受限，可手动下载对应版本的依赖包至 Conch 项目根目录，重新执行脚本（脚本会检测本地文件，跳过下载步骤）
 - 手动下载地址：
-  - x86_64 环境：
-    - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
-    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static
-  - aarch64 环境：
-    - containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-arm64.tar.gz
-    - cloud-hypervisor v51.0：https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.0/cloud-hypervisor-static-aarch64
+  - x86_64 环境：containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-amd64.tar.gz
+  - aarch64 环境：containerd v2.2.1：https://github.com/containerd/containerd/releases/download/v2.2.1/containerd-2.2.1-linux-arm64.tar.gz
 
-问题 2：执行 pull/process 命令提示「./bin/conch 不存在」
+问题 2：安装 cloud-hypervisor 失败
+
+报错示例：Error: Failed to download cloud-hypervisor. 或 wget: unable to resolve host address 'github.com'
+
+解决方案：
+
+- 检查网络是否正常，能否访问 GitHub（可通过 ping github.com 测试）
+- 若网络受限，可手动下载对应版本的依赖包：
+  - x86_64 环境：https://github.com/ConchSandbox/cloud-hypervisor/releases/download/v52.0-conch/cloud-hypervisor-static
+  - aarch64 环境：https://github.com/ConchSandbox/cloud-hypervisor/releases/download/v52.0-conch/cloud-hypervisor-static-aarch64
+- 下载后将文件放置到 `/usr/local/bin/cloud-hypervisor` 并赋予执行权限
+
+问题 3：执行 pull/process 命令提示「./bin/conch 不存在」
 
 报错示例：Error: ./bin/conch executable not found.
 
@@ -170,7 +178,7 @@
 ./scripts/conch-env-setup.sh pull
 ```
 
-问题 3：拉取镜像失败（提示证书验证失败或无法连接仓库）
+问题 4：拉取镜像失败（提示证书验证失败或无法连接仓库）
 
 报错示例：x509: certificate signed by unknown authority 或 failed to connect to registry
 

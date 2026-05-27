@@ -52,6 +52,9 @@ type ResourceArgs struct {
 
 	// Sandbox ID (passed via kernel cmdline)
 	SandboxId string
+
+	EventMonitorFd int
+	ApiSocketFd    int
 }
 
 type vmmClient interface {
