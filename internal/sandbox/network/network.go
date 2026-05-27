@@ -25,6 +25,7 @@ import (
 	"runtime"
 
 	"github.com/coreos/go-iptables/iptables"
+	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 )
@@ -163,12 +164,12 @@ func (s *Slot) CreateNetwork() (retErr error) {
 	defer func() {
 		err = netns.Set(hostNS)
 		if err != nil {
-			fmt.Errorf("error resetting network namespace back to the host namespace, %w", err)
+			getLogger().Warn("failed to reset network namespace back to host", ulog.F("slot_index", s.Idx), ulog.F("error", err))
 		}
 
 		err = hostNS.Close()
 		if err != nil {
-			fmt.Errorf("error closing host network namespace, %w", err)
+			getLogger().Warn("failed to close host network namespace handle", ulog.F("slot_index", s.Idx), ulog.F("error", err))
 		}
 	}()
 
@@ -178,11 +179,14 @@ func (s *Slot) CreateNetwork() (retErr error) {
 		return fmt.Errorf("cannot create new namespace: %w", err)
 	}
 	defer func() {
-		ns.Close()
-		if retErr != nil {
+		setupFailed := retErr != nil
+		if err := ns.Close(); err != nil {
+			getLogger().Warn("failed to close sandbox namespace handle", ulog.F("slot_index", s.Idx), ulog.F("namespace", s.NamespaceID()), ulog.F("error", err))
+		}
+		if setupFailed {
 			nsErr := netns.DeleteNamed(s.NamespaceID())
 			if nsErr != nil {
-				fmt.Errorf("error deleting namespace: %w", nsErr)
+				retErr = errors.Join(retErr, fmt.Errorf("error deleting namespace %s after failed setup: %w", s.NamespaceID(), nsErr))
 			}
 		}
 	}()
@@ -202,12 +206,12 @@ func (s *Slot) CreateNetwork() (retErr error) {
 		if retErr != nil {
 			err = netns.Set(hostNS)
 			if err != nil {
-				fmt.Errorf("error setting host network namespace: %w", err)
+				retErr = errors.Join(retErr, fmt.Errorf("error setting host network namespace for veth cleanup: %w", err))
 				return
 			}
 			if link, err := netlink.LinkByName(s.VethName()); err == nil {
 				if err := netlink.LinkDel(link); err != nil && !os.IsNotExist(err) {
-					fmt.Errorf("delete veth failed: %w", err)
+					retErr = errors.Join(retErr, fmt.Errorf("delete veth %s failed after slot %d setup failure: %w", s.VethName(), s.Idx, err))
 				}
 			}
 		}
@@ -254,17 +258,17 @@ func (s *Slot) RemoveNetwork() error {
 	// delete veth device
 	veth, err := netlink.LinkByName(s.VethName())
 	if err != nil {
-		errs = append(errs, fmt.Errorf("error finding veth: %w", err))
+		errs = append(errs, fmt.Errorf("error finding veth %s for slot %d: %w", s.VethName(), s.Idx, err))
 	} else {
 		err = netlink.LinkDel(veth)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("error deleting veth device: %w", err))
+			errs = append(errs, fmt.Errorf("error deleting veth device %s for slot %d: %w", s.VethName(), s.Idx, err))
 		}
 	}
 	// delete ns
 	err = netns.DeleteNamed(s.NamespaceID())
 	if err != nil {
-		errs = append(errs, fmt.Errorf("error deleting namespace: %w", err))
+		errs = append(errs, fmt.Errorf("error deleting namespace %s for slot %d: %w", s.NamespaceID(), s.Idx, err))
 	}
 
 	return errors.Join(errs...)

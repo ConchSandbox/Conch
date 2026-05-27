@@ -132,6 +132,7 @@ func initAllBridges() (retErr error) {
 		}
 	}
 
+	getLogger().Info("bridges initialized", ulog.F("bridge_count", configuredBridgeCount))
 	return nil
 }
 
