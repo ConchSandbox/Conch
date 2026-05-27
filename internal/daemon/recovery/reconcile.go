@@ -35,6 +35,8 @@ type Config struct {
 type Result struct {
 	SandboxesChecked        int
 	SandboxesDowngraded     int
+	ContainersChecked       int
+	ContainersDowngraded    int
 	SnapshotRuntimesChecked int
 	SnapshotRuntimesMarked  int
 	ViewSnapshotsChecked    int
@@ -67,6 +69,10 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("list sandbox state: %w", err)
 	}
+	containers, err := r.cfg.Store.ListContainers(ctx)
+	if err != nil {
+		return result, fmt.Errorf("list container state: %w", err)
+	}
 	snapshotRuntimes, err := r.cfg.Store.ListSnapshotRuntimes(ctx)
 	if err != nil {
 		return result, fmt.Errorf("list snapshot runtime state: %w", err)
@@ -80,6 +86,7 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 		return result, fmt.Errorf("list view alias state: %w", err)
 	}
 
+	sandboxStates := make(map[string]string, len(sandboxes))
 	reconciledSandboxes := make([]state.SandboxRecord, 0, len(sandboxes))
 	for _, rec := range sandboxes {
 		result.SandboxesChecked++
@@ -104,7 +111,22 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 		if err := r.cfg.Store.UpsertSandbox(ctx, rec); err != nil {
 			return result, fmt.Errorf("upsert reconciled sandbox %s: %w", rec.PodSandboxID, err)
 		}
+		sandboxStates[rec.PodSandboxID] = rec.State
 		reconciledSandboxes = append(reconciledSandboxes, rec)
+	}
+
+	for _, rec := range containers {
+		result.ContainersChecked++
+		if rec.State == state.ContainerRunning {
+			if sandboxStates[rec.PodSandboxID] != state.SandboxReady {
+				rec.State = state.ContainerUnknown
+				rec.LastError = joinReasons(rec.LastError, "parent sandbox is not READY after startup reconcile")
+				result.ContainersDowngraded++
+				if err := r.cfg.Store.UpsertContainer(ctx, rec); err != nil {
+					return result, fmt.Errorf("upsert reconciled container %s: %w", rec.ContainerID, err)
+				}
+			}
+		}
 	}
 
 	reconciledSnapshotRuntimes := make([]state.SnapshotRuntimeRecord, 0, len(snapshotRuntimes))

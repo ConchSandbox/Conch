@@ -35,6 +35,23 @@ type SandboxCreateResult struct {
 	IP           string
 }
 
+type ContainerCreateOptions struct {
+	ContainerID  string
+	PodSandboxID string
+	Name         string
+	Image        string
+	ImageRef     string
+	Command      []string
+	Args         []string
+	LogPath      string
+	Labels       map[string]string
+	Annotations  map[string]string
+}
+
+type ContainerCreateResult struct {
+	ContainerID string
+}
+
 type PullImageOptions struct {
 	ImageName          string
 	Namespace          string
