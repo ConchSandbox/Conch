@@ -8,13 +8,14 @@ import (
 	"io"
 	"strings"
 
+	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/sandbox"
 )
 
 type SandboxOps interface {
-	Create(sandbox.SandboxCreateRequest) (string, error)
+	Create(sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error)
 	Delete(sandbox.SandboxDeleteRequest) error
 	Pause(sandbox.SandboxPauseRequest) (string, error)
 }
@@ -81,15 +82,19 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		opts.SandboxID = id
 	}
 	namespace := s.normalizeNamespace(opts.Namespace)
+	if opts.LeaseID == "" {
+		opts.LeaseID = containerdclient.RuntimeLeaseID(namespace)
+	}
 	s.applySandboxDefaults(&opts)
 
-	ip, err := s.Sandbox.Create(sandbox.SandboxCreateRequest{
+	createResult, err := s.Sandbox.Create(sandbox.SandboxCreateRequest{
 		Namespace:   namespace,
 		SnapshotId:  opts.SnapshotID,
 		ImageName:   opts.ImageName,
 		UseSnapshot: opts.UseSnapshot,
 		VmmName:     opts.VMMName,
 		SandboxId:   opts.SandboxID,
+		LeaseID:     opts.LeaseID,
 		VcpuNum:     opts.VCPUNum,
 		VcpuMax:     opts.VCPUMax,
 		RamMB:       opts.RamMB,
@@ -101,7 +106,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		PodSandboxID: opts.PodSandboxID,
 		SandboxID:    opts.SandboxID,
 		Namespace:    namespace,
-		IP:           ip,
+		IP:           createResult.IP,
 	}, nil
 }
 

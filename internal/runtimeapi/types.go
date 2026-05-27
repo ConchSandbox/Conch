@@ -10,6 +10,7 @@ type SandboxCreateOptions struct {
 	Labels         map[string]string
 	Annotations    map[string]string
 	RuntimeHandler string
+	LeaseID        string
 	ImageName      string
 	SnapshotID     string
 	UseSnapshot    bool

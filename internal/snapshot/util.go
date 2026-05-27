@@ -162,6 +162,10 @@ func getMemKeyFromRootfs(rootfsKey string) string {
 	return rootfsKey + common.MemKeySuffix
 }
 
+func MemKeyFromRootfs(rootfsKey string) string {
+	return getMemKeyFromRootfs(rootfsKey)
+}
+
 func getRootfsViewAliasKey(sandboxID string) string {
 	return fmt.Sprintf("view-%s-%s", common.SnapshotMountRootfs, sandboxID)
 }

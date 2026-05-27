@@ -308,6 +308,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Namespace:    req.Namespace,
 		PodSandboxID: req.SandboxId,
 		SandboxID:    req.SandboxId,
+		LeaseID:      req.LeaseID,
 		ImageName:    req.ImageName,
 		SnapshotID:   req.SnapshotId,
 		UseSnapshot:  req.UseSnapshot,

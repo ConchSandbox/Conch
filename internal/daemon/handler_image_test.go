@@ -199,12 +199,12 @@ func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoReque
 	}, nil
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (string, error) {
+func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
 	f.createReq = req
 	if f.createErr != nil {
-		return "", f.createErr
+		return sandbox.SandboxCreateResult{}, f.createErr
 	}
-	return "192.0.2.2", nil
+	return sandbox.SandboxCreateResult{IP: "192.0.2.2", Namespace: req.Namespace, SandboxID: req.SandboxId}, nil
 }
 
 func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
