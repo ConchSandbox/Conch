@@ -15,6 +15,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -50,7 +51,7 @@ type fakeSnapshotService struct {
 	chainErr error
 }
 
-type fakeSandboxManager struct {
+type fakeSandboxOps struct {
 	createReq sandbox.SandboxCreateRequest
 	pauseReq  sandbox.SandboxPauseRequest
 	createErr error
@@ -128,31 +129,35 @@ func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req imageSvc.
 	}, nil
 }
 
-func newImageHandlerServer(svc imageService) *Daemon {
+func newRuntimeForTest(image *fakeImageService, snapshot *fakeSnapshotService, sandboxOps *fakeSandboxOps) *conchruntime.Service {
+	rt := conchruntime.New(sandboxOps, image, "default")
+	rt.Snapshot = snapshot
+	return rt
+}
+
+func newImageHandlerServer(svc *fakeImageService) *Daemon {
 	s := &Daemon{
-		router:        http.NewServeMux(),
-		imageService:  svc,
-		defaultKernel: "hub.oepkgs.net/conch/kernel:6.6.0",
+		router:         http.NewServeMux(),
+		runtimeService: newRuntimeForTest(svc, nil, nil),
+		defaultKernel:  "hub.oepkgs.net/conch/kernel:6.6.0",
 	}
 	s.routes()
 	return s
 }
 
-func newSnapshotHandlerServer(svc snapshotService) *Daemon {
+func newSnapshotHandlerServer(svc *fakeSnapshotService) *Daemon {
 	s := &Daemon{
-		router:          http.NewServeMux(),
-		snapshotService: svc,
+		router:         http.NewServeMux(),
+		runtimeService: newRuntimeForTest(nil, svc, nil),
 	}
 	s.routes()
 	return s
 }
 
-func newConvertHandlerServer(imageSvc imageService, snapshotSvc snapshotService, manager sandboxManager) *Daemon {
+func newConvertHandlerServer(imageSvc *fakeImageService, snapshotSvc *fakeSnapshotService, sandboxOps *fakeSandboxOps) *Daemon {
 	s := &Daemon{
-		router:          http.NewServeMux(),
-		imageService:    imageSvc,
-		snapshotService: snapshotSvc,
-		sandboxManager:  manager,
+		router:         http.NewServeMux(),
+		runtimeService: newRuntimeForTest(imageSvc, snapshotSvc, sandboxOps),
 	}
 	s.routes()
 	return s
@@ -194,7 +199,7 @@ func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoReque
 	}, nil
 }
 
-func (f *fakeSandboxManager) Create(req sandbox.SandboxCreateRequest) (string, error) {
+func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (string, error) {
 	f.createReq = req
 	if f.createErr != nil {
 		return "", f.createErr
@@ -202,11 +207,11 @@ func (f *fakeSandboxManager) Create(req sandbox.SandboxCreateRequest) (string, e
 	return "192.0.2.2", nil
 }
 
-func (f *fakeSandboxManager) Delete(req sandbox.SandboxDeleteRequest) error {
+func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxManager) Pause(req sandbox.SandboxPauseRequest) (string, error) {
+func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) {
 	f.pauseReq = req
 	if f.pauseErr != nil {
 		return "", f.pauseErr
@@ -374,7 +379,7 @@ func TestHandleSnapshotExport(t *testing.T) {
 
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
-	manager := &fakeSandboxManager{}
+	manager := &fakeSandboxOps{}
 	server := newConvertHandlerServer(imgSvc, snapSvc, manager)
 
 	rec := httptest.NewRecorder()
