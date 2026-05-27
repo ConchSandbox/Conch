@@ -10,6 +10,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
@@ -403,8 +404,15 @@ func (m *Manager) resolveNamespace(namespace string) string {
 func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) error {
 	logger := ulog.GetLogger()
 	var errs []error
+	fields := []ulog.Field{
+		ulog.F("sandbox_id", sandboxID),
+		ulog.F("namespace", sbx.namespace),
+		ulog.F("lease_id", sbx.leaseID),
+	}
 
+	finishClose := cleanupdiag.Start("sandbox.close", fields...)
 	err := sbx.Close(ctx)
+	finishClose(err)
 	if err != nil {
 		logger.Warn("failed to cleanup sandbox, will remove from cache",
 			ulog.F("sandbox_id", sandboxID),
@@ -416,7 +424,9 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	snapshotCtx := ctx
 	if sbx.leaseID != "" && m.daemonClient != nil {
 		var leaseErr error
+		finishLease := cleanupdiag.Start("sandbox.cleanup.restore_runtime_lease", fields...)
 		snapshotCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.namespace, sbx.leaseID)
+		finishLease(leaseErr)
 		if leaseErr != nil {
 			logger.Warn("failed to restore runtime lease context for cleanup",
 				ulog.F("sandbox_id", sandboxID),
@@ -426,7 +436,9 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 			errs = append(errs, leaseErr)
 		}
 	}
+	finishSnapshot := cleanupdiag.Start("sandbox.snapshot.remove", fields...)
 	err = snapshot.Remove(snapshotCtx, sbx.namespace, sandboxID)
+	finishSnapshot(err)
 	if err != nil {
 		logger.Warn("failed to remove sandbox snapshot",
 			ulog.F("sandbox_id", sandboxID),
@@ -436,7 +448,9 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 		errs = append(errs, err)
 	}
 
+	finishCID := cleanupdiag.Start("sandbox.cid.release", fields...)
 	releaseErr := m.ReleaseCID(sandboxID)
+	finishCID(releaseErr)
 	if releaseErr != nil {
 		logger.Warn("failed to release CID", ulog.F("sandbox_id", sandboxID), ulog.F("error", releaseErr))
 		errs = append(errs, releaseErr)

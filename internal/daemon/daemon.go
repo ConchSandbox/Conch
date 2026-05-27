@@ -22,6 +22,7 @@ import (
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/cri"
@@ -307,11 +308,16 @@ func (s *Daemon) Shutdown() {
 	logger := ulog.GetLogger()
 
 	s.cleanupOnce.Do(func() {
+		finishShutdown := cleanupdiag.Start("daemon.shutdown")
+		defer finishShutdown(nil)
+
 		// stop httpServer
 		if s.httpServer != nil {
+			finish := cleanupdiag.Start("daemon.http.shutdown", ulog.F("timeout", shutdownTimeout.String()))
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			err := s.httpServer.Shutdown(shutdownCtx)
 			shutdownCancel()
+			finish(err)
 			if err != nil {
 				logger.Error("HTTP server shutdown error", ulog.F("error", err))
 			} else {
@@ -320,10 +326,12 @@ func (s *Daemon) Shutdown() {
 		}
 
 		if s.unixSocketPath != "" {
+			finish := cleanupdiag.Start("daemon.http.remove_socket", ulog.F("socket", s.unixSocketPath))
 			err := os.Remove(s.unixSocketPath)
 			if err != nil && os.IsNotExist(err) {
 				err = nil
 			}
+			finish(err)
 			if err != nil {
 				logger.Error("Failed to remove unix socket", ulog.F("socket", s.unixSocketPath), ulog.F("error", err))
 			} else {
@@ -332,24 +340,32 @@ func (s *Daemon) Shutdown() {
 		}
 
 		if s.criServer != nil {
+			finish := cleanupdiag.Start("daemon.cri.stop")
 			s.criServer.Stop()
+			finish(nil)
 			logger.Info("CRI server stopped")
 		}
 
 		if s.stateStore != nil {
+			finish := cleanupdiag.Start("daemon.state_store.close")
 			err := s.stateStore.Close()
+			finish(err)
 			if err != nil {
 				logger.Error("State store cleanup error", ulog.F("error", err))
 			}
 		}
 
 		if s.containerdHost != nil {
+			finish := cleanupdiag.Start("daemon.containerd_host.close")
 			err := s.containerdHost.Close()
+			finish(err)
 			if err != nil {
 				logger.Error("Containerd cleanup error", ulog.F("error", err))
 			}
 		} else if s.daemonClient != nil {
+			finish := cleanupdiag.Start("daemon.containerd_client.close")
 			err := s.daemonClient.Close()
+			finish(err)
 			if err != nil {
 				logger.Error("Containerd cleanup error", ulog.F("error", err))
 			}
