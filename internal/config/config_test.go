@@ -126,6 +126,7 @@ func TestLoadConfig(t *testing.T) {
 			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n" +
 			"sandbox:\n  default_image: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
+			"state:\n  path: /tmp/conch-state.db\n" +
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
@@ -203,6 +204,9 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Sandbox.DefaultRAMMB != 2048 {
 		t.Errorf("LoadConfig().Sandbox.DefaultRAMMB = %d, want %d", cfg.Sandbox.DefaultRAMMB, 2048)
 	}
+	if cfg.State.Path != "/tmp/conch-state.db" {
+		t.Errorf("LoadConfig().State.Path = %q, want %q", cfg.State.Path, "/tmp/conch-state.db")
+	}
 }
 
 func TestDefaultConfigNetworkTapSettings(t *testing.T) {
@@ -242,6 +246,9 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	}
 	if cfg.Image.DefaultKernelImage != DefaultKernelImage {
 		t.Errorf("DefaultConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, DefaultKernelImage)
+	}
+	if cfg.State.Path != "/var/lib/conch/state.db" {
+		t.Errorf("DefaultConfig().State.Path = %q, want %q", cfg.State.Path, "/var/lib/conch/state.db")
 	}
 	if cfg.Sandbox.DefaultImage != "hub.oepkgs.net/conch/openeuler:odd-x86" {
 		t.Errorf("DefaultConfig().Sandbox.DefaultImage = %q", cfg.Sandbox.DefaultImage)

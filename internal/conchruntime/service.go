@@ -4,14 +4,21 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/sandbox"
+	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type SandboxOps interface {
@@ -40,11 +47,12 @@ type Service struct {
 	Sandbox          SandboxOps
 	Image            ImageOps
 	Snapshot         SnapshotOps
+	Store            state.Store
 	DefaultNamespace string
 	SandboxDefaults  SandboxDefaults
 }
 
-func New(sandboxOps SandboxOps, imageOps ImageOps, defaultNamespace ...string) *Service {
+func New(sandboxOps SandboxOps, imageOps ImageOps, store state.Store, defaultNamespace ...string) *Service {
 	namespace := "default"
 	if len(defaultNamespace) > 0 && strings.TrimSpace(defaultNamespace[0]) != "" {
 		namespace = strings.TrimSpace(defaultNamespace[0])
@@ -52,6 +60,7 @@ func New(sandboxOps SandboxOps, imageOps ImageOps, defaultNamespace ...string) *
 	return &Service{
 		Sandbox:          sandboxOps,
 		Image:            imageOps,
+		Store:            store,
 		DefaultNamespace: namespace,
 	}
 }
@@ -87,7 +96,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	s.applySandboxDefaults(&opts)
 
-	createResult, err := s.Sandbox.Create(sandbox.SandboxCreateRequest{
+	req := sandbox.SandboxCreateRequest{
 		Namespace:   namespace,
 		SnapshotId:  opts.SnapshotID,
 		ImageName:   opts.ImageName,
@@ -98,8 +107,55 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VcpuNum:     opts.VCPUNum,
 		VcpuMax:     opts.VCPUMax,
 		RamMB:       opts.RamMB,
-	})
+	}
+
+	createdAt := time.Now().UnixNano()
+	createResult, err := s.Sandbox.Create(req)
+	rec := state.SandboxRecord{
+		PodSandboxID:    opts.PodSandboxID,
+		ConchSandboxID:  opts.SandboxID,
+		Namespace:       namespace,
+		Name:            opts.Name,
+		UID:             opts.UID,
+		Attempt:         opts.Attempt,
+		State:           state.SandboxReady,
+		CreatedAt:       createdAt,
+		Labels:          copyMap(opts.Labels),
+		Annotations:     copyMap(opts.Annotations),
+		RuntimeHandler:  opts.RuntimeHandler,
+		LeaseID:         opts.LeaseID,
+		ImageName:       opts.ImageName,
+		SnapshotID:      opts.SnapshotID,
+		IP:              createResult.IP,
+		VMMName:         opts.VMMName,
+		VCPUNum:         opts.VCPUNum,
+		RamMB:           opts.RamMB,
+		VMMPID:          createResult.VMMPID,
+		VMMSocketPath:   createResult.VMMSocketPath,
+		VsockCID:        createResult.VsockCID,
+		VsockSocketPath: createResult.VsockSocketPath,
+		NetworkSlotKey:  createResult.NetworkSlotKey,
+		NetworkNS:       createResult.NetworkNS,
+		RootfsKey:       createResult.RootfsKey,
+		MemKey:          createResult.MemKey,
+		ParentRootfsID:  createResult.ParentRootfsID,
+		ParentMemID:     createResult.ParentMemID,
+		ParentVMID:      createResult.ParentVMID,
+		RootfsMount:     createResult.RootfsMount,
+		MemMount:        createResult.MemMount,
+		VMMount:         createResult.VMMount,
+		SnapshotRootDir: createResult.RootDir,
+	}
 	if err != nil {
+		rec.State = state.SandboxUnknown
+		rec.LastError = err.Error()
+		_ = s.upsertSandbox(ctx, rec)
+		return SandboxCreateResult{}, err
+	}
+	if err := s.upsertSandbox(ctx, rec); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	if err := s.upsertSandboxRuntimeState(ctx, rec, createResult); err != nil {
 		return SandboxCreateResult{}, err
 	}
 	return SandboxCreateResult{
@@ -132,24 +188,87 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 	}
 }
 
-func (s *Service) StopSandbox(ctx context.Context, namespace, sandboxID string) error {
+func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
+	rec, recErr := s.getSandbox(ctx, podSandboxID)
+	stateFound := recErr == nil
+	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
+		return fmt.Errorf("get sandbox state: %w", recErr)
+	}
+	sandboxID := rec.ConchSandboxID
+	if sandboxID == "" {
+		sandboxID = podSandboxID
+	}
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
 	namespace = s.normalizeNamespace(namespace)
-	return s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
+	err := s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
+	runtimeMissing := err != nil && strings.Contains(err.Error(), "not found")
+	if runtimeMissing {
+		err = nil
+		if stateFound {
+			err = terminateRecordedVMM(rec)
+		}
+	}
+	if err == nil {
+		_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+	}
+	if !stateFound {
+		return err
+	}
+	if rec.PodSandboxID == "" {
+		rec.PodSandboxID = podSandboxID
+		rec.ConchSandboxID = sandboxID
+		rec.Namespace = namespace
+	}
+	rec.StoppedAt = time.Now().UnixNano()
+	rec.State = state.SandboxStopped
+	if err != nil {
+		rec.State = state.SandboxUnknown
+		rec.LastError = err.Error()
+	}
+	_ = s.upsertSandbox(ctx, rec)
+	return err
 }
 
-func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string) error {
-	return s.StopSandbox(ctx, namespace, sandboxID)
+func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID string) error {
+	err := s.StopSandbox(ctx, namespace, podSandboxID)
+	if err == nil && s != nil && s.Store != nil {
+		_ = s.Store.DeleteSandbox(ctx, podSandboxID)
+	}
+	return err
 }
 
-func (s *Service) PauseSandbox(ctx context.Context, namespace, sandboxID string) (string, error) {
+func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID string) (string, error) {
 	if s == nil || s.Sandbox == nil {
 		return "", fmt.Errorf("sandbox service is not configured")
 	}
+	rec, _ := s.getSandbox(ctx, podSandboxID)
+	sandboxID := rec.ConchSandboxID
+	if sandboxID == "" {
+		sandboxID = podSandboxID
+	}
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
 	namespace = s.normalizeNamespace(namespace)
-	return s.Sandbox.Pause(sandbox.SandboxPauseRequest{Namespace: namespace, SandboxId: sandboxID})
+	snapshotID, err := s.Sandbox.Pause(sandbox.SandboxPauseRequest{Namespace: namespace, SandboxId: sandboxID})
+	if rec.PodSandboxID != "" {
+		rec.SnapshotID = snapshotID
+		rec.StoppedAt = time.Now().UnixNano()
+		rec.State = state.SandboxStopped
+		if err != nil {
+			rec.State = state.SandboxUnknown
+			rec.LastError = err.Error()
+		} else {
+			_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+		}
+		_ = s.upsertSandbox(ctx, rec)
+	}
+	return snapshotID, err
 }
 
 func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullImageResult, error) {
@@ -239,6 +358,211 @@ func (s *Service) SnapshotChain(ctx context.Context, req snapshotSvc.InfoRequest
 	return s.Snapshot.Chain(ctx, req)
 }
 
+func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	return s.Store.UpsertSandbox(ctx, rec)
+}
+
+func (s *Service) upsertSandboxRuntimeState(ctx context.Context, rec state.SandboxRecord, createResult sandbox.SandboxCreateResult) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	if rec.RootfsKey != "" || rec.MemKey != "" {
+		if err := s.Store.UpsertSnapshotRuntime(ctx, state.SnapshotRuntimeRecord{
+			Namespace:      rec.Namespace,
+			SandboxID:      rec.ConchSandboxID,
+			RootfsKey:      rec.RootfsKey,
+			MemKey:         rec.MemKey,
+			ParentRootfsID: rec.ParentRootfsID,
+			ParentMemID:    rec.ParentMemID,
+			ParentVMID:     rec.ParentVMID,
+			LeaseID:        rec.LeaseID,
+			RootfsMount:    rec.RootfsMount,
+			MemMount:       rec.MemMount,
+			VMMount:        rec.VMMount,
+			RootDir:        createResult.RootDir,
+			MemSize:        createResult.MemSize,
+			State:          state.SandboxReady,
+		}); err != nil {
+			return err
+		}
+	}
+	if rec.ParentVMID != "" && rec.VMMount != "" {
+		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentVMID, common.SnapshotMountVM, rec.VMMount, rec.LeaseID); err != nil {
+			return err
+		}
+	}
+	if createResult.Resume && rec.ParentRootfsID != "" && rec.RootfsMount != "" {
+		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentRootfsID, common.SnapshotMountRootfs, rec.RootfsMount, rec.LeaseID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) upsertViewRuntimeState(ctx context.Context, namespace, sandboxID, parentID, mountKind, mountPoint, leaseID string) error {
+	viewSnapshotKey := runtimeSnapshot.SharedViewSnapshotKey(mountKind, parentID)
+	var aliasKey string
+	switch mountKind {
+	case common.SnapshotMountRootfs:
+		aliasKey = runtimeSnapshot.RootfsViewAliasKey(sandboxID)
+	case common.SnapshotMountMem:
+		aliasKey = runtimeSnapshot.MemViewAliasKey(sandboxID)
+	case common.SnapshotMountVM:
+		aliasKey = runtimeSnapshot.VMViewAliasKey(sandboxID)
+	default:
+		return fmt.Errorf("unknown view mount kind %q", mountKind)
+	}
+	if err := s.Store.UpsertViewSnapshot(ctx, state.ViewSnapshotRecord{
+		Namespace:        namespace,
+		ParentSnapshotID: parentID,
+		ViewSnapshotKey:  viewSnapshotKey,
+		LeaseID:          leaseID,
+		MountPoint:       mountPoint,
+		RefCount:         1,
+		State:            state.SandboxReady,
+	}); err != nil {
+		return err
+	}
+	return s.Store.UpsertViewAlias(ctx, state.ViewAliasRecord{
+		Namespace:        namespace,
+		AliasKey:         aliasKey,
+		SandboxID:        sandboxID,
+		ParentSnapshotID: parentID,
+		MountKind:        mountKind,
+	})
+}
+
+func (s *Service) deleteSandboxRuntimeState(ctx context.Context, namespace, sandboxID string) error {
+	if s == nil || s.Store == nil || sandboxID == "" {
+		return nil
+	}
+	var errs []error
+	if err := s.Store.DeleteSnapshotRuntime(ctx, namespace, sandboxID); err != nil {
+		errs = append(errs, err)
+	}
+	aliasKeys := []string{
+		runtimeSnapshot.RootfsViewAliasKey(sandboxID),
+		runtimeSnapshot.MemViewAliasKey(sandboxID),
+		runtimeSnapshot.VMViewAliasKey(sandboxID),
+	}
+	parents := make(map[string]struct{})
+	aliases, err := s.Store.ListViewAliases(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	} else {
+		targetAliases := make(map[string]struct{}, len(aliasKeys))
+		for _, aliasKey := range aliasKeys {
+			targetAliases[aliasKey] = struct{}{}
+		}
+		for _, rec := range aliases {
+			if rec.Namespace != namespace {
+				continue
+			}
+			if _, ok := targetAliases[rec.AliasKey]; ok && rec.ParentSnapshotID != "" {
+				parents[rec.ParentSnapshotID] = struct{}{}
+			}
+		}
+	}
+	for _, aliasKey := range aliasKeys {
+		if err := s.Store.DeleteViewAlias(ctx, namespace, aliasKey); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(parents) > 0 {
+		if err := s.reconcileViewSnapshotRefs(ctx, namespace, parents); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Service) reconcileViewSnapshotRefs(ctx context.Context, namespace string, parents map[string]struct{}) error {
+	aliases, err := s.Store.ListViewAliases(ctx)
+	if err != nil {
+		return err
+	}
+	remainingRefs := make(map[string]int, len(parents))
+	for _, rec := range aliases {
+		if rec.Namespace != namespace {
+			continue
+		}
+		if _, ok := parents[rec.ParentSnapshotID]; ok {
+			remainingRefs[rec.ParentSnapshotID]++
+		}
+	}
+	views, err := s.Store.ListViewSnapshots(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, rec := range views {
+		if rec.Namespace != namespace {
+			continue
+		}
+		if _, ok := parents[rec.ParentSnapshotID]; !ok {
+			continue
+		}
+		if remainingRefs[rec.ParentSnapshotID] == 0 {
+			if err := s.Store.DeleteViewSnapshot(ctx, namespace, rec.ParentSnapshotID); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		rec.RefCount = remainingRefs[rec.ParentSnapshotID]
+		if err := s.Store.UpsertViewSnapshot(ctx, rec); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func terminateRecordedVMM(rec state.SandboxRecord) error {
+	if rec.VMMPID <= 0 {
+		return nil
+	}
+	matched, err := recordedVMMProcessMatches(rec)
+	if err != nil {
+		return err
+	}
+	if !matched {
+		return fmt.Errorf("refuse to signal vmm pid %d: process does not match sandbox %s", rec.VMMPID, rec.ConchSandboxID)
+	}
+	if err := syscall.Kill(rec.VMMPID, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return fmt.Errorf("send SIGTERM to vmm pid %d: %w", rec.VMMPID, err)
+	}
+	return nil
+}
+
+func recordedVMMProcessMatches(rec state.SandboxRecord) (bool, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", rec.VMMPID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, fmt.Errorf("read vmm pid %d cmdline: %w", rec.VMMPID, err)
+	}
+	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+	for _, marker := range []string{rec.ConchSandboxID, rec.VMMSocketPath, rec.VsockSocketPath} {
+		if marker != "" && strings.Contains(cmdline, marker) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) getSandbox(ctx context.Context, id string) (state.SandboxRecord, error) {
+	if s == nil || s.Store == nil {
+		return state.SandboxRecord{}, state.ErrNotFound
+	}
+	return s.Store.GetSandbox(ctx, id)
+}
+
 func (s *Service) normalizeNamespace(namespace string) string {
 	if ns := strings.TrimSpace(namespace); ns != "" {
 		return ns
@@ -255,4 +579,15 @@ func NewID() (string, error) {
 		return "", fmt.Errorf("generate id: %w", err)
 	}
 	return hex.EncodeToString(data[:]), nil
+}
+
+func copyMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

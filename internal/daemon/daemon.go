@@ -24,6 +24,8 @@ import (
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/daemon/recovery"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -39,6 +41,7 @@ const (
 type Daemon struct {
 	router         *http.ServeMux
 	containerdHost *containerdhost.Host
+	stateStore     state.Store
 	runtimeService *conchruntime.Service
 	daemonClient   *containerdclient.Client
 	httpServer     *http.Server
@@ -159,7 +162,14 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.daemonClient = daemonClient
 	s.defaultKernel = cfg.Image.DefaultKernelImage
 
-	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), cfg.Containerd.DefaultNamespace)
+	store, err := state.OpenBolt(cfg.State.Path)
+	if err != nil {
+		cancel()
+		_ = host.Close()
+		return nil, fmt.Errorf("open state store: %w", err)
+	}
+	s.stateStore = store
+	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
 	s.runtimeService.Snapshot = host.SnapshotService()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		ImageName: cfg.Sandbox.DefaultImage,
@@ -168,6 +178,36 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:   cfg.Sandbox.DefaultVCPUMax,
 		RamMB:     cfg.Sandbox.DefaultRAMMB,
 	})
+	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
+
+	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
+		Store:             store,
+		LeaseClient:       daemonClient,
+		SandboxRehydrator: host.SandboxService(),
+		DefaultNamespace:  cfg.Containerd.DefaultNamespace,
+	})
+	if err != nil {
+		cancel()
+		_ = store.Close()
+		_ = host.Close()
+		return nil, fmt.Errorf("reconcile state: %w", err)
+	}
+	logger.Info("State recovery reconciled",
+		ulog.F("sandboxes_checked", recoveryResult.SandboxesChecked),
+		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
+		ulog.F("snapshot_runtimes_checked", recoveryResult.SnapshotRuntimesChecked),
+		ulog.F("snapshot_runtimes_marked", recoveryResult.SnapshotRuntimesMarked),
+		ulog.F("view_snapshots_checked", recoveryResult.ViewSnapshotsChecked),
+		ulog.F("view_snapshots_marked", recoveryResult.ViewSnapshotsMarked),
+		ulog.F("runtime_leases_checked", recoveryResult.RuntimeLeasesChecked),
+		ulog.F("lease_errors", recoveryResult.LeaseErrors),
+		ulog.F("snapshot_caches_restored", recoveryResult.SnapshotCachesRestored),
+		ulog.F("view_mounts_restored", recoveryResult.ViewMountsRestored),
+		ulog.F("view_aliases_restored", recoveryResult.ViewAliasesRestored),
+		ulog.F("sandboxes_rehydrated", recoveryResult.SandboxesRehydrated),
+		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
+		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
+	)
 
 	handleSignals(ctx, cancel, s)
 
@@ -270,6 +310,13 @@ func (s *Daemon) Shutdown() {
 				logger.Error("Failed to remove unix socket", ulog.F("socket", s.unixSocketPath), ulog.F("error", err))
 			} else {
 				logger.Info("Removed unix socket", ulog.F("socket", s.unixSocketPath))
+			}
+		}
+
+		if s.stateStore != nil {
+			err := s.stateStore.Close()
+			if err != nil {
+				logger.Error("State store cleanup error", ulog.F("error", err))
 			}
 		}
 

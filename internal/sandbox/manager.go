@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"syscall"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/snapshot"
@@ -295,7 +297,9 @@ func (m *Manager) trackSandbox(ctx context.Context, namespace, sandboxID string,
 			return
 		}
 
-		m.cleanupSandbox(context.Background(), sbx, sandboxID)
+		if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
+			logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		}
 	}()
 }
 
@@ -323,6 +327,39 @@ func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateReques
 		MemSize:         snapshotConf.MemSize,
 		Resume:          resume,
 	}
+}
+
+func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, error) {
+	var (
+		restored int
+		errs     []error
+	)
+	for _, rec := range records {
+		if rec.State != state.SandboxReady {
+			continue
+		}
+		if rec.ConchSandboxID == "" {
+			continue
+		}
+		sb, err := attachSandboxFromRecord(rec, m.pool)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("attach sandbox %s: %w", rec.PodSandboxID, err))
+			continue
+		}
+		sb.leaseID = rec.LeaseID
+		if rec.VsockCID != 0 {
+			if err := m.cidAllocator.ReserveCID(rec.ConchSandboxID, rec.VsockCID); err != nil {
+				errs = append(errs, fmt.Errorf("reserve cid for %s: %w", rec.ConchSandboxID, err))
+				continue
+			}
+		}
+		if sb.slot != nil && m.pool != nil {
+			m.pool.AttachInUse(sb.slot)
+		}
+		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), sb)
+		restored++
+	}
+	return restored, errors.Join(errs...)
 }
 
 func (m *Manager) resolveParentSnapshotIDs(
@@ -357,11 +394,15 @@ func (m *Manager) resolveNamespace(namespace string) string {
 	if namespace != "" {
 		return namespace
 	}
+	if m.daemonClient == nil {
+		return "default"
+	}
 	return m.daemonClient.DefaultNamespace()
 }
 
-func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) {
+func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) error {
 	logger := ulog.GetLogger()
+	var errs []error
 
 	err := sbx.Close(ctx)
 	if err != nil {
@@ -369,6 +410,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 			ulog.F("sandbox_id", sandboxID),
 			ulog.F("error", err),
 		)
+		errs = append(errs, err)
 	}
 
 	snapshotCtx := ctx
@@ -381,6 +423,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 				ulog.F("lease_id", sbx.leaseID),
 				ulog.F("error", leaseErr),
 			)
+			errs = append(errs, leaseErr)
 		}
 	}
 	err = snapshot.Remove(snapshotCtx, sbx.namespace, sandboxID)
@@ -390,12 +433,15 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 			ulog.F("namespace", sbx.namespace),
 			ulog.F("error", err),
 		)
+		errs = append(errs, err)
 	}
 
 	releaseErr := m.ReleaseCID(sandboxID)
 	if releaseErr != nil {
 		logger.Warn("failed to release CID", ulog.F("sandbox_id", sandboxID), ulog.F("error", releaseErr))
+		errs = append(errs, releaseErr)
 	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
@@ -420,12 +466,7 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	}
 	m.lifecycleMu.Unlock()
 
-	go func() {
-		m.lifecycleMu.Lock()
-		defer m.lifecycleMu.Unlock()
-		m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
-	}()
-	return nil
+	return m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 }
 
 func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
