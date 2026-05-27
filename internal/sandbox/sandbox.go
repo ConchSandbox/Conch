@@ -48,6 +48,8 @@ type Sandbox struct {
 	process      *vmm.Process
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
+	sandboxID    string
+	leaseID      string
 	slot         *netstack.Slot
 	vsockConn    net.Conn
 }
@@ -117,6 +119,7 @@ func ResumeSandbox(
 		process:      vmmHandle,
 		cleanup:      cleanup,
 		namespace:    namespace,
+		sandboxID:    sandboxId,
 		slot:         slot,
 	}
 
@@ -200,6 +203,7 @@ func CreateSandbox(
 		process:      vmmHandle,
 		cleanup:      cleanup,
 		namespace:    namespace,
+		sandboxID:    sandboxId,
 		slot:         slot,
 	}
 

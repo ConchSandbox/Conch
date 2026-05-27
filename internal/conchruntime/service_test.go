@@ -11,9 +11,13 @@ type fakeSandboxOps struct {
 	req sandbox.SandboxCreateRequest
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (string, error) {
+func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
 	f.req = req
-	return "192.0.2.10", nil
+	return sandbox.SandboxCreateResult{
+		Namespace: req.Namespace,
+		SandboxID: req.SandboxId,
+		IP:        "192.0.2.10",
+	}, nil
 }
 
 func (f *fakeSandboxOps) Delete(sandbox.SandboxDeleteRequest) error {

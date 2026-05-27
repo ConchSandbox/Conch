@@ -64,7 +64,7 @@ func parseDuration(raw string, fallback time.Duration) (time.Duration, error) {
 	return time.ParseDuration(raw)
 }
 
-func (s *Service) Create(req conchsandbox.SandboxCreateRequest) (string, error) {
+func (s *Service) Create(req conchsandbox.SandboxCreateRequest) (conchsandbox.SandboxCreateResult, error) {
 	return s.manager.Create(req)
 }
 
