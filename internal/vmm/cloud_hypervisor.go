@@ -157,13 +157,14 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 }
 
 func buildPmemArgs(paths []string) string {
-	args := make([]string, 0, len(paths))
+	args := make([]string, 0, len(paths)+1)
+	args = append(args, "--pmem")
 	for _, path := range paths {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			continue
 		}
-		args = append(args, fmt.Sprintf("--pmem file=%s,discard_writes=on", path))
+		args = append(args, fmt.Sprintf("file=%s,discard_writes=on", path))
 	}
 	return strings.Join(args, " \\\n")
 }
