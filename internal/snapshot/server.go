@@ -31,7 +31,7 @@ type server struct {
 	viewMgr          *viewManager
 }
 
-var gServer server
+var gServer *server
 
 // NewServer initializes the snapshot server with containerd client.
 func NewServer(workDir string, daemonClient *containerdclient.Client) error {
@@ -47,15 +47,17 @@ func NewServer(workDir string, daemonClient *containerdclient.Client) error {
 	if err != nil {
 		return err
 	}
-	gServer.snt = erofsSn
-	gServer.rootfsSnt = erofsSn
-	gServer.mountMgr = daemonClient.MountManager()
-	gServer.workDir = workDir
-	gServer.activeSnapshots = make(map[string]map[string]*snapshots.Info)
-	gServer.activeRootfsPmem = make(map[string]map[string][]string)
-	gServer.viewMgr = &viewManager{
-		viewMounts:  make(map[string]map[string]*viewMountRef),
-		viewAliases: make(map[string]map[string]string),
+	gServer = &server{
+		snt:              erofsSn,
+		rootfsSnt:        erofsSn,
+		mountMgr:         daemonClient.MountManager(),
+		workDir:          workDir,
+		activeSnapshots:  make(map[string]map[string]*snapshots.Info),
+		activeRootfsPmem: make(map[string]map[string][]string),
+		viewMgr: &viewManager{
+			viewMounts:  make(map[string]map[string]*viewMountRef),
+			viewAliases: make(map[string]map[string]string),
+		},
 	}
 
 	return nil
@@ -593,12 +595,28 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 // CleanupAllViews unmounts and removes all view snapshots.
 // Should be called during graceful shutdown before Close().
 func (s *server) CleanupAllViews() {
+	if s == nil || s.viewMgr == nil {
+		return
+	}
 	s.viewMgr.CleanupAllViews(s.snt, s.mountMgr)
 }
 
 // Close releases snapshot resources.
 func (s *server) Close() error {
 	return nil
+}
+
+// Stat gets snapshot information.
+func (s *server) Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
+	if info := s.getActiveSnapshot(namespace, key); info != nil {
+		return *info, nil
+	}
+	if s.rootfsSnt != nil {
+		if info, err := s.rootfsSnt.Stat(ctx, namespace, key); err == nil {
+			return info, nil
+		}
+	}
+	return s.snt.Stat(ctx, namespace, key)
 }
 
 // withLabels creates a snapshot option with labels from config.

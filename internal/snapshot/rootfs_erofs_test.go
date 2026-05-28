@@ -23,21 +23,16 @@ func TestSnapshotConfigSnapDirTreatsRootDirAsMemRelative(t *testing.T) {
 }
 
 func TestStatReturnsActiveSnapshotBeforeSnapshotterLookup(t *testing.T) {
-	origServer := gServer
-	t.Cleanup(func() {
-		gServer = origServer
-	})
-
-	gServer = server{
+	srv := &server{
 		snt:             statMissingSnapshotter{},
 		activeSnapshots: make(map[string]map[string]*snapshots.Info),
 	}
-	gServer.addActiveSnapshot("default", "active-rootfs", &snapshots.Info{
+	srv.addActiveSnapshot("default", "active-rootfs", &snapshots.Info{
 		Name:   "active-rootfs",
 		Parent: "parent-rootfs",
 	})
 
-	info, err := Stat(context.Background(), "default", "active-rootfs")
+	info, err := srv.Stat(context.Background(), "default", "active-rootfs")
 	if err != nil {
 		t.Fatalf("Stat active snapshot: %v", err)
 	}
