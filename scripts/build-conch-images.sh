@@ -210,7 +210,7 @@ make_erofs_layers_from_input() {
     local work_dir
     work_dir=$(mktemp -d)
     mkdir -p "$BUILD_DIR"
-    trap "rm -rf '$work_dir'" RETURN
+    trap 'rm -rf "$work_dir"' RETURN
 
     log_info "分析输入文件: $(basename "$INPUT_PATH")"
 

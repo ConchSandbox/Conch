@@ -80,13 +80,15 @@ has_trailing_whitespace() {
   fi
 
   # Check trailing spaces/tabs/full-width spaces
-  local space_lines=$(sed -n '/[ \t　]$/p' "$file" | wc -l)
+  local space_lines
+  space_lines=$(sed -n '/[ \t　]$/p' "$file" | wc -l)
   if [[ $space_lines -gt 0 ]]; then
     return 0
   fi
 
   # Check trailing CR (from CRLF line endings)
-  local cr_lines=$(sed -n '/\r$/p' "$file" | wc -l)
+  local cr_lines
+  cr_lines=$(sed -n '/\r$/p' "$file" | wc -l)
   if [[ $cr_lines -gt 0 ]]; then
     return 0
   fi
@@ -98,7 +100,7 @@ has_trailing_whitespace() {
 # Cleanup function with backup toggle
 clean_file() {
   local file="$1"
-  local rel_path="${file#${PROJECT_ROOT}/}"
+  local rel_path="${file#"${PROJECT_ROOT}"/}"
 
   if ! check_file_permission "$file"; then
     return 1
@@ -259,7 +261,8 @@ main() {
   )
 
   # Count total files to process
-  local total_files=$("${find_cmd[@]}" | xargs -0 -I {} echo 1 | wc -l)
+  local total_files
+  total_files=$("${find_cmd[@]}" | xargs -0 -I {} echo 1 | wc -l)
   log_info "Total files scanned: $total_files"
 
   local cleanup_count=0
@@ -299,7 +302,7 @@ main() {
   if [[ ($VERBOSE -eq 1 || $DEBUG_MODE -eq 1) && $cleanup_count -gt 0 ]]; then
     echo -e "\n===== $(if [[ $DRY_RUN -eq 1 ]]; then echo "List of Files Needing Cleanup"; else echo "List of Files Processed"; fi) ====="
     for f in "${cleanup_files[@]}"; do
-      echo "- ${f#${PROJECT_ROOT}/}"
+      echo "- ${f#"${PROJECT_ROOT}"/}"
     done
   fi
 
