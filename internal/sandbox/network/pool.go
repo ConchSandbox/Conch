@@ -44,6 +44,8 @@ type Pool struct {
 	slotStorage        Storage
 	newSlots           chan *Slot
 	done               chan struct{}
+	prefillReady       chan struct{}
+	prefillReadyOnce   sync.Once
 	dynamicReservation bool
 	inUse              map[string]*Slot
 	inUseMu            sync.Mutex
@@ -57,6 +59,7 @@ func initHostMasquerade() error {
 	if err := tables.AppendUnique("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
 		return fmt.Errorf("error creating postrouting rule: %w", err)
 	}
+	getLogger().Debug("host masquerade initialized", ulog.F("cidr", vrtNetworkCIDR.String()))
 	return nil
 }
 
@@ -114,6 +117,7 @@ func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP strin
 		slotStorage:        slotStorage,
 		newSlots:           newSlots,
 		done:               make(chan struct{}),
+		prefillReady:       make(chan struct{}),
 		dynamicReservation: dynamicReservation,
 		inUse:              make(map[string]*Slot),
 	}
@@ -139,8 +143,8 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
 			return nil, context.Canceled
 		}
-		getLogger().Error("failed to create network", ulog.F("error", err))
-		return nil, fmt.Errorf("failed to create network: %w", err)
+		getLogger().Error("failed to create network", ulog.F("slot_index", ips.Idx), ulog.F("error", err))
+		return nil, fmt.Errorf("failed to create network for slot %d: %w", ips.Idx, err)
 	}
 	return ips, nil
 }
@@ -166,6 +170,9 @@ func (p *Pool) Populate(ctx context.Context) {
 		if err := p.populateStatic(ctx); err != nil {
 			getLogger().Warn("pool: static reservation exited with error", ulog.F("error", err))
 		}
+		p.prefillReadyOnce.Do(func() {
+			close(p.prefillReady)
+		})
 		select {
 		case <-p.done:
 			return
@@ -276,6 +283,43 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 }
 
 func (p *Pool) Get(ctx context.Context) (*Slot, error) {
+	if !p.dynamicReservation {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case s, ok := <-p.newSlots:
+				if !ok {
+					return nil, fmt.Errorf("network channel has been closed")
+				}
+				if s != nil {
+					p.trackInUse(s)
+				}
+				return s, nil
+			default:
+				if p.isPrefillReady() {
+					getLogger().Warn(
+						"no available network slot in the pool",
+						ulog.F("capacity", cap(p.newSlots)),
+						ulog.F("in_use", p.inUseCount()),
+						ulog.F("available", len(p.newSlots)),
+					)
+					return nil, fmt.Errorf("no available network slot in the pool, pool_size=%d", cap(p.newSlots))
+				}
+				s, ok, err := p.waitForSlotOrPrefillReady(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					if s != nil {
+						p.trackInUse(s)
+					}
+					return s, nil
+				}
+			}
+		}
+	}
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -287,6 +331,31 @@ func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 			p.trackInUse(s)
 		}
 		return s, nil
+	}
+}
+
+func (p *Pool) isPrefillReady() bool {
+	select {
+	case <-p.prefillReady:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Pool) waitForSlotOrPrefillReady(ctx context.Context) (*Slot, bool, error) {
+	select {
+	case <-p.prefillReady:
+		return nil, false, nil
+	case s, ok := <-p.newSlots:
+		if !ok {
+			return nil, false, fmt.Errorf("network channel has been closed")
+		}
+		return s, true, nil
+	case <-p.done:
+		return nil, false, fmt.Errorf("pool is stopping")
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
 	}
 }
 
@@ -316,23 +385,25 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		if slot != nil {
 			slotHealthErr := slotHealth(slot)
 			if !p.dynamicReservation && slotHealthErr == nil {
+				p.untrackInUse(slot)
 				if err := p.enqueueReplacement(ctx, slot); err != nil {
+					p.trackInUse(slot)
 					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
 				}
-				p.untrackInUse(slot)
+				getLogger().Info("network slot released", ulog.F("slot_index", slot.Idx))
 			} else {
 				if !p.dynamicReservation {
-					getLogger().Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+					getLogger().Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("slot_index", slot.Idx), ulog.F("error", slotHealthErr))
 				}
 				err := slot.RemoveNetwork()
 				if err != nil {
-					getLogger().Error("failed to remove network", ulog.F("error", err))
-					return fmt.Errorf("failed to remove network: %w", err)
+					getLogger().Error("failed to remove network", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+					return fmt.Errorf("failed to remove network for slot %d: %w", slot.Idx, err)
 				}
 				err = p.slotStorage.Release(slot)
 				if err != nil {
-					getLogger().Error("failed to release network slot", ulog.F("error", err))
-					return fmt.Errorf("failed to release network slot: %w", err)
+					getLogger().Error("failed to release network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+					return fmt.Errorf("failed to release network slot %d: %w", slot.Idx, err)
 				}
 				p.untrackInUse(slot)
 			}
@@ -351,6 +422,12 @@ func (p *Pool) untrackInUse(slot *Slot) {
 	p.inUseMu.Lock()
 	defer p.inUseMu.Unlock()
 	delete(p.inUse, slot.Key)
+}
+
+func (p *Pool) inUseCount() int {
+	p.inUseMu.Lock()
+	defer p.inUseMu.Unlock()
+	return len(p.inUse)
 }
 
 func (p *Pool) drainInUse() []*Slot {
