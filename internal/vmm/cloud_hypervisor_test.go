@@ -5,20 +5,20 @@ import (
 	"testing"
 )
 
-func TestBuildPmemArgsRepeatsCloudHypervisorOption(t *testing.T) {
+func TestBuildPmemArgsCloudHypervisorOption(t *testing.T) {
 	got := buildPmemArgs([]string{
 		"/var/lib/conch/rootfs/layer0.erofs",
 		" ",
 		"/var/lib/conch/rootfs/layer1.erofs",
 	})
 
-	if count := strings.Count(got, "--pmem file="); count != 2 {
-		t.Fatalf("pmem option count = %d, want 2 in %q", count, got)
+	if count := strings.Count(got, "--pmem"); count != 1 {
+		t.Fatalf("pmem option count = %d, want 1 in %q", count, got)
 	}
-	if strings.Contains(got, ",discard_writes=on file=") {
-		t.Fatalf("pmem layers were collapsed into one option: %q", got)
+	if !strings.Contains(got, "--pmem \\\nfile=/var/lib/conch/rootfs/layer0.erofs,discard_writes=on") {
+		t.Fatalf("first pmem file missing from single option: %q", got)
 	}
-	if !strings.Contains(got, "\\\n--pmem file=/var/lib/conch/rootfs/layer1.erofs,discard_writes=on") {
-		t.Fatalf("pmem arguments are not line-continuation separated: %q", got)
+	if !strings.Contains(got, "\\\nfile=/var/lib/conch/rootfs/layer1.erofs,discard_writes=on") {
+		t.Fatalf("pmem files are not line-continuation separated: %q", got)
 	}
 }
