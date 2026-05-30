@@ -23,6 +23,8 @@ type Config struct {
 	Containerd ContainerdConfig `yaml:"containerd"`
 	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
+	State      StateConfig      `yaml:"state"`
+	CRI        CRIConfig        `yaml:"cri"`
 }
 
 // AppConfig holds application-specific configuration
@@ -72,6 +74,20 @@ type SandboxConfig struct {
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
 	RequestTimeout     time.Duration `yaml:"request_timeout"`
+	DefaultImage       string        `yaml:"default_image"`
+	DefaultVMMName     string        `yaml:"default_vmm_name"`
+	DefaultVCPUNum     int64         `yaml:"default_vcpu_num"`
+	DefaultVCPUMax     int64         `yaml:"default_vcpu_max"`
+	DefaultRAMMB       int64         `yaml:"default_ram_mb"`
+}
+
+type StateConfig struct {
+	Path string `yaml:"path"`
+}
+
+type CRIConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Socket  string `yaml:"socket"`
 }
 
 // DefaultConfig returns the default configuration
@@ -113,6 +129,18 @@ func DefaultConfig() *Config {
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
+			DefaultImage:       "hub.oepkgs.net/conch/openeuler:odd-x86",
+			DefaultVMMName:     "cloud-hypervisor",
+			DefaultVCPUNum:     2,
+			DefaultVCPUMax:     2,
+			DefaultRAMMB:       4096,
+		},
+		State: StateConfig{
+			Path: "/var/lib/conch/state.db",
+		},
+		CRI: CRIConfig{
+			Enabled: false,
+			Socket:  "/var/run/conchd/conch-cri.sock",
 		},
 	}
 }
@@ -198,6 +226,27 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
+	}
+	if cfg.Sandbox.DefaultImage == "" {
+		cfg.Sandbox.DefaultImage = defaultCfg.Sandbox.DefaultImage
+	}
+	if cfg.Sandbox.DefaultVMMName == "" {
+		cfg.Sandbox.DefaultVMMName = defaultCfg.Sandbox.DefaultVMMName
+	}
+	if cfg.Sandbox.DefaultVCPUNum == 0 {
+		cfg.Sandbox.DefaultVCPUNum = defaultCfg.Sandbox.DefaultVCPUNum
+	}
+	if cfg.Sandbox.DefaultVCPUMax == 0 {
+		cfg.Sandbox.DefaultVCPUMax = defaultCfg.Sandbox.DefaultVCPUMax
+	}
+	if cfg.Sandbox.DefaultRAMMB == 0 {
+		cfg.Sandbox.DefaultRAMMB = defaultCfg.Sandbox.DefaultRAMMB
+	}
+	if cfg.State.Path == "" {
+		cfg.State.Path = defaultCfg.State.Path
+	}
+	if cfg.CRI.Socket == "" {
+		cfg.CRI.Socket = defaultCfg.CRI.Socket
 	}
 
 	if cfg.Server.WorkDir != "" {

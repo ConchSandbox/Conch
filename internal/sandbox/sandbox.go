@@ -8,8 +8,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/vmm"
@@ -48,8 +50,75 @@ type Sandbox struct {
 	process      *vmm.Process
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
+	sandboxID    string
+	leaseID      string
 	slot         *netstack.Slot
 	vsockConn    net.Conn
+}
+
+func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*Sandbox, error) {
+	if rec.VMMName == "" {
+		return nil, fmt.Errorf("missing vmm name")
+	}
+	if rec.VMMSocketPath == "" {
+		return nil, fmt.Errorf("missing vmm socket path")
+	}
+	if rec.NetworkSlotKey == "" {
+		return nil, fmt.Errorf("missing network slot key")
+	}
+	slotIdx, err := strconv.Atoi(rec.NetworkSlotKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid network slot key %q: %w", rec.NetworkSlotKey, err)
+	}
+	slot, err := netstack.NewSlot(rec.NetworkSlotKey, slotIdx)
+	if err != nil {
+		return nil, err
+	}
+	process, err := vmm.NewAttachedProcess(rec.VMMName, rec.VMMSocketPath, rec.VsockSocketPath, rec.VMMPID)
+	if err != nil {
+		return nil, err
+	}
+	rootDir := rec.SnapshotRootDir
+	if rootDir == "" {
+		rootDir = "/conch/snapshot"
+	}
+	memSize := rec.RamMB
+	if memSize <= 0 {
+		memSize = 256
+	}
+	conf := &snapshot.SnapshotConfig{
+		Rootfs:  rec.RootfsMount,
+		MemDir:  rec.MemMount,
+		VmDir:   rec.VMMount,
+		RootDir: rootDir,
+		MemSize: memSize,
+	}
+	cleanup := NewCleanup()
+	sb := &Sandbox{
+		cleanup:      cleanup,
+		process:      process,
+		snapshotConf: conf,
+		namespace:    rec.Namespace,
+		sandboxID:    rec.ConchSandboxID,
+		leaseID:      rec.LeaseID,
+		slot:         slot,
+	}
+	cleanup.Add(func(ctx context.Context) error {
+		if pool == nil || slot == nil {
+			return nil
+		}
+		return pool.Release(ctx, slot)
+	})
+	cleanup.Add(func(ctx context.Context) error {
+		if err := cleanupFiles(process.VmmSocketPath, process.VsockSocketPath); err != nil {
+			return fmt.Errorf("failed to cleanup files: %w", err)
+		}
+		return nil
+	})
+	cleanup.AddPriority(func(ctx context.Context) error {
+		return sb.Stop(ctx)
+	})
+	return sb, nil
 }
 
 func ResumeSandbox(
@@ -117,6 +186,7 @@ func ResumeSandbox(
 		process:      vmmHandle,
 		cleanup:      cleanup,
 		namespace:    namespace,
+		sandboxID:    sandboxId,
 		slot:         slot,
 	}
 
@@ -200,6 +270,7 @@ func CreateSandbox(
 		process:      vmmHandle,
 		cleanup:      cleanup,
 		namespace:    namespace,
+		sandboxID:    sandboxId,
 		slot:         slot,
 	}
 

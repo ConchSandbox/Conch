@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/coreos/go-iptables/iptables"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 )
@@ -347,6 +348,13 @@ func (p *Pool) trackInUse(slot *Slot) {
 	p.inUse[slot.Key] = slot
 }
 
+func (p *Pool) AttachInUse(slot *Slot) {
+	if p == nil || slot == nil {
+		return
+	}
+	p.trackInUse(slot)
+}
+
 func (p *Pool) untrackInUse(slot *Slot) {
 	p.inUseMu.Lock()
 	defer p.inUseMu.Unlock()
@@ -414,20 +422,38 @@ func (p *Pool) Cleanup() error {
 		cleaned++
 	}
 
-	for _, slot := range p.drainInUse() {
+	finishInUse := cleanupdiag.Start("network_pool.cleanup_in_use")
+	inUseSlots := p.drainInUse()
+	for _, slot := range inUseSlots {
 		cleanupSlot(slot, "in_use")
 	}
+	finishInUse(nil)
 
+	finishQueue := cleanupdiag.Start("network_pool.cleanup_queue", ulog.F("queued_slots", len(p.newSlots)), ulog.F("queue_capacity", cap(p.newSlots)))
+	queueCleaned := 0
 	for slot := range p.newSlots {
 		cleanupSlot(slot, "queue")
+		queueCleaned++
 	}
+	finishQueue(nil)
 
-	getLogger().Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
+	getLogger().Info("pool cleanup summary",
+		ulog.F("cleaned_slots", cleaned),
+		ulog.F("failed_slots", failed),
+		ulog.F("in_use_slots", len(inUseSlots)),
+		ulog.F("queue_slots", queueCleaned),
+	)
 
-	if err := deleteHostMasquerade(); err != nil {
+	finishMasquerade := cleanupdiag.Start("network_pool.delete_host_masquerade")
+	err := deleteHostMasquerade()
+	finishMasquerade(err)
+	if err != nil {
 		errs = append(errs, err)
 	}
-	if err := deleteAllBridges(); err != nil {
+	finishBridges := cleanupdiag.Start("network_pool.delete_bridges")
+	err = deleteAllBridges()
+	finishBridges(err)
+	if err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

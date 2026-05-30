@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/bits"
 	"net"
+	"syscall"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
@@ -91,57 +92,145 @@ func initAllBridges() (retErr error) {
 
 	for bridgeOrdinal := 0; bridgeOrdinal < configuredBridgeCount; bridgeOrdinal++ {
 		bridgeName := getBridgeName(bridgeOrdinal)
-		bridge := &netlink.Bridge{
-			LinkAttrs: netlink.LinkAttrs{
-				Name: bridgeName,
-				MTU:  1500,
-			},
-		}
-		if err := netlink.LinkAdd(bridge); err != nil {
-			getLogger().Error("failed to create bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
-			return fmt.Errorf("error creating bridge %s: %w", bridgeName, err)
-		}
-		created = append(created, bridgeName)
-
-		bridgeLink, err := netlink.LinkByName(bridgeName)
+		createdBridge, err := ensureBridge(bridgeName, bridgeOrdinal)
 		if err != nil {
-			getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
-			return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
+			return err
 		}
-
-		bridgeNet, err := getBridgeSubnet(bridgeOrdinal)
-		if err != nil {
-			return fmt.Errorf("error getting bridge subnet for %s: %w", bridgeName, err)
-		}
-		bridgeIP, err := netutils.GetIndexedIP(bridgeNet, vrtAddressPerSlot)
-		if err != nil {
-			return fmt.Errorf("error getting bridge IP for %s: %w", bridgeName, err)
-		}
-		if err := netlink.AddrAdd(bridgeLink, &netlink.Addr{
-			IPNet: &net.IPNet{
-				IP:   bridgeIP,
-				Mask: bridgeNet.Mask,
-			},
-		}); err != nil {
-			return fmt.Errorf("error assigning address to bridge %s: %w", bridgeName, err)
-		}
-
-		if err := netlink.LinkSetUp(bridgeLink); err != nil {
-			getLogger().Error("failed to set bridge up", ulog.F("bridge", bridgeName), ulog.F("error", err))
-			return fmt.Errorf("error setting bridge %s up: %w", bridgeName, err)
+		if createdBridge {
+			created = append(created, bridgeName)
 		}
 	}
 
 	return nil
 }
 
-func deleteBridge(bridgeName string) error {
-	veth, err := netlink.LinkByName(bridgeName)
+func ensureBridge(bridgeName string, bridgeOrdinal int) (bool, error) {
+	bridgeNet, err := getBridgeSubnet(bridgeOrdinal)
 	if err != nil {
+		return false, fmt.Errorf("error getting bridge subnet for %s: %w", bridgeName, err)
+	}
+	bridgeIP, err := netutils.GetIndexedIP(bridgeNet, vrtAddressPerSlot)
+	if err != nil {
+		return false, fmt.Errorf("error getting bridge IP for %s: %w", bridgeName, err)
+	}
+
+	bridgeLink, err := netlink.LinkByName(bridgeName)
+	if err == nil {
+		if err := configureExistingBridge(bridgeLink, bridgeName, bridgeIP, bridgeNet.Mask); err != nil {
+			return false, err
+		}
+		getLogger().Info("reusing existing bridge", ulog.F("bridge", bridgeName))
+		return false, nil
+	}
+
+	var notFound netlink.LinkNotFoundError
+	if !errors.As(err, &notFound) {
+		getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		return false, fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
+	}
+
+	bridge := &netlink.Bridge{
+		LinkAttrs: netlink.LinkAttrs{
+			Name: bridgeName,
+			MTU:  1500,
+		},
+	}
+	if err := netlink.LinkAdd(bridge); err != nil {
+		// Another conchd/process may have created the bridge between LinkByName and LinkAdd.
+		bridgeLink, lookupErr := netlink.LinkByName(bridgeName)
+		if lookupErr == nil {
+			if cfgErr := configureExistingBridge(bridgeLink, bridgeName, bridgeIP, bridgeNet.Mask); cfgErr != nil {
+				return false, cfgErr
+			}
+			getLogger().Info("reusing concurrently created bridge", ulog.F("bridge", bridgeName))
+			return false, nil
+		}
+		getLogger().Error("failed to create bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		return false, fmt.Errorf("error creating bridge %s: %w", bridgeName, err)
+	}
+
+	bridgeLink, err = netlink.LinkByName(bridgeName)
+	if err != nil {
+		getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		return true, fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
+	}
+	if err := configureExistingBridge(bridgeLink, bridgeName, bridgeIP, bridgeNet.Mask); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func configureExistingBridge(bridgeLink netlink.Link, bridgeName string, bridgeIP net.IP, bridgeMask net.IPMask) error {
+	if _, ok := bridgeLink.(*netlink.Bridge); !ok {
+		return fmt.Errorf("link %s already exists but is %s, not bridge", bridgeName, bridgeLink.Type())
+	}
+	if err := ensureBridgeAddress(bridgeLink, bridgeIP, bridgeMask); err != nil {
+		return fmt.Errorf("error assigning address to bridge %s: %w", bridgeName, err)
+	}
+	if err := netlink.LinkSetUp(bridgeLink); err != nil {
+		getLogger().Error("failed to set bridge up", ulog.F("bridge", bridgeName), ulog.F("error", err))
+		return fmt.Errorf("error setting bridge %s up: %w", bridgeName, err)
+	}
+	return nil
+}
+
+func ensureBridgeAddress(bridgeLink netlink.Link, bridgeIP net.IP, bridgeMask net.IPMask) error {
+	target := &net.IPNet{IP: bridgeIP, Mask: bridgeMask}
+	hasAddress, err := bridgeHasAddress(bridgeLink, target)
+	if err != nil {
+		return err
+	}
+	if hasAddress {
+		return nil
+	}
+	if err := netlink.AddrAdd(bridgeLink, &netlink.Addr{IPNet: target}); err != nil {
+		// Treat an address that appeared concurrently as success.
+		hasAddress, checkErr := bridgeHasAddress(bridgeLink, target)
+		if checkErr != nil {
+			return errors.Join(err, checkErr)
+		}
+		if hasAddress {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func bridgeHasAddress(bridgeLink netlink.Link, target *net.IPNet) (bool, error) {
+	addrs, err := netlink.AddrList(bridgeLink, syscall.AF_INET)
+	if err != nil {
+		return false, err
+	}
+	for _, addr := range addrs {
+		if ipNetEqual(addr.IPNet, target) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func ipNetEqual(a, b *net.IPNet) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.IP.Equal(b.IP) && string(a.Mask) == string(b.Mask)
+}
+
+func deleteBridge(bridgeName string) error {
+	bridge, err := netlink.LinkByName(bridgeName)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return nil
+		}
 		getLogger().Error("failed to find bridge", ulog.F("bridge", bridgeName), ulog.F("error", err))
 		return fmt.Errorf("error finding bridge %s: %w", bridgeName, err)
 	}
-	err = netlink.LinkDel(veth)
+	if _, ok := bridge.(*netlink.Bridge); !ok {
+		return fmt.Errorf("link %s exists but is %s, not bridge", bridgeName, bridge.Type())
+	}
+	err = netlink.LinkDel(bridge)
 	if err != nil {
 		getLogger().Error("failed to delete bridge device", ulog.F("bridge", bridgeName), ulog.F("error", err))
 		return fmt.Errorf("error delete bridge device %s: %w", bridgeName, err)

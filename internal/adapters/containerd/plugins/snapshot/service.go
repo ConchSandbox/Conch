@@ -13,6 +13,7 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 )
@@ -62,8 +63,10 @@ func New(client *containerdclient.Client, workDir string) (*Service, error) {
 }
 
 func (s *Service) Close() error {
-	conchsnapshot.CleanupAllViews()
-	return conchsnapshot.Close()
+	finishClose := cleanupdiag.Start("snapshot_service.close")
+	err := conchsnapshot.Close()
+	finishClose(err)
+	return err
 }
 
 func (s *Service) LinkVM(ctx context.Context, req LinkVMRequest) error {

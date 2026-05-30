@@ -43,3 +43,15 @@ sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
   request_timeout: 60s
+  default_image: hub.oepkgs.net/conch/openeuler:odd-x86
+  default_vmm_name: cloud-hypervisor
+  default_vcpu_num: 2
+  default_vcpu_max: 2
+  default_ram_mb: 4096
+
+state:
+  path: /var/lib/conch/state.db
+
+cri:
+  enabled: false
+  socket: /var/run/conchd/conch-cri.sock

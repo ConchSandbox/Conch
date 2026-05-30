@@ -2,28 +2,19 @@ package containerdclient
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
+	"strings"
+
+	"github.com/containerd/containerd/v2/core/leases"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
 )
 
-// session represents a namespace session with context and cancellation
-type session struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	lease  leases.Lease
-}
-
 // Client wraps containerd client connection and provides namespace management
 type Client struct {
-	*containerd.Client                     // embedded containerd client
-	sessions           map[string]*session // namespace -> session mapping
-	mu                 sync.RWMutex        // protects sessions
+	*containerd.Client // embedded containerd client
 }
 
 // NewInMemory creates a client backed by containerd services in the current
@@ -34,74 +25,78 @@ func NewInMemory(ic *plugin.InitContext, opts ...containerd.Opt) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	return &Client{
-		Client:   cli,
-		sessions: make(map[string]*session),
-	}, nil
+	return &Client{Client: cli}, nil
 }
 
-// GetNamespaceContext returns an existing namespace context
-// Returns (context, bool) - (nil, false) if namespace not found
-func (c *Client) GetNamespaceContext(namespace string) (context.Context, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	s, ok := c.sessions[namespace]
-	if !ok {
-		return nil, false
+func RuntimeLeaseID(namespace string) string {
+	ns := strings.TrimSpace(namespace)
+	if ns == "" {
+		ns = "default"
 	}
-	return s.ctx, true
+	return "conch.runtime." + ns
 }
 
-// WithNamespace returns a namespace context, creating a new session if needed
-// Uses double-check locking to avoid duplicate session creation
 func (c *Client) WithNamespace(ctx context.Context, namespace string) (context.Context, error) {
+	ns := strings.TrimSpace(namespace)
+	if ns == "" {
+		if c == nil || c.Client == nil {
+			return nil, fmt.Errorf("containerd client is nil")
+		}
+		ns = c.Client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	return namespaces.WithNamespace(ctx, ns), nil
+}
+
+func (c *Client) WithRuntimeLease(ctx context.Context, namespace, leaseID string) (context.Context, string, error) {
+	if c == nil || c.Client == nil {
+		return nil, "", fmt.Errorf("containerd client is nil")
+	}
 	ns := namespace
 	if ns == "" {
 		ns = c.Client.DefaultNamespace()
 	}
-
-	c.mu.RLock()
-	if s, ok := c.sessions[ns]; ok {
-		c.mu.RUnlock()
-		return s.ctx, nil
+	if ns == "" {
+		ns = "default"
 	}
-	c.mu.RUnlock()
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if s, ok := c.sessions[ns]; ok {
-		return s.ctx, nil
+	if leaseID == "" {
+		leaseID = RuntimeLeaseID(ns)
 	}
-
-	namespaceCtx := namespaces.WithNamespace(context.Background(), ns)
-	lease, err := c.LeasesService().Create(namespaceCtx, leases.WithRandomID())
-	if err != nil {
-		return nil, fmt.Errorf("create lease for namespace %s: %w", ns, err)
+	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	if err := c.ensureLease(namespaceCtx, leaseID, map[string]string{
+		"io.conch.lease.kind":      "runtime",
+		"io.conch.lease.namespace": ns,
+	}); err != nil {
+		return nil, "", err
 	}
-
-	sessionCtx, cancel := context.WithCancel(leases.WithLease(namespaceCtx, lease.ID))
-	c.sessions[ns] = &session{ctx: sessionCtx, cancel: cancel, lease: lease}
-	return sessionCtx, nil
+	return leases.WithLease(namespaceCtx, leaseID), leaseID, nil
 }
 
-// Close closes the connection and cleans up all sessions
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var errs []error
-	for k, v := range c.sessions {
-		namespaceCtx := namespaces.WithNamespace(context.Background(), k)
-		if err := c.LeasesService().Delete(namespaceCtx, v.lease); err != nil {
-			errs = append(errs, fmt.Errorf("delete lease %s in namespace %s: %w", v.lease.ID, k, err))
+func (c *Client) ensureLease(ctx context.Context, leaseID string, labels map[string]string) error {
+	items, err := c.LeasesService().List(ctx)
+	if err != nil {
+		return fmt.Errorf("list leases: %w", err)
+	}
+	for _, item := range items {
+		if item.ID == leaseID {
+			return nil
 		}
-		v.cancel()
-		delete(c.sessions, k)
 	}
-	if err := c.Client.Close(); err != nil {
-		errs = append(errs, err)
+	_, err = c.LeasesService().Create(ctx, leases.WithID(leaseID), leases.WithLabels(labels))
+	if err != nil {
+		return fmt.Errorf("create runtime lease %s: %w", leaseID, err)
 	}
-	return errors.Join(errs...)
+	return nil
+}
+
+// Close closes the containerd client connection.
+func (c *Client) Close() error {
+	if c == nil || c.Client == nil {
+		return nil
+	}
+	return c.Client.Close()
 }
 
 // DefaultNamespace returns the default namespace
