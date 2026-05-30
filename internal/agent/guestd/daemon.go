@@ -19,7 +19,7 @@ import (
 
 const (
 	ServerPort     = ":4064"
-	ServerVersion  = "0.0.2"
+	ServerVersion  = "0.0.3"
 	vsockReadyPort = 4065
 )
 
@@ -29,6 +29,45 @@ var (
 	mu               sync.Mutex
 	isSafe           = true
 )
+
+func initDefaultLogger(logFile string) ulog.Logger {
+	config := ulog.Config{
+		Level:  ulog.InfoLevel,
+		Stdout: true,
+	}
+	if logFile != "" {
+		config.OutputFile = logFile
+	}
+	if err := ulog.Init(config); err != nil {
+		panic(err)
+	}
+
+	logger := ulog.GetLogger()
+	if currentSandboxID != "" {
+		logger = logger.With(ulog.F("sandboxId", currentSandboxID))
+		ulog.SetLogger(logger)
+	}
+	rootLogger = logger
+	return logger
+}
+
+func refreshSandboxLoggerFromCmdline() string {
+	sandboxID := getSandboxIDFromCmdline()
+	if sandboxID == "" {
+		return ""
+	}
+
+	mu.Lock()
+	currentSandboxID = sandboxID
+	mu.Unlock()
+
+	if rootLogger == nil {
+		rootLogger = ulog.GetLogger()
+	}
+	rootLogger = rootLogger.ReplaceField("sandboxId", sandboxID)
+	ulog.SetLogger(rootLogger)
+	return sandboxID
+}
 
 func getSandboxIDFromCmdline() string {
 	data, err := os.ReadFile("/proc/cmdline")
@@ -117,6 +156,24 @@ func listenVsockLoop(handler VsockHandler) {
 }
 
 func Run(args []string) error {
+	flags := flag.NewFlagSet("conch-agent", flag.ExitOnError)
+	var asInit bool
+	var chrootPath string
+	flags.BoolVar(&asInit, "init", false, "Run as init process (PID 1)")
+	flags.StringVar(&chrootPath, "path", "", "Path for chroot directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	if !asInit && os.Getpid() == 1 {
+		asInit = true
+	}
+	if asInit {
+		initDefaultLogger("")
+		runAsInit()
+		return nil
+	}
+
 	// Initialize logger
 	logDir := "/var/log/conch-agent/"
 	err := os.MkdirAll(logDir, 0755)
@@ -156,13 +213,6 @@ func Run(args []string) error {
 		ulog.F("server_port", ServerPort),
 		ulog.F("vsock_port", vsockReadyPort),
 	)
-
-	flags := flag.NewFlagSet("conch-agent", flag.ExitOnError)
-	var chrootPath string
-	flags.StringVar(&chrootPath, "path", "", "Path for chroot directory")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
 
 	if chrootPath != "" {
 		logger.Info("Executing chroot", ulog.F("path", chrootPath))
