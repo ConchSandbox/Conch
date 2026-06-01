@@ -16,9 +16,13 @@ type RehydrateResult struct {
 }
 
 func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
-	if gServer.snt == nil {
+	if gServer == nil || gServer.snt == nil {
 		return RehydrateResult{}, fmt.Errorf("server not init")
 	}
+	return gServer.rehydrateRuntimeState(ctx, runtimes, views, aliases)
+}
+
+func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
 	var (
 		result RehydrateResult
 		errs   []error
@@ -31,12 +35,12 @@ func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntime
 			if key == "" {
 				continue
 			}
-			info, err := gServer.snt.Stat(ctx, rec.Namespace, key)
+			info, err := s.snt.Stat(ctx, rec.Namespace, key)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("stat active snapshot %s/%s: %w", rec.Namespace, key, err))
 				continue
 			}
-			gServer.addActiveSnapshot(rec.Namespace, key, &info)
+			s.addActiveSnapshot(rec.Namespace, key, &info)
 			result.ActiveSnapshots++
 		}
 	}
@@ -63,7 +67,7 @@ func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntime
 		if aliasCount := aliasRefs[rec.Namespace+"/"+rec.ParentSnapshotID]; aliasCount > refCount {
 			refCount = aliasCount
 		}
-		gServer.viewMgr.restoreViewMount(rec.Namespace, rec.ParentSnapshotID, rec.ViewSnapshotKey, rec.MountPoint, refCount)
+		s.viewMgr.restoreViewMount(rec.Namespace, rec.ParentSnapshotID, rec.ViewSnapshotKey, rec.MountPoint, refCount)
 		restoredViews[rec.Namespace+"/"+rec.ParentSnapshotID] = struct{}{}
 		result.ViewMounts++
 	}
@@ -74,7 +78,7 @@ func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntime
 		if _, ok := restoredViews[rec.Namespace+"/"+rec.ParentSnapshotID]; !ok {
 			continue
 		}
-		gServer.viewMgr.restoreViewAlias(rec.Namespace, rec.AliasKey, rec.ParentSnapshotID)
+		s.viewMgr.restoreViewAlias(rec.Namespace, rec.AliasKey, rec.ParentSnapshotID)
 		result.ViewAliases++
 	}
 	return result, errors.Join(errs...)

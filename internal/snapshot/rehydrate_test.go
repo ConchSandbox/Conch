@@ -15,7 +15,7 @@ func TestRehydrateRuntimeStateSkipsAliasesForUnrestoredViews(t *testing.T) {
 	mountPoint := t.TempDir()
 	missingMountPoint := t.TempDir() + "/missing"
 
-	gServer = server{
+	srv := &server{
 		snt:              fakeSnapshotter{},
 		activeSnapshots:  make(map[string]map[string]*snapshots.Info),
 		activeRootfsPmem: make(map[string]map[string][]string),
@@ -24,11 +24,8 @@ func TestRehydrateRuntimeStateSkipsAliasesForUnrestoredViews(t *testing.T) {
 			viewAliases: make(map[string]map[string]string),
 		},
 	}
-	t.Cleanup(func() {
-		gServer = server{}
-	})
 
-	result, err := RehydrateRuntimeState(ctx, nil, []state.ViewSnapshotRecord{
+	result, err := srv.rehydrateRuntimeState(ctx, nil, []state.ViewSnapshotRecord{
 		{
 			Namespace:        "default",
 			ParentSnapshotID: "parent-ready",
@@ -66,10 +63,10 @@ func TestRehydrateRuntimeStateSkipsAliasesForUnrestoredViews(t *testing.T) {
 	if result.ViewAliases != 1 {
 		t.Fatalf("ViewAliases = %d, want 1", result.ViewAliases)
 	}
-	if parent, ok := gServer.viewMgr.getViewAlias("default", "alias-ready"); !ok || parent != "parent-ready" {
+	if parent, ok := srv.viewMgr.getViewAlias("default", "alias-ready"); !ok || parent != "parent-ready" {
 		t.Fatalf("ready alias = (%q, %v), want parent-ready true", parent, ok)
 	}
-	if parent, ok := gServer.viewMgr.getViewAlias("default", "alias-missing"); ok {
+	if parent, ok := srv.viewMgr.getViewAlias("default", "alias-missing"); ok {
 		t.Fatalf("missing alias restored to %q, want absent", parent)
 	}
 }
