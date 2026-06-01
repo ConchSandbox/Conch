@@ -121,6 +121,7 @@ func (w *stdoutWriter) Sync() error {
 type Config struct {
 	Level       LogLevel // Minimum log level to output
 	OutputPath  string   // Path to log directory (default: /var/log/conchd/)
+	OutputFile  string   // Exact path to a log file. If set, OutputPath is ignored.
 	Stdout      bool     // Also write to stdout
 	MaxFileSize int64    // Maximum size for a log file before rotation (default: 10MB)
 }
@@ -164,13 +165,10 @@ func Init(config Config) error {
 		rotation:    0,
 	}
 
-	// Determine output mode based on OutputPath and Stdout
-	// Mode 1: Only stdout (OutputPath is empty, Stdout is true)
-	// Mode 2: Only file (OutputPath is set, Stdout is false)
-	// Mode 3: Both stdout and file (OutputPath is set, Stdout is true)
-	onlyStdout := (config.OutputPath == "" && config.Stdout)
-	fileMode := (config.OutputPath != "")
-	bothMode := (config.OutputPath != "" && config.Stdout)
+	// Determine output mode based on OutputFile/OutputPath and Stdout.
+	onlyStdout := (config.OutputFile == "" && config.OutputPath == "" && config.Stdout)
+	fileMode := (config.OutputFile != "" || config.OutputPath != "")
+	bothMode := fileMode && config.Stdout
 
 	if onlyStdout {
 		// Pure stdout mode - no file creation
@@ -178,17 +176,20 @@ func Init(config Config) error {
 		logger.filePath = ""
 		logger.writer = &stdoutWriter{}
 	} else if fileMode {
-		// File mode or both mode - create log directory and file
-		// Create log directory if it doesn't exist
-		if err := os.MkdirAll(config.OutputPath, 0755); err != nil {
-			return fmt.Errorf("failed to create log directory: %w", err)
+		var logFilePath string
+		if config.OutputFile != "" {
+			logFilePath = config.OutputFile
+		} else {
+			now := time.Now()
+			datetime := now.Format("20060102-150405")
+			logFileName := fmt.Sprintf("%s.log", datetime)
+			logFilePath = filepath.Join(config.OutputPath, logFileName)
 		}
 
-		// Create log file with datetime in filename
-		now := time.Now()
-		datetime := now.Format("20060102-150405")
-		logFileName := fmt.Sprintf("%s.log", datetime)
-		logFilePath := filepath.Join(config.OutputPath, logFileName)
+		logDir := filepath.Dir(logFilePath)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory: %w", err)
+		}
 
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
@@ -205,8 +206,8 @@ func Init(config Config) error {
 				stdout:      os.Stdout,
 				filePath:    logFilePath,
 				maxFileSize: config.MaxFileSize,
-				baseName:    logFileName,
-				outputPath:  config.OutputPath,
+				baseName:    filepath.Base(logFilePath),
+				outputPath:  filepath.Dir(logFilePath),
 				rotation:    &logger.rotation,
 			}
 		} else {
