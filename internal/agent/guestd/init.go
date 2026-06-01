@@ -98,12 +98,20 @@ func runAsInit() {
 			ulog.GetLogger().Info("Rootfs conch entrypoint not found; skipping rootfs service startup")
 		}
 
-		chrootToMerge()
+		if err := chrootToMerge(); err != nil {
+			ulog.GetLogger().Error("Failed to chroot into merge layer, aborting init")
+			return
+		}
 	} else {
 		ulog.GetLogger().Warn("Overlay rootfs not found", ulog.F("target", MergeTarget))
 	}
 
-	startGRPCServerAsync()
+	if err := startGRPCServerAsync(); err != nil {
+		ulog.GetLogger().Error("gRPC server failed to start, vsock will report NOT_READY",
+			ulog.F("error", err),
+		)
+	}
+
 	go startVsockServer()
 	go reapChildren()
 	go waitForRootfsServiceReadySignal()
@@ -112,16 +120,18 @@ func runAsInit() {
 	waitForSignal()
 }
 
-// chrootToMerge chroot to the OverlayFS merge layer
-func chrootToMerge() {
+// chrootToMerge chroot to the OverlayFS merge layer.
+func chrootToMerge() error {
 	logger := ulog.GetLogger()
 	if err := syscall.Chroot(MergeTarget); err != nil {
 		logger.Error("Chroot failed", ulog.F("target", MergeTarget), ulog.F("error", err))
-		return
+		return err
 	}
 	if err := os.Chdir("/"); err != nil {
 		logger.Error("Chdir failed", ulog.F("target", "/"), ulog.F("error", err))
+		return err
 	}
+	return nil
 }
 
 func waitForRootfsServiceReadySignal() {
@@ -144,7 +154,7 @@ func waitForSignal() {
 // startGRPCServerAsync binds the gRPC listener synchronously, then serves in
 // the background. Returning after net.Listen succeeds makes vsock READY checks
 // deterministic without waiting on rootfs services.
-func startGRPCServerAsync() {
+func startGRPCServerAsync() error {
 	logger := ulog.GetLogger()
 	listener, err := net.Listen("tcp", ServerPort)
 	if err != nil {
@@ -152,7 +162,7 @@ func startGRPCServerAsync() {
 			ulog.F("port", ServerPort),
 			ulog.F("error", err),
 		)
-		return
+		return err
 	}
 
 	grpcServer := grpc.NewServer()
@@ -170,9 +180,10 @@ func startGRPCServerAsync() {
 			ulog.GetLogger().Error("gRPC server error", ulog.F("error", err))
 		}
 	}()
+	return nil
 }
 
-// startVsockServer starts the vsock server (original logic)
+// startVsockServer starts the vsock server for host communication.
 func startVsockServer() {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {

@@ -248,6 +248,8 @@ func Run(args []string) error {
 
 	reflection.Register(grpcServer)
 
+	markGRPCReady()
+
 	go func() {
 		logger.Info("gRPC server starting", ulog.F("address", listener.Addr()))
 

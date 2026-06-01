@@ -9,7 +9,7 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-// setupNetwork replicates the original conch-network-setup.sh script
+// setupNetwork brings up the loopback and first non-lo interface with a static IP.
 func setupNetwork() {
 	logger := ulog.GetLogger()
 	// ip link set lo up

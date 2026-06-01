@@ -11,8 +11,7 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-// reapChildren reaps zombie child processes (required for PID 1)
-// This replaces the original "exec bash" behavior
+// reapChildren reaps zombie child processes (required for PID 1).
 func reapChildren() {
 	logger := ulog.GetLogger()
 	for {
