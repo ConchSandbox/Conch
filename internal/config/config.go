@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"gopkg.in/yaml.v3"
 )
@@ -49,12 +50,16 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int    `yaml:"pool_size"`
-	DynamicReservation bool   `yaml:"dynamic_reservation"`
-	BridgeCount        int    `yaml:"bridge_count"`
-	TapIP              string `yaml:"tap_ip"`
-	TapMask            int    `yaml:"tap_mask"`
+	PoolSize           int       `yaml:"pool_size"`
+	DynamicReservation bool      `yaml:"dynamic_reservation"`
+	BridgeCount        int       `yaml:"bridge_count"`
+	TapIP              string    `yaml:"tap_ip"`
+	TapMask            int       `yaml:"tap_mask"`
+	CNI                CNIConfig `yaml:"cni"`
 }
+
+// CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
+type CNIConfig = netstack.CNIManagerConfig
 
 // ContainerdConfig holds containerd runtime configuration
 type ContainerdConfig struct {
@@ -116,6 +121,12 @@ func DefaultConfig() *Config {
 			BridgeCount:        1,
 			TapIP:              "192.168.100.2",
 			TapMask:            24,
+			CNI: CNIConfig{
+				PluginBinDirs: []string{"/opt/cni/bin"},
+				PluginConfDir: "/etc/conch/cni/net.d",
+				PluginMaxConf: 1,
+				IfName:        "eth0",
+			},
 		},
 		Containerd: ContainerdConfig{
 			RootDir:          "/var/lib/conch/containerd",
@@ -150,6 +161,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	// If config path is empty, use default config
 	if configPath == "" {
 		return DefaultConfig(), nil
+	}
+	if absPath, err := filepath.Abs(configPath); err == nil {
+		configPath = absPath
 	}
 
 	// Read config file
@@ -206,6 +220,19 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Network.TapMask == 0 {
 		cfg.Network.TapMask = defaultCfg.Network.TapMask
 	}
+	if len(cfg.Network.CNI.PluginBinDirs) == 0 {
+		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
+	}
+	if cfg.Network.CNI.PluginConfDir == "" {
+		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
+	}
+	cfg.Network.CNI.PluginConfDir = resolveCNIPluginConfDir(configPath, cfg.Network.CNI.PluginConfDir, defaultCfg.Network.CNI.PluginConfDir)
+	if cfg.Network.CNI.PluginMaxConf == 0 {
+		cfg.Network.CNI.PluginMaxConf = defaultCfg.Network.CNI.PluginMaxConf
+	}
+	if cfg.Network.CNI.IfName == "" {
+		cfg.Network.CNI.IfName = defaultCfg.Network.CNI.IfName
+	}
 	if cfg.Containerd.RootDir == "" {
 		cfg.Containerd.RootDir = defaultCfg.Containerd.RootDir
 	}
@@ -254,6 +281,34 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func resolveCNIPluginConfDir(configPath, confDir, defaultConfDir string) string {
+	if confDir != defaultConfDir || hasCNIConfig(confDir) {
+		return confDir
+	}
+	localConfDir := filepath.Join(filepath.Dir(configPath), "cni", "net.d")
+	if hasCNIConfig(localConfDir) {
+		return localConfDir
+	}
+	return confDir
+}
+
+func hasCNIConfig(confDir string) bool {
+	entries, err := os.ReadDir(confDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext == ".conf" || ext == ".conflist" {
+			return true
+		}
+	}
+	return false
 }
 
 // GetLogConfig converts LogConfig to ulog.Config

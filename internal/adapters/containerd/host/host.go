@@ -19,12 +19,13 @@ import (
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	sandboxSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
+	"github.com/openeuler/Conch/internal/netstack"
 )
 
 const (
@@ -55,6 +56,7 @@ type SandboxConfig struct {
 	BridgeCount        int
 	TapIP              string
 	TapMask            int
+	CNI                netstack.CNIManagerConfig
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
@@ -266,6 +268,7 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 		"bridge_count":         cfg.BridgeCount,
 		"tap_ip":               cfg.TapIP,
 		"tap_mask":             cfg.TapMask,
+		"cni":                  cfg.CNI,
 		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
 		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
 		"request_timeout":      cfg.RequestTimeout.String(),

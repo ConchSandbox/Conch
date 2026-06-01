@@ -150,6 +150,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			BridgeCount:        cfg.Network.BridgeCount,
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
+			CNI:                cfg.Network.CNI,
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,

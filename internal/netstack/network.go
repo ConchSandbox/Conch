@@ -14,14 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 [MODIFIED] - Changes made on 2025-12-24 by Team conch: Add veth into bridge and optimize iptables config
+[MODIFIED] - Changes made on 2026-05-13 by Team conch: Split CNI-owned outer networking from Conch-owned guest tap networking
 */
 package netstack
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/coreos/go-iptables/iptables"
@@ -38,236 +41,223 @@ func enableIPv4Forwarding(sysctlPath string) error {
 	return nil
 }
 
-func (s *Slot) addVethToBridge(veth *netlink.Veth, hostNS netns.NsHandle) error {
-	// Move Veth device to the host NS
-	err := netlink.LinkSetNsFd(veth, int(hostNS))
-	if err != nil {
-		return fmt.Errorf("error moving veth device to the host namespace: %w", err)
-	}
-	err = netns.Set(hostNS)
-	if err != nil {
-		return fmt.Errorf("error setting network namespace: %w", err)
-	}
-
-	// add veth into bridge
-	vethInHost, err := netlink.LinkByName(s.VethName())
-	if err != nil {
-		return fmt.Errorf("error finding veth: %w", err)
-	}
-	err = netlink.LinkSetUp(vethInHost)
-	if err != nil {
-		return fmt.Errorf("error setting veth device up: %w", err)
-	}
-	bridgeLink, err := netlink.LinkByName(s.BridgeName())
-	if err != nil {
-		return fmt.Errorf("error finding bridge %s: %w", s.BridgeName(), err)
-	}
-	if err := netlink.LinkSetMaster(vethInHost, bridgeLink); err != nil {
-		return fmt.Errorf("error add veth %v into bridge %v: %w", vethInHost, bridgeLink, err)
-	}
-
-	return nil
-}
-
-func (s *Slot) initSandboxNetwork(tables *iptables.IPTables, sandboxNs netns.NsHandle) error {
-	err := netns.Set(sandboxNs)
-	if err != nil {
-		return fmt.Errorf("error setting network namespace to %s: %w", sandboxNs.String(), err)
-	}
-	// create tap interface
-	tapAttrs := netlink.NewLinkAttrs()
-	tapAttrs.Name = s.TapName()
-	tapAttrs.Namespace = sandboxNs
-	tap := &netlink.Tuntap{
-		Mode:      netlink.TUNTAP_MODE_TAP,
-		LinkAttrs: tapAttrs,
-	}
-	err = netlink.LinkAdd(tap)
-	if err != nil {
-		return fmt.Errorf("error creating tap device: %w", err)
-	}
-	err = netlink.LinkSetUp(tap)
-	if err != nil {
-		return fmt.Errorf("error setting tap device up: %w", err)
-	}
-	err = netlink.AddrAdd(tap, &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   s.TapIP(),
-			Mask: s.TapCIDR(),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("error setting address of the tap device: %w", err)
-	}
-
-	// set NS lo device up
-	lo, err := netlink.LinkByName(loopbackInterface)
-	if err != nil {
-		return fmt.Errorf("error finding lo: %w", err)
-	}
-	err = netlink.LinkSetUp(lo)
-	if err != nil {
-		return fmt.Errorf("error setting lo device up: %w", err)
-	}
-
-	// DNAT to the guest tap address requires IPv4 forwarding inside the sandbox netns.
-	if err := enableIPv4Forwarding(ipv4ForwardingSysctlPath); err != nil {
-		return err
-	}
-
-	// Add NS default route
-	link, err := netlink.LinkByName(s.VpeerName())
-	if err != nil {
-		return fmt.Errorf("error finding vpeer: %w", err)
-	}
-	linkIndex := link.Attrs().Index
-	err = netlink.RouteAdd(&netlink.Route{
-		LinkIndex: linkIndex,
-		Gw:        s.BridgeIP(),
-	})
-	if err != nil {
-		return fmt.Errorf("error adding default NS route: %w", err)
-	}
-
-	// Add NAT routing rules to NS
-	err = tables.Append("nat", "POSTROUTING", "-s", s.NamespaceIP(), "-j", "SNAT", "--to", s.VpeerIPString())
-	if err != nil {
-		return fmt.Errorf("error creating postrouting rule to vpeer: %w", err)
-	}
-	err = tables.Append("nat", "PREROUTING", "-d", s.VpeerIPString(), "-j", "DNAT", "--to-destination", s.NamespaceIP())
-	if err != nil {
-		return fmt.Errorf("error creating postrouting rule from vpeer: %w", err)
-	}
-
-	return nil
-}
-
-func (s *Slot) setHostRoute(hostNS netns.NsHandle) error {
-	err := netns.Set(hostNS)
-	if err != nil {
-		return fmt.Errorf("error setting network namespace to %s: %w", hostNS.String(), err)
-	}
-	return nil
-}
-
-func (s *Slot) CreateNetwork() (retErr error) {
-	// prevent thread changes so we can safely manipulate with namespaces
+func runInNetNSPath(netnsPath string, fn func() error) (retErr error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	// get host namespace
 	hostNS, err := netns.Get()
 	if err != nil {
-		return fmt.Errorf("cannot get current (host) namespace: %w", err)
+		return fmt.Errorf("cannot get current namespace: %w", err)
 	}
 	defer func() {
-		err = netns.Set(hostNS)
-		if err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace: %w", err))
+		if err := netns.Set(hostNS); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to host: %w", err))
 		}
-
-		err = hostNS.Close()
-		if err != nil {
+		if err := hostNS.Close(); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
 		}
 	}()
 
-	// Create NS for the sandbox and enter new network NS
-	ns, err := netns.NewNamed(s.NamespaceID())
+	targetNS, err := netns.GetFromPath(netnsPath)
 	if err != nil {
-		return fmt.Errorf("cannot create new namespace: %w", err)
+		return fmt.Errorf("cannot open network namespace %s: %w", netnsPath, err)
 	}
 	defer func() {
-		ns.Close()
-		if retErr != nil {
-			nsErr := netns.DeleteNamed(s.NamespaceID())
-			if nsErr != nil {
-				retErr = errors.Join(retErr, fmt.Errorf("error deleting namespace: %w", nsErr))
-			}
+		if err := targetNS.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error closing target network namespace %s: %w", netnsPath, err))
 		}
 	}()
 
-	// Create the Veth and Vpeer
-	vethAttrs := netlink.NewLinkAttrs()
-	vethAttrs.Name = s.VethName()
-	veth := &netlink.Veth{
-		LinkAttrs: vethAttrs,
-		PeerName:  s.VpeerName(),
+	if err := netns.Set(targetNS); err != nil {
+		return fmt.Errorf("error setting network namespace to %s: %w", netnsPath, err)
 	}
-	err = netlink.LinkAdd(veth)
+	return fn()
+}
+
+func CreateSandboxNetworkNamespace(slot *Slot) (netnsPath string, retErr error) {
+	if slot == nil {
+		return "", fmt.Errorf("slot is nil")
+	}
+	netnsPath = slot.NetNSPath()
+	if _, err := os.Stat(netnsPath); err == nil {
+		return netnsPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("error checking network namespace %s: %w", netnsPath, err)
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hostNS, err := netns.Get()
 	if err != nil {
-		return fmt.Errorf("error creating veth device: %w", err)
+		return "", fmt.Errorf("cannot get current (host) namespace: %w", err)
 	}
 	defer func() {
-		if retErr != nil {
-			err = netns.Set(hostNS)
-			if err != nil {
-				retErr = errors.Join(retErr, fmt.Errorf("error setting host network namespace: %w", err))
-				return
-			}
-			if link, err := netlink.LinkByName(s.VethName()); err == nil {
-				if err := netlink.LinkDel(link); err != nil && !os.IsNotExist(err) {
-					retErr = errors.Join(retErr, fmt.Errorf("delete veth failed: %w", err))
-				}
-			}
+		if err := netns.Set(hostNS); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace: %w", err))
+		}
+		if err := hostNS.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
 		}
 	}()
-	vpeer, err := netlink.LinkByName(s.VpeerName())
+
+	ns, err := netns.NewNamed(slot.NamespaceID())
 	if err != nil {
-		return fmt.Errorf("error finding vpeer: %w", err)
+		return "", fmt.Errorf("cannot create new namespace: %w", err)
 	}
-	err = netlink.LinkSetUp(vpeer)
+	defer ns.Close()
+
+	return netnsPath, nil
+}
+
+func DeleteSandboxNetworkNamespace(netnsPath string) error {
+	if netnsPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(netnsPath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("error checking namespace %s: %w", netnsPath, err)
+	}
+	if err := netns.DeleteNamed(filepath.Base(netnsPath)); err != nil {
+		return fmt.Errorf("error deleting namespace %s: %w", netnsPath, err)
+	}
+	return nil
+}
+
+func (s *Slot) CreateNetwork() error {
+	netnsPath, err := CreateSandboxNetworkNamespace(s)
 	if err != nil {
-		return fmt.Errorf("error setting vpeer device up: %w", err)
+		return fmt.Errorf("failed to create network for slot index %d: %w", s.Idx, err)
 	}
-	// add IP for ns-veth-%{idx}
-	err = netlink.AddrAdd(vpeer, &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   s.VpeerIP(),
-			Mask: s.VrtMask(),
-		},
+	s.setNetNSPath(netnsPath)
+	return nil
+}
+
+func SetupGuestTapNetwork(ctx context.Context, slot *Slot, netnsPath string, cniResult *CNIResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	return runInNetNSPath(netnsPath, func() error {
+		return slot.setupGuestTapNetwork(cniResult)
 	})
-	if err != nil {
-		return fmt.Errorf("error adding vpeer device address: %w", err)
+}
+
+func TeardownGuestTapNetwork(ctx context.Context, slot *Slot, netnsPath string, cniResult *CNIResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	return runInNetNSPath(netnsPath, func() error {
+		return slot.teardownGuestTapNetwork(cniResult)
+	})
+}
+
+func ValidateReusableSlotNetwork(ctx context.Context, slot *Slot, netnsPath string, ifName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if ifName == "" {
+		ifName = defaultCNIIfName
+	}
+	return runInNetNSPath(netnsPath, func() error {
+		if _, err := netlink.LinkByName(ifName); err != nil {
+			return fmt.Errorf("cni interface %s missing: %w", ifName, err)
+		}
+		if _, err := netlink.LinkByName(slot.TapName()); err != nil {
+			return fmt.Errorf("tap interface %s missing: %w", slot.TapName(), err)
+		}
+		return nil
+	})
+}
+
+func (s *Slot) setupGuestTapNetwork(cniResult *CNIResult) error {
+	if cniResult == nil || cniResult.IP == "" {
+		return fmt.Errorf("cni result has no sandbox outer IP")
 	}
 
-	if err = s.addVethToBridge(veth, hostNS); err != nil {
-		return fmt.Errorf("error adding veth to bridge: %w", err)
+	tapAttrs := netlink.NewLinkAttrs()
+	tapAttrs.Name = s.TapName()
+	tap := &netlink.Tuntap{
+		Mode:      netlink.TUNTAP_MODE_TAP,
+		LinkAttrs: tapAttrs,
 	}
+	if err := netlink.LinkAdd(tap); err != nil {
+		return fmt.Errorf("error creating tap device: %w", err)
+	}
+	if err := netlink.LinkSetUp(tap); err != nil {
+		return fmt.Errorf("error setting tap device up: %w", err)
+	}
+	if err := netlink.AddrAdd(tap, &netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   s.TapIP(),
+			Mask: s.TapCIDR(),
+		},
+	}); err != nil {
+		return fmt.Errorf("error setting address of the tap device: %w", err)
+	}
+
+	lo, err := netlink.LinkByName(loopbackInterface)
+	if err != nil {
+		return fmt.Errorf("error finding lo: %w", err)
+	}
+	if err := netlink.LinkSetUp(lo); err != nil {
+		return fmt.Errorf("error setting lo device up: %w", err)
+	}
+
+	if err := enableIPv4Forwarding(ipv4ForwardingSysctlPath); err != nil {
+		return err
+	}
+
 	tables, err := iptables.New()
 	if err != nil {
 		return fmt.Errorf("error initializing iptables: %w", err)
 	}
-	if err := s.initSandboxNetwork(tables, ns); err != nil {
-		return fmt.Errorf("error init sandbox network: %w", err)
+	if err := tables.Append("nat", "POSTROUTING", "-s", s.NamespaceIP(), "-j", "SNAT", "--to", cniResult.IP); err != nil {
+		return fmt.Errorf("error creating postrouting rule to guest tap: %w", err)
 	}
-	// todo: init nftables
-	// if the netns network where the sandbox is located needs to perform traffic filtering and forwarding later,
-	// the firewall needs to be enabled.
+	if err := tables.Append("nat", "PREROUTING", "-d", cniResult.IP, "-j", "DNAT", "--to-destination", s.NamespaceIP()); err != nil {
+		return fmt.Errorf("error creating prerouting rule to guest tap: %w", err)
+	}
 
-	return s.setHostRoute(hostNS)
+	return nil
 }
 
-func (s *Slot) RemoveNetwork() error {
+func (s *Slot) teardownGuestTapNetwork(cniResult *CNIResult) error {
 	var errs []error
 
-	// delete veth device
-	veth, err := netlink.LinkByName(s.VethName())
-	if err != nil {
-		var linkNotFound netlink.LinkNotFoundError
-		if !errors.As(err, &linkNotFound) {
-			errs = append(errs, fmt.Errorf("error finding veth: %w", err))
-		}
-	} else {
-		err = netlink.LinkDel(veth)
+	if cniResult != nil && cniResult.IP != "" {
+		tables, err := iptables.New()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("error deleting veth device: %w", err))
+			errs = append(errs, fmt.Errorf("error initializing iptables: %w", err))
+		} else {
+			if err := tables.DeleteIfExists("nat", "POSTROUTING", "-s", s.NamespaceIP(), "-j", "SNAT", "--to", cniResult.IP); err != nil {
+				errs = append(errs, fmt.Errorf("error deleting postrouting rule to guest tap: %w", err))
+			}
+			if err := tables.DeleteIfExists("nat", "PREROUTING", "-d", cniResult.IP, "-j", "DNAT", "--to-destination", s.NamespaceIP()); err != nil {
+				errs = append(errs, fmt.Errorf("error deleting prerouting rule to guest tap: %w", err))
+			}
 		}
 	}
-	// delete ns
-	err = netns.DeleteNamed(s.NamespaceID())
-	if err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("error deleting namespace: %w", err))
+
+	tap, err := netlink.LinkByName(s.TapName())
+	if err == nil {
+		if err := netlink.LinkDel(tap); err != nil {
+			errs = append(errs, fmt.Errorf("error deleting tap device: %w", err))
+		}
+	} else {
+		var linkNotFound netlink.LinkNotFoundError
+		if !errors.As(err, &linkNotFound) && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("error finding tap device: %w", err))
+		}
 	}
 
 	return errors.Join(errs...)
