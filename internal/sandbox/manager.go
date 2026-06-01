@@ -238,6 +238,15 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create sandbox: CID allocation error: %v", err)
 	}
+	cidAllocated := true
+	defer func() {
+		if cidAllocated {
+			if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
+				logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
+			}
+		}
+	}()
+
 	vsockSocketPath, err := SandboxVsockSocketPath(key)
 	if err != nil {
 		return "", fmt.Errorf("failed to create sandbox: vsock socket path error: %v", err)
@@ -273,9 +282,6 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	sbx, err = createSandboxWithVsockSend(ctx, snapshotConf, namespace, req.VmmName, req.SandboxId, req.VcpuNum, vcpuMax, m.pool, m.vsockSignalRetry, m.vsockSignalTimeout, resume, vsockCID, vsockSocketPath)
 
 	if err != nil {
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
 		return "", fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	peerIP = sbx.slot.VpeerIPString()
@@ -301,6 +307,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 
 		m.sandboxes.Delete(mapKey)
 	}()
+	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
 
