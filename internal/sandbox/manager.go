@@ -410,6 +410,9 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		if err := snapshot.Remove(context.Background(), sbx.namespace, req.SandboxId); err != nil {
 			logger.Error("sandbox remove error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
 		}
+		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
+			logger.Warn("failed to release CID after pause", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
+		}
 	}()
 
 	if err := sbx.Pause(ctx); err != nil {
