@@ -129,13 +129,13 @@ func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req imageSvc.
 	}, nil
 }
 
-func newRuntimeForTest(image *fakeImageService, snapshot *fakeSnapshotService, sandboxOps *fakeSandboxOps) *conchruntime.Service {
+func newRuntimeForTest(image conchruntime.ImageOps, snapshot conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *conchruntime.Service {
 	rt := conchruntime.New(sandboxOps, image, nil, "default")
 	rt.Snapshot = snapshot
 	return rt
 }
 
-func newImageHandlerServer(svc *fakeImageService) *Daemon {
+func newImageHandlerServer(svc conchruntime.ImageOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
 		runtimeService: newRuntimeForTest(svc, nil, nil),
@@ -145,7 +145,7 @@ func newImageHandlerServer(svc *fakeImageService) *Daemon {
 	return s
 }
 
-func newSnapshotHandlerServer(svc *fakeSnapshotService) *Daemon {
+func newSnapshotHandlerServer(svc conchruntime.SnapshotOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
 		runtimeService: newRuntimeForTest(nil, svc, nil),
@@ -154,7 +154,7 @@ func newSnapshotHandlerServer(svc *fakeSnapshotService) *Daemon {
 	return s
 }
 
-func newConvertHandlerServer(imageSvc *fakeImageService, snapshotSvc *fakeSnapshotService, sandboxOps *fakeSandboxOps) *Daemon {
+func newConvertHandlerServer(imageSvc conchruntime.ImageOps, snapshotSvc conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
 		runtimeService: newRuntimeForTest(imageSvc, snapshotSvc, sandboxOps),
