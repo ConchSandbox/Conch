@@ -139,7 +139,7 @@ func ResumeSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -225,7 +225,7 @@ func CreateSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}

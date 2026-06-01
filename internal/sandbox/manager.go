@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -348,14 +348,22 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, error) {
 			continue
 		}
 		sb.leaseID = rec.LeaseID
+		cidReserved := false
 		if rec.VsockCID != 0 {
 			if err := m.cidAllocator.ReserveCID(rec.ConchSandboxID, rec.VsockCID); err != nil {
 				errs = append(errs, fmt.Errorf("reserve cid for %s: %w", rec.ConchSandboxID, err))
 				continue
 			}
+			cidReserved = true
 		}
 		if sb.slot != nil && m.pool != nil {
-			m.pool.AttachInUse(sb.slot)
+			if err := m.pool.RestoreInUse(sb.slot, rec.ConchSandboxID, rec.IP); err != nil {
+				if cidReserved {
+					_ = m.ReleaseCID(rec.ConchSandboxID)
+				}
+				errs = append(errs, fmt.Errorf("restore network slot for %s: %w", rec.ConchSandboxID, err))
+				continue
+			}
 		}
 		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), sb)
 		restored++

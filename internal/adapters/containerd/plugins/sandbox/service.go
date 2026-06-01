@@ -18,14 +18,15 @@ import (
 )
 
 type Config struct {
-	PoolSize           int    `toml:"pool_size" json:"poolSize"`
-	DynamicReservation bool   `toml:"dynamic_reservation" json:"dynamicReservation"`
-	BridgeCount        int    `toml:"bridge_count" json:"bridgeCount"`
-	TapIP              string `toml:"tap_ip" json:"tapIP"`
-	TapMask            int    `toml:"tap_mask" json:"tapMask"`
-	VsockSignalRetry   string `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
-	VsockSignalTimeout string `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
-	RequestTimeout     string `toml:"request_timeout" json:"requestTimeout"`
+	PoolSize           int                       `toml:"pool_size" json:"poolSize"`
+	DynamicReservation bool                      `toml:"dynamic_reservation" json:"dynamicReservation"`
+	BridgeCount        int                       `toml:"bridge_count" json:"bridgeCount"`
+	TapIP              string                    `toml:"tap_ip" json:"tapIP"`
+	TapMask            int                       `toml:"tap_mask" json:"tapMask"`
+	CNI                netstack.CNIManagerConfig `toml:"cni" json:"cni"`
+	VsockSignalRetry   string                    `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
+	VsockSignalTimeout string                    `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
+	RequestTimeout     string                    `toml:"request_timeout" json:"requestTimeout"`
 }
 
 type Service struct {
@@ -49,7 +50,7 @@ func New(ctx context.Context, client *containerdclient.Client, cfg Config) (*Ser
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := netstack.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask)
+	pool, err := netstack.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask, cfg.CNI)
 	if err != nil {
 		return nil, err
 	}
