@@ -35,7 +35,7 @@ func mountFS(source, target, fstype string, flags uintptr, data string, args ...
 	return nil
 }
 
-// mountEssentialFilesystems replicates original initrd.sh lines 36-39
+// mountEssentialFilesystems mounts /proc, /sys, /tmp, and /dev.
 func mountEssentialFilesystems() {
 	logger := ulog.GetLogger()
 	mounts := []struct {
@@ -62,17 +62,17 @@ func mountEssentialFilesystems() {
 	}
 }
 
-// mountStorageDevices replicates original initrd.sh lines 41-77
+// mountStorageDevices mounts the writable layer and pmem devices, then sets up OverlayFS.
 func mountStorageDevices() {
 	logger := ulog.GetLogger()
-	// Create vda device node (original line 41)
+	// Create vda device node
 	if _, err := os.Stat("/dev/vda"); os.IsNotExist(err) {
 		if err := syscall.Mknod("/dev/vda", syscall.S_IFBLK|0600, int(unix.Mkdev(253, 0))); err != nil {
 			logger.Warn("Failed to create /dev/vda", ulog.F("error", err))
 		}
 	}
 
-	// Try to mount vda (original lines 48-56)
+	// Try to mount vda
 	upperDir := "/mnt/conch/upper"
 	workDir := "/mnt/conch/work"
 
@@ -89,13 +89,13 @@ func mountStorageDevices() {
 		os.MkdirAll(workDir, 0755)
 	}
 
-	// Prepare merge point (original line 59)
+	// Prepare merge point
 	os.MkdirAll("/mnt/conch/merge", 0755)
 
-	// Scan and mount pmem devices (original lines 62-72)
+	// Scan and mount pmem devices
 	lowerDirs := mountPmemDevices()
 
-	// Mount OverlayFS (original lines 75-77)
+	// Mount OverlayFS
 	if len(lowerDirs) > 0 {
 		mountOverlayFS(lowerDirs, upperDir, workDir)
 	}
@@ -133,7 +133,6 @@ func mountPmemDevices() string {
 			continue
 		}
 
-		// Reverse order (original line 70)
 		if lowerDirs == nil {
 			lowerDirs = []string{mountPoint}
 		} else {
@@ -156,10 +155,9 @@ func mountOverlayFS(lowerDirs, upperDir, workDir string) {
 	}
 }
 
-// prepareMergeRoot replicates original initrd.sh lines 81-85
+// prepareMergeRoot ensures /root exists and root's home directory is /root.
 func prepareMergeRoot() {
 	logger := ulog.GetLogger()
-	// mkdir -p $TARGET/root
 	os.MkdirAll(MergeTarget+"/root", 0755)
 
 	// Ensure root's home is /root without corrupting an already-correct passwd line.
@@ -184,7 +182,7 @@ func prepareMergeRoot() {
 	}
 }
 
-// bindMountToMerge replicates original initrd.sh lines 90-93
+// bindMountToMerge bind-mounts host filesystems into the OverlayFS merge layer.
 func bindMountToMerge() {
 	logger := ulog.GetLogger()
 	for _, dir := range []string{"/proc", "/sys", "/dev", "/tmp"} {
