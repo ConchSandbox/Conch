@@ -191,9 +191,6 @@ func NewProcess(
 	}
 
 	cmd := exec.Command(
-		"unshare",
-		"-m",
-		"--",
 		"bash",
 		"-c",
 		startScript,
