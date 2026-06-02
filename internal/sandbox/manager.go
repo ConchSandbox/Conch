@@ -145,6 +145,14 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
+	cidAllocated := true
+	defer func() {
+		if err != nil && cidAllocated {
+			if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
+				logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
+			}
+		}
+	}()
 
 	snapshotConf, err := m.prepareSnapshotWorkspace(leaseCtx, namespace, req, parentIDs, runtimeIDs, resume)
 	if err != nil {
@@ -160,6 +168,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	sbx.leaseID = leaseID
 
 	m.trackSandbox(ctx, namespace, req.SandboxId, sbx)
+	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
 	return buildSandboxCreateResult(namespace, leaseID, req, sbx, snapshotConf, parentIDs, runtimeIDs, resume), nil
@@ -193,13 +202,15 @@ func (m *Manager) prepareParentSnapshots(ctx context.Context, namespace string, 
 
 func (m *Manager) allocateCreateRuntimeIDs(req SandboxCreateRequest) (createRuntimeIDs, error) {
 	key := req.SandboxId
-	vsockCID, err := m.AllocateUniqueCID(req.SandboxId)
-	if err != nil {
-		return createRuntimeIDs{}, fmt.Errorf("failed to create sandbox: CID allocation error: %v", err)
-	}
+
 	vsockSocketPath, err := SandboxVsockSocketPath(key)
 	if err != nil {
 		return createRuntimeIDs{}, fmt.Errorf("failed to create sandbox: vsock socket path error: %v", err)
+	}
+
+	vsockCID, err := m.AllocateUniqueCID(req.SandboxId)
+	if err != nil {
+		return createRuntimeIDs{}, fmt.Errorf("failed to create sandbox: CID allocation error: %v", err)
 	}
 	vcpuMax := req.VcpuMax
 	if vcpuMax == 0 {
@@ -276,9 +287,6 @@ func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
 				ulog.F("error", closeErr),
 			)
 		}
-	}
-	if releaseErr := m.ReleaseCID(sandboxID); releaseErr != nil {
-		logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", sandboxID), ulog.F("error", releaseErr))
 	}
 }
 
