@@ -74,14 +74,12 @@ func newVmmClient(vmmType int, vmmSocketPath string) (vmmClient, error) {
 		logger.Info("Creating CLH client", ulog.F("socket", vmmSocketPath))
 		return NewCLHClient(vmmType, vmmSocketPath), nil
 	case StratovirtVmmType:
-		ulog.GetLogger().Error("Unsupported VMM type",
-			ulog.F("type", vmmType),
-		)
-		return nil, fmt.Errorf("unsupported VMM type: %s", vmmType)
+		ulog.GetLogger().Info("Creating Stratovirt client", ulog.F("socket", vmmSocketPath))
+		return NewStratovirtClient(vmmType, vmmSocketPath), nil
 	default:
 		ulog.GetLogger().Error("Unknown VMM type",
 			ulog.F("type", vmmType),
 		)
-		return nil, fmt.Errorf("unknown VMM type: %s", vmmType)
+		return nil, fmt.Errorf("unknown VMM type: %d", vmmType)
 	}
 }

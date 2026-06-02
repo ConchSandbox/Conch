@@ -120,7 +120,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to init network pool: %w", err)
 	}
 
-	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Sandbox.VsockSignalRetry, cfg.Sandbox.VsockSignalTimeout, cfg.Sandbox.RequestTimeout))
+	s.SetSandboxManager(sandbox.NewManager(pool, daemonClient, cfg.Sandbox.VsockSignalRetry, cfg.Sandbox.VsockSignalTimeout, cfg.Sandbox.RequestTimeout, cfg.Sandbox.DefaultVMM))
 	go pool.Populate(ctx)
 
 	handleSignals(ctx, cancel, s)

@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox/network"
+	"github.com/openeuler/Conch/internal/sandbox/vmm"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -23,16 +27,18 @@ type Manager struct {
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
+	defaultVMM         string
 	cidAllocator       *CIDAllocator
 }
 
-func NewManager(p *network.Pool, daemonClient *daemon.Client, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) *Manager {
+func NewManager(p *network.Pool, daemonClient *daemon.Client, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration, defaultVMM string) *Manager {
 	return &Manager{
 		pool:               p,
 		daemonClient:       daemonClient,
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
+		defaultVMM:         defaultVMM,
 		cidAllocator:       NewCIDAllocator(),
 	}
 }
@@ -83,7 +89,12 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 	}
 
 	errCh := make(chan error, 1)
-	go waitForVsockAgentReady(ctx, sbx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout, errCh)
+	// StratoVirt exposes a real vhost-vsock device, so the host talks to the guest
+	// agent over AF_VSOCK directly; cloud-hypervisor proxies vsock over a unix socket.
+	// The transport difference is hidden behind the vsockAgentWaiter interface.
+	vmmType, _ := vmm.GetVmmType(vmmName)
+	waiter := newVsockAgentWaiter(vmmType, vsockCID, vsockSocketPath)
+	go waiter.waitForAgentReady(ctx, sbx, sandboxId, vsockSignalRetry, vsockSignalTimeout, errCh)
 
 	select {
 	case err := <-errCh:
@@ -97,7 +108,29 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 	return sbx, nil
 }
 
-func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockSocketPath string, vsockSignalRetry, vsockSignalTimeout time.Duration, errCh chan error) {
+// vsockAgentWaiter waits until the in-VM agent reports READY and stores its connection
+// on the sandbox. Each VMM exposes vsock differently, so each provides an implementation.
+type vsockAgentWaiter interface {
+	waitForAgentReady(ctx context.Context, sbx *Sandbox, sandboxId string, vsockSignalRetry, vsockSignalTimeout time.Duration, errCh chan error)
+}
+
+// newVsockAgentWaiter returns the vsockAgentWaiter matching the VMM type.
+func newVsockAgentWaiter(vmmType int, vsockCID uint32, vsockSocketPath string) vsockAgentWaiter {
+	switch vmmType {
+	case vmm.StratovirtVmmType:
+		return &stratovirtVsockWaiter{vsockCID: vsockCID}
+	default:
+		return &unixProxyVsockWaiter{vsockSocketPath: vsockSocketPath}
+	}
+}
+
+// unixProxyVsockWaiter talks to the agent over a cloud-hypervisor unix-socket vsock proxy.
+type unixProxyVsockWaiter struct {
+	vsockSocketPath string
+}
+
+func (w *unixProxyVsockWaiter) waitForAgentReady(ctx context.Context, sbx *Sandbox, sandboxId string, vsockSignalRetry, vsockSignalTimeout time.Duration, errCh chan error) {
+	vsockSocketPath := w.vsockSocketPath
 	logger := ulog.GetLogger()
 	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxId)
 
@@ -205,9 +238,176 @@ func waitForVsockAgentReady(ctx context.Context, sbx *Sandbox, sandboxId, vsockS
 	}
 }
 
+// stratovirtVsockWaiter waits for the agent over a real AF_VSOCK connection (StratoVirt
+// uses vhost-vsock-pci, talking to (CID, port) directly). If AF_VSOCK is unavailable it
+// falls back to the QMP startup check.
+type stratovirtVsockWaiter struct {
+	vsockCID uint32
+}
+
+// waitForAgentReady runs the timeout/cancellation/backoff loop, retrying trySignalAgent
+// until the agent signals READY, the deadline elapses, or ctx is cancelled.
+func (w *stratovirtVsockWaiter) waitForAgentReady(ctx context.Context, sbx *Sandbox, sandboxId string, vsockSignalRetry, vsockSignalTimeout time.Duration, errCh chan error) {
+	logger := ulog.GetLogger()
+	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxId)
+
+	timer := time.NewTimer(vsockSignalTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-timer.C:
+			logger.Error("vsock signal attempts timed out for Stratovirt", ulog.F("sandboxId", sandboxId), ulog.F("timeout", vsockSignalTimeout))
+			errCh <- fmt.Errorf("vsock signal timeout after %v", vsockSignalTimeout)
+			return
+		case <-ctx.Done():
+			errCh <- ctx.Err()
+			return
+		default:
+			if w.trySignalAgent(sbx, sandboxId, payload, logger) {
+				errCh <- nil
+				return
+			}
+			time.Sleep(vsockSignalRetry)
+		}
+	}
+}
+
+// trySignalAgent runs one connect -> send-payload -> await-READY cycle. It returns true when
+// the wait is done (agent READY, or AF_VSOCK unavailable so we defer to QMP) and false to
+// retry. It owns the socket fd, closing it on every path except the one handed to sbx.
+func (w *stratovirtVsockWaiter) trySignalAgent(sbx *Sandbox, sandboxId, payload string, logger ulog.Logger) bool {
+	fd, unsupported, err := w.dialVsock(sandboxId, logger)
+	if unsupported {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+
+	if _, err := unix.Write(fd, []byte(payload)); err != nil {
+		logger.Warn("failed to send payload to Stratovirt VM, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
+		unix.Close(fd)
+		return false
+	}
+	logger.Debug("payload sent to Stratovirt VM, waiting for READY signal", ulog.F("sandboxId", sandboxId))
+
+	buf := make([]byte, 64)
+	n, err := unix.Read(fd, buf)
+	if err != nil {
+		logger.Debug("failed to read from Stratovirt vsock, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
+		unix.Close(fd)
+		return false
+	}
+
+	agentMsg := string(buf[:n])
+	switch {
+	case strings.Contains(agentMsg, "NOT_READY"):
+		logger.Error("Agent gRPC service not started in Stratovirt VM", ulog.F("sandboxId", sandboxId))
+		unix.Close(fd)
+		return false
+	case strings.Contains(agentMsg, "READY:"):
+		w.adoptReadyConn(sbx, sandboxId, fd, agentMsg, logger)
+		return true
+	default:
+		logger.Warn("Received unknown message from Stratovirt Agent", ulog.F("msg", agentMsg))
+		unix.Close(fd)
+		return false
+	}
+}
+
+// dialVsock opens an AF_VSOCK socket and connects it to the agent's ready port. unsupported
+// is true when AF_VSOCK is unavailable (stop retrying); the fd is closed on every non-success path.
+func (w *stratovirtVsockWaiter) dialVsock(sandboxId string, logger ulog.Logger) (fd int, unsupported bool, err error) {
+	fd, err = unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	if err != nil {
+		if isVsockUnavailable(err) {
+			logger.Warn("AF_VSOCK not supported on this system, skipping vsock detection for Stratovirt", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
+			return -1, true, err
+		}
+		logger.Debug("failed to create AF_VSOCK socket for Stratovirt, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
+		return -1, false, err
+	}
+
+	sa := &unix.SockaddrVM{CID: w.vsockCID, Port: vsockReadyPort}
+	if err = unix.Connect(fd, sa); err != nil {
+		unix.Close(fd)
+		if isVsockUnavailable(err) {
+			// Host has AF_VSOCK but the agent's endpoint isn't connectable yet (e.g. ENODEV);
+			// benign, so defer readiness to the QMP startup check.
+			logger.Info("Agent vsock endpoint not reachable over AF_VSOCK; relying on the QMP VM startup check for readiness",
+				ulog.F("sandboxId", sandboxId),
+				ulog.F("cid", w.vsockCID),
+				ulog.F("port", vsockReadyPort),
+				ulog.F("error", err))
+			return -1, true, err
+		}
+		logger.Debug("failed to connect to VM vsock for Stratovirt, retrying...",
+			ulog.F("sandboxId", sandboxId),
+			ulog.F("cid", w.vsockCID),
+			ulog.F("port", vsockReadyPort),
+			ulog.F("error", err))
+		return -1, false, err
+	}
+
+	logger.Debug("Connected to Stratovirt VM via AF_VSOCK",
+		ulog.F("sandboxId", sandboxId),
+		ulog.F("cid", w.vsockCID),
+		ulog.F("port", vsockReadyPort))
+	return fd, false, nil
+}
+
+// adoptReadyConn logs the agent version from a READY message and stores a net.Conn wrapping
+// the vsock fd on sbx. If the fd can't be wrapped (Go's net lacks AF_VSOCK support) it's
+// dropped, but the VM is still ready since the agent already signalled READY.
+func (w *stratovirtVsockWaiter) adoptReadyConn(sbx *Sandbox, sandboxId string, fd int, agentMsg string, logger ulog.Logger) {
+	agentVersion := ""
+	if parts := strings.SplitN(agentMsg, "READY:", 2); len(parts) > 1 {
+		agentVersion = strings.TrimSpace(parts[1])
+	}
+	if agentVersion != expectedAgentVersion {
+		logger.Warn("Received Stratovirt agent signal but version mismatch",
+			ulog.F("sandboxId", sandboxId),
+			ulog.F("agent_version", agentVersion),
+			ulog.F("expected_version", expectedAgentVersion))
+	} else {
+		logger.Info("Stratovirt Sandbox Agent is officially READY!",
+			ulog.F("sandboxId", sandboxId),
+			ulog.F("agent_version", agentVersion))
+	}
+
+	file := os.NewFile(uintptr(fd), "vsock")
+	vsockConn, err := net.FileConn(file)
+	if err != nil {
+		logger.Info("vsock fd not convertible to net.Conn (vsock protocol not supported by Go net package), but Agent is READY - connection established via raw fd",
+			ulog.F("sandboxId", sandboxId),
+			ulog.F("error", err))
+		file.Close()
+		return
+	}
+	sbx.vsockConn = vsockConn
+}
+
+// isVsockUnavailable reports whether err indicates the host lacks AF_VSOCK support, as opposed
+// to a transient failure worth retrying.
+func isVsockUnavailable(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "not supported") ||
+		strings.Contains(msg, "not available") ||
+		strings.Contains(msg, "not permitted") ||
+		strings.Contains(msg, "no such device")
+}
+
 func (m *Manager) Create(req SandboxCreateRequest) (string, error) {
 	logger := ulog.GetLogger()
 	logger.Debug("creating sandbox in manager")
+
+	// The hypervisor is a host-side decision: fall back to the server-configured default
+	// when the client did not pin a specific vmm_name.
+	if req.VmmName == "" {
+		req.VmmName = m.defaultVMM
+		logger.Debug("vmm_name not specified, using server default", ulog.F("vmm_name", req.VmmName))
+	}
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
