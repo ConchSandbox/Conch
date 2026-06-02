@@ -42,3 +42,6 @@ sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
   request_timeout: 60s
+  # Hypervisor launched when a create request does not specify vmm_name.
+  # Supported: "cloud-hypervisor", "stratovirt"
+  default_vmm: stratovirt

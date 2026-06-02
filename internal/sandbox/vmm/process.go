@@ -70,6 +70,9 @@ type VmmFds struct {
 // cleanup closes all fds and removes the socket file.
 // Each fd is checked before closing to avoid double-close.
 func (f *VmmFds) cleanup() {
+	if f == nil {
+		return
+	}
 	if f.conchEventFd > 0 {
 		unix.Close(f.conchEventFd)
 		f.conchEventFd = 0
@@ -142,14 +145,22 @@ func NewProcess(
 		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
 	}
 
-	vmmFds, err := createVmmFds(vmmSocketPath)
-	if err != nil {
-		logger.Error("Failed to create vmm fds", ulog.F("error", err))
-		return nil, err
-	}
+	// StratoVirt manages its own QMP socket (-qmp unix:...) and uses a real
+	// vhost-vsock device; it does not support cloud-hypervisor's --event-monitor /
+	// --api-socket fd passing. Only create the CLH event/api fds for CLH. For
+	// StratoVirt we leave vmmFds nil so the boot-event wait is skipped and VM
+	// readiness is detected via QMP query-status (StratovirtClient.CheckDaemonAlive).
+	var vmmFds *VmmFds
+	if vmmType == CLHVmmType {
+		vmmFds, err = createVmmFds(vmmSocketPath)
+		if err != nil {
+			logger.Error("Failed to create vmm fds", ulog.F("error", err))
+			return nil, err
+		}
 
-	vmmResourceArgs.EventMonitorFd = vmmFds.clhEventFd
-	vmmResourceArgs.ApiSocketFd = vmmFds.apiSocketFd
+		vmmResourceArgs.EventMonitorFd = vmmFds.clhEventFd
+		vmmResourceArgs.ApiSocketFd = vmmFds.apiSocketFd
+	}
 
 	client, err := newVmmClient(vmmType, vmmSocketPath)
 	if err != nil {
@@ -360,6 +371,33 @@ func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent
 	}
 }
 
+// waitForVmmSocket waits for the VMM-managed unix (QMP) socket file to appear.
+// StratoVirt creates its QMP socket itself only after the process starts
+// (-qmp unix:...,server,nowait), unlike cloud-hypervisor whose api-socket fd is
+// bound before exec. So before issuing any QMP command we must wait for the file.
+func (p *Process) waitForVmmSocket(ctx context.Context) error {
+	logger := ulog.GetLogger()
+
+	// Wait bounded only by the request context deadline (request_timeout, 60s),
+	// matching the old Conch behavior. Under high-concurrency snapshot starts on
+	// ARM, StratoVirt can take longer than a short fixed timeout to bind its QMP
+	// socket; a hardcoded cap here caused spurious "timeout waiting for vmm socket".
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", p.VmmSocketPath, ctx.Err())
+		case <-ticker.C:
+			if _, err := os.Stat(p.VmmSocketPath); err == nil {
+				logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
+				return nil
+			}
+		}
+	}
+}
+
 func (p *Process) Create(ctx context.Context) error {
 	logger := ulog.GetLogger()
 
@@ -376,6 +414,14 @@ func (p *Process) Create(ctx context.Context) error {
 		return err
 	}
 	logger.Info("VM booted, ready for vsock")
+
+	// StratoVirt creates its QMP socket after start; wait for it before QMP calls.
+	if p.vmmFds == nil {
+		if err := p.waitForVmmSocket(ctx); err != nil {
+			vmmStopErr := p.Stop()
+			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
+		}
+	}
 
 	// check conchd alive
 	err = p.client.CheckDaemonAlive()
@@ -401,7 +447,15 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 	}
 
 	// With fd-based api socket, no need to wait for api-ready event
-	// The socket is already bound and listening when cloud-hypervisor starts
+	// The socket is already bound and listening when cloud-hypervisor starts.
+	// StratoVirt instead creates its QMP socket after start, so wait for it before
+	// issuing QMP commands (LoadSnapshot below connects to QMP immediately).
+	if p.vmmFds == nil {
+		if err := p.waitForVmmSocket(ctx); err != nil {
+			vmmStopErr := p.Stop()
+			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
+		}
+	}
 
 	// preferVNC=false: to achieve fast startup, load memory on demand.
 	err = p.client.LoadSnapshot(snapfilePath, false)
@@ -467,7 +521,7 @@ func (p *Process) Stop() error {
 			ulog.F("pid", p.cmd.Process.Pid),
 			ulog.F("error", err),
 		)
-		return fmt.Errorf("failed to send SIGTERM to vmm process, %s: %w", p.cmd.Process.Pid, err)
+		return fmt.Errorf("failed to send SIGTERM to vmm process, pid %d: %w", p.cmd.Process.Pid, err)
 	}
 
 	logger.Debug("Sent SIGTERM to VMM process",

@@ -71,7 +71,11 @@ type SandboxConfig struct {
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
 	RequestTimeout     time.Duration `yaml:"request_timeout"`
+	// DefaultVMM is the hypervisor used when a create request does not specify vmm_name.
+	DefaultVMM string `yaml:"default_vmm"`
 }
+
+const DefaultVMM = "stratovirt"
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
@@ -111,6 +115,7 @@ func DefaultConfig() *Config {
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
+			DefaultVMM:         DefaultVMM,
 		},
 	}
 }
@@ -193,6 +198,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
+	}
+	if cfg.Sandbox.DefaultVMM == "" {
+		cfg.Sandbox.DefaultVMM = defaultCfg.Sandbox.DefaultVMM
 	}
 
 	if cfg.Server.WorkDir != "" {
