@@ -30,6 +30,8 @@ type SandboxOps interface {
 type ImageOps interface {
 	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
 	Push(context.Context, imageSvc.PushRequest) error
+	List(context.Context, imageSvc.ListRequest) ([]imageSvc.Meta, error)
+	Remove(context.Context, imageSvc.RemoveRequest) error
 	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
 	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
 	ExportArchive(context.Context, io.Writer, imageSvc.ExportArchiveRequest) error
@@ -39,6 +41,8 @@ type ImageOps interface {
 
 type SnapshotOps interface {
 	LinkVM(context.Context, snapshotSvc.LinkVMRequest) error
+	List(context.Context, snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error)
+	Remove(context.Context, snapshotSvc.RemoveRequest) error
 	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
 	Chain(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Chain, error)
 }
@@ -302,6 +306,20 @@ func (s *Service) PushImageRequest(ctx context.Context, req imageSvc.PushRequest
 	return s.Image.Push(ctx, req)
 }
 
+func (s *Service) ListImageRequest(ctx context.Context, req imageSvc.ListRequest) ([]imageSvc.Meta, error) {
+	if s == nil || s.Image == nil {
+		return nil, fmt.Errorf("image service is not configured")
+	}
+	return s.Image.List(ctx, req)
+}
+
+func (s *Service) RemoveImageRequest(ctx context.Context, req imageSvc.RemoveRequest) error {
+	if s == nil || s.Image == nil {
+		return fmt.Errorf("image service is not configured")
+	}
+	return s.Image.Remove(ctx, req)
+}
+
 func (s *Service) UnpackImage(ctx context.Context, req imageSvc.UnpackRequest) (map[string]string, error) {
 	if s == nil || s.Image == nil {
 		return nil, fmt.Errorf("image service is not configured")
@@ -342,6 +360,20 @@ func (s *Service) LinkSnapshotVM(ctx context.Context, req snapshotSvc.LinkVMRequ
 		return fmt.Errorf("snapshot service is not configured")
 	}
 	return s.Snapshot.LinkVM(ctx, req)
+}
+
+func (s *Service) ListSnapshotRequest(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+	if s == nil || s.Snapshot == nil {
+		return nil, fmt.Errorf("snapshot service is not configured")
+	}
+	return s.Snapshot.List(ctx, req)
+}
+
+func (s *Service) RemoveSnapshotRequest(ctx context.Context, req snapshotSvc.RemoveRequest) error {
+	if s == nil || s.Snapshot == nil {
+		return fmt.Errorf("snapshot service is not configured")
+	}
+	return s.Snapshot.Remove(ctx, req)
 }
 
 func (s *Service) SnapshotInfo(ctx context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {

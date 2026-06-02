@@ -19,9 +19,13 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  conch convert [options]")
 	fmt.Fprintln(out, "  conch push [options] <local-image> <remote-image>")
+	fmt.Fprintln(out, "  conch image ls [options]")
+	fmt.Fprintln(out, "  conch image rm [options] <image-name>")
 	fmt.Fprintln(out, "  conch pull [options] <image-name>")
 	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
 	fmt.Fprintln(out, "  conch snapshot export [options]")
+	fmt.Fprintln(out, "  conch snapshots ls [options]")
+	fmt.Fprintln(out, "  conch snapshots rm [options] <snapshot-key>")
 	fmt.Fprintln(out, "  conch --help")
 	fmt.Fprintln(out, "  conch convert --help")
 	fmt.Fprintln(out, "  conch push --help")
@@ -33,9 +37,11 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  convert Convert an existing OCI rootfs image plus kernel/initrd files")
 	fmt.Fprintln(out, "          into a Conch native EROFS boot image.")
 	fmt.Fprintln(out, "  push    Push a Conch OCI index from conchd/containerd.")
+	fmt.Fprintln(out, "  image   List or remove images from conchd/containerd.")
 	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
 	fmt.Fprintln(out, "  snapshot Export a sandbox-snapshot image from an existing snapshot or sandbox.")
+	fmt.Fprintln(out, "  snapshots List or remove snapshots from conchd/containerd.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Environment:")
 	fmt.Fprintln(out, "  CONCH_API_URL            conchd API base URL")
@@ -96,6 +102,8 @@ func Run(args []string) int {
 			return 0
 		}
 		err = runPush(ctx, args[1:])
+	case "image":
+		err = runImage(ctx, args[1:])
 	case "unpack":
 		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
 			printUnpackHelp(os.Stdout)
@@ -103,6 +111,8 @@ func Run(args []string) int {
 		}
 		err = runUnpack(ctx, args[1:])
 	case "snapshot":
+		err = runSnapshot(ctx, args[1:])
+	case "snapshots":
 		err = runSnapshot(ctx, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", sub)

@@ -24,12 +24,16 @@ import (
 type fakeImageService struct {
 	pullReq     imageSvc.PullRequest
 	pushReq     imageSvc.PushRequest
+	listReq     imageSvc.ListRequest
+	removeReq   imageSvc.RemoveRequest
 	unpackReq   imageSvc.UnpackRequest
 	prepareReq  imageSvc.PrepareRootfsSourceRequest
 	convertReq  imageSvc.ConvertRootfsToErofsRequest
 	exportReq   imageSvc.ExportArchiveRequest
 	pullErr     error
 	pushErr     error
+	listErr     error
+	removeErr   error
 	unpackErr   error
 	prepareErr  error
 	convertErr  error
@@ -40,15 +44,21 @@ type fakeImageService struct {
 	exportRaw   string
 	prepareResp imageSvc.PrepareRootfsSourceResponse
 	convertResp imageSvc.ConvertRootfsToErofsResponse
+	images      []imageSvc.Meta
 }
 
 type fakeSnapshotService struct {
-	linkReq  snapshotSvc.LinkVMRequest
-	infoReq  snapshotSvc.InfoRequest
-	chainReq snapshotSvc.InfoRequest
-	linkErr  error
-	infoErr  error
-	chainErr error
+	linkReq   snapshotSvc.LinkVMRequest
+	listReq   snapshotSvc.ListRequest
+	removeReq snapshotSvc.RemoveRequest
+	infoReq   snapshotSvc.InfoRequest
+	chainReq  snapshotSvc.InfoRequest
+	linkErr   error
+	listErr   error
+	removeErr error
+	infoErr   error
+	chainErr  error
+	snapshots []snapshotSvc.Meta
 }
 
 type fakeSandboxOps struct {
@@ -69,6 +79,19 @@ func (f *fakeImageService) Pull(_ context.Context, req imageSvc.PullRequest) (ma
 func (f *fakeImageService) Push(_ context.Context, req imageSvc.PushRequest) error {
 	f.pushReq = req
 	return f.pushErr
+}
+
+func (f *fakeImageService) List(_ context.Context, req imageSvc.ListRequest) ([]imageSvc.Meta, error) {
+	f.listReq = req
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.images, nil
+}
+
+func (f *fakeImageService) Remove(_ context.Context, req imageSvc.RemoveRequest) error {
+	f.removeReq = req
+	return f.removeErr
 }
 
 func (f *fakeImageService) Unpack(_ context.Context, req imageSvc.UnpackRequest) (map[string]string, error) {
@@ -168,6 +191,19 @@ func (f *fakeSnapshotService) LinkVM(_ context.Context, req snapshotSvc.LinkVMRe
 	return f.linkErr
 }
 
+func (f *fakeSnapshotService) List(_ context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+	f.listReq = req
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.snapshots, nil
+}
+
+func (f *fakeSnapshotService) Remove(_ context.Context, req snapshotSvc.RemoveRequest) error {
+	f.removeReq = req
+	return f.removeErr
+}
+
 func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {
 	f.infoReq = req
 	if f.infoErr != nil {
@@ -259,6 +295,46 @@ func TestHandleUnpackImage(t *testing.T) {
 	}
 	if svc.unpackReq.ImageName != "hub.oepkgs.net/conch/conch-index:v0.1" {
 		t.Fatalf("unpack image = %q", svc.unpackReq.ImageName)
+	}
+}
+
+func TestHandleListAndRemoveImage(t *testing.T) {
+	svc := &fakeImageService{
+		images: []imageSvc.Meta{{
+			Name:         "localhost/conch/demo:latest",
+			TargetDigest: "sha256:demo",
+			Size:         42,
+		}},
+	}
+	server := newImageHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/image/list", bytes.NewBufferString(`{"namespace":"team-a","filters":["name==localhost/conch/demo:latest"]}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.listReq.Namespace != "team-a" || len(svc.listReq.Filters) != 1 {
+		t.Fatalf("list request = %#v", svc.listReq)
+	}
+	var listResp struct {
+		Images []imageSvc.Meta `json:"images"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResp.Images) != 1 || listResp.Images[0].Name != "localhost/conch/demo:latest" {
+		t.Fatalf("list response = %#v", listResp)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/image/remove", bytes.NewBufferString(`{"namespace":"team-a","image_name":"localhost/conch/demo:latest","synchronous":true}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.removeReq.Namespace != "team-a" || svc.removeReq.ImageName != "localhost/conch/demo:latest" || !svc.removeReq.Synchronous {
+		t.Fatalf("remove request = %#v", svc.removeReq)
 	}
 }
 
@@ -407,6 +483,63 @@ func TestHandleSnapshotExport(t *testing.T) {
 	}
 	if got.BootIndexTag != "localhost/conch/snap:latest" || got.BootIndexDigest == "" {
 		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHandleListAndRemoveSnapshot(t *testing.T) {
+	svc := &fakeSnapshotService{
+		snapshots: []snapshotSvc.Meta{{
+			Key:    "sha256:rootfs",
+			Kind:   "committed",
+			Parent: "sha256:parent",
+		}},
+	}
+	server := newSnapshotHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/list", bytes.NewBufferString(`{"namespace":"team-a","filters":["kind==committed"]}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.listReq.Namespace != "team-a" || len(svc.listReq.Filters) != 1 {
+		t.Fatalf("list request = %#v", svc.listReq)
+	}
+	var listResp struct {
+		Snapshots []snapshotSvc.Meta `json:"snapshots"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResp.Snapshots) != 1 || listResp.Snapshots[0].Key != "sha256:rootfs" {
+		t.Fatalf("list response = %#v", listResp)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{"namespace":"team-a","key":"sha256:rootfs","cascade":true}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if svc.removeReq.Namespace != "team-a" || svc.removeReq.Key != "sha256:rootfs" || !svc.removeReq.Cascade {
+		t.Fatalf("remove request = %#v", svc.removeReq)
+	}
+}
+
+func TestHandleRemoveSnapshotInvalidRequest(t *testing.T) {
+	svc := &fakeSnapshotService{
+		removeErr: errors.Join(snapshotSvc.ErrInvalidRequest, errors.New("key is required")),
+	}
+	server := newSnapshotHandlerServer(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{"namespace":"team-a"}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("remove status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if svc.removeReq.Namespace != "team-a" || svc.removeReq.Key != "" {
+		t.Fatalf("remove request = %#v", svc.removeReq)
 	}
 }
 

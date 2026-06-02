@@ -22,6 +22,8 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestImageAPIMethods(t *testing.T) {
 	var pullReq PullImageRequest
 	var unpackReq UnpackImageRequest
+	var listReq ListImagesRequest
+	var removeReq RemoveImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case pullImage:
@@ -34,6 +36,20 @@ func TestImageAPIMethods(t *testing.T) {
 				t.Fatalf("decode unpack request: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(ImageResponse{Results: map[string]string{"sandbox": "sandbox-id"}})
+		case listImages:
+			if err := json.NewDecoder(r.Body).Decode(&listReq); err != nil {
+				t.Fatalf("decode list request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(ListImagesResponse{Images: []ImageRecord{{
+				Name:         "localhost/conch/demo:latest",
+				TargetDigest: "sha256:demo",
+				Size:         42,
+			}}})
+		case removeImage:
+			if err := json.NewDecoder(r.Body).Decode(&removeReq); err != nil {
+				t.Fatalf("decode remove request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -68,6 +84,31 @@ func TestImageAPIMethods(t *testing.T) {
 	}
 	if unpackResults["sandbox"] != "sandbox-id" {
 		t.Fatalf("unpack results = %#v", unpackResults)
+	}
+
+	images, err := c.ListImages(context.Background(), ListImagesRequest{
+		Namespace: "team-a",
+		Filters:   []string{"name==localhost/conch/demo:latest"},
+	})
+	if err != nil {
+		t.Fatalf("ListImages: %v", err)
+	}
+	if listReq.Namespace != "team-a" || len(listReq.Filters) != 1 {
+		t.Fatalf("list request = %#v", listReq)
+	}
+	if len(images) != 1 || images[0].Name != "localhost/conch/demo:latest" {
+		t.Fatalf("images = %#v", images)
+	}
+
+	if err := c.RemoveImage(context.Background(), RemoveImageRequest{
+		ImageName:   "localhost/conch/demo:latest",
+		Namespace:   "team-a",
+		Synchronous: true,
+	}); err != nil {
+		t.Fatalf("RemoveImage: %v", err)
+	}
+	if removeReq.ImageName != "localhost/conch/demo:latest" || removeReq.Namespace != "team-a" || !removeReq.Synchronous {
+		t.Fatalf("remove request = %#v", removeReq)
 	}
 }
 
@@ -125,6 +166,8 @@ func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
 
 	var metadata ConvertImageMetadata
 	var snapshotReq SnapshotExportRequest
+	var listSnapshotsReq ListSnapshotsRequest
+	var removeSnapshotReq RemoveSnapshotRequest
 	var kernelBody string
 	var initrdBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +214,20 @@ func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
 				BootIndexDigest: "sha256:snapshot",
 				BootIndexTag:    snapshotReq.BootIndexTag,
 			})
+		case listSnapshots:
+			if err := json.NewDecoder(r.Body).Decode(&listSnapshotsReq); err != nil {
+				t.Fatalf("decode snapshot list request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(ListSnapshotsResponse{Snapshots: []SnapshotRecord{{
+				Key:    "sha256:rootfs",
+				Kind:   "committed",
+				Parent: "sha256:parent",
+			}}})
+		case removeSnapshot:
+			if err := json.NewDecoder(r.Body).Decode(&removeSnapshotReq); err != nil {
+				t.Fatalf("decode snapshot remove request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -212,6 +269,31 @@ func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
 	}
 	if snapshotReq.RootfsSnapshotID != "rootfs-id" || snapshotReq.Namespace != "team-a" || snapshotResp.BootIndexDigest != "sha256:snapshot" {
 		t.Fatalf("snapshot req=%#v resp=%#v", snapshotReq, snapshotResp)
+	}
+
+	snapshots, err := c.ListSnapshots(context.Background(), ListSnapshotsRequest{
+		Namespace: "team-a",
+		Filters:   []string{"kind==committed"},
+	})
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if listSnapshotsReq.Namespace != "team-a" || len(listSnapshotsReq.Filters) != 1 {
+		t.Fatalf("snapshot list request = %#v", listSnapshotsReq)
+	}
+	if len(snapshots) != 1 || snapshots[0].Key != "sha256:rootfs" {
+		t.Fatalf("snapshots = %#v", snapshots)
+	}
+
+	if err := c.RemoveSnapshot(context.Background(), RemoveSnapshotRequest{
+		Key:       "sha256:rootfs",
+		Namespace: "team-a",
+		Cascade:   true,
+	}); err != nil {
+		t.Fatalf("RemoveSnapshot: %v", err)
+	}
+	if removeSnapshotReq.Key != "sha256:rootfs" || removeSnapshotReq.Namespace != "team-a" || !removeSnapshotReq.Cascade {
+		t.Fatalf("snapshot remove request = %#v", removeSnapshotReq)
 	}
 }
 
