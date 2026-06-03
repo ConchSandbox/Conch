@@ -34,46 +34,6 @@ import (
 
 const ipv4ForwardingSysctlPath = "/proc/sys/net/ipv4/ip_forward"
 
-func enableIPv4Forwarding(sysctlPath string) error {
-	if err := os.WriteFile(sysctlPath, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("error enabling ipv4 forwarding via %s: %w", sysctlPath, err)
-	}
-	return nil
-}
-
-func runInNetNSPath(netnsPath string, fn func() error) (retErr error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	hostNS, err := netns.Get()
-	if err != nil {
-		return fmt.Errorf("cannot get current namespace: %w", err)
-	}
-	defer func() {
-		if err := netns.Set(hostNS); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to host: %w", err))
-		}
-		if err := hostNS.Close(); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
-		}
-	}()
-
-	targetNS, err := netns.GetFromPath(netnsPath)
-	if err != nil {
-		return fmt.Errorf("cannot open network namespace %s: %w", netnsPath, err)
-	}
-	defer func() {
-		if err := targetNS.Close(); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("error closing target network namespace %s: %w", netnsPath, err))
-		}
-	}()
-
-	if err := netns.Set(targetNS); err != nil {
-		return fmt.Errorf("error setting network namespace to %s: %w", netnsPath, err)
-	}
-	return fn()
-}
-
 func CreateSandboxNetworkNamespace(slot *Slot) (netnsPath string, retErr error) {
 	if slot == nil {
 		return "", fmt.Errorf("slot is nil")
@@ -134,6 +94,98 @@ func (s *Slot) CreateNetwork() error {
 	return nil
 }
 
+func runInNetNSPath(netnsPath string, fn func() error) (retErr error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hostNS, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("cannot get current namespace: %w", err)
+	}
+	defer func() {
+		if err := netns.Set(hostNS); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to host: %w", err))
+		}
+		if err := hostNS.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
+		}
+	}()
+
+	targetNS, err := netns.GetFromPath(netnsPath)
+	if err != nil {
+		return fmt.Errorf("cannot open network namespace %s: %w", netnsPath, err)
+	}
+	defer func() {
+		if err := targetNS.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("error closing target network namespace %s: %w", netnsPath, err))
+		}
+	}()
+
+	if err := netns.Set(targetNS); err != nil {
+		return fmt.Errorf("error setting network namespace to %s: %w", netnsPath, err)
+	}
+	return fn()
+}
+
+func ValidateReusableSlotNetwork(ctx context.Context, slot *Slot, netnsPath string, ifName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if ifName == "" {
+		ifName = defaultCNIIfName
+	}
+	return runInNetNSPath(netnsPath, func() error {
+		cniLink, err := netlink.LinkByName(ifName)
+		if err != nil {
+			return fmt.Errorf("cni interface %s missing: %w", ifName, err)
+		}
+		if result := slot.CNIResult(); result != nil && result.IP != "" {
+			expectedIP := parseCNIResultIP(result.IP)
+			if expectedIP == nil {
+				return fmt.Errorf("stored cni IP %q is invalid", result.IP)
+			}
+			hasIP, err := linkHasIP(cniLink, expectedIP)
+			if err != nil {
+				return fmt.Errorf("checking cni interface %s addresses: %w", ifName, err)
+			}
+			if !hasIP {
+				return fmt.Errorf("cni interface %s missing stored IP %s", ifName, expectedIP.String())
+			}
+		}
+		if _, err := netlink.LinkByName(slot.TapName()); err != nil {
+			return fmt.Errorf("tap interface %s missing: %w", slot.TapName(), err)
+		}
+		return nil
+	})
+}
+
+func parseCNIResultIP(raw string) net.IP {
+	if ip := net.ParseIP(raw); ip != nil {
+		return ip
+	}
+	ip, _, err := net.ParseCIDR(raw)
+	if err != nil {
+		return nil
+	}
+	return ip
+}
+
+func linkHasIP(link netlink.Link, ip net.IP) (bool, error) {
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return false, err
+	}
+	for _, addr := range addrs {
+		if addr.IP.Equal(ip) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func SetupGuestTapNetwork(ctx context.Context, slot *Slot, netnsPath string, cniResult *CNIResult) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -155,27 +207,6 @@ func TeardownGuestTapNetwork(ctx context.Context, slot *Slot, netnsPath string, 
 	}
 	return runInNetNSPath(netnsPath, func() error {
 		return slot.teardownGuestTapNetwork(cniResult)
-	})
-}
-
-func ValidateReusableSlotNetwork(ctx context.Context, slot *Slot, netnsPath string, ifName string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if slot == nil {
-		return fmt.Errorf("slot is nil")
-	}
-	if ifName == "" {
-		ifName = defaultCNIIfName
-	}
-	return runInNetNSPath(netnsPath, func() error {
-		if _, err := netlink.LinkByName(ifName); err != nil {
-			return fmt.Errorf("cni interface %s missing: %w", ifName, err)
-		}
-		if _, err := netlink.LinkByName(slot.TapName()); err != nil {
-			return fmt.Errorf("tap interface %s missing: %w", slot.TapName(), err)
-		}
-		return nil
 	})
 }
 
@@ -213,8 +244,8 @@ func (s *Slot) setupGuestTapNetwork(cniResult *CNIResult) error {
 		return fmt.Errorf("error setting lo device up: %w", err)
 	}
 
-	if err := enableIPv4Forwarding(ipv4ForwardingSysctlPath); err != nil {
-		return err
+	if err := os.WriteFile(ipv4ForwardingSysctlPath, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("error enabling ipv4 forwarding via %s: %w", ipv4ForwardingSysctlPath, err)
 	}
 
 	tables, err := iptables.New()

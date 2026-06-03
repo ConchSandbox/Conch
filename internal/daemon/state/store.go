@@ -10,6 +10,11 @@ type Store interface {
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
+	UpsertNetworkSlot(context.Context, NetworkSlotRecord) error
+	GetNetworkSlot(context.Context, string) (NetworkSlotRecord, error)
+	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)
+	DeleteNetworkSlot(context.Context, string) error
+
 	UpsertContainer(context.Context, ContainerRecord) error
 	GetContainer(context.Context, string) (ContainerRecord, error)
 	ListContainers(context.Context) ([]ContainerRecord, error)

@@ -155,6 +155,7 @@ func (s *StorageLocal) Release(ips *Slot) error {
 	defer s.acquiredNsMu.Unlock()
 	slotName := getSlotName(ips.Idx)
 	delete(s.acquiredNs, slotName)
+	delete(s.hostNs, slotName)
 
 	return nil
 }

@@ -22,7 +22,8 @@ type LeaseClient interface {
 }
 
 type SandboxRehydrator interface {
-	Rehydrate([]state.SandboxRecord) (int, error)
+	Rehydrate([]state.SandboxRecord) (int, map[string]struct{}, error)
+	CleanupAssignedWithoutReadySandbox(map[string]struct{}) error
 }
 
 type Config struct {
@@ -191,11 +192,17 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 		result.ViewAliasesRestored = snapshotResult.ViewAliases
 	}
 	if r.cfg.SandboxRehydrator != nil {
-		count, err := r.cfg.SandboxRehydrator.Rehydrate(reconciledSandboxes)
+		count, restoredSandboxIDs, err := r.cfg.SandboxRehydrator.Rehydrate(reconciledSandboxes)
 		result.SandboxesRehydrated = count
 		if err != nil {
 			result.RehydrateErrors++
 			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
+			return result, fmt.Errorf("rehydrate sandboxes: %w", err)
+		}
+		if err := r.cfg.SandboxRehydrator.CleanupAssignedWithoutReadySandbox(restoredSandboxIDs); err != nil {
+			result.RehydrateErrors++
+			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
+			return result, fmt.Errorf("cleanup stale assigned network slots: %w", err)
 		}
 	}
 
