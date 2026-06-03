@@ -33,8 +33,13 @@ func printSnapshotHelp(out io.Writer) {
 	fmt.Fprintln(out, "Common usage:")
 	fmt.Fprintln(out, "  conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>")
 	fmt.Fprintln(out, "  conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>")
-	fmt.Fprintln(out, "  conch snapshots ls")
-	fmt.Fprintln(out, "  conch snapshots rm <snapshot-key>")
+	fmt.Fprintln(out, "  conch snapshot ls")
+	fmt.Fprintln(out, "  conch snapshot rm <snapshot-key>")
+	fmt.Fprintln(out, "  conch snapshot rm --cascade <rootfs-snapshot-key>")
+}
+
+func printSnapshotsHelp(out io.Writer) {
+	printSnapshotHelp(out)
 }
 
 func printSnapshotExportHelp(out io.Writer, fs *flag.FlagSet) {
@@ -95,6 +100,10 @@ func runSnapshot(ctx context.Context, args []string) error {
 		printSnapshotHelp(os.Stderr)
 		return fmt.Errorf("unknown snapshot command %q", args[0])
 	}
+}
+
+func runSnapshotsAlias(ctx context.Context, args []string) error {
+	return runSnapshot(ctx, args)
 }
 
 func runSnapshotExport(ctx context.Context, args []string) error {
@@ -177,6 +186,7 @@ func runSnapshotRemove(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
+	cascade := fs.Bool("cascade", false, "remove the whole Conch rootfs/mem/vm snapshot group")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -192,6 +202,7 @@ func runSnapshotRemove(ctx context.Context, args []string) error {
 	if err := client.NewClientWithConfig("", *configPath).RemoveSnapshot(ctx, client.RemoveSnapshotRequest{
 		Key:       key,
 		Namespace: resolveConchNamespace(cfg, *namespace),
+		Cascade:   *cascade,
 	}); err != nil {
 		return fmt.Errorf("conch snapshot rm: %w", err)
 	}
