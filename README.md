@@ -15,7 +15,7 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 
 - 轻量安全隔离 -- 支持虚拟沙箱，对 Agent 任务进行安全隔离。支持完整的生命周期管理，包括创建、暂停、恢复和删除等操作。
 - 快照启动加速 -- 支持虚拟机内存和根文件系统的快照功能。通过快照机制，可以实现秒级的沙箱启动，显著提升大规模部署场景下的资源利用效率。快照采用写时复制（Copy-on-Write）技术，最小化存储开销。
-- 精简容器网络 -- 通过 veth 设备和 NAT 规则实现网络隔离和地址转换，支持容器网络池化复用，降低启动时延。
+- 精简容器网络 -- 通过 CNI 插件管理沙箱网络命名空间的外层网络，同时由 Conch 保留可复用 slot、netns 生命周期、VM guest tap 和 guest NAT 的管理权，在保持网络池化低时延的同时对齐 CRI 风格运行时的外层网络边界。
 
 ## 快速开始
 
@@ -24,8 +24,14 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 - Go 1.26+
 - Cloud-Hypervisor v51.0+
 - erofs-utils 1.9+（需要 `mkfs.erofs --fsalignblks`）
-- Iptables 网络配置工具
 - Linux 5.10+
+- root 权限，或等价的 `CAP_SYS_ADMIN` 与 `CAP_NET_ADMIN` 能力，用于 network namespace、tap 设备、路由和 NAT 规则
+- 主机已安装 CNI 插件二进制文件，默认路径为 `/opt/cni/bin`；默认 bridge 模式至少需要 `bridge`、`host-local` 和 `loopback`
+- 存在至少一个 Conch CNI `.conf` 或 `.conflist` 配置文件。默认路径为 `/etc/conch/cni/net.d`；如果该默认路径没有配置，Conch 会回退到已加载配置文件旁边的 `cni/net.d`，例如 `config/cni/net.d`。
+- CNI 子网不能与主机网络、集群网络或 VM guest tap 子网重叠
+- Iptables 网络配置工具。Conch 仍会为 VM guest tap 路径配置 namespace 内 NAT；所选 CNI 插件也可能依赖 iptables 或 nftables。
+
+网络设计细节与验证步骤见 [Conch Network Guide](docs/guide/net_usage.md)。
 
 Conchd 会在进程内初始化 containerd 服务和 Conch 插件，不需要单独启动系统 `containerd` 守护进程。
 
