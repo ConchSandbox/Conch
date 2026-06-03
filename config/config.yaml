@@ -23,7 +23,7 @@ network:
   dynamic_reservation: false
   # Deprecated for the current CNI path. Multi-bridge support should be handled later through CNI config selection.
   # TODO: Replace this with an explicit CNI bridge-shard policy.
-  bridge_count: 1
+  # bridge_count: 1
   # Tap interface address inside the sandbox network namespace
   tap_ip: 192.168.100.2
   # CIDR mask for tap_ip
