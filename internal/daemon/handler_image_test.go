@@ -62,10 +62,11 @@ type fakeSnapshotService struct {
 }
 
 type fakeSandboxOps struct {
-	createReq sandbox.SandboxCreateRequest
-	pauseReq  sandbox.SandboxPauseRequest
-	createErr error
-	pauseErr  error
+	createReq  sandbox.SandboxCreateRequest
+	pauseReq   sandbox.SandboxPauseRequest
+	deleteReqs []sandbox.SandboxDeleteRequest
+	createErr  error
+	pauseErr   error
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req imageSvc.PullRequest) (map[string]string, error) {
@@ -244,6 +245,7 @@ func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.Sandb
 }
 
 func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
+	f.deleteReqs = append(f.deleteReqs, req)
 	return nil
 }
 
@@ -444,6 +446,54 @@ func TestHandleConvertImage(t *testing.T) {
 	}
 	if got.BootIndexTag != "localhost/conch/demo:latest" || got.BootIndexDigest == "" || got.RootfsImageRef == "" {
 		t.Fatalf("response = %#v", got)
+	}
+}
+
+func TestHandleConvertImageSnapshotPauseFailureCleansSandbox(t *testing.T) {
+	oldKernel := buildKernelArchiveFromFiles
+	defer func() { buildKernelArchiveFromFiles = oldKernel }()
+	buildKernelArchiveFromFiles = func(_ context.Context, _, _, _, archivePath string) (digest.Digest, error) {
+		return digest.FromString("kernel"), os.WriteFile(archivePath, []byte("kernel-archive"), 0o644)
+	}
+
+	imgSvc := &fakeImageService{}
+	snapSvc := &fakeSnapshotService{}
+	manager := &fakeSandboxOps{pauseErr: errors.New("pause failed")}
+	server := newConvertHandlerServer(imgSvc, snapSvc, manager)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("metadata", `{"source":"docker.io/library/nginx:latest","namespace":"team-a","boot_index_tag":"localhost/conch/demo:latest","snapshot":true}`)
+	kernelPart, err := writer.CreateFormFile("kernel", "vmlinuz")
+	if err != nil {
+		t.Fatalf("kernel form file: %v", err)
+	}
+	_, _ = kernelPart.Write([]byte("kernel"))
+	initrdPart, err := writer.CreateFormFile("initrd", "conch.initrd")
+	if err != nil {
+		t.Fatalf("initrd form file: %v", err)
+	}
+	_, _ = initrdPart.Write([]byte("initrd"))
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/image/convert", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if manager.createReq.SandboxId == "" {
+		t.Fatalf("sandbox was not created: %#v", manager.createReq)
+	}
+	if len(manager.deleteReqs) != 1 {
+		t.Fatalf("delete requests = %#v, want one cleanup", manager.deleteReqs)
+	}
+	if manager.deleteReqs[0].SandboxId != manager.createReq.SandboxId || manager.deleteReqs[0].Namespace != "team-a" {
+		t.Fatalf("cleanup request = %#v, create request = %#v", manager.deleteReqs[0], manager.createReq)
 	}
 }
 

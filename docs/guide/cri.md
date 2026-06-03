@@ -10,10 +10,10 @@
 - 支持 `RunPodSandbox` 创建 Conch VM sandbox。
 - 支持 `StopPodSandbox` / `RemovePodSandbox` 删除 sandbox。
 - 支持 container create/start/stop/remove 的占位状态流转。
-- 支持 `PullImage` 基础链路，用于 kubelet image 语义和 Conch image 处理入口。
+- 支持 `PullImage` / `ListImages` / `ImageStatus` / `RemoveImage` 基础链路，用于 kubelet image 语义和 Conch image 管理入口。
 - 支持通过 `sandbox-image + use-snapshot` 控制冷启动或快照恢复启动。
 
-当前版本不实现完整 OCI container rootfs 语义。Kubernetes `containers[].image` 只用于 kubelet/CRI 的 image 和 container config 语义，不会变成 VM 内 rootfs，也不会在 VM 内启动真实业务进程。`ImageStatus`、`ListImages`、`RemoveImage` 和 `ImageFsInfo` 当前保持 scaffold 行为。
+当前版本不实现完整 OCI container rootfs 语义。Kubernetes `containers[].image` 只用于 kubelet/CRI 的 image 和 container config 语义，不会变成 VM 内 rootfs，也不会在 VM 内启动真实业务进程。`ImageFsInfo` 当前仍为基础占位实现，暂不返回真实镜像文件系统用量。
 
 ## 2. conchd 配置
 
