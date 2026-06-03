@@ -16,6 +16,7 @@ import (
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -304,6 +305,71 @@ func (s *Service) PushImageRequest(ctx context.Context, req imageSvc.PushRequest
 		return fmt.Errorf("image service is not configured")
 	}
 	return s.Image.Push(ctx, req)
+}
+
+func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
+	items, err := s.ListImageRequest(ctx, imageSvc.ListRequest{
+		Namespace: opts.Namespace,
+		Filters:   opts.Filters,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runtimeapi.ImageRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, runtimeapi.ImageRecord{
+			Name:            item.Name,
+			TargetDigest:    item.TargetDigest,
+			RepoDigests:     imageRepoDigests(item.Name, item.TargetDigest),
+			TargetMediaType: item.TargetMediaType,
+			Size:            item.Size,
+			Kind:            firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels)),
+			Labels:          item.Labels,
+		})
+	}
+	return out, nil
+}
+
+func imageRepoDigests(name, digest string) []string {
+	if name == "" || digest == "" {
+		return nil
+	}
+	base := name
+	lastSlash := strings.LastIndex(base, "/")
+	lastColon := strings.LastIndex(base, ":")
+	if lastColon > lastSlash {
+		base = base[:lastColon]
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return nil
+	}
+	return []string{base + "@" + digest}
+}
+
+func imageKindFromLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	if kind := strings.TrimSpace(labels["io.conch.kind"]); kind != "" {
+		return kind
+	}
+	if kind := strings.TrimSpace(labels["kind"]); kind != "" {
+		return kind
+	}
+	if kind := strings.TrimSpace(labels["conch.io/kind"]); kind != "" {
+		return kind
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) ListImageRequest(ctx context.Context, req imageSvc.ListRequest) ([]imageSvc.Meta, error) {

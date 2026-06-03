@@ -304,6 +304,7 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 			Name:         "localhost/conch/demo:latest",
 			TargetDigest: "sha256:demo",
 			Size:         42,
+			Kind:         "sandbox-base",
 		}},
 	}
 	server := newImageHandlerServer(svc)
@@ -325,6 +326,9 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 	}
 	if len(listResp.Images) != 1 || listResp.Images[0].Name != "localhost/conch/demo:latest" {
 		t.Fatalf("list response = %#v", listResp)
+	}
+	if listResp.Images[0].Kind != "sandbox-base" {
+		t.Fatalf("list response kind = %q, want sandbox-base", listResp.Images[0].Kind)
 	}
 
 	rec = httptest.NewRecorder()
