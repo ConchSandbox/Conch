@@ -56,3 +56,58 @@ func TestBoltStoreSandboxAndContainerCRUD(t *testing.T) {
 		t.Fatalf("GetSandbox() after delete got nil error")
 	}
 }
+
+func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	slot := NetworkSlotRecord{
+		SlotKey:   "2",
+		SlotIndex: 2,
+		State:     NetworkSlotWarmIdle,
+		SandboxID: "sandbox-a",
+		NetNSPath: "/var/run/netns/ns-2",
+		CNIID:     "conch-slot-2",
+		CNIIP:     "10.12.0.2",
+		LastError: "initial error",
+	}
+	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
+		t.Fatalf("UpsertNetworkSlot() error = %v", err)
+	}
+	got, err := store.GetNetworkSlot(ctx, slot.SlotKey)
+	if err != nil {
+		t.Fatalf("GetNetworkSlot() error = %v", err)
+	}
+	if got.State != NetworkSlotWarmIdle || got.CNIID != slot.CNIID || got.SandboxID != slot.SandboxID || got.LastError != slot.LastError {
+		t.Fatalf("GetNetworkSlot() = %#v, want %#v", got, slot)
+	}
+	slot.State = NetworkSlotCleaning
+	slot.LastError = "cleanup pending"
+	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
+		t.Fatalf("UpsertNetworkSlot(update) error = %v", err)
+	}
+	got, err = store.GetNetworkSlot(ctx, slot.SlotKey)
+	if err != nil {
+		t.Fatalf("GetNetworkSlot() after update error = %v", err)
+	}
+	if got.State != NetworkSlotCleaning || got.LastError != "cleanup pending" || got.SandboxID != slot.SandboxID {
+		t.Fatalf("GetNetworkSlot() after update = %#v, want cleaning slot", got)
+	}
+	slots, err := store.ListNetworkSlots(ctx)
+	if err != nil {
+		t.Fatalf("ListNetworkSlots() error = %v", err)
+	}
+	if len(slots) != 1 || slots[0].SlotKey != slot.SlotKey {
+		t.Fatalf("ListNetworkSlots() = %#v, want one slot", slots)
+	}
+	if err := store.DeleteNetworkSlot(ctx, slot.SlotKey); err != nil {
+		t.Fatalf("DeleteNetworkSlot() error = %v", err)
+	}
+	if _, err := store.GetNetworkSlot(ctx, slot.SlotKey); err == nil {
+		t.Fatalf("GetNetworkSlot() after delete got nil error")
+	}
+}
