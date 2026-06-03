@@ -44,6 +44,7 @@ func TestImageAPIMethods(t *testing.T) {
 				Name:         "localhost/conch/demo:latest",
 				TargetDigest: "sha256:demo",
 				Size:         42,
+				Kind:         "sandbox-base",
 			}}})
 		case removeImage:
 			if err := json.NewDecoder(r.Body).Decode(&removeReq); err != nil {
@@ -98,6 +99,9 @@ func TestImageAPIMethods(t *testing.T) {
 	}
 	if len(images) != 1 || images[0].Name != "localhost/conch/demo:latest" {
 		t.Fatalf("images = %#v", images)
+	}
+	if images[0].Kind != "sandbox-base" {
+		t.Fatalf("image kind = %q, want sandbox-base", images[0].Kind)
 	}
 
 	if err := c.RemoveImage(context.Background(), RemoveImageRequest{

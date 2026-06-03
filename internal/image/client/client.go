@@ -106,6 +106,7 @@ type ImageRecord struct {
 	TargetDigest    string            `json:"target_digest"`
 	TargetMediaType string            `json:"target_media_type"`
 	Size            int64             `json:"size,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	CreatedAt       time.Time         `json:"created_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
