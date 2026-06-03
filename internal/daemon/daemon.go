@@ -859,6 +859,16 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 		}); err != nil {
 			return convertImageResponse{}, fmt.Errorf("create sandbox for snapshot conversion: %w", err)
 		}
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+			defer cancel()
+			if err := s.runtimeService.RemoveSandbox(cleanupCtx, namespace, sandboxID); err != nil {
+				ulog.GetLogger().Warn("failed to cleanup snapshot conversion sandbox",
+					ulog.F("sandbox_id", sandboxID),
+					ulog.F("error", err),
+				)
+			}
+		}()
 		rootfsSnapshotID, err = s.runtimeService.PauseSandbox(ctx, namespace, sandboxID)
 		if err != nil {
 			return convertImageResponse{}, fmt.Errorf("pause sandbox for snapshot conversion: %w", err)

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	digestpkg "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
@@ -120,6 +121,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		PodSandboxID:    opts.PodSandboxID,
 		ConchSandboxID:  opts.SandboxID,
 		Namespace:       namespace,
+		PodNamespace:    firstNonEmpty(opts.PodNamespace, opts.Namespace),
 		Name:            opts.Name,
 		UID:             opts.UID,
 		Attempt:         opts.Attempt,
@@ -331,20 +333,45 @@ func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOpti
 }
 
 func imageRepoDigests(name, digest string) []string {
+	name = strings.TrimSpace(name)
+	digest = strings.TrimSpace(digest)
 	if name == "" || digest == "" {
 		return nil
 	}
+	if isDigestOnlyRef(name) {
+		return nil
+	}
 	base := name
-	lastSlash := strings.LastIndex(base, "/")
-	lastColon := strings.LastIndex(base, ":")
-	if lastColon > lastSlash {
-		base = base[:lastColon]
+	if repo, _, ok := strings.Cut(base, "@"); ok {
+		base = repo
+	} else {
+		lastSlash := strings.LastIndex(base, "/")
+		lastColon := strings.LastIndex(base, ":")
+		if lastColon > lastSlash {
+			base = base[:lastColon]
+		}
 	}
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return nil
 	}
 	return []string{base + "@" + digest}
+}
+
+func isDigestOnlyRef(ref string) bool {
+	if _, err := digestpkg.Parse(ref); err == nil {
+		return true
+	}
+	algo, _, ok := strings.Cut(ref, ":")
+	if !ok || strings.Contains(algo, "/") {
+		return false
+	}
+	switch algo {
+	case "sha256", "sha384", "sha512":
+		return true
+	default:
+		return false
+	}
 }
 
 func imageKindFromLabels(labels map[string]string) string {
@@ -377,6 +404,14 @@ func (s *Service) ListImageRequest(ctx context.Context, req imageSvc.ListRequest
 		return nil, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.List(ctx, req)
+}
+
+func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
+	return s.RemoveImageRequest(ctx, imageSvc.RemoveRequest{
+		Namespace:   opts.Namespace,
+		ImageName:   opts.ImageName,
+		Synchronous: opts.Synchronous,
+	})
 }
 
 func (s *Service) RemoveImageRequest(ctx context.Context, req imageSvc.RemoveRequest) error {

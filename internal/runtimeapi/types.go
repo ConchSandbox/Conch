@@ -2,6 +2,7 @@ package runtimeapi
 
 type SandboxCreateOptions struct {
 	Namespace      string
+	PodNamespace   string
 	PodSandboxID   string
 	SandboxID      string
 	Name           string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	runtimev1 "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -11,6 +12,13 @@ import (
 type fakeRuntime struct {
 	createReq          runtimeapi.SandboxCreateOptions
 	createContainerReq runtimeapi.ContainerCreateOptions
+	pullImageReq       runtimeapi.PullImageOptions
+	listImagesReq      runtimeapi.ListImagesOptions
+	removeImageReq     runtimeapi.RemoveImageOptions
+	removeImageReqs    []runtimeapi.RemoveImageOptions
+	removeImageErrs    map[string]error
+	images             []runtimeapi.ImageRecord
+	pullResult         runtimeapi.PullImageResult
 }
 
 func (f *fakeRuntime) CreateSandbox(_ context.Context, req runtimeapi.SandboxCreateOptions) (runtimeapi.SandboxCreateResult, error) {
@@ -35,8 +43,25 @@ func (f *fakeRuntime) SetContainerState(context.Context, string, string) error {
 	return nil
 }
 
-func (f *fakeRuntime) PullImage(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
-	return runtimeapi.PullImageResult{}, nil
+func (f *fakeRuntime) PullImage(_ context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
+	f.pullImageReq = req
+	return f.pullResult, nil
+}
+
+func (f *fakeRuntime) ListImages(_ context.Context, req runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
+	f.listImagesReq = req
+	return f.images, nil
+}
+
+func (f *fakeRuntime) RemoveImage(_ context.Context, req runtimeapi.RemoveImageOptions) error {
+	f.removeImageReq = req
+	f.removeImageReqs = append(f.removeImageReqs, req)
+	if f.removeImageErrs != nil {
+		if err := f.removeImageErrs[req.ImageName]; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TestRunPodSandboxPassesConchAnnotations(t *testing.T) {
@@ -69,6 +94,12 @@ func TestRunPodSandboxPassesConchAnnotations(t *testing.T) {
 	if runtime.createReq.ImageName != "registry.example.invalid/conch/sandbox:latest" {
 		t.Fatalf("ImageName = %q", runtime.createReq.ImageName)
 	}
+	if runtime.createReq.Namespace != "" {
+		t.Fatalf("Namespace = %q, want fixed default runtime namespace", runtime.createReq.Namespace)
+	}
+	if runtime.createReq.PodNamespace != "team-a" {
+		t.Fatalf("PodNamespace = %q, want team-a", runtime.createReq.PodNamespace)
+	}
 	if !runtime.createReq.UseSnapshot {
 		t.Fatalf("UseSnapshot = false, want true")
 	}
@@ -98,5 +129,26 @@ func TestRunPodSandboxLeavesDefaultsToRuntime(t *testing.T) {
 	}
 	if runtime.createReq.VCPUNum != 0 || runtime.createReq.VCPUMax != 0 || runtime.createReq.RamMB != 0 {
 		t.Fatalf("request should leave resource defaults to runtime: %#v", runtime.createReq)
+	}
+}
+
+func TestSandboxMetadataUsesPodNamespace(t *testing.T) {
+	meta := sandboxMetadata(state.SandboxRecord{
+		Name:         "pod-a",
+		Namespace:    "conch-system",
+		PodNamespace: "team-a",
+		UID:          "uid-a",
+		Attempt:      2,
+	})
+	if meta.GetNamespace() != "team-a" {
+		t.Fatalf("Namespace = %q, want pod namespace team-a", meta.GetNamespace())
+	}
+
+	meta = sandboxMetadata(state.SandboxRecord{
+		Name:      "pod-a",
+		Namespace: "legacy-team-a",
+	})
+	if meta.GetNamespace() != "legacy-team-a" {
+		t.Fatalf("legacy Namespace = %q, want fallback namespace", meta.GetNamespace())
 	}
 }

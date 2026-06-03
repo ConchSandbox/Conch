@@ -16,6 +16,7 @@ type SandboxRecord struct {
 	PodSandboxID    string            `json:"pod_sandbox_id"`
 	ConchSandboxID  string            `json:"conch_sandbox_id"`
 	Namespace       string            `json:"namespace"`
+	PodNamespace    string            `json:"pod_namespace,omitempty"`
 	Name            string            `json:"name"`
 	UID             string            `json:"uid"`
 	Attempt         uint32            `json:"attempt"`
