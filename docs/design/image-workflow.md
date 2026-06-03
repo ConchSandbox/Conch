@@ -10,7 +10,7 @@
 - `conch push`
 - `conch pull`
 - `conch unpack`
-- `conch snapshot export`
+- `conch snapshot-image export`
 
 conchd 会在进程内初始化 containerd v2 服务和 Conch 插件，不要求单独启动系统 `containerd` 守护进程。
 
@@ -178,8 +178,8 @@ conch convert --source docker.io/library/nginx:latest \
 本地已有运行态 snapshot 或 sandbox 时，也可以使用：
 
 ```bash
-conch snapshot export --snapshot-id <rootfs-snapshot-id> -t localhost/conch/snapshot:latest
-conch snapshot export --sandbox-id <sandbox-id> -t localhost/conch/snapshot:latest
+conch snapshot-image export --snapshot-id <rootfs-snapshot-id> -t localhost/conch/snapshot:latest
+conch snapshot-image export --sandbox-id <sandbox-id> -t localhost/conch/snapshot:latest
 ```
 
 ## 6. 目标机验证

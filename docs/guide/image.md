@@ -1,173 +1,119 @@
 # Conch Image Guide
 
-本文档介绍 Conch 镜像管理的常用命令，包括构建、快照导出、发布、拉取和解包。
+本文档介绍当前 Conch 镜像管理的常用命令。当前镜像入口围绕 `conch convert`、`conch pull`、`conch push`、`conch unpack`、`conch image` 和 `conch snapshots` 展开。
 
-## 1. conch build
+## 1. conch convert
 
-`conch build` 兼容 `buildah bud` 参数，并由 Conch 处理 Dockerfile 中的 `KERNEL` / `INDEX` / `SNAP` 扩展指令。
-
-### 1.1 普通 rootfs 构建
-
-最小 rootfs Dockerfile 示例：
-
-```dockerfile
-FROM docker.io/library/busybox:latest
-RUN echo "hello Conch" > /hello.txt
-```
-
-构建命令：
+`conch convert` 用于把已有 OCI rootfs 镜像与本地 kernel/initrd 文件转换为 Conch boot OCI index。
 
 ```bash
-conch build -f Dockerfile -t localhost/demo:latest .
+conch convert \
+  --source docker.io/openeuler/openeuler:24.03-lts-sp2 \
+  --kernel ./bzImage \
+  --initrd ./conch.initrd \
+  -t localhost/conch/openeuler:latest
 ```
 
-### 1.2 构建 sandbox-image
-
-生成 `sandbox-image` 时，在 Dockerfile 中补充 `KERNEL` 与 `INDEX`：
-
-```dockerfile
-FROM docker.io/library/busybox:latest
-RUN echo "hello Conch" > /hello.txt
-
-KERNEL bzImage conch.initrd
-INDEX
-```
-
-构建命令：
+如果需要生成包含内存快照的 `sandbox-snapshot` 镜像，可增加 `--snapshot`：
 
 ```bash
-conch build -f Dockerfile -t localhost/demo-sandbox:latest .
+conch convert \
+  --source docker.io/openeuler/openeuler:24.03-lts-sp2 \
+  --kernel ./bzImage \
+  --initrd ./conch.initrd \
+  --snapshot \
+  -t localhost/conch/openeuler-snapshot:latest
 ```
 
-启用 `INDEX` 后，命令会先将 rootfs 转换为 PMEM/EROFS rootfs 镜像，再与 kernel 镜像组装为 `sandbox-image`，最终镜像名使用 `-t` 指定的 tag。
+## 2. conch snapshot-image export
 
-### 1.3 构建 sandbox-snapshot
-
-启用 SNAP 流程时，在 Dockerfile 中补充 `KERNEL` 与 `SNAP`：
-
-```dockerfile
-FROM docker.io/library/busybox:latest
-RUN echo "hello Conch" > /hello.txt
-
-KERNEL bzImage conch.initrd
-SNAP
-```
-
-构建命令：
+`conch snapshot-image export` 用于将已有 rootfs snapshot 或运行中的 sandbox 导出为 `sandbox-snapshot` 镜像。
 
 ```bash
-CONCH_EROFS_OUTPUT_DIR=/tmp/conch-erofs \
-conch build --config config/config.yaml -f Dockerfile.snap -t localhost/demo-snap:latest .
-```
-
-启用 `SNAP` 后，命令会额外打印构建出的镜像名与推送示例，例如：
-
-```text
-Build outputs:
-  RootFS build image: localhost/demo-snap:latest
-  PMEM RootFS image:  localhost/conch/pmem-rootfs:latest
-  Kernel image:       localhost/conch/kernel:latest
-  Sandbox snapshot:   localhost/conch/sandbox-snapshot:latest
-  Push command:       conch push localhost/conch/sandbox-snapshot:latest <registry>/<repository>:<tag>
-```
-
-## 2. conch push
-
-`conch push` 用于发布 Conch 镜像产物，包括 `sandbox-image`、`sandbox-snapshot`，以及 kernel multi-arch 镜像。
-
-认证建议通过 `buildah login <registry>` 提前完成。
-
-```bash
-# 推送到远端 registry
-conch push localhost/demo-sandbox:latest hub.oepkgs.net/conch/demo-sandbox:latest
-
-# 如目标 registry 需要 plain HTTP 或跳过 TLS 校验
-conch push --plain-http localhost/demo-sandbox:latest conch.example.com/conch/demo-sandbox:latest
-
-# 推送 kernel multi-arch 镜像
-conch push localhost/conch/kernel:6.6.0 hub.oepkgs.net/conch/kernel:6.6.0
-```
-
-## 3. conch snapshot export
-
-`conch snapshot export` 用于将本地已有的 rootfs snapshot 或 sandbox 运行态导出为 `sandbox-snapshot` 镜像。
-
-### 3.1 根据 rootfs snapshot 导出
-
-当 rootfs snapshot 已存在且已经关联好 mem/vm snapshot 时，可直接导出：
-
-```bash
-conch snapshot export \
+conch snapshot-image export \
   --snapshot-id sha256:xxxxxxxx \
   -t localhost/conch/sandbox-snapshot:latest
 ```
 
-### 3.2 根据 sandbox 导出
-
-当 sandbox 仍在运行时，可通过 sandbox ID 触发 pause，再将生成的快照导出为镜像：
+也可以通过 sandbox ID 触发 pause 后导出：
 
 ```bash
-conch snapshot export \
+conch snapshot-image export \
   --sandbox-id sandbox-123 \
   -t localhost/conch/sandbox-snapshot:latest
 ```
 
-说明：
+`--snapshot-id` 与 `--sandbox-id` 二选一，`-t` / `--tag` 必填。
 
-- `--snapshot-id` 与 `--sandbox-id` 二选一
-- `-t` / `--tag` 必填，用于指定输出的 `sandbox-snapshot` 镜像名
-- `--config` 可用于指定 conchd 与 containerd 配置文件
+## 3. conch pull / push / unpack
 
-## 4. conch pull
-
-`conch pull` 用于拉取 Conch 镜像，并在本地自动完成 unpack。
-
-### 4.1 拉取 Conch 原生镜像
+`conch pull` 用于拉取 Conch 镜像，并在本地完成 unpack：
 
 ```bash
-conch pull hub.oepkgs.net/conch/sandbox-snapshot:latest
+conch pull hub.oepkgs.net/conch/openeuler:cri-v0.0.1-x86
 ```
 
-### 4.2 拉取普通 OCI 镜像并转换
-
-对于标准 OCI 镜像，`conch pull` 会将其转换为 Conch 可运行输入后，再在本地完成 unpack。
+`conch push` 用于推送本地 Conch OCI index：
 
 ```bash
-conch pull docker.io/library/nginx:latest
+conch push localhost/conch/openeuler:latest hub.oepkgs.net/conch/openeuler:latest
 ```
 
-如源镜像所在 registry 需要，可显式指定源镜像的拉取参数：
+`conch unpack` 用于把已有 Conch boot OCI index 解包到 conchd 管理的 containerd store：
 
 ```bash
-conch pull --plain-http --user <username:password> docker.io/library/nginx:latest
+conch unpack hub.oepkgs.net/conch/openeuler:cri-v0.0.1-x86
 ```
 
-如默认 kernel 镜像使用独立 registry，也可单独指定 kernel 镜像的拉取参数：
+这些命令会通过 conchd API 操作 conchd 进程内的 containerd store，支持通过配置读取 `server.unix_socket` 或 `server.host` / `server.port`，以及 `containerd.default_namespace`。
+
+## 4. conch image
+
+`conch image ls` 展示 conchd/containerd 中的 image metadata：
 
 ```bash
-conch pull --kernel-plain-http --kernel-user <username:password> docker.io/library/nginx:latest
+conch image ls
 ```
 
-`conch pull` 与 `conch unpack` 通过 conchd API 操作 conchd 进程内的 containerd store，均支持通过 config 读取：
+输出包含：
 
-- `server.unix_socket` 或 `server.host`/`server.port`
-- `containerd.default_namespace`
+```text
+NAME  KIND  DIGEST  SIZE
+```
 
-其中，标准 OCI 镜像转换流程还会使用默认的 kernel 镜像配置。默认配置使用 `hub.oepkgs.net/conch/kernel:6.6.0`，该 tag 应发布为 multi-arch 镜像，由镜像仓库和本地拉取工具自动选择对应架构。
+其中 `KIND` 可用于区分 `sandbox-base`、`sandbox-snapshot`、`rootfs`、`sandbox`、`mem-snapshot` 等镜像类型。
 
-## 5. conch unpack
-
-`conch unpack` 用于把 Conch boot OCI index 发送给 conchd 解包到进程内 containerd，并回写 rootfs 与 vm/mem snapshot 的关联。
+`conch image rm` 删除 containerd image record：
 
 ```bash
-# 解包 boot OCI index（默认 namespace: default）
-conch unpack hub.oepkgs.net/conch/conch-index:v0.1
-
-# 解包到指定 namespace
-conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1
+conch image rm localhost/conch/openeuler:latest
 ```
+
+注意：`image rm` 不会自动清理该 image unpack 产生的 snapshot 数据。如需清理 snapshot，请使用 `conch snapshots rm`。
+
+## 5. conch snapshots
+
+`conch snapshots ls` 展示 erofs snapshotter 中的 snapshot：
+
+```bash
+conch snapshots ls
+```
+
+`conch snapshots rm` 默认只删除未被 Conch rootfs/mem/vm 关系引用的单个 snapshot：
+
+```bash
+conch snapshots rm sha256:xxxxxxxx
+```
+
+对于 Conch snapshot group，建议使用 `--cascade` 删除完整的 rootfs/mem/vm 关联组：
+
+```bash
+conch snapshots rm --cascade sha256:rootfs-snapshot
+```
+
+如果直接删除已关联的 mem/vm 组件，命令会拒绝操作，避免留下悬空 rootfs label。
 
 ## 6. 相关文档
 
 - 镜像工作流设计：`docs/design/image-workflow.md`
-- 构建脚本设计：`docs/design/build-conch-images-script.md`
+- CRI 使用文档：`docs/guide/cri.md`

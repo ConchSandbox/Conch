@@ -23,7 +23,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch image rm [options] <image-name>")
 	fmt.Fprintln(out, "  conch pull [options] <image-name>")
 	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
-	fmt.Fprintln(out, "  conch snapshot export [options]")
+	fmt.Fprintln(out, "  conch snapshot-image export [options]")
 	fmt.Fprintln(out, "  conch snapshots ls [options]")
 	fmt.Fprintln(out, "  conch snapshots rm [options] <snapshot-key>")
 	fmt.Fprintln(out, "  conch --help")
@@ -31,7 +31,8 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch push --help")
 	fmt.Fprintln(out, "  conch pull --help")
 	fmt.Fprintln(out, "  conch unpack --help")
-	fmt.Fprintln(out, "  conch snapshot --help")
+	fmt.Fprintln(out, "  conch snapshot-image --help")
+	fmt.Fprintln(out, "  conch snapshots --help")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  convert Convert an existing OCI rootfs image plus kernel/initrd files")
@@ -40,7 +41,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  image   List or remove images from conchd/containerd.")
 	fmt.Fprintln(out, "  pull    Pull a Conch native image and unpack it into containerd snapshots.")
 	fmt.Fprintln(out, "  unpack  Unpack a Conch boot OCI index into containerd snapshots.")
-	fmt.Fprintln(out, "  snapshot Export a sandbox-snapshot image from an existing snapshot or sandbox.")
+	fmt.Fprintln(out, "  snapshot-image Export a sandbox-snapshot image from an existing snapshot or sandbox.")
 	fmt.Fprintln(out, "  snapshots List or remove snapshots from conchd/containerd.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Environment:")
@@ -110,10 +111,10 @@ func Run(args []string) int {
 			return 0
 		}
 		err = runUnpack(ctx, args[1:])
-	case "snapshot":
-		err = runSnapshot(ctx, args[1:])
+	case "snapshot-image":
+		err = runSnapshotImage(ctx, args[1:])
 	case "snapshots":
-		err = runSnapshot(ctx, args[1:])
+		err = runSnapshots(ctx, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", sub)
 		printHelp(os.Stderr)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/openeuler/Conch/internal/image/client"
 )
@@ -73,11 +74,19 @@ func runImageList(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch image ls: %w", err)
 	}
-	fmt.Printf("%-64s %-18s %s\n", "DIGEST", "TARGET_SIZE", "NAME")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tKIND\tDIGEST\tSIZE")
 	for _, image := range images {
-		fmt.Printf("%-64s %-18d %s\n", image.TargetDigest, image.Size, image.Name)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", image.Name, displayImageKind(image.Kind), image.TargetDigest, image.Size)
 	}
-	return nil
+	return tw.Flush()
+}
+
+func displayImageKind(kind string) string {
+	if strings.TrimSpace(kind) == "" {
+		return "-"
+	}
+	return kind
 }
 
 func runImageRemove(ctx context.Context, args []string) error {
@@ -85,7 +94,7 @@ func runImageRemove(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	synchronous := fs.Bool("sync", false, "remove image resources synchronously")
+	synchronous := fs.Bool("sync", true, "delete the containerd image record synchronously")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err

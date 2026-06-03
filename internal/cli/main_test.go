@@ -26,7 +26,7 @@ func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 		"conch push [options] <local-image> <remote-image>",
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
-		"conch snapshot export [options]",
+		"conch snapshot-image export [options]",
 		"Subcommands:",
 	} {
 		if !strings.Contains(got, want) {
@@ -330,27 +330,52 @@ func TestParseConvertArgs(t *testing.T) {
 	}
 }
 
-func TestPrintSnapshotHelpIncludesExport(t *testing.T) {
+func TestPrintSnapshotImageHelpIncludesExport(t *testing.T) {
 	var buf bytes.Buffer
-	printSnapshotHelp(&buf)
+	printSnapshotImageHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch snapshot export [options]",
+		"conch snapshot-image export [options]",
 		"export  Export a sandbox-snapshot image",
-		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
-		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
+		"conch snapshot-image export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
+		"conch snapshot-image export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("snapshot help output missing %q:\n%s", want, got)
+			t.Fatalf("snapshot-image help output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{
+		"conch snapshot ls",
+		"conch snapshots ls",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("snapshot-image help output unexpectedly contains %q:\n%s", unwanted, got)
 		}
 	}
 }
 
-func TestPrintSnapshotExportHelpIncludesExamples(t *testing.T) {
+func TestPrintSnapshotsHelpIncludesListAndRemove(t *testing.T) {
 	var buf bytes.Buffer
-	fs, _ := newSnapshotExportFlagSet(&buf)
-	printSnapshotExportHelp(&buf, fs)
+	printSnapshotsHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch snapshots ls [options]",
+		"conch snapshots rm [options] <snapshot-key>",
+		"ls  List EROFS snapshots",
+		"rm  Remove an EROFS snapshot",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshots help output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestPrintSnapshotImageExportHelpIncludesExamples(t *testing.T) {
+	var buf bytes.Buffer
+	fs, _ := newSnapshotImageExportFlagSet(&buf)
+	printSnapshotImageExportHelp(&buf, fs)
 
 	got := buf.String()
 	for _, want := range []string{
@@ -361,15 +386,15 @@ func TestPrintSnapshotExportHelpIncludesExamples(t *testing.T) {
 		"-tag string",
 		"-t string",
 		"Either one of --snapshot-id or --sandbox-id is required.",
-		"conch snapshot export --snapshot-id sha256:abc -t localhost/conch/sandbox-snapshot:latest",
+		"conch snapshot-image export --snapshot-id sha256:abc -t localhost/conch/sandbox-snapshot:latest",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("snapshot export help output missing %q:\n%s", want, got)
+			t.Fatalf("snapshot-image export help output missing %q:\n%s", want, got)
 		}
 	}
 }
 
-func TestParseSnapshotExportArgs(t *testing.T) {
+func TestParseSnapshotImageExportArgs(t *testing.T) {
 	tests := []struct {
 		name         string
 		args         []string
@@ -417,18 +442,18 @@ func TestParseSnapshotExportArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseSnapshotExportArgs(tt.args)
+			got, err := parseSnapshotImageExportArgs(tt.args)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseSnapshotExportArgs() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("parseSnapshotImageExportArgs() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				if !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Fatalf("parseSnapshotExportArgs() error = %q, want substring %q", err.Error(), tt.wantErrText)
+					t.Fatalf("parseSnapshotImageExportArgs() error = %q, want substring %q", err.Error(), tt.wantErrText)
 				}
 				return
 			}
 			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig || got.namespace != tt.wantNS {
-				t.Fatalf("parseSnapshotExportArgs() = %#v", got)
+				t.Fatalf("parseSnapshotImageExportArgs() = %#v", got)
 			}
 		})
 	}
