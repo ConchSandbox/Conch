@@ -134,7 +134,7 @@ func ResumeSandbox(
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
-			cleanupErr := cleanup.Run(ctx)
+			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
 	}()
@@ -220,7 +220,7 @@ func CreateSandbox(
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
-			cleanupErr := cleanup.Run(ctx)
+			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
 	}()

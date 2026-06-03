@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("state record not found")
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
+	[]byte("network_slots"),
 	[]byte("containers"),
 	[]byte("snapshot_runtimes"),
 	[]byte("view_snapshots"),
@@ -135,6 +136,33 @@ func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) 
 
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
+}
+
+func (s *BoltStore) UpsertNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
+	return s.upsert(ctx, []byte("network_slots"), rec.SlotKey, rec)
+}
+
+func (s *BoltStore) GetNetworkSlot(ctx context.Context, slotKey string) (NetworkSlotRecord, error) {
+	var rec NetworkSlotRecord
+	err := s.get(ctx, []byte("network_slots"), slotKey, &rec)
+	return rec, err
+}
+
+func (s *BoltStore) ListNetworkSlots(ctx context.Context) ([]NetworkSlotRecord, error) {
+	var out []NetworkSlotRecord
+	err := s.list(ctx, []byte("network_slots"), func(data []byte) error {
+		var rec NetworkSlotRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		out = append(out, rec)
+		return nil
+	})
+	return out, err
+}
+
+func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotKey string) error {
+	return s.delete(ctx, []byte("network_slots"), slotKey)
 }
 
 func (s *BoltStore) UpsertContainer(ctx context.Context, rec ContainerRecord) error {

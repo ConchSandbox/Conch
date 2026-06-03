@@ -21,6 +21,7 @@ const (
 	defaultCNIPluginConfDir     = "/etc/conch/cni/net.d"
 	defaultCNIPluginBinDir      = "/opt/cni/bin"
 	defaultCNIPluginMaxConf     = 1
+	defaultCNIPodNamespace      = "conch"
 	defaultHostLocalIPAMDataDir = "/var/lib/cni/networks"
 	cniTeardownRetryAttempts    = 3
 	cniTeardownRetryDelay       = 100 * time.Millisecond
@@ -94,6 +95,11 @@ type CNIDNS struct {
 	Domain      string
 	Search      []string
 	Options     []string
+}
+
+type cniSelectedMetadata struct {
+	bridgeNames       []string
+	hostLocalAllocDir string
 }
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
@@ -190,119 +196,11 @@ func (m *CNIManager) SelectCNIPluginAndConfig(slot *Slot) (cni.CNI, string, erro
 	return m.plugin, m.selectedConf, nil
 }
 
-func buildCNIOpts(slot *Slot, cniID, netnsPath string) ([]NamespaceOpts, error) {
-	if slot == nil {
-		return nil, fmt.Errorf("slot is nil")
-	}
-	if cniID == "" {
-		return nil, fmt.Errorf("cniID is required")
-	}
-	if netnsPath == "" {
-		return nil, fmt.Errorf("netnsPath is required")
-	}
-	return []NamespaceOpts{
-		cni.WithLabels(map[string]string{
-			"K8S_POD_NAMESPACE":          "conch",
-			"K8S_POD_NAME":               cniID,
-			"K8S_POD_INFRA_CONTAINER_ID": cniID,
-			"CONCH_NETWORK_SLOT":         slot.Key,
-			"CONCH_BRIDGE_SHARD":         slot.BridgeName(),
-			"IgnoreUnknown":              "1",
-		}),
-	}, nil
-}
-
-func (m *CNIManager) SetupPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) (*CNIResult, error) {
-	if m == nil || m.plugin == nil {
-		return nil, fmt.Errorf("cni config not initialized")
-	}
-	var (
-		result *cni.Result
-		err    error
-	)
-	if m.config.SetupSerially {
-		result, err = m.plugin.SetupSerially(ctx, cniID, netnsPath, opts...)
-	} else {
-		result, err = m.plugin.Setup(ctx, cniID, netnsPath, opts...)
-	}
-	if err != nil {
-		removeErr := m.plugin.Remove(context.WithoutCancel(ctx), cniID, netnsPath, opts...)
-		if removeErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("failed to setup cni network: %w", err),
-				fmt.Errorf("failed to rollback cni setup: %w", removeErr),
-				m.validateHostLocalAllocationReleased(cniID),
-			)
-		}
-		if allocErr := m.validateHostLocalAllocationReleased(cniID); allocErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("failed to setup cni network: %w", err),
-				fmt.Errorf("cni rollback left host-local allocation: %w", allocErr),
-			)
-		}
-		return nil, err
-	}
-	converted, err := convertCNIResult(result, m.config.IfName)
-	if err != nil {
-		removeErr := m.plugin.Remove(context.WithoutCancel(ctx), cniID, netnsPath, opts...)
-		if removeErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("failed to convert cni result: %w", err),
-				fmt.Errorf("failed to rollback cni setup: %w", removeErr),
-			)
-		}
-		return nil, fmt.Errorf("failed to convert cni result after rolling back cni setup: %w", err)
-	}
-	return converted, nil
-}
-
-func (m *CNIManager) TeardownPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
-	if cniID == "" || netnsPath == "" {
-		return nil
-	}
-	if m == nil || m.plugin == nil {
-		return fmt.Errorf("cni config not initialized")
-	}
-	return m.plugin.Remove(ctx, cniID, netnsPath, opts...)
-}
-
 func (m *CNIManager) SelectedBridgeNames() ([]string, error) {
 	if m == nil {
 		return nil, nil
 	}
 	return append([]string(nil), m.selectedBridgeNames...), nil
-}
-
-func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
-	if m == nil || m.selectedHostLocalAllocDir == "" || cniID == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(m.selectedHostLocalAllocDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading host-local allocation dir %s: %w", m.selectedHostLocalAllocDir, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), "last_reserved_ip") || entry.Name() == "lock" {
-			continue
-		}
-		path := filepath.Join(m.selectedHostLocalAllocDir, entry.Name())
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("reading host-local allocation %s: %w", path, err)
-		}
-		if strings.Contains(string(content), cniID) {
-			return fmt.Errorf("host-local allocation %s still references cni id %s", path, cniID)
-		}
-	}
-	return nil
-}
-
-type cniSelectedMetadata struct {
-	bridgeNames       []string
-	hostLocalAllocDir string
 }
 
 func selectedCNIConfigMetadata(confDir, selectedConf string) (cniSelectedMetadata, error) {
@@ -349,6 +247,28 @@ func selectedCNIConfigMetadata(confDir, selectedConf string) (cniSelectedMetadat
 	}
 	getLogger().Warn("selected cni config was not found while inspecting cleanup metadata", ulog.F("config", selectedConf), ulog.F("dir", confDir))
 	return metadata, nil
+}
+
+func buildCNIOpts(slot *Slot, cniID, netnsPath string) ([]NamespaceOpts, error) {
+	if slot == nil {
+		return nil, fmt.Errorf("slot is nil")
+	}
+	if cniID == "" {
+		return nil, fmt.Errorf("cniID is required")
+	}
+	if netnsPath == "" {
+		return nil, fmt.Errorf("netnsPath is required")
+	}
+	return []NamespaceOpts{
+		cni.WithLabels(map[string]string{
+			"K8S_POD_NAMESPACE":          defaultCNIPodNamespace,
+			"K8S_POD_NAME":               cniID,
+			"K8S_POD_INFRA_CONTAINER_ID": cniID,
+			"CONCH_NETWORK_SLOT":         slot.Key,
+			"CONCH_BRIDGE_SHARD":         slot.BridgeName(),
+			"IgnoreUnknown":              "1",
+		}),
+	}, nil
 }
 
 func (c cniConfigFile) bridgeNames() []string {
@@ -496,4 +416,82 @@ func ipToString(ip net.IP) string {
 		return ""
 	}
 	return ip.String()
+}
+
+func (m *CNIManager) SetupPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) (*CNIResult, error) {
+	if m == nil || m.plugin == nil {
+		return nil, fmt.Errorf("cni config not initialized")
+	}
+	var (
+		result *cni.Result
+		err    error
+	)
+	if m.config.SetupSerially {
+		result, err = m.plugin.SetupSerially(ctx, cniID, netnsPath, opts...)
+	} else {
+		result, err = m.plugin.Setup(ctx, cniID, netnsPath, opts...)
+	}
+	if err != nil {
+		if isExpectedShutdownError(ctx, err) {
+			return nil, errors.Join(err, ctx.Err())
+		}
+		return nil, m.rollbackCNISetup(ctx, cniID, netnsPath, fmt.Errorf("failed to setup cni network: %w", err), opts...)
+	}
+	converted, err := convertCNIResult(result, m.config.IfName)
+	if err != nil {
+		if shouldPreserveAfterCancel(ctx) {
+			return nil, errors.Join(err, ctx.Err())
+		}
+		return nil, m.rollbackCNISetup(ctx, cniID, netnsPath, fmt.Errorf("failed to convert cni result: %w", err), opts...)
+	}
+	return converted, nil
+}
+
+func (m *CNIManager) rollbackCNISetup(ctx context.Context, cniID, netnsPath string, cause error, opts ...NamespaceOpts) error {
+	removeErr := m.plugin.Remove(context.WithoutCancel(ctx), cniID, netnsPath, opts...)
+	allocErr := m.validateHostLocalAllocationReleased(cniID)
+	if removeErr != nil {
+		return errors.Join(cause, fmt.Errorf("failed to rollback cni setup: %w", removeErr), allocErr)
+	}
+	if allocErr != nil {
+		return errors.Join(cause, fmt.Errorf("cni rollback left host-local allocation: %w", allocErr))
+	}
+	return cause
+}
+
+func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
+	if m == nil || m.selectedHostLocalAllocDir == "" || cniID == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(m.selectedHostLocalAllocDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading host-local allocation dir %s: %w", m.selectedHostLocalAllocDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), "last_reserved_ip") || entry.Name() == "lock" {
+			continue
+		}
+		path := filepath.Join(m.selectedHostLocalAllocDir, entry.Name())
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading host-local allocation %s: %w", path, err)
+		}
+		if strings.Contains(string(content), cniID) {
+			return fmt.Errorf("host-local allocation %s still references cni id %s", path, cniID)
+		}
+	}
+	return nil
+}
+
+func (m *CNIManager) TeardownPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
+	if cniID == "" || netnsPath == "" {
+		return nil
+	}
+	if m == nil || m.plugin == nil {
+		return fmt.Errorf("cni config not initialized")
+	}
+	return m.plugin.Remove(ctx, cniID, netnsPath, opts...)
 }

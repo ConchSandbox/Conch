@@ -136,6 +136,14 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := ulog.GetLogger()
 
+	store, err := state.OpenBolt(cfg.State.Path)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open state store: %w", err)
+	}
+	s.stateStore = store
+	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
+
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
 		RootDir:          cfg.Containerd.RootDir,
 		StateDir:         cfg.Containerd.StateDir,
@@ -151,6 +159,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
 			CNI:                cfg.Network.CNI,
+			NetworkSlotStore:   store,
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
@@ -158,6 +167,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 	})
 	if err != nil {
 		cancel()
+		_ = store.Close()
 		logger.Error("Failed to init embedded containerd host", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to init embedded containerd host: %w", err)
 	}
@@ -166,13 +176,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.daemonClient = daemonClient
 	s.defaultKernel = cfg.Image.DefaultKernelImage
 
-	store, err := state.OpenBolt(cfg.State.Path)
-	if err != nil {
-		cancel()
-		_ = host.Close()
-		return nil, fmt.Errorf("open state store: %w", err)
-	}
-	s.stateStore = store
 	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
 	s.runtimeService.Snapshot = host.SnapshotService()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
@@ -182,8 +185,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:   cfg.Sandbox.DefaultVCPUMax,
 		RamMB:     cfg.Sandbox.DefaultRAMMB,
 	})
-	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
-
 	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
 		Store:             store,
 		LeaseClient:       daemonClient,
@@ -192,8 +193,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	})
 	if err != nil {
 		cancel()
-		_ = store.Close()
 		_ = host.Close()
+		_ = store.Close()
 		return nil, fmt.Errorf("reconcile state: %w", err)
 	}
 	logger.Info("State recovery reconciled",
@@ -347,15 +348,6 @@ func (s *Daemon) Shutdown() {
 			logger.Info("CRI server stopped")
 		}
 
-		if s.stateStore != nil {
-			finish := cleanupdiag.Start("daemon.state_store.close")
-			err := s.stateStore.Close()
-			finish(err)
-			if err != nil {
-				logger.Error("State store cleanup error", ulog.F("error", err))
-			}
-		}
-
 		if s.containerdHost != nil {
 			finish := cleanupdiag.Start("daemon.containerd_host.close")
 			err := s.containerdHost.Close()
@@ -369,6 +361,15 @@ func (s *Daemon) Shutdown() {
 			finish(err)
 			if err != nil {
 				logger.Error("Containerd cleanup error", ulog.F("error", err))
+			}
+		}
+
+		if s.stateStore != nil {
+			finish := cleanupdiag.Start("daemon.state_store.close")
+			err := s.stateStore.Close()
+			finish(err)
+			if err != nil {
+				logger.Error("State store cleanup error", ulog.F("error", err))
 			}
 		}
 		logger.Info("Cleanup completed")
