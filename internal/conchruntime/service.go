@@ -101,6 +101,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		opts.LeaseID = containerdclient.RuntimeLeaseID(namespace)
 	}
 	s.applySandboxDefaults(&opts)
+	agentToken, err := sandbox.GenerateAgentToken()
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
 
 	req := sandbox.SandboxCreateRequest{
 		Namespace:   namespace,
@@ -113,6 +117,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VcpuNum:     opts.VCPUNum,
 		VcpuMax:     opts.VCPUMax,
 		RamMB:       opts.RamMB,
+		AgentToken:  agentToken,
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -170,6 +175,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		SandboxID:    opts.SandboxID,
 		Namespace:    namespace,
 		IP:           createResult.IP,
+		AgentToken:   createResult.AgentToken,
 	}, nil
 }
 

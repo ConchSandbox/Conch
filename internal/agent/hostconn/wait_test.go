@@ -13,6 +13,7 @@ func TestWaitForVsockAgentReadyReportsTimeout(t *testing.T) {
 		conn, err := WaitReady(
 			context.Background(),
 			"sandbox-timeout",
+			"token",
 			t.TempDir()+"/missing.vsock",
 			time.Millisecond,
 			10*time.Millisecond,
@@ -43,6 +44,7 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 	conn, err := WaitReady(
 		ctx,
 		"sandbox-canceled",
+		"token",
 		t.TempDir()+"/missing.vsock",
 		time.Millisecond,
 		time.Second,

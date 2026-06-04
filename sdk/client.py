@@ -24,13 +24,19 @@ class AgentClient:
     }
     FALLBACK_SCRIPT_NAME = "main.py"
 
-    def __init__(self, host: str, port: int = DEFAULT_GRPC_PORT):
+    def __init__(self, host: str, port: int = DEFAULT_GRPC_PORT, token: Optional[str] = None):
         self.host = host
         self.port = port
+        self.token = token
         self.address = f"{host}:{port}"
         self.channel = None
         self.stub = None
         self._connect()
+
+    def _metadata(self):
+        if not self.token:
+            return None
+        return (("x-conch-agent-token", self.token),)
 
     def _connect(self):
         # connect to agent grpc server
@@ -43,7 +49,7 @@ class AgentClient:
     def health_check(self) -> Dict[str, Any]:
         request = agent_pb2.Empty()
         try:
-            response = self.stub.HealthCheck(request)
+            response = self.stub.HealthCheck(request, metadata=self._metadata())
             return {
                 "status": "OK",
                 "message": response.message,
@@ -75,7 +81,7 @@ class AgentClient:
         request = agent_pb2.StartProcessRequest(**request_kwargs)
 
         try:
-            response = self.stub.StartProcess(request)
+            response = self.stub.StartProcess(request, metadata=self._metadata())
             status = self.STATUS_SUCCESS if response.exit_code == 0 and not response.error else self.STATUS_FAILED
             return {
                 "status": status,
@@ -148,7 +154,7 @@ class AgentClient:
         uploaded_count = 0
         try:
             for file in files:
-                response = self.stub.PostFileStream(self._iter_file_chunks(file))
+                response = self.stub.PostFileStream(self._iter_file_chunks(file), metadata=self._metadata())
                 if response.error:
                     return {
                         "status": self.STATUS_FAILED,
@@ -173,7 +179,7 @@ class AgentClient:
             os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
             size = 0
             with open(local_path, "wb") as f:
-                for chunk in self.stub.GetFileStream(request):
+                for chunk in self.stub.GetFileStream(request, metadata=self._metadata()):
                     f.write(chunk.content)
                     size += len(chunk.content)
 

@@ -34,6 +34,7 @@ type SandboxCreateResult struct {
 	SandboxID    string
 	Namespace    string
 	IP           string
+	AgentToken   string
 }
 
 type ContainerCreateOptions struct {
