@@ -17,10 +17,16 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-const defaultVmmBinary = "/usr/local/bin/cloud-hypervisor"
+const (
+	defaultVmmBinary          = "/usr/local/bin/cloud-hypervisor"
+	pmemDevicesPerPciSegment  = 24
+	defaultCloudHypervisorPci = 1
+)
 
 const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} \
+{{ if .PlatformArgs }}{{ .PlatformArgs }} \
+{{ end }}\
 --cpus boot={{ .CPUBoot }},max={{ .CPUMax }},max_phys_bits=42 \
 --kernel {{ .KernelPath }} \
 --initramfs {{ .InitrdPath }} \
@@ -50,6 +56,7 @@ type StartScriptCLHArgs struct {
 	MemoryPath      string
 	KernelPath      string
 	InitrdPath      string
+	PlatformArgs    string
 	PmemArgs        string
 	NamespaceID     string
 	TapName         string
@@ -114,6 +121,7 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 		MemoryPath:      args.MemoryPath,
 		KernelPath:      args.KernelPath,
 		InitrdPath:      args.InitrdPath,
+		PlatformArgs:    buildPlatformArgs(args.PmemPaths),
 		PmemArgs:        buildPmemArgs(args.PmemPaths),
 		NamespaceID:     args.NamespaceID,
 		TapName:         args.TapName,
@@ -156,15 +164,49 @@ func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, 
 	return script, nil
 }
 
+func buildPlatformArgs(pmemPaths []string) string {
+	pmemCount := nonEmptyPathCount(pmemPaths)
+	segments := pciSegmentsForPmemDeviceCount(pmemCount)
+	if segments <= defaultCloudHypervisorPci {
+		return ""
+	}
+	return fmt.Sprintf(`--platform "num_pci_segments=%d"`, segments)
+}
+
+func pciSegmentsForPmemDeviceCount(pmemCount int) int {
+	if pmemCount <= 0 {
+		return defaultCloudHypervisorPci
+	}
+	return (pmemCount + pmemDevicesPerPciSegment - 1) / pmemDevicesPerPciSegment
+}
+
+func nonEmptyPathCount(paths []string) int {
+	count := 0
+	for _, path := range paths {
+		if strings.TrimSpace(path) != "" {
+			count++
+		}
+	}
+	return count
+}
+
 func buildPmemArgs(paths []string) string {
 	args := make([]string, 0, len(paths)+1)
 	args = append(args, "--pmem")
+	pmemIndex := 0
+	segments := pciSegmentsForPmemDeviceCount(nonEmptyPathCount(paths))
 	for _, path := range paths {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			continue
 		}
-		args = append(args, fmt.Sprintf("file=%s,discard_writes=on", path))
+		pciSegment := pmemIndex / pmemDevicesPerPciSegment
+		pmemIndex++
+		pmemArg := fmt.Sprintf("file=%s,discard_writes=on", path)
+		if segments > defaultCloudHypervisorPci {
+			pmemArg += fmt.Sprintf(",pci_segment=%d", pciSegment)
+		}
+		args = append(args, pmemArg)
 	}
 	return strings.Join(args, " \\\n")
 }
