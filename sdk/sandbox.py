@@ -270,8 +270,7 @@ class Sandbox:
         if content is not None:
             request_kwargs["content"] = content
             if not args:
-                filename = kwargs.get("filename", "main.py")
-                request_kwargs["args"] = [filename]
+                request_kwargs["args"] = []
 
         result = self.client.start_process(**request_kwargs)
         return Execution(result)
