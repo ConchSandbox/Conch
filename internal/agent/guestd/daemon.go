@@ -140,7 +140,7 @@ func listenVsockLoop(handler VsockHandler) {
 			logger.Error("Failed to read from vsock connection", ulog.F("error", err))
 		} else if n > 0 {
 			message := string(buf[:n])
-			logger.Info("Received message via vsock", ulog.F("message", message))
+			logger.Info("Received message via vsock", ulog.F("bytes", n))
 
 			response := handler.HandleMessage(message)
 			if response != "" {
@@ -243,7 +243,10 @@ func Run(args []string) error {
 		)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(agentUnaryAuthInterceptor),
+		grpc.StreamInterceptor(agentStreamAuthInterceptor),
+	)
 	pb.RegisterAgentServiceServer(grpcServer, &AgentServer{Version: ServerVersion})
 
 	reflection.Register(grpcServer)

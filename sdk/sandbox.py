@@ -25,6 +25,7 @@ STATUS_KEY = "status"
 ERROR_KEY = "error"
 MESSAGE_KEY = "message"
 IP_KEY = "ip"
+AGENT_TOKEN_KEY = "agent_token"
 SNAPSHOT_ID_RESP_KEY = "snapshotId"
 
 # Config keys
@@ -112,6 +113,7 @@ class Sandbox:
         self.use_snapshot = bool(config_use_snapshot if use_snapshot is None else use_snapshot)
 
         self.ip = None
+        self.agent_token = None
         self.client = None
         self.vcpu_num = vcpu_num
         self.ram_mb = ram_mb
@@ -160,15 +162,19 @@ class Sandbox:
         # Initialize/update the AgentClient based on sandbox creation result
         status = result.get(STATUS_KEY)
         server_ip = result.get(IP_KEY)
+        agent_token = result.get(AGENT_TOKEN_KEY)
 
         if status == "ok" and server_ip:
+            if not agent_token:
+                raise RuntimeError("Sandbox creation failed: missing agent_token in response")
             self.ip = server_ip
+            self.agent_token = agent_token
             if self.client:
                 try:
                     self.client.close()
                 except Exception:
                     pass
-            self.client = AgentClient(host=self.ip)
+            self.client = AgentClient(host=self.ip, token=self.agent_token)
         else:
             error_val = result.get(ERROR_KEY)
             error_msg = str(error_val) if error_val is not None else "Unknown error"

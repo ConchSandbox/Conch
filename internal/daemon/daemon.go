@@ -423,8 +423,9 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ok",
-		"ip":     result.IP,
+		"status":      "ok",
+		"ip":          result.IP,
+		"agent_token": result.AgentToken,
 	})
 }
 

@@ -12,12 +12,12 @@ import (
 
 const (
 	vsockReadyPort       = 4065
-	expectedAgentVersion = "0.0.2"
+	expectedAgentVersion = "0.0.3"
 )
 
-func WaitReady(ctx context.Context, sandboxID, vsockSocketPath string, retry, timeout time.Duration) (net.Conn, error) {
+func WaitReady(ctx context.Context, sandboxID, agentToken, vsockSocketPath string, retry, timeout time.Duration) (net.Conn, error) {
 	logger := ulog.GetLogger()
-	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\n", sandboxID)
+	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\nAGENT_TOKEN:%s\n", sandboxID, agentToken)
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -33,7 +33,6 @@ func WaitReady(ctx context.Context, sandboxID, vsockSocketPath string, retry, ti
 		default:
 			conn, err := net.Dial("unix", vsockSocketPath)
 			if err != nil {
-				logger.Debug("failed to connect to vsock socket, retrying...", ulog.F("sandboxId", sandboxID), ulog.F("error", err))
 				time.Sleep(retry)
 				continue
 			}

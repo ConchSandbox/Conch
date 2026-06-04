@@ -20,9 +20,10 @@ type fakeSandboxOps struct {
 func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
 	f.req = req
 	return sandbox.SandboxCreateResult{
-		Namespace: req.Namespace,
-		SandboxID: req.SandboxId,
-		IP:        "192.0.2.10",
+		Namespace:  req.Namespace,
+		SandboxID:  req.SandboxId,
+		IP:         "192.0.2.10",
+		AgentToken: req.AgentToken,
 	}, nil
 }
 
@@ -243,7 +244,8 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 		RamMB:     4096,
 	})
 
-	if _, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{SandboxID: "sandbox-1"}); err != nil {
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{SandboxID: "sandbox-1"})
+	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
@@ -255,6 +257,12 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 	if sandboxOps.req.VcpuNum != 2 || sandboxOps.req.VcpuMax != 4 || sandboxOps.req.RamMB != 4096 {
 		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VcpuNum, sandboxOps.req.VcpuMax, sandboxOps.req.RamMB)
+	}
+	if sandboxOps.req.AgentToken == "" {
+		t.Fatal("AgentToken is empty")
+	}
+	if result.AgentToken != sandboxOps.req.AgentToken {
+		t.Fatalf("result.AgentToken = %q, want generated token", result.AgentToken)
 	}
 }
 

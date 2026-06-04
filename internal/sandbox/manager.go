@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -51,6 +53,7 @@ type SandboxCreateRequest struct {
 	VcpuNum     int64  `json:"vcpu_num"`
 	VcpuMax     int64  `json:"vcpu_max"`
 	RamMB       int64  `json:"ram_mb"`
+	AgentToken  string `json:"-"`
 }
 
 type SandboxDeleteRequest struct {
@@ -65,6 +68,7 @@ type SandboxPauseRequest struct {
 
 type SandboxCreateResult struct {
 	IP              string
+	AgentToken      string
 	Namespace       string
 	SandboxID       string
 	LeaseID         string
@@ -87,11 +91,19 @@ type SandboxCreateResult struct {
 	Resume          bool
 }
 
+func GenerateAgentToken() (string, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("failed to generate agent token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(tokenBytes), nil
+}
+
 func sandboxMapKey(namespace, sandboxID string) string {
 	return namespace + ":" + sandboxID
 }
 
-func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.SnapshotConfig, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
 	var sbx *Sandbox
@@ -105,7 +117,7 @@ func createSandboxWithVsockSend(ctx context.Context, snapshotConf *snapshot.Snap
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
 
-	conn, err := hostconn.WaitReady(ctx, sandboxId, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout)
+	conn, err := hostconn.WaitReady(ctx, sandboxId, agentToken, vsockSocketPath, vsockSignalRetry, vsockSignalTimeout)
 	if err != nil {
 		return sbx, err
 	}
@@ -124,6 +136,10 @@ type createRuntimeIDs struct {
 func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, err error) {
 	logger := ulog.GetLogger()
 	logger.Debug("creating sandbox in manager")
+
+	if req.AgentToken == "" {
+		return SandboxCreateResult{}, fmt.Errorf("agent token is required")
+	}
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
@@ -267,6 +283,7 @@ func (m *Manager) startSandbox(ctx context.Context, namespace string, req Sandbo
 		namespace,
 		req.VmmName,
 		req.SandboxId,
+		req.AgentToken,
 		req.VcpuNum,
 		runtimeIDs.vcpuMax,
 		m.pool,
@@ -315,6 +332,7 @@ func (m *Manager) trackSandbox(ctx context.Context, namespace, sandboxID string,
 func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateRequest, sbx *Sandbox, snapshotConf *snapshot.SnapshotConfig, parentIDs snapshot.ParentSnapshotIDs, runtimeIDs createRuntimeIDs, resume bool) SandboxCreateResult {
 	return SandboxCreateResult{
 		IP:              sbx.slot.VpeerIPString(),
+		AgentToken:      req.AgentToken,
 		Namespace:       namespace,
 		SandboxID:       req.SandboxId,
 		LeaseID:         leaseID,

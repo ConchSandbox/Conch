@@ -165,7 +165,10 @@ func startGRPCServerAsync() error {
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(agentUnaryAuthInterceptor),
+		grpc.StreamInterceptor(agentStreamAuthInterceptor),
+	)
 	pb.RegisterAgentServiceServer(grpcServer, &AgentServer{Version: ServerVersion})
 	reflection.Register(grpcServer)
 

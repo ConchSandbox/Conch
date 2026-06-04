@@ -49,9 +49,15 @@ func (h *VsockHandlerImpl) HandleMessage(message string) string {
 	logger := ulog.GetLogger()
 
 	if strings.Contains(message, "SANDBOX_ID:") {
-		parts := strings.Split(message, "SANDBOX_ID:")
-		if len(parts) > 1 {
-			newSandboxID := strings.TrimSpace(parts[1])
+		newSandboxID := parseVsockField(message, "SANDBOX_ID:")
+		if newSandboxID != "" {
+			agentToken := parseVsockField(message, "AGENT_TOKEN:")
+			if agentToken == "" {
+				logger.Warn("agent token missing from vsock init message")
+				return "NOT_READY\n"
+			}
+			agentAuth.SetToken(agentToken)
+
 			if newSandboxID != "" {
 				if h.GetSandboxID() != newSandboxID {
 					h.SetSandboxID(newSandboxID)
@@ -81,6 +87,19 @@ func (h *VsockHandlerImpl) HandleMessage(message string) string {
 						ulog.F("timeout", sandboxReadyResponseTimeout.String()))
 					return "NOT_READY\n"
 				}
+			}
+		}
+	}
+	return ""
+}
+
+func parseVsockField(message, prefix string) string {
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, prefix) {
+			parts := strings.SplitN(line, prefix, 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
 			}
 		}
 	}
