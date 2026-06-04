@@ -14,6 +14,7 @@ class AgentClient:
     DEFAULT_GRPC_PORT = 4064
     STATUS_SUCCESS = 0
     STATUS_FAILED = -1
+    FILE_CHUNK_SIZE = 1024 * 1024
     DEFAULT_SCRIPT_NAMES = {
         ("python", "python3", "python2"): "main.py",
         ("node", "nodejs"): "main.js",
@@ -66,13 +67,10 @@ class AgentClient:
             "args": args or [],
         }
 
-        if filename is None:
-            filename = self._infer_script_name(cmd)
-
         if content is not None:
             request_kwargs["content"] = content
             if args is None:
-                request_kwargs["args"] = filename
+                request_kwargs["args"] = []
 
         request = agent_pb2.StartProcessRequest(**request_kwargs)
 
@@ -108,63 +106,62 @@ class AgentClient:
                 if "content" in item and "filepath" in item:
                     content = item["content"]
                     filepath = item["filepath"]
+                    files.append({"filepath": filepath, "content": content})
                 elif all(k in item for k in ("local_path", "remote_path")):
                     lp = item["local_path"]
                     if not os.path.exists(lp):
                         raise FileNotFoundError(f"local file not found: {lp}")
-                    with open(lp, "rb") as f:
-                        content = f.read()
                     filepath = item["remote_path"]
+                    files.append({"filepath": filepath, "local_path": lp})
                 else:
                     raise ValueError(
                         "invalid file spec, need 'content'+'filepath' or 'local_path'+'remote_path': "
                         + str(item)
                     )
-                files.append({"filepath": filepath, "content": content})
 
         elif len(args) == 2:
             local_path, remote_path = args
             if not os.path.exists(local_path):
                 raise FileNotFoundError(f"local file not found: {local_path}")
-            with open(local_path, "rb") as f:
-                content = f.read()
-            files.append({"filepath": remote_path, "content": content})
+            files.append({"filepath": remote_path, "local_path": local_path})
 
         elif len(args) == 1 and isinstance(args[0], (list, tuple)):
             for item in args[0]:
                 if "content" in item and "filepath" in item:
                     content = item["content"]
                     filepath = item["filepath"]
+                    files.append({"filepath": filepath, "content": content})
                 elif all(k in item for k in ("local_path", "remote_path")):
                     lp = item["local_path"]
                     if not os.path.exists(lp):
                         raise FileNotFoundError(f"local file not found: {lp}")
-                    with open(lp, "rb") as f:
-                        content = f.read()
                     filepath = item["remote_path"]
+                    files.append({"filepath": filepath, "local_path": lp})
                 else:
                     raise ValueError(
                         "invalid file spec, need 'content'+'filepath' or 'local_path'+'remote_path': "
                         + str(item)
                     )
-                files.append({"filepath": filepath, "content": content})
         else:
             raise TypeError("usage: post_files(local, remote) or post_files([spec, ...]) or post_files(files=[...])")
 
-        pb_files = [
-            agent_pb2.File(filepath=f["filepath"], content=f["content"])
-            for f in files
-        ]
-        request = agent_pb2.PostFilesRequest(files=pb_files)
-
+        uploaded_count = 0
         try:
-            response = self.stub.PostFiles(request)
-            status = self.STATUS_SUCCESS if not response.error else self.STATUS_FAILED
+            for file in files:
+                response = self.stub.PostFileStream(self._iter_file_chunks(file))
+                if response.error:
+                    return {
+                        "status": self.STATUS_FAILED,
+                        "uploaded_count": uploaded_count,
+                        "message": response.error,
+                        "error": response.error,
+                    }
+                uploaded_count += response.uploaded_count
             return {
-                "status": status,
-                "uploaded_count": response.uploaded_count,
-                "message": response.error or f"uploaded {response.uploaded_count} files",
-                "error": response.error,
+                "status": self.STATUS_SUCCESS,
+                "uploaded_count": uploaded_count,
+                "message": f"uploaded {uploaded_count} files",
+                "error": "",
             }
         except grpc.RpcError as e:
             raise RuntimeError(f"gRPC failed: [{e.code()}] {e.details()}") from e
@@ -173,17 +170,16 @@ class AgentClient:
         # download single file from agent server
         request = agent_pb2.GetFileRequest(filepath=remote_path)
         try:
-            response = self.stub.GetFile(request)
-            if response.error:
-                raise RuntimeError(f"download failed: {response.error}")
-
             os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+            size = 0
             with open(local_path, "wb") as f:
-                f.write(response.content)
+                for chunk in self.stub.GetFileStream(request):
+                    f.write(chunk.content)
+                    size += len(chunk.content)
 
             return {
                 "status": self.STATUS_SUCCESS,
-                "size": len(response.content),
+                "size": size,
                 "message": "OK",
             }
         except grpc.RpcError as e:
@@ -227,3 +223,31 @@ class AgentClient:
             if cmd in cmd_set:
                 return script_name
         return self.FALLBACK_SCRIPT_NAME
+
+    def _iter_file_chunks(self, file: Dict[str, Any]):
+        filepath = file["filepath"]
+        first = True
+
+        if "local_path" in file:
+            with open(file["local_path"], "rb") as f:
+                while True:
+                    content = f.read(self.FILE_CHUNK_SIZE)
+                    if not content:
+                        break
+                    yield agent_pb2.FileChunk(filepath=filepath if first else "", content=content)
+                    first = False
+            if first:
+                yield agent_pb2.FileChunk(filepath=filepath, content=b"")
+            return
+
+        content = file["content"]
+        if isinstance(content, str):
+            content = content.encode()
+        for offset in range(0, len(content), self.FILE_CHUNK_SIZE):
+            yield agent_pb2.FileChunk(
+                filepath=filepath if first else "",
+                content=content[offset:offset + self.FILE_CHUNK_SIZE],
+            )
+            first = False
+        if first:
+            yield agent_pb2.FileChunk(filepath=filepath, content=b"")
