@@ -404,7 +404,6 @@ func (s *server) AcquireResumeWorkspace(
 		conf.KernelFile(),
 		conf.InitrdFile(),
 		conf.SnapshotMemFile(),
-		conf.PmemFiles(),
 		cid,
 		socketPath,
 	); err != nil {
@@ -485,7 +484,7 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(conf.SnapDir(), common.SnapshotConfigFileName)
-	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), viewConf.PmemFiles(), 0, ""); err != nil {
+	if err := configUpdater.updateSnapshotConfig(configFilePath, viewConf.KernelFile(), viewConf.InitrdFile(), viewConf.SnapshotMemFile(), 0, ""); err != nil {
 		return "", fmt.Errorf("update snapshot config failed: %v", err)
 	}
 
