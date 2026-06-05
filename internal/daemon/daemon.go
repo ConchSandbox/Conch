@@ -564,6 +564,10 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		writeImageError(w, "Failed to push image", err)
 		return
 	}
+	logger.Info("Image pushed successfully",
+		ulog.F("local_image", req.LocalImage),
+		ulog.F("remote_image", req.RemoteImage),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

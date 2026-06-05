@@ -1,7 +1,9 @@
 package image
 
 import (
+	"net/http"
 	"testing"
+	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -52,5 +54,40 @@ func TestInferComponentKindFromName(t *testing.T) {
 		if got := inferComponentKindFromName(name); got != want {
 			t.Fatalf("%s => %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestResolveRegistryResponseHeaderTimeout(t *testing.T) {
+	t.Setenv(registryTimeoutEnv, "10m")
+	if got := resolveRegistryResponseHeaderTimeout(""); got != 10*time.Minute {
+		t.Fatalf("timeout = %s, want 10m", got)
+	}
+
+	t.Setenv(registryTimeoutEnv, "bad")
+	if got := resolveRegistryResponseHeaderTimeout(""); got != defaultRegistryResponseHeaderTimeout {
+		t.Fatalf("timeout = %s, want default %s", got, defaultRegistryResponseHeaderTimeout)
+	}
+
+	t.Setenv(registryTimeoutEnv, "0")
+	if got := resolveRegistryResponseHeaderTimeout(""); got != defaultRegistryResponseHeaderTimeout {
+		t.Fatalf("timeout = %s, want default %s", got, defaultRegistryResponseHeaderTimeout)
+	}
+
+	t.Setenv(registryTimeoutEnv, "10m")
+	if got := resolveRegistryResponseHeaderTimeout("3m"); got != 3*time.Minute {
+		t.Fatalf("request registry timeout = %s, want 3m", got)
+	}
+}
+
+func TestRegistryHTTPClientUsesResolvedResponseHeaderTimeout(t *testing.T) {
+	t.Setenv(registryTimeoutEnv, "7m")
+
+	client := registryHTTPClient("")
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 7*time.Minute {
+		t.Fatalf("ResponseHeaderTimeout = %s, want 7m", transport.ResponseHeaderTimeout)
 	}
 }

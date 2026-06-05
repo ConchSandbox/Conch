@@ -146,6 +146,14 @@ func TestConchAPITimeoutEnv(t *testing.T) {
 	}
 }
 
+func TestConchAPITimeoutOverride(t *testing.T) {
+	t.Setenv("CONCH_API_TIMEOUT", "5m")
+	c := NewClientWithConfigAndTimeout("http://127.0.0.1:4063", "", 10*time.Minute)
+	if c.httpClient.Timeout != 10*time.Minute {
+		t.Fatalf("timeout = %s, want 10m", c.httpClient.Timeout)
+	}
+}
+
 func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
 	kernel, err := os.CreateTemp(t.TempDir(), "kernel-*")
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,11 @@ var (
 
 const SnapshotLabelVMSnapshot = "conch/snapshotter/vm-snapshot"
 
+const (
+	defaultRegistryResponseHeaderTimeout = 10 * time.Minute
+	registryTimeoutEnv                   = "CONCH_REGISTRY_TIMEOUT"
+)
+
 type PullRequest struct {
 	ImageName              string `json:"image_name"`
 	Namespace              string `json:"namespace,omitempty"`
@@ -52,12 +58,13 @@ type PullRequest struct {
 }
 
 type PushRequest struct {
-	LocalImage  string `json:"local_image"`
-	RemoteImage string `json:"remote_image"`
-	Namespace   string `json:"namespace,omitempty"`
-	PlainHTTP   bool   `json:"plain_http,omitempty"`
-	Username    string `json:"username,omitempty"`
-	Password    string `json:"password,omitempty"`
+	LocalImage      string `json:"local_image"`
+	RemoteImage     string `json:"remote_image"`
+	Namespace       string `json:"namespace,omitempty"`
+	PlainHTTP       bool   `json:"plain_http,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Password        string `json:"password,omitempty"`
+	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
 
 type UnpackRequest struct {
@@ -276,7 +283,7 @@ func (s *Service) Push(ctx context.Context, req PushRequest) error {
 	}
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		PlainHTTP: req.PlainHTTP,
-		Client:    registryHTTPClient(),
+		Client:    registryHTTPClient(req.RegistryTimeout),
 		Credentials: func(string) (string, string, error) {
 			return req.Username, req.Password, nil
 		},
@@ -351,13 +358,13 @@ func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
 	return nil
 }
 
-func registryHTTPClient() *http.Client {
+func registryHTTPClient(registryTimeoutValue string) *http.Client {
 	tr, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return http.DefaultClient
 	}
 	cloned := tr.Clone()
-	cloned.ResponseHeaderTimeout = 10 * time.Minute
+	cloned.ResponseHeaderTimeout = resolveRegistryResponseHeaderTimeout(registryTimeoutValue)
 	return &http.Client{Transport: cloned}
 }
 
@@ -431,6 +438,24 @@ func inferComponentKindFromName(name string) string {
 	default:
 		return ""
 	}
+}
+
+func resolveRegistryResponseHeaderTimeout(registryTimeoutValue string) time.Duration {
+	if raw := strings.TrimSpace(registryTimeoutValue); raw != "" {
+		return parseRegistryResponseHeaderTimeout(raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv(registryTimeoutEnv)); raw != "" {
+		return parseRegistryResponseHeaderTimeout(raw)
+	}
+	return defaultRegistryResponseHeaderTimeout
+}
+
+func parseRegistryResponseHeaderTimeout(raw string) time.Duration {
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return defaultRegistryResponseHeaderTimeout
+	}
+	return timeout
 }
 
 func (s *Service) Unpack(ctx context.Context, req UnpackRequest) (map[string]string, error) {
