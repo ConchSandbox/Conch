@@ -39,7 +39,7 @@ network:
     plugin_conf_dir: /etc/conch/cni/net.d
     # Number of non-loopback network configs to load from plugin_conf_dir
     plugin_max_conf: 1
-    # Outer sandbox interface name created by CNI
+    # Outer sandbox interface name created by CNI; go-cni currently generates the first interface as <prefix>0
     if_name: eth0
     # Run CNI setup serially when plugin chains require strict ordering
     setup_serially: false

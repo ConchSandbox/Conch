@@ -64,7 +64,7 @@ Conch 网络配置需要注意如下事项：
 - `pool_size` 给定了网络池的槽位数目，以及宿主机上可同时运行的沙箱最大数目。
 - `tap_ip` 和 `tap_mask` 给定了每个沙箱内部面向虚拟机的 `tap` 子网。
 - `plugin_bin_dirs` 指向 CNI 插件目录, `plugin_conf_dir` 指向 Conch CNI 配置目录。
-- `if_name` 给定了 CNI 创建的沙箱网络接口名称, 通常是 `eth0`。
+- `if_name` 给定了 CNI 创建的沙箱网络接口名称，通常是 `eth0`；当前 go-cni 会把第一个接口生成为 `<prefix>0`，因此该配置需要与这一命名方式一致。
 
 
 ## 手动验证

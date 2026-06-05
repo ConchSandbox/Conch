@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	cni "github.com/containerd/go-cni"
@@ -65,6 +66,16 @@ func TestInterfacePrefix(t *testing.T) {
 				t.Fatalf("interfacePrefix(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewCNIManagerRejectsIncompatibleIfName(t *testing.T) {
+	_, err := NewCNIManager(CNIManagerConfig{IfName: "net1"})
+	if err == nil {
+		t.Fatal("NewCNIManager() error = nil, want incompatible if_name error")
+	}
+	if !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("NewCNIManager() error = %v, want incompatible if_name error", err)
 	}
 }
 

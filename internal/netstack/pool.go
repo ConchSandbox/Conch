@@ -1105,7 +1105,7 @@ func slotFromNetworkSlotRecord(rec state.NetworkSlotRecord) (*Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if rec.CNIID != "" || rec.CNIIP != "" {
+	if rec.CNIIP != "" {
 		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, opts)
 	}
 	return slot, nil
@@ -1116,8 +1116,12 @@ func recordSlotFromState(rec state.NetworkSlotRecord) *Slot {
 	if rec.NetNSPath != "" {
 		slot.setNetNSPath(rec.NetNSPath)
 	}
-	if rec.CNIID != "" || rec.CNIIP != "" {
-		slot.setSlotNetwork(rec.CNIID, &CNIResult{IP: rec.CNIIP}, nil)
+	if rec.CNIIP != "" {
+		cniID := rec.CNIID
+		if cniID == "" {
+			cniID = slot.CNIContainerID()
+		}
+		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, nil)
 	}
 	if rec.SandboxID != "" {
 		slot.assignSandbox(rec.SandboxID)
