@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/openeuler/Conch/internal/image/client"
 )
@@ -18,6 +19,7 @@ type pushOptions struct {
 	password    string
 	namespace   string
 	configPath  string
+	timeout     string
 }
 
 func printPushHelp(out io.Writer) {
@@ -34,6 +36,8 @@ func printPushHelp(out io.Writer) {
 	fmt.Fprintln(out, "        registry username")
 	fmt.Fprintln(out, "  --password string")
 	fmt.Fprintln(out, "        registry password")
+	fmt.Fprintln(out, "  --timeout duration")
+	fmt.Fprintln(out, "        timeout for this push operation")
 	fmt.Fprintln(out, "  -n, --namespace string")
 	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
 	fmt.Fprintln(out, "  --config string")
@@ -41,6 +45,7 @@ func printPushHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
 	fmt.Fprintln(out, "  conch push localhost/demo-index:latest hub.oepkgs.net/conch/demo-index:latest")
+	fmt.Fprintln(out, "  conch push --timeout 30m localhost/demo-index:latest hub.oepkgs.net/conch/demo-index:latest")
 	fmt.Fprintln(out, "  conch push --plain-http localhost/demo-index:latest conch.example.com/conch/demo-index:latest")
 }
 
@@ -49,19 +54,27 @@ func runPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	var apiTimeout time.Duration
+	if opts.timeout != "" {
+		apiTimeout, err = time.ParseDuration(opts.timeout)
+		if err != nil || apiTimeout <= 0 {
+			return fmt.Errorf("conch push: invalid --timeout %q", opts.timeout)
+		}
+	}
 	cfg, err := loadConchConfig(opts.configPath)
 	if err != nil {
 		return fmt.Errorf("conch push: load config: %w", err)
 	}
 	ns := resolveConchNamespace(cfg, opts.namespace)
-	conchClient := client.NewClientWithConfig("", opts.configPath)
+	conchClient := client.NewClientWithConfigAndTimeout("", opts.configPath, apiTimeout)
 	if err := conchClient.PushImage(ctx, client.PushImageRequest{
-		LocalImage:  opts.localImage,
-		RemoteImage: opts.remoteImage,
-		Namespace:   ns,
-		PlainHTTP:   opts.plainHTTP,
-		Username:    opts.username,
-		Password:    opts.password,
+		LocalImage:      opts.localImage,
+		RemoteImage:     opts.remoteImage,
+		Namespace:       ns,
+		PlainHTTP:       opts.plainHTTP,
+		Username:        opts.username,
+		Password:        opts.password,
+		RegistryTimeout: opts.timeout,
 	}); err != nil {
 		return fmt.Errorf("conch push: %w", err)
 	}
@@ -94,6 +107,14 @@ func parsePushArgs(args []string) (pushOptions, error) {
 			i++
 		case strings.HasPrefix(arg, "--password="):
 			opts.password = strings.TrimPrefix(arg, "--password=")
+		case arg == "--timeout":
+			if i+1 >= len(args) {
+				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)
+			}
+			opts.timeout = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--timeout="):
+			opts.timeout = strings.TrimPrefix(arg, "--timeout=")
 		case arg == "--namespace" || arg == "-n":
 			if i+1 >= len(args) {
 				return pushOptions{}, fmt.Errorf("conch push: missing value for %s", arg)

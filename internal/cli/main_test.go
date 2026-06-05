@@ -35,6 +35,11 @@ func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 			t.Fatalf("help output missing %q:\n%s", want, got)
 		}
 	}
+	for _, unwanted := range []string{"CONCH_API_TIMEOUT", "CONCH_REGISTRY_TIMEOUT"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("help output should not expose %q:\n%s", unwanted, got)
+		}
+	}
 	if strings.Contains(got, "conch snapshots ls [options]") {
 		t.Fatalf("help output still contains deprecated snapshots command:\n%s", got)
 	}
@@ -50,6 +55,9 @@ func TestPrintPushHelpIncludesExample(t *testing.T) {
 		"conchd/containerd",
 		"--plain-http",
 		"--username string",
+		"--timeout duration",
+		"timeout for this push operation",
+		"conch push --timeout 30m",
 		"containerd namespace",
 	} {
 		if !strings.Contains(got, want) {
@@ -60,13 +68,14 @@ func TestPrintPushHelpIncludesExample(t *testing.T) {
 
 func TestParsePushArgs(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		wantLocal  string
-		wantRemote string
-		wantPlain  bool
-		wantNS     string
-		wantErr    bool
+		name        string
+		args        []string
+		wantLocal   string
+		wantRemote  string
+		wantPlain   bool
+		wantNS      string
+		wantTimeout string
+		wantErr     bool
 	}{
 		{
 			name:       "default",
@@ -90,6 +99,13 @@ func TestParsePushArgs(t *testing.T) {
 			wantNS:     "team-b",
 		},
 		{
+			name:        "timeout",
+			args:        []string{"--timeout=10m", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			wantLocal:   "localhost/demo:latest",
+			wantRemote:  "conch.example.com/conch/demo:latest",
+			wantTimeout: "10m",
+		},
+		{
 			name:    "missing image",
 			args:    []string{"localhost/demo:latest"},
 			wantErr: true,
@@ -110,7 +126,7 @@ func TestParsePushArgs(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.plainHTTP != tt.wantPlain || got.namespace != tt.wantNS {
+			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.plainHTTP != tt.wantPlain || got.namespace != tt.wantNS || got.timeout != tt.wantTimeout {
 				t.Fatalf("parsePushArgs() = %#v", got)
 			}
 		})
@@ -149,6 +165,29 @@ containerd:
 	}
 	if got.Namespace != "team-a" {
 		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
+	}
+	if got.RegistryTimeout != "" {
+		t.Fatalf("registry timeout = %q, want empty", got.RegistryTimeout)
+	}
+}
+
+func TestRunPushPassesTimeout(t *testing.T) {
+	var got client.PushImageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode push request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+	t.Setenv("CONCH_API_URL", server.URL)
+
+	err := runPush(context.Background(), []string{"--timeout", "30m", "localhost/demo:latest", "remote/demo:latest"})
+	if err != nil {
+		t.Fatalf("runPush: %v", err)
+	}
+	if got.RegistryTimeout != "30m" {
+		t.Fatalf("registry timeout = %q, want 30m", got.RegistryTimeout)
 	}
 }
 
