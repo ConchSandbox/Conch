@@ -54,8 +54,8 @@ conch convert --source docker.io/library/nginx:latest \
 1. CLI 将 `source`、`kernel`、`initrd`、`tag` 等参数提交给 conchd 的 `/api/image/convert`。
 2. conchd 在进程内 containerd 中查找 `source`；本地不存在时从 registry 拉取。
 3. rootfs 通过 `erofs-container-toolkit` 转换为 native EROFS layer。
-4. kernel/initrd 被打包为 `sandbox` 组件镜像。
-5. conchd 生成 boot index，并导入本地 containerd。
+4. conchd 将转换后的 rootfs manifest、kernel/initrd 生成的 sandbox manifest 组装为同一个 boot index。
+5. conchd 直接将新增 blob 写入 containerd content store，创建用户指定 tag 的 image record，然后 unpack 完整 boot index。
 
 ### 3.2 rootfs 到 native EROFS layer
 
@@ -89,7 +89,7 @@ boot/vmlinuz
 data/conch.initrd
 ```
 
-然后调用 `mkfs.erofs` 将该目录转换成 native EROFS layer，并写入一个 OCI layout。该 manifest 的 descriptor 会带上：
+然后调用 `mkfs.erofs` 将该目录转换成 native EROFS layer，并写入 containerd content store。该 manifest 的 descriptor 会带上：
 
 ```text
 io.conch.kind=sandbox
@@ -118,8 +118,6 @@ io.conch.kind=sandbox
 3. mem-snapshot manifest
 - annotation：`io.conch.kind=mem-snapshot`
 - ref name：`<tag>-mem`
-
-conchd 将 rootfs、sandbox、mem-snapshot 三类组件写入同一个 OCI layout，再生成 `index.json`，导入 containerd 后以用户指定的 `-t/--tag` 作为最终 Conch 镜像名。
 
 ## 4. 分发与目标机准备
 

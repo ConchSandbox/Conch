@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -29,6 +30,7 @@ type fakeImageService struct {
 	unpackReq   imageSvc.UnpackRequest
 	prepareReq  imageSvc.PrepareRootfsSourceRequest
 	convertReq  imageSvc.ConvertRootfsToErofsRequest
+	publishReq  imageSvc.PublishBootImageRequest
 	exportReq   imageSvc.ExportArchiveRequest
 	pullErr     error
 	pushErr     error
@@ -37,6 +39,7 @@ type fakeImageService struct {
 	unpackErr   error
 	prepareErr  error
 	convertErr  error
+	publishErr  error
 	exportErr   error
 	results     map[string]string
 	importReqs  []imageSvc.ImportArchiveRequest
@@ -45,15 +48,14 @@ type fakeImageService struct {
 	prepareResp imageSvc.PrepareRootfsSourceResponse
 	convertResp imageSvc.ConvertRootfsToErofsResponse
 	images      []imageSvc.Meta
+	publishResp imageSvc.PublishBootImageResponse
 }
 
 type fakeSnapshotService struct {
-	linkReq   snapshotSvc.LinkVMRequest
 	listReq   snapshotSvc.ListRequest
 	removeReq snapshotSvc.RemoveRequest
 	infoReq   snapshotSvc.InfoRequest
 	chainReq  snapshotSvc.InfoRequest
-	linkErr   error
 	listErr   error
 	removeErr error
 	infoErr   error
@@ -118,6 +120,21 @@ func (f *fakeImageService) ExportArchive(_ context.Context, w io.Writer, req ima
 	_, _ = io.WriteString(w, "archive-content")
 	f.exportRaw = "archive-content"
 	return nil
+}
+
+func (f *fakeImageService) PublishBootImage(_ context.Context, req imageSvc.PublishBootImageRequest) (imageSvc.PublishBootImageResponse, error) {
+	f.publishReq = req
+	if f.publishErr != nil {
+		return imageSvc.PublishBootImageResponse{}, f.publishErr
+	}
+	if f.publishResp.ImageName != "" {
+		return f.publishResp, nil
+	}
+	return imageSvc.PublishBootImageResponse{
+		BootIndexDigest: "sha256:boot",
+		SnapshotKey:     "rootfs-id",
+		ImageName:       req.BootIndexTag,
+	}, nil
 }
 
 func (f *fakeImageService) PrepareRootfsSource(_ context.Context, req imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error) {
@@ -185,11 +202,6 @@ func newConvertHandlerServer(imageSvc conchruntime.ImageOps, snapshotSvc conchru
 	}
 	s.routes()
 	return s
-}
-
-func (f *fakeSnapshotService) LinkVM(_ context.Context, req snapshotSvc.LinkVMRequest) error {
-	f.linkReq = req
-	return f.linkErr
 }
 
 func (f *fakeSnapshotService) List(_ context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
@@ -383,29 +395,13 @@ func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
 }
 
 func TestHandleConvertImage(t *testing.T) {
-	oldKernel := buildKernelArchiveFromFiles
-	oldBoot := buildBootIndexArchive
-	defer func() {
-		buildKernelArchiveFromFiles = oldKernel
-		buildBootIndexArchive = oldBoot
-	}()
-	buildKernelArchiveFromFiles = func(_ context.Context, _, _, _, archivePath string) (digest.Digest, error) {
-		return digest.FromString("kernel"), os.WriteFile(archivePath, []byte("kernel-archive"), 0o644)
-	}
-	buildBootIndexArchive = func(_ context.Context, opts conchimage.BootIndexOptions) (digest.Digest, error) {
-		if opts.RootfsArchivePath == "" || opts.SandboxArchivePath == "" || opts.Tag == "" {
-			t.Fatalf("boot options = %#v", opts)
-		}
-		return digest.FromString("boot"), os.WriteFile(opts.ArchivePath, []byte("boot-archive"), 0o644)
-	}
-
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
 	server := newConvertHandlerServer(imgSvc, snapSvc, nil)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("metadata", `{"source":"docker.io/library/nginx:latest","namespace":"team-a","boot_index_tag":"localhost/conch/demo:latest","plain_http":true}`)
+	_ = writer.WriteField("metadata", `{"source":" docker.io/library/nginx:latest ","namespace":"team-a","boot_index_tag":" localhost/conch/demo:latest ","plain_http":true}`)
 	kernelPart, err := writer.CreateFormFile("kernel", "vmlinuz")
 	if err != nil {
 		t.Fatalf("kernel form file: %v", err)
@@ -434,11 +430,14 @@ func TestHandleConvertImage(t *testing.T) {
 	if imgSvc.convertReq.Namespace != "team-a" || imgSvc.convertReq.SourceImage != "docker.io/library/nginx:latest" {
 		t.Fatalf("convert request = %#v", imgSvc.convertReq)
 	}
-	if snapSvc.linkReq.RootfsSnapshotID != "rootfs-id" || snapSvc.linkReq.VMSnapshotID == "" || snapSvc.linkReq.Namespace != "team-a" {
-		t.Fatalf("link request = %#v", snapSvc.linkReq)
+	if imgSvc.publishReq.Namespace != "team-a" || imgSvc.publishReq.RootfsImageName == "" || imgSvc.publishReq.BootIndexTag != "localhost/conch/demo:latest" {
+		t.Fatalf("publish request = %#v", imgSvc.publishReq)
 	}
-	if len(imgSvc.importReqs) != 2 || imgSvc.importReqs[1].ImportedTag != "localhost/conch/demo:latest" {
-		t.Fatalf("import requests = %#v", imgSvc.importReqs)
+	if imgSvc.publishReq.KernelPath == "" || imgSvc.publishReq.InitrdPath == "" {
+		t.Fatalf("publish request missing kernel/initrd paths: %#v", imgSvc.publishReq)
+	}
+	if len(imgSvc.importReqs) != 0 {
+		t.Fatalf("import requests = %#v, want none", imgSvc.importReqs)
 	}
 	var got convertImageResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -450,12 +449,6 @@ func TestHandleConvertImage(t *testing.T) {
 }
 
 func TestHandleConvertImageSnapshotPauseFailureCleansSandbox(t *testing.T) {
-	oldKernel := buildKernelArchiveFromFiles
-	defer func() { buildKernelArchiveFromFiles = oldKernel }()
-	buildKernelArchiveFromFiles = func(_ context.Context, _, _, _, archivePath string) (digest.Digest, error) {
-		return digest.FromString("kernel"), os.WriteFile(archivePath, []byte("kernel-archive"), 0o644)
-	}
-
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
 	manager := &fakeSandboxOps{pauseErr: errors.New("pause failed")}
@@ -489,11 +482,20 @@ func TestHandleConvertImageSnapshotPauseFailureCleansSandbox(t *testing.T) {
 	if manager.createReq.SandboxId == "" {
 		t.Fatalf("sandbox was not created: %#v", manager.createReq)
 	}
+	if imgSvc.publishReq.BootIndexTag == "localhost/conch/demo:latest" || !strings.HasPrefix(imgSvc.publishReq.BootIndexTag, "conch-boot:convert-") {
+		t.Fatalf("publish request used final tag instead of temporary tag: %#v", imgSvc.publishReq)
+	}
+	if manager.createReq.ImageName != imgSvc.publishReq.BootIndexTag {
+		t.Fatalf("sandbox image = %q, want temporary boot image %q", manager.createReq.ImageName, imgSvc.publishReq.BootIndexTag)
+	}
 	if len(manager.deleteReqs) != 1 {
 		t.Fatalf("delete requests = %#v, want one cleanup", manager.deleteReqs)
 	}
 	if manager.deleteReqs[0].SandboxId != manager.createReq.SandboxId || manager.deleteReqs[0].Namespace != "team-a" {
 		t.Fatalf("cleanup request = %#v, create request = %#v", manager.deleteReqs[0], manager.createReq)
+	}
+	if imgSvc.removeReq.ImageName != imgSvc.publishReq.BootIndexTag || imgSvc.removeReq.Namespace != "team-a" {
+		t.Fatalf("temporary image cleanup request = %#v, publish request = %#v", imgSvc.removeReq, imgSvc.publishReq)
 	}
 }
 

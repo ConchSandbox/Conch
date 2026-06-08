@@ -57,8 +57,7 @@ type Daemon struct {
 }
 
 var (
-	buildKernelArchiveFromFiles = conchimage.BuildKernelArchiveFromFiles
-	buildBootIndexArchive       = conchimage.BuildBootIndexArchive
+	buildBootIndexArchive = conchimage.BuildBootIndexArchive
 )
 
 type convertImageRequest struct {
@@ -75,7 +74,6 @@ type convertImageResponse struct {
 	BootIndexDigest string `json:"boot_index_digest"`
 	BootIndexTag    string `json:"boot_index_tag"`
 	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
-	KernelImageRef  string `json:"kernel_image_ref,omitempty"`
 	SourceImageRef  string `json:"source_image_ref,omitempty"`
 }
 
@@ -251,7 +249,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
 	s.router.HandleFunc("/api/image/convert", s.handleConvertImage)
 	s.router.HandleFunc("/api/snapshot/export", s.handleSnapshotExport)
-	s.router.HandleFunc("/api/snapshot/link-vm", s.handleLinkSnapshotVM)
 	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
 	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
@@ -742,7 +739,7 @@ func (s *Daemon) handleConvertImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.convertImage(r.Context(), req, kernelPath, initrdPath, tmpDir)
+	resp, err := s.convertImage(r.Context(), req, kernelPath, initrdPath)
 	if err != nil {
 		logger.Error("Failed to convert image",
 			ulog.F("source", req.Source),
@@ -795,17 +792,19 @@ func (s *Daemon) handleSnapshotExport(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kernelPath, initrdPath, tmpDir string) (convertImageResponse, error) {
-	if strings.TrimSpace(req.Source) == "" {
+func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kernelPath, initrdPath string) (convertImageResponse, error) {
+	source := strings.TrimSpace(req.Source)
+	bootIndexTag := strings.TrimSpace(req.BootIndexTag)
+	if source == "" {
 		return convertImageResponse{}, fmt.Errorf("%w: source is required", imageSvc.ErrInvalidRequest)
 	}
-	if strings.TrimSpace(req.BootIndexTag) == "" {
+	if bootIndexTag == "" {
 		return convertImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", imageSvc.ErrInvalidRequest)
 	}
 	namespace := s.resolveNamespace(req.Namespace)
 
 	prepared, err := s.runtimeService.PrepareRootfsSource(ctx, imageSvc.PrepareRootfsSourceRequest{
-		Source:    req.Source,
+		Source:    source,
 		Namespace: namespace,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
@@ -826,35 +825,43 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 	if err != nil {
 		return convertImageResponse{}, fmt.Errorf("convert rootfs to EROFS: %w", err)
 	}
-	rootfsSnapshotID := strings.TrimSpace(convertResp.SnapshotKey)
-	if rootfsSnapshotID == "" {
-		return convertImageResponse{}, fmt.Errorf("convert rootfs to EROFS returned empty snapshot key")
-	}
 
-	kernelImageRef := fmt.Sprintf("conch-kernel:convert-%d", time.Now().UnixNano())
-	kernelArchive := filepath.Join(tmpDir, "kernel.oci.tar")
-	if _, err := buildKernelArchiveFromFiles(ctx, kernelPath, initrdPath, kernelImageRef, kernelArchive); err != nil {
-		return convertImageResponse{}, fmt.Errorf("build native kernel component archive: %w", err)
+	publishTag := bootIndexTag
+	if req.Snapshot {
+		publishTag = fmt.Sprintf("conch-boot:convert-%d", time.Now().UnixNano())
 	}
-	vmImport, err := s.importImageArchiveFromPath(ctx, kernelArchive, namespace, kernelImageRef)
+	bootResp, err := s.runtimeService.PublishBootImage(ctx, imageSvc.PublishBootImageRequest{
+		Namespace:       namespace,
+		RootfsImageName: convertResp.ImageName,
+		KernelPath:      kernelPath,
+		InitrdPath:      initrdPath,
+		BootIndexTag:    publishTag,
+	})
 	if err != nil {
-		return convertImageResponse{}, fmt.Errorf("import kernel component image %s: %w", kernelImageRef, err)
-	}
-	if err := s.runtimeService.LinkSnapshotVM(ctx, snapshotSvc.LinkVMRequest{
-		RootfsSnapshotID: rootfsSnapshotID,
-		VMSnapshotID:     vmImport.SnapshotKey,
-		Namespace:        namespace,
-	}); err != nil {
-		return convertImageResponse{}, fmt.Errorf("link rootfs snapshot to sandbox snapshot: %w", err)
+		return convertImageResponse{}, fmt.Errorf("publish native boot image: %w", err)
 	}
 
 	if req.Snapshot {
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+			defer cancel()
+			if err := s.runtimeService.RemoveImageRequest(cleanupCtx, imageSvc.RemoveRequest{
+				Namespace: namespace,
+				ImageName: bootResp.ImageName,
+			}); err != nil {
+				ulog.GetLogger().Warn("failed to cleanup temporary boot image",
+					ulog.F("image", bootResp.ImageName),
+					ulog.F("error", err),
+				)
+			}
+		}()
+
 		sandboxID := fmt.Sprintf("conch-snap-%d", time.Now().UnixNano())
 		if _, err := s.runtimeService.CreateSandbox(ctx, runtimeapi.SandboxCreateOptions{
 			Namespace:    namespace,
 			PodSandboxID: sandboxID,
 			SandboxID:    sandboxID,
-			ImageName:    convertResp.ImageName,
+			ImageName:    bootResp.ImageName,
 			VMMName:      "cloud-hypervisor",
 			VCPUNum:      1,
 			RamMB:        256,
@@ -871,13 +878,13 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 				)
 			}
 		}()
-		rootfsSnapshotID, err = s.runtimeService.PauseSandbox(ctx, namespace, sandboxID)
+		rootfsSnapshotID, err := s.runtimeService.PauseSandbox(ctx, namespace, sandboxID)
 		if err != nil {
 			return convertImageResponse{}, fmt.Errorf("pause sandbox for snapshot conversion: %w", err)
 		}
 		snapshotResp, err := s.exportSnapshotImage(ctx, snapshotExportRequest{
 			Namespace:        namespace,
-			BootIndexTag:     req.BootIndexTag,
+			BootIndexTag:     bootIndexTag,
 			RootfsSnapshotID: rootfsSnapshotID,
 		})
 		if err != nil {
@@ -887,44 +894,16 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 			BootIndexDigest: snapshotResp.BootIndexDigest,
 			BootIndexTag:    snapshotResp.BootIndexTag,
 			RootfsImageRef:  convertResp.ImageName,
-			KernelImageRef:  kernelImageRef,
 			SourceImageRef:  prepared.ImageName,
 		}, nil
 	}
 
-	bootDigest, err := s.publishBootIndex(ctx, convertResp.ImageName, kernelArchive, req.BootIndexTag, namespace, tmpDir)
-	if err != nil {
-		return convertImageResponse{}, err
-	}
 	return convertImageResponse{
-		BootIndexDigest: bootDigest,
-		BootIndexTag:    req.BootIndexTag,
+		BootIndexDigest: bootResp.BootIndexDigest,
+		BootIndexTag:    bootIndexTag,
 		RootfsImageRef:  convertResp.ImageName,
-		KernelImageRef:  kernelImageRef,
 		SourceImageRef:  prepared.ImageName,
 	}, nil
-}
-
-func (s *Daemon) publishBootIndex(ctx context.Context, rootfsImageName, kernelArchive, bootIndexTag, namespace, tmpDir string) (string, error) {
-	rootfsArchive := filepath.Join(tmpDir, "rootfs.oci.tar")
-	if err := s.exportImageArchiveToPath(ctx, rootfsArchive, namespace, rootfsImageName); err != nil {
-		return "", fmt.Errorf("export native rootfs image: %w", err)
-	}
-
-	bootArchive := filepath.Join(tmpDir, "boot-index.oci.tar")
-	bootDigest, err := buildBootIndexArchive(ctx, conchimage.BootIndexOptions{
-		RootfsArchivePath:  rootfsArchive,
-		SandboxArchivePath: kernelArchive,
-		Tag:                bootIndexTag,
-		ArchivePath:        bootArchive,
-	})
-	if err != nil {
-		return "", fmt.Errorf("build native boot index archive: %w", err)
-	}
-	if _, err := s.importImageArchiveFromPath(ctx, bootArchive, namespace, bootIndexTag); err != nil {
-		return "", fmt.Errorf("import native boot index archive: %w", err)
-	}
-	return bootDigest.String(), nil
 }
 
 func (s *Daemon) exportSnapshotImage(ctx context.Context, req snapshotExportRequest) (snapshotExportResponse, error) {
@@ -1112,55 +1091,9 @@ func writeImageError(w http.ResponseWriter, prefix string, err error) {
 	http.Error(w, prefix+": "+err.Error(), status)
 }
 
-type linkSnapshotVMRequest struct {
-	RootfsSnapshotID string `json:"rootfs_snapshot_id"`
-	VMSnapshotID     string `json:"vm_snapshot_id"`
-	Namespace        string `json:"namespace,omitempty"`
-}
-
 type snapshotInfoRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
-}
-
-func (s *Daemon) handleLinkSnapshotVM(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
-	logger.Debug("Handling link snapshot VM request")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req linkSnapshotVMRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.RootfsSnapshotID == "" || req.VMSnapshotID == "" {
-		http.Error(w, "rootfs_snapshot_id and vm_snapshot_id are required", http.StatusBadRequest)
-		return
-	}
-	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	if err := s.runtimeService.LinkSnapshotVM(r.Context(), snapshotSvc.LinkVMRequest{
-		RootfsSnapshotID: req.RootfsSnapshotID,
-		VMSnapshotID:     req.VMSnapshotID,
-		Namespace:        req.Namespace,
-	}); err != nil {
-		logger.Error("Failed to link snapshot VM",
-			ulog.F("rootfs_snapshot_id", req.RootfsSnapshotID),
-			ulog.F("vm_snapshot_id", req.VMSnapshotID),
-			ulog.F("error", err),
-		)
-		http.Error(w, "Failed to link snapshot VM: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {

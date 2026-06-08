@@ -33,7 +33,6 @@ type Result struct {
 	BootIndexDigest string
 	BootIndexTag    string
 	RootfsImageRef  string
-	KernelImageRef  string
 	SourceImageRef  string
 }
 
@@ -81,7 +80,6 @@ func Convert(ctx context.Context, opts ConvertOpts) (Result, error) {
 		BootIndexDigest: resp.BootIndexDigest,
 		BootIndexTag:    resp.BootIndexTag,
 		RootfsImageRef:  resp.RootfsImageRef,
-		KernelImageRef:  resp.KernelImageRef,
 		SourceImageRef:  resp.SourceImageRef,
 	}, nil
 }

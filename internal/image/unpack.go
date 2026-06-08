@@ -21,9 +21,6 @@ import (
 )
 
 const (
-	SnapshotLabelMemSnapshot = "conch/snapshotter/mem-snapshot"
-	SnapshotLabelVMSnapshot  = "conch/snapshotter/vm-snapshot"
-
 	KindRootfs      = "rootfs"
 	KindSandbox     = "sandbox"
 	KindMemSnapshot = "mem-snapshot"
@@ -176,8 +173,11 @@ func getImageIndex(ctx context.Context, client *containerd.Client, imageName str
 	if target.MediaType != ocispec.MediaTypeImageIndex {
 		return nil, fmt.Errorf("image %s is not an OCI Image Index (mediaType: %s)", imageName, target.MediaType)
 	}
+	return readImageIndex(ctx, client, target)
+}
 
-	indexData, err := content.ReadBlob(ctx, client.ContentStore(), target)
+func readImageIndex(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) (*ocispec.Index, error) {
+	indexData, err := content.ReadBlob(ctx, client.ContentStore(), desc)
 	if err != nil {
 		return nil, fmt.Errorf("read index content: %w", err)
 	}
@@ -328,12 +328,12 @@ func linkSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, 
 	labels := make(map[string]string)
 	fieldpaths := []string{}
 	if sandboxSID != "" {
-		labels[SnapshotLabelVMSnapshot] = sandboxSID
-		fieldpaths = append(fieldpaths, "labels."+SnapshotLabelVMSnapshot)
+		labels[common.SnapshotLabelVMSnapshot] = sandboxSID
+		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelVMSnapshot)
 	}
 	if memSID != "" {
-		labels[SnapshotLabelMemSnapshot] = memSID
-		fieldpaths = append(fieldpaths, "labels."+SnapshotLabelMemSnapshot)
+		labels[common.SnapshotLabelMemSnapshot] = memSID
+		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelMemSnapshot)
 	}
 	if rootfsImageName != "" {
 		labels[common.SnapshotLabelRootfsImage] = rootfsImageName

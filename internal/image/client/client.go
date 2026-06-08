@@ -148,7 +148,6 @@ type ConvertImageResponse struct {
 	BootIndexDigest string `json:"boot_index_digest"`
 	BootIndexTag    string `json:"boot_index_tag"`
 	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
-	KernelImageRef  string `json:"kernel_image_ref,omitempty"`
 	SourceImageRef  string `json:"source_image_ref,omitempty"`
 }
 

@@ -8,62 +8,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
+	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/util"
 )
-
-func TestBuildKernelArchiveFromFilesWritesSandboxComponent(t *testing.T) {
-	requireMkfsErofs(t)
-
-	dir := t.TempDir()
-	kernel := filepath.Join(dir, "bzImage")
-	initrd := filepath.Join(dir, "conch.initrd")
-	if err := os.WriteFile(kernel, []byte("kernel"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(initrd, []byte("initrd"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	archivePath := filepath.Join(dir, "kernel.oci.tar")
-	if _, err := BuildKernelArchiveFromFiles(context.Background(), kernel, initrd, "localhost/conch/kernel:test", archivePath); err != nil {
-		t.Fatalf("BuildKernelArchiveFromFiles: %v", err)
-	}
-
-	layoutDir := filepath.Join(dir, "layout")
-	if err := util.Untar(archivePath, layoutDir); err != nil {
-		t.Fatalf("Untar: %v", err)
-	}
-	index := readIndex(t, layoutDir, "index.json")
-	if len(index.Manifests) != 1 {
-		t.Fatalf("manifest count = %d, want 1", len(index.Manifests))
-	}
-	desc := index.Manifests[0]
-	if desc.Annotations["io.conch.kind"] != KindSandbox {
-		t.Fatalf("kind annotation = %q, want %q", desc.Annotations["io.conch.kind"], KindSandbox)
-	}
-	manifest := readManifest(t, layoutDir, desc)
-	if len(manifest.Layers) != 1 {
-		t.Fatalf("layer count = %d, want 1", len(manifest.Layers))
-	}
-	if manifest.Layers[0].MediaType != erofsconvert.NativeLayerMediaType {
-		t.Fatalf("layer media type = %q", manifest.Layers[0].MediaType)
-	}
-}
 
 func TestBuildBootIndexArchiveAllowsNoMemSnapshot(t *testing.T) {
 	requireMkfsErofs(t)
 
 	dir := t.TempDir()
 	rootfsArchive := writeSingleComponentArchive(t, dir, "rootfs", KindRootfs)
-	sandboxArchive := writeSingleComponentArchive(t, dir, "sandbox", KindSandbox)
+	sandboxRoot := writeComponentRoot(t, dir, "sandbox")
 	bootArchive := filepath.Join(dir, "boot.oci.tar")
 	if _, err := BuildBootIndexArchive(context.Background(), BootIndexOptions{
-		RootfsArchivePath:  rootfsArchive,
-		SandboxArchivePath: sandboxArchive,
-		Tag:                "localhost/conch/demo:latest",
-		ArchivePath:        bootArchive,
+		RootfsArchivePath: rootfsArchive,
+		SandboxChainPaths: []string{sandboxRoot},
+		Tag:               "localhost/conch/demo:latest",
+		ArchivePath:       bootArchive,
 	}); err != nil {
 		t.Fatalf("BuildBootIndexArchive: %v", err)
 	}
@@ -85,18 +47,80 @@ func TestBuildBootIndexArchiveAllowsNoMemSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
+	requireMkfsErofs(t)
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := localcontent.NewStore(filepath.Join(dir, "content"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	rootfs := filepath.Join(dir, "rootfs")
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "bin"), []byte("rootfs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rootfsDesc, err := writeNativeComponentToContent(ctx, store, []string{rootfs}, KindRootfs, "localhost/conch/rootfs:test")
+	if err != nil {
+		t.Fatalf("writeNativeComponentToContent rootfs: %v", err)
+	}
+
+	kernel := filepath.Join(dir, "bzImage")
+	initrd := filepath.Join(dir, "conch.initrd")
+	if err := os.WriteFile(kernel, []byte("kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(initrd, []byte("initrd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexDesc, err := BuildBootIndexInContent(ctx, store, BootIndexContentOptions{
+		RootfsDescriptor: rootfsDesc,
+		KernelPath:       kernel,
+		InitrdPath:       initrd,
+		Tag:              "localhost/conch/demo:latest",
+	})
+	if err != nil {
+		t.Fatalf("BuildBootIndexInContent: %v", err)
+	}
+	raw, err := content.ReadBlob(ctx, store, indexDesc)
+	if err != nil {
+		t.Fatalf("read boot index blob: %v", err)
+	}
+	var index ocispec.Index
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatalf("unmarshal boot index: %v", err)
+	}
+	if len(index.Manifests) != 2 {
+		t.Fatalf("manifest count = %d, want 2", len(index.Manifests))
+	}
+	kinds := map[string]bool{}
+	for _, desc := range index.Manifests {
+		kinds[desc.Annotations["io.conch.kind"]] = true
+		if _, err := content.ReadBlob(ctx, store, desc); err != nil {
+			t.Fatalf("manifest blob %s missing: %v", desc.Digest, err)
+		}
+	}
+	if !kinds[KindRootfs] || !kinds[KindSandbox] {
+		t.Fatalf("kinds = %#v", kinds)
+	}
+}
+
 func TestBuildBootIndexArchivePeelsNestedRootfsIndex(t *testing.T) {
 	requireMkfsErofs(t)
 
 	dir := t.TempDir()
 	rootfsArchive := writeNestedIndexArchive(t, dir, "rootfs", KindRootfs)
-	sandboxArchive := writeSingleComponentArchive(t, dir, "sandbox", KindSandbox)
+	sandboxRoot := writeComponentRoot(t, dir, "sandbox")
 	bootArchive := filepath.Join(dir, "boot.oci.tar")
 	if _, err := BuildBootIndexArchive(context.Background(), BootIndexOptions{
-		RootfsArchivePath:  rootfsArchive,
-		SandboxArchivePath: sandboxArchive,
-		Tag:                "localhost/conch/demo:latest",
-		ArchivePath:        bootArchive,
+		RootfsArchivePath: rootfsArchive,
+		SandboxChainPaths: []string{sandboxRoot},
+		Tag:               "localhost/conch/demo:latest",
+		ArchivePath:       bootArchive,
 	}); err != nil {
 		t.Fatalf("BuildBootIndexArchive: %v", err)
 	}
@@ -113,13 +137,7 @@ func TestBuildBootIndexArchivePeelsNestedRootfsIndex(t *testing.T) {
 
 func writeSingleComponentArchive(t *testing.T, dir, name, kind string) string {
 	t.Helper()
-	root := filepath.Join(dir, name+"-root")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "file"), []byte(name), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	root := writeComponentRoot(t, dir, name)
 	layoutDir := filepath.Join(dir, name+"-layout")
 	desc, _, err := writeNativeComponent(context.Background(), layoutDir, []string{root}, kind, "localhost/conch/"+name+":latest")
 	if err != nil {
@@ -134,6 +152,18 @@ func writeSingleComponentArchive(t *testing.T, dir, name, kind string) string {
 		t.Fatal(err)
 	}
 	return archivePath
+}
+
+func writeComponentRoot(t *testing.T, dir, name string) string {
+	t.Helper()
+	root := filepath.Join(dir, name+"-root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte(name), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func writeNestedIndexArchive(t *testing.T, dir, name, kind string) string {

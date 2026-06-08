@@ -143,9 +143,6 @@ func printConvertSummary(out io.Writer, res conchconvert.Result) {
 	if res.RootfsImageRef != "" {
 		fmt.Fprintf(out, "  %-20s %s\n", "Native rootfs image:", res.RootfsImageRef)
 	}
-	if res.KernelImageRef != "" {
-		fmt.Fprintf(out, "  %-20s %s\n", "Kernel component:", res.KernelImageRef)
-	}
 	if res.BootIndexTag != "" {
 		fmt.Fprintf(out, "  %-20s %s\n", "Conch image:", res.BootIndexTag)
 		fmt.Fprintf(out, "  %-20s %s\n", "Push command:", fmt.Sprintf("conch push %s <registry>/<repository>:<tag>", res.BootIndexTag))

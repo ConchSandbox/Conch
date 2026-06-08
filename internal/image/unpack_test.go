@@ -10,6 +10,8 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type recordingSnapshotter struct {
@@ -181,14 +183,14 @@ func TestLinkSnapshotLabelsLinksSandboxAndOptionalMem(t *testing.T) {
 	if snapshotter.updatedInfo.Name != "rootfs-id" {
 		t.Fatalf("updated snapshot: got %q want %q", snapshotter.updatedInfo.Name, "rootfs-id")
 	}
-	if snapshotter.updatedInfo.Labels[SnapshotLabelVMSnapshot] != "sandbox-id" {
-		t.Fatalf("sandbox label: got %q want %q", snapshotter.updatedInfo.Labels[SnapshotLabelVMSnapshot], "sandbox-id")
+	if snapshotter.updatedInfo.Labels[common.SnapshotLabelVMSnapshot] != "sandbox-id" {
+		t.Fatalf("sandbox label: got %q want %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelVMSnapshot], "sandbox-id")
 	}
-	if snapshotter.updatedInfo.Labels[SnapshotLabelMemSnapshot] != "mem-id" {
-		t.Fatalf("mem label: got %q want %q", snapshotter.updatedInfo.Labels[SnapshotLabelMemSnapshot], "mem-id")
+	if snapshotter.updatedInfo.Labels[common.SnapshotLabelMemSnapshot] != "mem-id" {
+		t.Fatalf("mem label: got %q want %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelMemSnapshot], "mem-id")
 	}
-	if snapshotter.updatedInfo.Labels["conch/snapshotter/rootfs-image"] != "localhost/conch/rootfs-component:abc" {
-		t.Fatalf("rootfs image label: got %q", snapshotter.updatedInfo.Labels["conch/snapshotter/rootfs-image"])
+	if snapshotter.updatedInfo.Labels[common.SnapshotLabelRootfsImage] != "localhost/conch/rootfs-component:abc" {
+		t.Fatalf("rootfs image label: got %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelRootfsImage])
 	}
 }
 

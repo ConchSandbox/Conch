@@ -207,7 +207,6 @@ func TestConvertAndSnapshotExportAPIMethods(t *testing.T) {
 				BootIndexDigest: "sha256:boot",
 				BootIndexTag:    "localhost/conch/demo:latest",
 				RootfsImageRef:  "conch-erofs-rootfs:build-123",
-				KernelImageRef:  "conch-kernel:build-123",
 				SourceImageRef:  "docker.io/library/nginx:latest",
 			})
 		case snapshotExport:

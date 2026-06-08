@@ -37,8 +37,6 @@ var (
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
 )
 
-const SnapshotLabelVMSnapshot = "conch/snapshotter/vm-snapshot"
-
 type PullRequest struct {
 	ImageName              string `json:"image_name"`
 	Namespace              string `json:"namespace,omitempty"`
@@ -100,6 +98,20 @@ type Meta struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	CreatedAt       time.Time         `json:"created_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
+}
+
+type PublishBootImageRequest struct {
+	Namespace       string `json:"namespace,omitempty"`
+	RootfsImageName string `json:"rootfs_image_name"`
+	KernelPath      string `json:"kernel_path"`
+	InitrdPath      string `json:"initrd_path"`
+	BootIndexTag    string `json:"boot_index_tag"`
+}
+
+type PublishBootImageResponse struct {
+	BootIndexDigest string `json:"boot_index_digest"`
+	SnapshotKey     string `json:"snapshot_key"`
+	ImageName       string `json:"image_name"`
 }
 
 type PrepareRootfsSourceRequest struct {
@@ -485,35 +497,37 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req Impo
 	}
 
 	snapshotter := s.client.SnapshotService("erofs")
-	var finalSnapshotKey string
-	var finalImageName string
-	for _, imgInfo := range reorderImportedImages(importedImages, req.ImportedTag) {
-		if imgInfo.Target.MediaType == ocispec.MediaTypeImageIndex {
-			if err := conchimage.ValidateConchImageIndex(importCtx, s.client.Client, imgInfo.Name); err == nil {
-				snapshotMap, err := conchimage.UnpackAllSubImages(importCtx, s.client.Client, imgInfo.Name)
-				if err != nil {
-					return ImportArchiveResponse{}, fmt.Errorf("failed to unpack Conch image index %s: %w", imgInfo.Name, err)
-				}
-				finalSnapshotKey = snapshotMap[conchimage.KindRootfs]
-				finalImageName = imgInfo.Name
-				break
+	finalSnapshotKey, finalImageName, err := selectImportedSnapshot(
+		reorderImportedImages(importedImages, req.ImportedTag),
+		func(imgInfo images.Image) (map[string]string, bool, error) {
+			if err := conchimage.ValidateConchImageIndex(importCtx, s.client.Client, imgInfo.Name); err != nil {
+				return nil, false, nil
 			}
-		}
-		img := containerd.NewImage(s.client.Client, imgInfo)
-		if err := img.Unpack(importCtx, "erofs"); err != nil {
-			return ImportArchiveResponse{}, fmt.Errorf("failed to unpack image %s: %w", imgInfo.Name, err)
-		}
+			snapshotMap, err := conchimage.UnpackAllSubImages(importCtx, s.client.Client, imgInfo.Name)
+			if err != nil {
+				return nil, true, fmt.Errorf("failed to unpack Conch image index %s: %w", imgInfo.Name, err)
+			}
+			return snapshotMap, true, nil
+		},
+		func(imgInfo images.Image) (string, error) {
+			img := containerd.NewImage(s.client.Client, imgInfo)
+			if err := img.Unpack(importCtx, "erofs"); err != nil {
+				return "", fmt.Errorf("failed to unpack image %s: %w", imgInfo.Name, err)
+			}
 
-		diffIDs, err := img.RootFS(importCtx)
-		if err != nil {
-			return ImportArchiveResponse{}, fmt.Errorf("failed to get rootfs: %w", err)
-		}
-		finalSnapshotKey = identity.ChainID(diffIDs).String()
-		finalImageName = imgInfo.Name
-		if _, err := snapshotter.Stat(importCtx, finalSnapshotKey); err != nil {
-			continue
-		}
-		break
+			diffIDs, err := img.RootFS(importCtx)
+			if err != nil {
+				return "", fmt.Errorf("failed to get rootfs: %w", err)
+			}
+			snapshotKey := identity.ChainID(diffIDs).String()
+			if _, err := snapshotter.Stat(importCtx, snapshotKey); err != nil {
+				return "", nil
+			}
+			return snapshotKey, nil
+		},
+	)
+	if err != nil {
+		return ImportArchiveResponse{}, err
 	}
 
 	if finalSnapshotKey == "" {
@@ -523,6 +537,29 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req Impo
 		SnapshotKey: finalSnapshotKey,
 		ImageName:   finalImageName,
 	}, nil
+}
+
+func selectImportedSnapshot(importedImages []images.Image, unpackConchIndex func(images.Image) (map[string]string, bool, error), unpackRegularImage func(images.Image) (string, error)) (string, string, error) {
+	for _, imgInfo := range importedImages {
+		if imgInfo.Target.MediaType == ocispec.MediaTypeImageIndex {
+			snapshotMap, isConchIndex, err := unpackConchIndex(imgInfo)
+			if err != nil {
+				return "", "", err
+			}
+			if isConchIndex {
+				return snapshotMap[conchimage.KindRootfs], imgInfo.Name, nil
+			}
+		}
+		snapshotKey, err := unpackRegularImage(imgInfo)
+		if err != nil {
+			return "", "", err
+		}
+		if snapshotKey == "" {
+			continue
+		}
+		return snapshotKey, imgInfo.Name, nil
+	}
+	return "", "", nil
 }
 
 func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req ExportArchiveRequest) error {
@@ -551,6 +588,80 @@ func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req ExportArch
 		return fmt.Errorf("export image %s: %w", req.ImageName, err)
 	}
 	return nil
+}
+
+func (s *Service) PublishBootImage(ctx context.Context, req PublishBootImageRequest) (PublishBootImageResponse, error) {
+	if s == nil || s.client == nil {
+		return PublishBootImageResponse{}, fmt.Errorf("image service has no containerd client")
+	}
+	if req.RootfsImageName == "" {
+		return PublishBootImageResponse{}, fmt.Errorf("%w: rootfs_image_name is required", ErrInvalidRequest)
+	}
+	if req.KernelPath == "" {
+		return PublishBootImageResponse{}, fmt.Errorf("%w: kernel_path is required", ErrInvalidRequest)
+	}
+	if req.InitrdPath == "" {
+		return PublishBootImageResponse{}, fmt.Errorf("%w: initrd_path is required", ErrInvalidRequest)
+	}
+	if req.BootIndexTag == "" {
+		return PublishBootImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidRequest)
+	}
+
+	ns := req.Namespace
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	publishCtx, done, err := s.client.WithLease(namespaceCtx)
+	if err != nil {
+		return PublishBootImageResponse{}, fmt.Errorf("create content lease: %w", err)
+	}
+	defer done(publishCtx)
+
+	rootfsImage, err := s.client.ImageService().Get(publishCtx, req.RootfsImageName)
+	if err != nil {
+		return PublishBootImageResponse{}, fmt.Errorf("lookup rootfs image %s: %w", req.RootfsImageName, err)
+	}
+	indexDesc, err := conchimage.BuildBootIndexInContent(publishCtx, s.client.ContentStore(), conchimage.BootIndexContentOptions{
+		RootfsDescriptor: rootfsImage.Target,
+		KernelPath:       req.KernelPath,
+		InitrdPath:       req.InitrdPath,
+		Tag:              req.BootIndexTag,
+	})
+	if err != nil {
+		return PublishBootImageResponse{}, fmt.Errorf("build boot index content: %w", err)
+	}
+
+	labelHandler := images.SetChildrenLabels(s.client.ContentStore(), images.ChildrenHandler(s.client.ContentStore()))
+	if err := images.WalkNotEmpty(publishCtx, labelHandler, indexDesc); err != nil {
+		return PublishBootImageResponse{}, fmt.Errorf("label boot index content: %w", err)
+	}
+	imageRecord := images.Image{Name: req.BootIndexTag, Target: indexDesc}
+	if _, err := s.client.ImageService().Update(publishCtx, imageRecord, "target"); err != nil {
+		if !errdefs.IsNotFound(err) {
+			return PublishBootImageResponse{}, fmt.Errorf("update boot image record %s: %w", req.BootIndexTag, err)
+		}
+		if _, err := s.client.ImageService().Create(publishCtx, imageRecord); err != nil {
+			return PublishBootImageResponse{}, fmt.Errorf("create boot image record %s: %w", req.BootIndexTag, err)
+		}
+	}
+
+	snapshotMap, err := conchimage.UnpackAllSubImages(publishCtx, s.client.Client, req.BootIndexTag)
+	if err != nil {
+		return PublishBootImageResponse{}, fmt.Errorf("unpack boot image %s: %w", req.BootIndexTag, err)
+	}
+	snapshotKey := snapshotMap[conchimage.KindRootfs]
+	if snapshotKey == "" {
+		return PublishBootImageResponse{}, fmt.Errorf("boot image %s unpack returned empty rootfs snapshot key", req.BootIndexTag)
+	}
+	return PublishBootImageResponse{
+		BootIndexDigest: indexDesc.Digest.String(),
+		SnapshotKey:     snapshotKey,
+		ImageName:       req.BootIndexTag,
+	}, nil
 }
 
 func (s *Service) ConvertRootfsToErofs(ctx context.Context, req ConvertRootfsToErofsRequest) (ConvertRootfsToErofsResponse, error) {
