@@ -86,8 +86,20 @@ type StateConfig struct {
 }
 
 type CRIConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Socket  string `yaml:"socket"`
+	Enabled  bool              `yaml:"enabled"`
+	Socket   string            `yaml:"socket"`
+	Snapshot CRISnapshotConfig `yaml:"snapshot"`
+}
+
+// CRISnapshotConfig configures CheckpointContainer's snapshot push target and
+// registry credentials. The registry is the cross-node shared snapshot layer.
+type CRISnapshotConfig struct {
+	// DefaultRepo is used when a Pod sets neither conch.io/snapshot-image nor
+	// conch.io/snapshot-repo annotation.
+	DefaultRepo string `yaml:"default_repo"`
+	PlainHTTP   bool   `yaml:"plain_http"`
+	Username    string `yaml:"username"`
+	Password    string `yaml:"password"`
 }
 
 // DefaultConfig returns the default configuration

@@ -23,6 +23,19 @@ const (
 type Config struct {
 	Socket             string
 	DefaultKernelImage string
+	Snapshot           SnapshotConfig
+}
+
+// SnapshotConfig configures how CheckpointContainer derives the push target and
+// authenticates to the registry that acts as the cross-node snapshot layer.
+type SnapshotConfig struct {
+	// DefaultRepo is used when a Pod sets neither conch.io/snapshot-image nor
+	// conch.io/snapshot-repo. The snapshot is pushed to
+	// "<DefaultRepo>/<pod-name>:<timestamp>".
+	DefaultRepo string
+	PlainHTTP   bool
+	Username    string
+	Password    string
 }
 
 type Runtime interface {
@@ -35,15 +48,18 @@ type Runtime interface {
 }
 
 type Server struct {
-	cfg     Config
-	runtime Runtime
-	store   state.Store
-	grpc    *grpc.Server
-	ln      net.Listener
+	cfg          Config
+	runtime      Runtime
+	store        state.Store
+	checkpointer Checkpointer
+	grpc         *grpc.Server
+	ln           net.Listener
 }
 
-func New(cfg Config, runtime Runtime, store state.Store) *Server {
-	return &Server{cfg: cfg, runtime: runtime, store: store}
+// New creates a CRI server. checkpointer may be nil, in which case
+// CheckpointContainer returns Unimplemented.
+func New(cfg Config, runtime Runtime, store state.Store, checkpointer Checkpointer) *Server {
+	return &Server{cfg: cfg, runtime: runtime, store: store, checkpointer: checkpointer}
 }
 
 func (s *Server) Start() error {
@@ -70,7 +86,7 @@ func (s *Server) Start() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	svc := &service{cfg: s.cfg, runtime: s.runtime, store: s.store}
+	svc := &service{cfg: s.cfg, runtime: s.runtime, store: s.store, checkpointer: s.checkpointer}
 	runtimev1.RegisterRuntimeServiceServer(grpcServer, svc)
 	runtimev1.RegisterImageServiceServer(grpcServer, svc)
 
@@ -118,9 +134,10 @@ type service struct {
 	runtimev1.UnimplementedRuntimeServiceServer
 	runtimev1.UnimplementedImageServiceServer
 
-	cfg     Config
-	runtime Runtime
-	store   state.Store
+	cfg          Config
+	runtime      Runtime
+	store        state.Store
+	checkpointer Checkpointer
 }
 
 func (s *service) Version(context.Context, *runtimev1.VersionRequest) (*runtimev1.VersionResponse, error) {

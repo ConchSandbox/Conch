@@ -218,7 +218,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 		s.criServer = cri.New(cri.Config{
 			Socket:             cfg.CRI.Socket,
 			DefaultKernelImage: cfg.Image.DefaultKernelImage,
-		}, s.runtimeService, store)
+			Snapshot: cri.SnapshotConfig{
+				DefaultRepo: cfg.CRI.Snapshot.DefaultRepo,
+				PlainHTTP:   cfg.CRI.Snapshot.PlainHTTP,
+				Username:    cfg.CRI.Snapshot.Username,
+				Password:    cfg.CRI.Snapshot.Password,
+			},
+		}, s.runtimeService, store, s)
 		if err := s.criServer.Start(); err != nil {
 			cancel()
 			_ = store.Close()
@@ -730,6 +736,49 @@ func (s *Daemon) handleSnapshotExport(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// CheckpointSandbox implements cri.Checkpointer. It snapshots a running sandbox
+// into an OCI image (reusing the snapshot export path) and pushes it to a
+// registry so it can be restored on any node. It is invoked by the CRI
+// CheckpointContainer RPC, which kubelet routes to the node running the Pod.
+func (s *Daemon) CheckpointSandbox(ctx context.Context, opts cri.CheckpointOptions) (cri.CheckpointResult, error) {
+	if s.runtimeService == nil || s.runtimeService.Image == nil ||
+		s.runtimeService.Snapshot == nil || s.runtimeService.Sandbox == nil {
+		return cri.CheckpointResult{}, fmt.Errorf("image, snapshot or sandbox service unavailable")
+	}
+	if strings.TrimSpace(opts.ImageRef) == "" {
+		return cri.CheckpointResult{}, fmt.Errorf("image ref is required")
+	}
+	if strings.TrimSpace(opts.SandboxID) == "" {
+		return cri.CheckpointResult{}, fmt.Errorf("sandbox id is required")
+	}
+
+	// Pause + commit the VM and build a local OCI snapshot image tagged with the
+	// target ref. NOTE: pausing terminates the source sandbox (checkpoint-and-
+	// terminate semantics).
+	exportResp, err := s.exportSnapshotImage(ctx, snapshotExportRequest{
+		Namespace:    opts.Namespace,
+		SandboxID:    opts.SandboxID,
+		BootIndexTag: opts.ImageRef,
+	})
+	if err != nil {
+		return cri.CheckpointResult{}, fmt.Errorf("export snapshot image: %w", err)
+	}
+
+	// Push the local snapshot image to the registry (cross-node shared layer).
+	if err := s.runtimeService.PushImageRequest(ctx, imageSvc.PushRequest{
+		LocalImage:  opts.ImageRef,
+		RemoteImage: opts.ImageRef,
+		Namespace:   s.resolveNamespace(opts.Namespace),
+		PlainHTTP:   opts.PlainHTTP,
+		Username:    opts.Username,
+		Password:    opts.Password,
+	}); err != nil {
+		return cri.CheckpointResult{}, fmt.Errorf("push snapshot image %s: %w", opts.ImageRef, err)
+	}
+
+	return cri.CheckpointResult{ImageRef: opts.ImageRef, Digest: exportResp.BootIndexDigest}, nil
 }
 
 func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kernelPath, initrdPath, tmpDir string) (convertImageResponse, error) {
