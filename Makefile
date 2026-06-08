@@ -1,4 +1,4 @@
-.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor install
+.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor install build-agent-initramfs
 
 # project name
 PROJECT_NAME := Conch
@@ -84,6 +84,15 @@ build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) $(GO_TAG_FLAGS) -o $(BIN_DIR)/$* ./cmd/$*
+
+build-agent-initramfs: gen-proto-go ## Build Alpine initramfs that runs conch-agent as PID 1
+	@echo "building static conch-agent for initramfs..."
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) \
+		$(GOBUILD) -tags "netgo,osusergo" \
+		-ldflags '-s -w -extldflags "-static"' \
+		-o $(BIN_DIR)/conch-agent ./cmd/conch-agent
+	./scripts/build-agent-initramfs.sh --agent-bin "$(BIN_DIR)/conch-agent"
 
 clean: ## Clean build artifacts
 	@echo "cleaning build artifacts..."
