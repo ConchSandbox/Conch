@@ -2,6 +2,9 @@ package recovery
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -10,6 +13,23 @@ import (
 
 type fakeLeaseClient struct {
 	seen map[string]string
+}
+
+type fakeSandboxRehydrator struct {
+	count      int
+	restoredID map[string]struct{}
+	err        error
+	cleanupID  map[string]struct{}
+	cleanupErr error
+}
+
+func (f *fakeSandboxRehydrator) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
+	return f.count, f.restoredID, f.err
+}
+
+func (f *fakeSandboxRehydrator) CleanupAssignedWithoutReadySandbox(ids map[string]struct{}) error {
+	f.cleanupID = ids
+	return f.cleanupErr
 }
 
 func (f *fakeLeaseClient) WithRuntimeLease(ctx context.Context, namespace, leaseID string) (context.Context, string, error) {
@@ -127,5 +147,98 @@ func TestReconcileMarksMissingViewSnapshotUnknown(t *testing.T) {
 	}
 	if views[0].State != state.SandboxUnknown {
 		t.Fatalf("view.State = %q, want %q", views[0].State, state.SandboxUnknown)
+	}
+}
+
+func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	nsPath := t.TempDir()
+	vsockPath := nsPath + "/vsock.sock"
+	if err := os.WriteFile(vsockPath, []byte{}, 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:    "pod-1",
+		ConchSandboxID:  "sandbox-1",
+		Namespace:       "default",
+		State:           state.SandboxReady,
+		NetworkNS:       nsPath,
+		VsockSocketPath: vsockPath,
+		IP:              "10.12.0.2",
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+
+	wantErr := errors.New("rehydrate failed")
+	rehydrator := &fakeSandboxRehydrator{
+		err:        wantErr,
+		restoredID: map[string]struct{}{"sandbox-1": {}},
+	}
+	result, err := Reconcile(ctx, Config{
+		Store:             store,
+		LeaseClient:       &fakeLeaseClient{},
+		SandboxRehydrator: rehydrator,
+		DefaultNamespace:  "default",
+	})
+	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("Reconcile() error = %v, want %v", err, wantErr)
+	}
+	if result.RehydrateErrors != 1 {
+		t.Fatalf("RehydrateErrors = %d, want 1", result.RehydrateErrors)
+	}
+	if _, ok := rehydrator.cleanupID["sandbox-1"]; !ok {
+		t.Fatalf("CleanupAssignedWithoutReadySandbox() ids = %v, want sandbox-1", rehydrator.cleanupID)
+	}
+}
+
+func TestReconcileCleansStaleAssignedNetworkSlotsAfterRehydrate(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	nsPath := t.TempDir()
+	vsockPath := nsPath + "/vsock.sock"
+	if err := os.WriteFile(vsockPath, []byte{}, 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:    "pod-ready",
+		ConchSandboxID:  "sandbox-ready",
+		Namespace:       "default",
+		State:           state.SandboxReady,
+		NetworkNS:       nsPath,
+		VsockSocketPath: vsockPath,
+		IP:              "10.12.0.2",
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+
+	rehydrator := &fakeSandboxRehydrator{
+		count:      1,
+		restoredID: map[string]struct{}{"sandbox-ready": {}},
+	}
+	result, err := Reconcile(ctx, Config{
+		Store:             store,
+		LeaseClient:       &fakeLeaseClient{},
+		SandboxRehydrator: rehydrator,
+		DefaultNamespace:  "default",
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.SandboxesRehydrated != 1 {
+		t.Fatalf("SandboxesRehydrated = %d, want 1", result.SandboxesRehydrated)
+	}
+	if _, ok := rehydrator.cleanupID["sandbox-ready"]; !ok {
+		t.Fatalf("cleanup ids = %#v, want sandbox-ready", rehydrator.cleanupID)
 	}
 }

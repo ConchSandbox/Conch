@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -15,17 +16,19 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type Config struct {
-	PoolSize           int    `toml:"pool_size" json:"poolSize"`
-	DynamicReservation bool   `toml:"dynamic_reservation" json:"dynamicReservation"`
-	BridgeCount        int    `toml:"bridge_count" json:"bridgeCount"`
-	TapIP              string `toml:"tap_ip" json:"tapIP"`
-	TapMask            int    `toml:"tap_mask" json:"tapMask"`
-	VsockSignalRetry   string `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
-	VsockSignalTimeout string `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
-	RequestTimeout     string `toml:"request_timeout" json:"requestTimeout"`
+	PoolSize           int                       `toml:"pool_size" json:"poolSize"`
+	DynamicReservation bool                      `toml:"dynamic_reservation" json:"dynamicReservation"`
+	BridgeCount        int                       `toml:"bridge_count" json:"bridgeCount"`
+	TapIP              string                    `toml:"tap_ip" json:"tapIP"`
+	TapMask            int                       `toml:"tap_mask" json:"tapMask"`
+	CNI                netstack.CNIManagerConfig `toml:"cni" json:"cni"`
+	VsockSignalRetry   string                    `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
+	VsockSignalTimeout string                    `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
+	RequestTimeout     string                    `toml:"request_timeout" json:"requestTimeout"`
 }
 
 type Service struct {
@@ -49,12 +52,18 @@ func New(ctx context.Context, client *containerdclient.Client, cfg Config) (*Ser
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := netstack.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask)
+	pool, err := netstack.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask, cfg.CNI, currentNetworkSlotStore())
 	if err != nil {
 		return nil, err
 	}
+	if _, err := pool.AdoptWarmIdle(ctx); err != nil {
+		if errors.Is(err, netstack.ErrNetworkSlotStoreRead) || errors.Is(err, netstack.ErrNetworkSlotCleanup) {
+			return nil, err
+		}
+		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))
+	}
 	manager := conchsandbox.NewManager(pool, client, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
-	go pool.Populate(ctx)
+	go pool.Populate(netstack.WithPreserveOnCancel(ctx))
 	return &Service{manager: manager}, nil
 }
 
@@ -77,11 +86,18 @@ func (s *Service) Pause(req conchsandbox.SandboxPauseRequest) (string, error) {
 	return s.manager.Pause(req)
 }
 
-func (s *Service) Rehydrate(records []state.SandboxRecord) (int, error) {
+func (s *Service) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
 	if s == nil || s.manager == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
 	return s.manager.Rehydrate(records)
+}
+
+func (s *Service) CleanupAssignedWithoutReadySandbox(restoredSandboxIDs map[string]struct{}) error {
+	if s == nil || s.manager == nil {
+		return nil
+	}
+	return s.manager.CleanupAssignedWithoutReadySandbox(restoredSandboxIDs)
 }
 
 func (s *Service) Close() error {
@@ -95,19 +111,33 @@ func (s *Service) Close() error {
 	}
 	s.closed = true
 	finish := cleanupdiag.Start("sandbox_service.close_preserve")
+	s.manager.WaitPoolPopulateStopped()
 	finish(nil)
 	return s.closeErr
 }
 
 var (
-	readyMu sync.Mutex
-	readyCh chan<- *Service
+	readyMu          sync.Mutex
+	readyCh          chan<- *Service
+	networkSlotStore netstack.NetworkSlotStore
 )
 
 func SetReadyChannel(ch chan<- *Service) {
 	readyMu.Lock()
 	defer readyMu.Unlock()
 	readyCh = ch
+}
+
+func SetNetworkSlotStore(store netstack.NetworkSlotStore) {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	networkSlotStore = store
+}
+
+func currentNetworkSlotStore() netstack.NetworkSlotStore {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	return networkSlotStore
 }
 
 func publishReady(svc *Service) {

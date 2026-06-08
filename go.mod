@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/containerd/containerd/v2 v2.3.0
 	github.com/containerd/errdefs v1.0.0
+	github.com/containerd/go-cni v1.1.13
 	github.com/containerd/platforms v1.0.0-rc.4
 	github.com/containerd/plugin v1.1.0
 	github.com/coreos/go-iptables v0.8.0
@@ -41,6 +42,7 @@ require (
 	github.com/containerd/otelttrpc v0.1.0 // indirect
 	github.com/containerd/ttrpc v1.2.8 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
+	github.com/containernetworking/cni v1.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
@@ -67,11 +69,13 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.3.0 // indirect
+	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
+	github.com/sasha-s/go-deadlock v0.3.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opencensus.io v0.24.0 // indirect

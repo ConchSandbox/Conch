@@ -16,6 +16,7 @@ vendor/
 
 # Go workspace file
 go.work
+.gocache
 
 # IDE
 .idea/
@@ -43,3 +44,6 @@ api/py_proto/
 # python
 __pycache__
 *.pyc
+
+# Coding Agents
+.codex

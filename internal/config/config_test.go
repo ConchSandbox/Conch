@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -127,7 +128,8 @@ func TestLoadConfig(t *testing.T) {
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n" +
 			"sandbox:\n  default_image: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
-			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
+			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -177,6 +179,21 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Network.TapMask != 25 {
 		t.Errorf("LoadConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 25)
 	}
+	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/custom/cni/bin" {
+		t.Errorf("LoadConfig().Network.CNI.PluginBinDirs = %v, want [/custom/cni/bin]", cfg.Network.CNI.PluginBinDirs)
+	}
+	if cfg.Network.CNI.PluginConfDir != "/custom/cni/net.d" {
+		t.Errorf("LoadConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/custom/cni/net.d")
+	}
+	if cfg.Network.CNI.PluginMaxConf != 2 {
+		t.Errorf("LoadConfig().Network.CNI.PluginMaxConf = %d, want 2", cfg.Network.CNI.PluginMaxConf)
+	}
+	if cfg.Network.CNI.IfName != "net1" {
+		t.Errorf("LoadConfig().Network.CNI.IfName = %q, want %q", cfg.Network.CNI.IfName, "net1")
+	}
+	if !cfg.Network.CNI.SetupSerially {
+		t.Errorf("LoadConfig().Network.CNI.SetupSerially = %v, want true", cfg.Network.CNI.SetupSerially)
+	}
 	if cfg.Containerd.RootDir != "/tmp/conch-containerd-root" {
 		t.Errorf("LoadConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/tmp/conch-containerd-root")
 	}
@@ -209,6 +226,24 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestResolveCNIPluginConfDirFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	localConfDir := filepath.Join(tmpDir, "cni", "net.d")
+	defaultConfDir := filepath.Join(tmpDir, "etc", "conch", "cni", "net.d")
+	if err := os.MkdirAll(localConfDir, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localConfDir, "10-conch.conf"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got := resolveCNIPluginConfDir(cfgPath, defaultConfDir, defaultConfDir)
+	if got != localConfDir {
+		t.Errorf("resolveCNIPluginConfDir() = %q, want %q", got, localConfDir)
+	}
+}
+
 func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -220,6 +255,18 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	}
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
+	}
+	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != netstack.DefaultCNIPluginBinDir {
+		t.Errorf("DefaultConfig().Network.CNI.PluginBinDirs = %v, want [%s]", cfg.Network.CNI.PluginBinDirs, netstack.DefaultCNIPluginBinDir)
+	}
+	if cfg.Network.CNI.PluginConfDir != netstack.DefaultCNIPluginConfDir {
+		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, netstack.DefaultCNIPluginConfDir)
+	}
+	if cfg.Network.CNI.PluginMaxConf != netstack.DefaultCNIPluginMaxConf {
+		t.Errorf("DefaultConfig().Network.CNI.PluginMaxConf = %d, want %d", cfg.Network.CNI.PluginMaxConf, netstack.DefaultCNIPluginMaxConf)
+	}
+	if cfg.Network.CNI.IfName != netstack.DefaultCNIIfName {
+		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want %s", cfg.Network.CNI.IfName, netstack.DefaultCNIIfName)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -330,11 +330,12 @@ func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateReques
 	}
 }
 
-func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, error) {
+func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
 	var (
 		restored int
 		errs     []error
 	)
+	restoredSandboxIDs := make(map[string]struct{})
 	for _, rec := range records {
 		if rec.State != state.SandboxReady {
 			continue
@@ -348,19 +349,35 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, error) {
 			continue
 		}
 		sb.leaseID = rec.LeaseID
+		cidReserved := false
 		if rec.VsockCID != 0 {
 			if err := m.cidAllocator.ReserveCID(rec.ConchSandboxID, rec.VsockCID); err != nil {
 				errs = append(errs, fmt.Errorf("reserve cid for %s: %w", rec.ConchSandboxID, err))
 				continue
 			}
+			cidReserved = true
 		}
 		if sb.slot != nil && m.pool != nil {
-			m.pool.AttachInUse(sb.slot)
+			if err := m.pool.RestoreInUse(sb.slot, rec.ConchSandboxID, rec.IP); err != nil {
+				if cidReserved {
+					_ = m.ReleaseCID(rec.ConchSandboxID)
+				}
+				errs = append(errs, fmt.Errorf("restore network slot for %s: %w", rec.ConchSandboxID, err))
+				continue
+			}
 		}
 		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), sb)
+		restoredSandboxIDs[rec.ConchSandboxID] = struct{}{}
 		restored++
 	}
-	return restored, errors.Join(errs...)
+	return restored, restoredSandboxIDs, errors.Join(errs...)
+}
+
+func (m *Manager) CleanupAssignedWithoutReadySandbox(restoredSandboxIDs map[string]struct{}) error {
+	if m.pool != nil {
+		return m.pool.CleanupAssignedWithoutReadySandbox(restoredSandboxIDs)
+	}
+	return nil
 }
 
 func (m *Manager) resolveParentSnapshotIDs(
@@ -561,6 +578,13 @@ func (m *Manager) CleanupPool() error {
 	logger.Debug("cleanup pool finish")
 
 	return nil
+}
+
+func (m *Manager) WaitPoolPopulateStopped() {
+	if m == nil || m.pool == nil {
+		return
+	}
+	m.pool.WaitPopulateStopped()
 }
 
 func (m *Manager) AllocateUniqueCID(sandboxId string) (uint32, error) {

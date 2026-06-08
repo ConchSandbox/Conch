@@ -134,12 +134,12 @@ func ResumeSandbox(
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
-			cleanupErr := cleanup.Run(ctx)
+			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -220,12 +220,12 @@ func CreateSandbox(
 	cleanup := NewCleanup()
 	defer func() {
 		if e != nil {
-			cleanupErr := cleanup.Run(ctx)
+			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}

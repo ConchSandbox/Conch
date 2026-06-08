@@ -6,6 +6,11 @@ const (
 	SandboxStopped  = "STOPPED"
 	SandboxUnknown  = "UNKNOWN"
 
+	NetworkSlotCreating = "CREATING"
+	NetworkSlotWarmIdle = "WARM_IDLE"
+	NetworkSlotAssigned = "ASSIGNED"
+	NetworkSlotCleaning = "CLEANING"
+
 	ContainerCreated = "CREATED"
 	ContainerRunning = "RUNNING_PLACEHOLDER"
 	ContainerExited  = "EXITED"
@@ -49,6 +54,20 @@ type SandboxRecord struct {
 	VMMount         string            `json:"vm_mount,omitempty"`
 	SnapshotRootDir string            `json:"snapshot_root_dir,omitempty"`
 	LastError       string            `json:"last_error,omitempty"`
+}
+
+type NetworkSlotRecord struct {
+	SlotKey   string `json:"slot_key"`
+	SlotIndex int    `json:"slot_index"`
+	State     string `json:"state"`
+
+	SandboxID string `json:"sandbox_id,omitempty"`
+	NetNSPath string `json:"netns_path,omitempty"`
+	CNIID     string `json:"cni_id,omitempty"`
+	CNIIP     string `json:"cni_ip,omitempty"`
+
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 type ContainerRecord struct {

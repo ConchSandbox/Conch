@@ -1,6 +1,6 @@
 <img src="./docs/assets/Conch-logo.jpg" alt="Conch logo" style="width:200px;" />
 
-<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.23+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
+<a href="https://atomgit.com/openeuler/Conch.git"><img src="https://img.shields.io/badge/atomgit-Conch-blue"/></a> ![license](https://img.shields.io/badge/license-Mulan%20PSL%20v2-blue) <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26+-blue"/> </a><a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-SDK-blue"/> </a>
 
 # Conch - Agent Sandbox Engine
 
@@ -15,7 +15,7 @@ The project is developed around the following new sandbox requirements of Agents
 
 - Lightweight and Secure Isolation -- Supports virtual sandboxes to securely isolate Agent tasks. It also supports full lifecycle management, including creation, suspension, resumption, and deletion operations.
 - Snapshot Boot Acceleration -- Supports snapshot functionality for virtual machine memory and root file systems. Through snapshot mechanisms, it enables second-level sandbox startup, significantly improving resource utilization efficiency in large-scale deployment scenarios. Snapshots adopt Copy-on-Write technology to minimize storage overhead.
-- Streamlined Container Networking -- Implements network isolation and address translation through veth devices and NAT rules. It supports pooled reuse of container networks to reduce startup latency.
+- Streamlined Container Networking -- Uses CNI plugins for the outer sandbox network namespace while Conch keeps ownership of reusable slots, sandbox netns lifecycle, guest tap setup, and VM-side NAT. This keeps the fast network pool model while aligning the outer network boundary with CRI-style runtimes.
 
 ## Quick Start
 
@@ -24,8 +24,14 @@ The project is developed around the following new sandbox requirements of Agents
 - Go 1.26+
 - Cloud-Hypervisor v51.0+
 - erofs-utils 1.9+ (`mkfs.erofs --fsalignblks` is required)
-- Iptables network configuration tool
 - Linux 5.10+
+- Root privileges or equivalent `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` capabilities for network namespaces, tap devices, routes, and NAT rules
+- CNI plugin binaries installed on the host, by default under `/opt/cni/bin` (`bridge`, `host-local`, and `loopback` are required for the default bridge-style setup)
+- At least one Conch CNI `.conf` or `.conflist` file. The default path is `/etc/conch/cni/net.d`; if that default path is empty, Conch falls back to `cni/net.d` next to the loaded config file, such as `config/cni/net.d`.
+- A CNI subnet that does not overlap with the host network, cluster network, or VM guest tap subnet
+- Iptables network configuration tool. Conch still uses namespace-local NAT for the VM guest tap path; the selected CNI plugins may also require iptables or nftables depending on their configuration.
+
+For network design details and verification steps, see [Conch Network Guide](docs/guide/net_usage.en.md).
 
 Conchd initializes containerd services and Conch plugins in process, so a standalone system `containerd` daemon is not required.
 

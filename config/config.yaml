@@ -17,18 +17,32 @@ server:
   port: 4063
 
 network:
-  # CIDR capacity is at most: (4096-3*bridge_count) slots; practical max depends on host/kernel/network setup. Default: 250
+  # With the current single-bridge CNI config, CIDR capacity is at most 4093 slots; practical max depends on host/kernel/network setup. Default: 250
   pool_size: 250
   # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
   dynamic_reservation: false
-  # Number of bridges. Power-of-two values use the parent subnet most efficiently; non-power-of-two values are rounded up internally for subnet sizing.
-  # Non-power-of-two bridge_count is rounded up to the next power of two for clean non-overlapping subnets, so tail address space is intentionally left unused.
-  # Multi-bridge mode allocates slot IPs round-robin across bridge subnets, so addresses are spread across bridges rather than contiguous in the parent subnet.
-  bridge_count: 1
+  # Deprecated for the current CNI path. Multi-bridge support should be handled later through CNI config selection.
+  # TODO: Replace this with an explicit CNI bridge-shard policy.
+  # bridge_count: 1
   # Tap interface address inside the sandbox network namespace
   tap_ip: 192.168.100.2
   # CIDR mask for tap_ip
   tap_mask: 24
+  cni:
+    # CNI plugin binary search paths used for outer sandbox networking.
+    # These binaries must be installed on the Linux host; the Go CNI library does not install them.
+    plugin_bin_dirs:
+      - /opt/cni/bin
+    # Directory containing the CNI .conf/.conflist Conch should load for sandbox networking.
+    # Change this if your Conch CNI configs live somewhere else.
+    # If this default directory has no config, Conch falls back to cni/net.d next to this config file.
+    plugin_conf_dir: /etc/conch/cni/net.d
+    # Number of non-loopback network configs to load from plugin_conf_dir
+    plugin_max_conf: 1
+    # Outer sandbox interface name created by CNI; go-cni currently generates the first interface as <prefix>0
+    if_name: eth0
+    # Run CNI setup serially when plugin chains require strict ordering
+    setup_serially: false
 
 containerd:
   root_dir: /var/lib/conch/containerd

@@ -14,12 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 [MODIFIED] - Changes made on 2025-12-24 by Team conch: Simplify slot config and init bridge
+[MODIFIED] - Changes made on 2026-05-13 by Team conch: Add slot-owned CNI state for reusable sandbox network slots.
 */
 package netstack
 
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 
 	netutils "k8s.io/utils/net"
 )
@@ -45,6 +47,12 @@ var (
 type Slot struct {
 	Key string
 	Idx int
+
+	sandboxID string
+	cniID     string
+	netnsPath string
+	cniResult *CNIResult
+	cniOpts   []NamespaceOpts
 
 	bridgeOrdinal int
 	vPeerIp       net.IP
@@ -151,6 +159,55 @@ func configureTapNetwork(tapIP string, tapMask int) error {
 
 func (s *Slot) NamespaceID() string {
 	return fmt.Sprintf("ns-%d", s.Idx)
+}
+
+func (s *Slot) NetNSPath() string {
+	if s.netnsPath != "" {
+		return s.netnsPath
+	}
+	return filepath.Join(netNamespacesDir, s.NamespaceID())
+}
+
+func (s *Slot) setNetNSPath(netnsPath string) {
+	s.netnsPath = netnsPath
+}
+
+func (s *Slot) CNIContainerID() string {
+	if s.cniID != "" {
+		return s.cniID
+	}
+	return fmt.Sprintf("conch-slot-%s", s.Key)
+}
+
+func (s *Slot) setSlotNetwork(cniID string, cniResult *CNIResult, cniOpts []NamespaceOpts) {
+	s.cniID = cniID
+	s.cniResult = cniResult
+	s.cniOpts = cniOpts
+	if cniResult != nil && cniResult.IP != "" {
+		s.vPeerIp = parseCNIResultIP(cniResult.IP)
+	}
+}
+
+func (s *Slot) assignSandbox(sandboxID string) {
+	s.sandboxID = sandboxID
+}
+
+func (s *Slot) clearSandboxAssignment() {
+	s.sandboxID = ""
+}
+
+func (s *Slot) clearSlotNetwork() {
+	s.cniID = ""
+	s.cniResult = nil
+	s.cniOpts = nil
+}
+
+func (s *Slot) SandboxID() string {
+	return s.sandboxID
+}
+
+func (s *Slot) CNIResult() *CNIResult {
+	return s.cniResult
 }
 
 func (s *Slot) VethName() string {
