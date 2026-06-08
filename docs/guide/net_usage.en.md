@@ -65,7 +65,7 @@ Pay attention to the following network config items:
 - `pool_size` sets the number of network pool slots and the maximum number of sandboxes that can run on the host at the same time.
 - `tap_ip` and `tap_mask` define the VM-facing `tap` subnet inside each sandbox.
 - `plugin_bin_dirs` points to the CNI plugin directory, and `plugin_conf_dir` points to the Conch CNI config directory.
-- `if_name` sets the sandbox network interface name created by CNI, normally `eth0`.
+- `if_name` sets the sandbox network interface name created by CNI, normally `eth0`; current go-cni creates the first interface as `<prefix>0`, so this value must match that naming pattern.
 
 ## Manual Verification
 

@@ -16,11 +16,15 @@ import (
 )
 
 const (
-	defaultCNIIfName            = "eth0"
+	DefaultCNIIfName            = "eth0"
+	DefaultCNIPluginConfDir     = "/etc/conch/cni/net.d"
+	DefaultCNIPluginBinDir      = "/opt/cni/bin"
+	DefaultCNIPluginMaxConf     = 1
+	defaultCNIIfName            = DefaultCNIIfName
 	defaultCNIInterfacePrefix   = "eth"
-	defaultCNIPluginConfDir     = "/etc/conch/cni/net.d"
-	defaultCNIPluginBinDir      = "/opt/cni/bin"
-	defaultCNIPluginMaxConf     = 1
+	defaultCNIPluginConfDir     = DefaultCNIPluginConfDir
+	defaultCNIPluginBinDir      = DefaultCNIPluginBinDir
+	defaultCNIPluginMaxConf     = DefaultCNIPluginMaxConf
 	defaultCNIPodNamespace      = "conch"
 	defaultHostLocalIPAMDataDir = "/var/lib/cni/networks"
 	cniTeardownRetryAttempts    = 3
@@ -104,12 +108,16 @@ type cniSelectedMetadata struct {
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	cfg = normalizeCNIManagerConfig(cfg)
+	ifPrefix := interfacePrefix(cfg.IfName)
+	if generated := defaultIfNameForPrefix(ifPrefix); generated != cfg.IfName {
+		return nil, fmt.Errorf("if_name %q is incompatible with go-cni interface prefix %q; expected %q", cfg.IfName, ifPrefix, generated)
+	}
 	plugin, err := cni.New(
 		cni.WithMinNetworkCount(cfg.MinNetworkCount),
 		cni.WithPluginConfDir(cfg.PluginConfDir),
 		cni.WithPluginMaxConfNum(cfg.PluginMaxConf),
 		cni.WithPluginDir(cfg.PluginBinDirs),
-		cni.WithInterfacePrefix(interfacePrefix(cfg.IfName)),
+		cni.WithInterfacePrefix(ifPrefix),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize cni: %w", err)
@@ -161,6 +169,13 @@ func interfacePrefix(ifName string) string {
 		return defaultCNIInterfacePrefix
 	}
 	return prefix
+}
+
+func defaultIfNameForPrefix(prefix string) string {
+	if prefix == "" {
+		prefix = defaultCNIInterfacePrefix
+	}
+	return fmt.Sprintf("%s0", prefix)
 }
 
 func selectedCNIConfigName(plugin cni.CNI) string {

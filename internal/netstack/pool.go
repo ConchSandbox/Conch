@@ -243,10 +243,10 @@ func (p *Pool) upsertSlotRecord(ctx context.Context, slot *Slot, slotState, sand
 		State:     slotState,
 		SandboxID: sandboxID,
 		NetNSPath: slot.NetNSPath(),
-		CNIID:     slot.CNIContainerID(),
 		UpdatedAt: time.Now().UnixNano(),
 	}
 	if result := slot.CNIResult(); result != nil {
+		rec.CNIID = slot.CNIContainerID()
 		rec.CNIIP = result.IP
 	}
 	if err != nil {
@@ -604,6 +604,9 @@ func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
 		return fmt.Errorf("failed to setup cni network: %w", err)
 	}
 	slot.setSlotNetwork(cniID, cniResult, opts)
+	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
+		return fmt.Errorf("failed to record cni network setup: %w", err)
+	}
 
 	if err := SetupGuestTapNetwork(ctx, slot, netnsPath, cniResult); err != nil {
 		return fmt.Errorf("failed to setup guest tap network: %w", err)
@@ -1105,7 +1108,7 @@ func slotFromNetworkSlotRecord(rec state.NetworkSlotRecord) (*Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if rec.CNIID != "" || rec.CNIIP != "" {
+	if rec.CNIIP != "" {
 		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, opts)
 	}
 	return slot, nil
@@ -1116,8 +1119,12 @@ func recordSlotFromState(rec state.NetworkSlotRecord) *Slot {
 	if rec.NetNSPath != "" {
 		slot.setNetNSPath(rec.NetNSPath)
 	}
-	if rec.CNIID != "" || rec.CNIIP != "" {
-		slot.setSlotNetwork(rec.CNIID, &CNIResult{IP: rec.CNIIP}, nil)
+	if rec.CNIIP != "" {
+		cniID := rec.CNIID
+		if cniID == "" {
+			cniID = slot.CNIContainerID()
+		}
+		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, nil)
 	}
 	if rec.SandboxID != "" {
 		slot.assignSandbox(rec.SandboxID)

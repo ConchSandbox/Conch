@@ -117,6 +117,10 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if !slot.VpeerIP().Equal(net.ParseIP("10.12.0.2")) {
 		t.Fatalf("VpeerIP() = %v, want 10.12.0.2", slot.VpeerIP())
 	}
+	slot.setSlotNetwork("custom-cni-id", &CNIResult{IP: "10.12.0.3/20"}, nil)
+	if !slot.VpeerIP().Equal(net.ParseIP("10.12.0.3")) {
+		t.Fatalf("VpeerIP() = %v, want 10.12.0.3", slot.VpeerIP())
+	}
 
 	slot.assignSandbox("sandbox-a")
 	if slot.SandboxID() != "sandbox-a" {

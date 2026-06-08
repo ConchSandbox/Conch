@@ -168,7 +168,7 @@ func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
 		ConchSandboxID:  "sandbox-1",
 		Namespace:       "default",
 		State:           state.SandboxReady,
-		NetNSPath:       nsPath,
+		NetworkNS:       nsPath,
 		VsockSocketPath: vsockPath,
 		IP:              "10.12.0.2",
 	}); err != nil {
@@ -176,10 +176,14 @@ func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
 	}
 
 	wantErr := errors.New("rehydrate failed")
+	rehydrator := &fakeSandboxRehydrator{
+		err:        wantErr,
+		restoredID: map[string]struct{}{"sandbox-1": {}},
+	}
 	result, err := Reconcile(ctx, Config{
 		Store:             store,
 		LeaseClient:       &fakeLeaseClient{},
-		SandboxRehydrator: &fakeSandboxRehydrator{err: wantErr},
+		SandboxRehydrator: rehydrator,
 		DefaultNamespace:  "default",
 	})
 	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
@@ -187,6 +191,9 @@ func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
 	}
 	if result.RehydrateErrors != 1 {
 		t.Fatalf("RehydrateErrors = %d, want 1", result.RehydrateErrors)
+	}
+	if _, ok := rehydrator.cleanupID["sandbox-1"]; !ok {
+		t.Fatalf("CleanupAssignedWithoutReadySandbox() ids = %v, want sandbox-1", rehydrator.cleanupID)
 	}
 }
 
@@ -208,7 +215,7 @@ func TestReconcileCleansStaleAssignedNetworkSlotsAfterRehydrate(t *testing.T) {
 		ConchSandboxID:  "sandbox-ready",
 		Namespace:       "default",
 		State:           state.SandboxReady,
-		NetNSPath:       nsPath,
+		NetworkNS:       nsPath,
 		VsockSocketPath: vsockPath,
 		IP:              "10.12.0.2",
 	}); err != nil {

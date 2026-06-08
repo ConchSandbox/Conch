@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -255,17 +256,17 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
 	}
-	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/opt/cni/bin" {
-		t.Errorf("DefaultConfig().Network.CNI.PluginBinDirs = %v, want [/opt/cni/bin]", cfg.Network.CNI.PluginBinDirs)
+	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != netstack.DefaultCNIPluginBinDir {
+		t.Errorf("DefaultConfig().Network.CNI.PluginBinDirs = %v, want [%s]", cfg.Network.CNI.PluginBinDirs, netstack.DefaultCNIPluginBinDir)
 	}
-	if cfg.Network.CNI.PluginConfDir != "/etc/conch/cni/net.d" {
-		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/etc/conch/cni/net.d")
+	if cfg.Network.CNI.PluginConfDir != netstack.DefaultCNIPluginConfDir {
+		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, netstack.DefaultCNIPluginConfDir)
 	}
-	if cfg.Network.CNI.PluginMaxConf != 1 {
-		t.Errorf("DefaultConfig().Network.CNI.PluginMaxConf = %d, want 1", cfg.Network.CNI.PluginMaxConf)
+	if cfg.Network.CNI.PluginMaxConf != netstack.DefaultCNIPluginMaxConf {
+		t.Errorf("DefaultConfig().Network.CNI.PluginMaxConf = %d, want %d", cfg.Network.CNI.PluginMaxConf, netstack.DefaultCNIPluginMaxConf)
 	}
-	if cfg.Network.CNI.IfName != "eth0" {
-		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want eth0", cfg.Network.CNI.IfName)
+	if cfg.Network.CNI.IfName != netstack.DefaultCNIIfName {
+		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want %s", cfg.Network.CNI.IfName, netstack.DefaultCNIIfName)
 	}
 }
 

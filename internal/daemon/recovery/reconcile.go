@@ -180,29 +180,35 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 		reconciledViewSnapshots = append(reconciledViewSnapshots, rec)
 	}
 
-	if snapshotResult, err := runtimeSnapshot.RehydrateRuntimeState(ctx, reconciledSnapshotRuntimes, reconciledViewSnapshots, viewAliases); err != nil {
-		result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
-		result.ViewMountsRestored = snapshotResult.ViewMounts
-		result.ViewAliasesRestored = snapshotResult.ViewAliases
-		result.RehydrateErrors++
-		result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
-	} else {
-		result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
-		result.ViewMountsRestored = snapshotResult.ViewMounts
-		result.ViewAliasesRestored = snapshotResult.ViewAliases
+	if len(reconciledSnapshotRuntimes) > 0 || len(reconciledViewSnapshots) > 0 || len(viewAliases) > 0 {
+		if snapshotResult, err := runtimeSnapshot.RehydrateRuntimeState(ctx, reconciledSnapshotRuntimes, reconciledViewSnapshots, viewAliases); err != nil {
+			result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
+			result.ViewMountsRestored = snapshotResult.ViewMounts
+			result.ViewAliasesRestored = snapshotResult.ViewAliases
+			result.RehydrateErrors++
+			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
+		} else {
+			result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
+			result.ViewMountsRestored = snapshotResult.ViewMounts
+			result.ViewAliasesRestored = snapshotResult.ViewAliases
+		}
 	}
 	if r.cfg.SandboxRehydrator != nil {
 		count, restoredSandboxIDs, err := r.cfg.SandboxRehydrator.Rehydrate(reconciledSandboxes)
 		result.SandboxesRehydrated = count
+		var rehydrateErr error
 		if err != nil {
 			result.RehydrateErrors++
 			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
-			return result, fmt.Errorf("rehydrate sandboxes: %w", err)
+			rehydrateErr = fmt.Errorf("rehydrate sandboxes: %w", err)
 		}
 		if err := r.cfg.SandboxRehydrator.CleanupAssignedWithoutReadySandbox(restoredSandboxIDs); err != nil {
 			result.RehydrateErrors++
 			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
-			return result, fmt.Errorf("cleanup stale assigned network slots: %w", err)
+			return result, errors.Join(rehydrateErr, fmt.Errorf("cleanup stale assigned network slots: %w", err))
+		}
+		if rehydrateErr != nil {
+			return result, rehydrateErr
 		}
 	}
 

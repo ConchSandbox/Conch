@@ -122,10 +122,10 @@ func DefaultConfig() *Config {
 			TapIP:              "192.168.100.2",
 			TapMask:            24,
 			CNI: CNIConfig{
-				PluginBinDirs: []string{"/opt/cni/bin"},
-				PluginConfDir: "/etc/conch/cni/net.d",
-				PluginMaxConf: 1,
-				IfName:        "eth0",
+				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
+				PluginConfDir: netstack.DefaultCNIPluginConfDir,
+				PluginMaxConf: netstack.DefaultCNIPluginMaxConf,
+				IfName:        netstack.DefaultCNIIfName,
 			},
 		},
 		Containerd: ContainerdConfig{

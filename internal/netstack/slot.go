@@ -184,7 +184,7 @@ func (s *Slot) setSlotNetwork(cniID string, cniResult *CNIResult, cniOpts []Name
 	s.cniResult = cniResult
 	s.cniOpts = cniOpts
 	if cniResult != nil && cniResult.IP != "" {
-		s.vPeerIp = net.ParseIP(cniResult.IP)
+		s.vPeerIp = parseCNIResultIP(cniResult.IP)
 	}
 }
 

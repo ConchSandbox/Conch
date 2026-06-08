@@ -104,6 +104,33 @@ func TestIsExpectedShutdownError(t *testing.T) {
 	}
 }
 
+func TestUpsertSlotRecordPersistsCNIIDOnlyWithResult(t *testing.T) {
+	withBridgeLayout(t, 1)
+	store := newFakeNetworkSlotStore()
+	p := &Pool{slotStore: store}
+	slot, err := NewSlot("2", firstSlotIndex)
+	if err != nil {
+		t.Fatalf("NewSlot(): %v", err)
+	}
+
+	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
+		t.Fatalf("upsertSlotRecord() before cni result: %v", err)
+	}
+	rec := store.records[slot.Key]
+	if rec.CNIID != "" || rec.CNIIP != "" {
+		t.Fatalf("record before cni result has CNIID=%q CNIIP=%q, want empty", rec.CNIID, rec.CNIIP)
+	}
+
+	slot.setSlotNetwork(slot.CNIContainerID(), &CNIResult{IP: "10.12.0.2"}, nil)
+	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
+		t.Fatalf("upsertSlotRecord() after cni result: %v", err)
+	}
+	rec = store.records[slot.Key]
+	if rec.CNIID != slot.CNIContainerID() || rec.CNIIP != "10.12.0.2" {
+		t.Fatalf("record after cni result has CNIID=%q CNIIP=%q, want %q/10.12.0.2", rec.CNIID, rec.CNIIP, slot.CNIContainerID())
+	}
+}
+
 func TestHandleCreatedSlotAfterPreserveCancelRecordsWarmIdle(t *testing.T) {
 	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
