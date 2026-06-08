@@ -240,8 +240,11 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/pause", s.handlePauseSandbox)
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
+	s.router.HandleFunc("/api/snapshot/remove", s.handleRemoveSnapshot)
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
 	s.router.HandleFunc("/api/image/push", s.handlePushImage)
+	s.router.HandleFunc("/api/image/list", s.handleListImage)
+	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
 	s.router.HandleFunc("/api/image/convert", s.handleConvertImage)
@@ -564,6 +567,64 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling list image request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Image == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req imageSvc.ListRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	images, err := s.runtimeService.ListImageRequest(r.Context(), req)
+	if err != nil {
+		logger.Error("Failed to list images", ulog.F("error", err))
+		writeImageError(w, "Failed to list images", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string][]imageSvc.Meta{"images": images})
+}
+
+func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling remove image request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Image == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req imageSvc.RemoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.runtimeService.RemoveImageRequest(r.Context(), req); err != nil {
+		logger.Error("Failed to remove image",
+			ulog.F("image_name", req.ImageName),
+			ulog.F("error", err),
+		)
+		writeImageError(w, "Failed to remove image", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 	logger := ulog.GetLogger()
 	logger.Debug("Handling unpack image request")
@@ -798,6 +859,16 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 		}); err != nil {
 			return convertImageResponse{}, fmt.Errorf("create sandbox for snapshot conversion: %w", err)
 		}
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+			defer cancel()
+			if err := s.runtimeService.RemoveSandbox(cleanupCtx, namespace, sandboxID); err != nil {
+				ulog.GetLogger().Warn("failed to cleanup snapshot conversion sandbox",
+					ulog.F("sandbox_id", sandboxID),
+					ulog.F("error", err),
+				)
+			}
+		}()
 		rootfsSnapshotID, err = s.runtimeService.PauseSandbox(ctx, namespace, sandboxID)
 		if err != nil {
 			return convertImageResponse{}, fmt.Errorf("pause sandbox for snapshot conversion: %w", err)
@@ -1152,5 +1223,64 @@ func (s *Daemon) handleSnapshotChain(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(chain)
 }
 
-// TODO return available snapshot_id
-func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {}
+func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling list snapshot request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
+		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req snapshotSvc.ListRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	snapshots, err := s.runtimeService.ListSnapshotRequest(r.Context(), req)
+	if err != nil {
+		logger.Error("Failed to list snapshots", ulog.F("error", err))
+		http.Error(w, "Failed to list snapshots: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string][]snapshotSvc.Meta{"snapshots": snapshots})
+}
+
+func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling remove snapshot request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
+		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req snapshotSvc.RemoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.runtimeService.RemoveSnapshotRequest(r.Context(), req); err != nil {
+		logger.Error("Failed to remove snapshot",
+			ulog.F("key", req.Key),
+			ulog.F("error", err),
+		)
+		status := http.StatusInternalServerError
+		if errors.Is(err, snapshotSvc.ErrInvalidRequest) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, "Failed to remove snapshot: "+err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}

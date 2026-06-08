@@ -2,12 +2,18 @@ package image
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
@@ -72,6 +78,28 @@ type ImportArchiveResponse struct {
 type ExportArchiveRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	ImageName string `json:"image_name"`
+}
+
+type ListRequest struct {
+	Namespace string   `json:"namespace,omitempty"`
+	Filters   []string `json:"filters,omitempty"`
+}
+
+type RemoveRequest struct {
+	Namespace   string `json:"namespace,omitempty"`
+	ImageName   string `json:"image_name"`
+	Synchronous bool   `json:"synchronous,omitempty"`
+}
+
+type Meta struct {
+	Name            string            `json:"name"`
+	TargetDigest    string            `json:"target_digest"`
+	TargetMediaType string            `json:"target_media_type"`
+	Size            int64             `json:"size,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 }
 
 type PrepareRootfsSourceRequest struct {
@@ -248,14 +276,161 @@ func (s *Service) Push(ctx context.Context, req PushRequest) error {
 	}
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		PlainHTTP: req.PlainHTTP,
+		Client:    registryHTTPClient(),
 		Credentials: func(string) (string, string, error) {
 			return req.Username, req.Password, nil
 		},
 	})
-	if err := s.client.Push(pushCtx, req.RemoteImage, img.Target(), containerd.WithResolver(resolver)); err != nil {
+	if err := s.client.Push(pushCtx, req.RemoteImage, img.Target(), containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
 		return fmt.Errorf("push image %s -> %s: %w", req.LocalImage, req.RemoteImage, err)
 	}
 	return nil
+}
+
+func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
+	if s == nil || s.client == nil {
+		return nil, fmt.Errorf("image service has no containerd client")
+	}
+	ns := req.Namespace
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	listCtx := namespaces.WithNamespace(ctx, ns)
+	items, err := s.client.ImageService().List(listCtx, req.Filters...)
+	if err != nil {
+		return nil, fmt.Errorf("list images: %w", err)
+	}
+	out := make([]Meta, 0, len(items))
+	for _, item := range items {
+		kind := imageKindFromLabels(item.Labels)
+		if kind == "" {
+			kind = s.classifyImageKind(listCtx, item)
+		}
+		out = append(out, Meta{
+			Name:            item.Name,
+			TargetDigest:    item.Target.Digest.String(),
+			TargetMediaType: item.Target.MediaType,
+			Size:            item.Target.Size,
+			Kind:            kind,
+			Labels:          item.Labels,
+			CreatedAt:       item.CreatedAt,
+			UpdatedAt:       item.UpdatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("image service has no containerd client")
+	}
+	if req.ImageName == "" {
+		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+	}
+	ns := req.Namespace
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	removeCtx := namespaces.WithNamespace(ctx, ns)
+	opts := []images.DeleteOpt{}
+	if req.Synchronous {
+		opts = append(opts, images.SynchronousDelete())
+	}
+	if err := s.client.ImageService().Delete(removeCtx, req.ImageName, opts...); err != nil {
+		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
+	}
+	return nil
+}
+
+func registryHTTPClient() *http.Client {
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultClient
+	}
+	cloned := tr.Clone()
+	cloned.ResponseHeaderTimeout = 10 * time.Minute
+	return &http.Client{Transport: cloned}
+}
+
+func imageKindFromLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	for _, key := range []string{"io.conch.kind", "conch.io/kind", "kind"} {
+		if kind := labels[key]; kind != "" {
+			return kind
+		}
+	}
+	return ""
+}
+
+func (s *Service) classifyImageKind(ctx context.Context, item images.Image) string {
+	if s == nil || s.client == nil {
+		return ""
+	}
+	switch item.Target.MediaType {
+	case ocispec.MediaTypeImageIndex:
+		return s.classifyIndexKind(ctx, item.Target)
+	default:
+		return inferComponentKindFromName(item.Name)
+	}
+}
+
+func (s *Service) classifyIndexKind(ctx context.Context, target ocispec.Descriptor) string {
+	indexData, err := content.ReadBlob(ctx, s.client.ContentStore(), target)
+	if err != nil {
+		return ""
+	}
+	var index ocispec.Index
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		return ""
+	}
+	return classifyConchIndexKind(index)
+}
+
+func classifyConchIndexKind(index ocispec.Index) string {
+	hasRootfs := false
+	hasSandbox := false
+	hasMem := false
+	for _, manifest := range index.Manifests {
+		switch manifest.Annotations["io.conch.kind"] {
+		case conchimage.KindRootfs:
+			hasRootfs = true
+		case conchimage.KindSandbox:
+			hasSandbox = true
+		case conchimage.KindMemSnapshot:
+			hasMem = true
+		}
+	}
+	if hasRootfs && hasSandbox {
+		if hasMem {
+			return "sandbox-snapshot"
+		}
+		return "sandbox-base"
+	}
+	return ""
+}
+
+func inferComponentKindFromName(name string) string {
+	switch {
+	case strings.Contains(name, "/rootfs-component:") || strings.HasSuffix(name, "-rootfs"):
+		return conchimage.KindRootfs
+	case strings.Contains(name, "/sandbox-component:") || strings.HasSuffix(name, "-sandbox"):
+		return conchimage.KindSandbox
+	case strings.Contains(name, "/mem-snapshot-component:") || strings.HasSuffix(name, "-mem"):
+		return conchimage.KindMemSnapshot
+	default:
+		return ""
+	}
 }
 
 func (s *Service) Unpack(ctx context.Context, req UnpackRequest) (map[string]string, error) {

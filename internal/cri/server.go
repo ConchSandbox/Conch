@@ -32,6 +32,8 @@ type Runtime interface {
 	CreateContainer(context.Context, runtimeapi.ContainerCreateOptions) (runtimeapi.ContainerCreateResult, error)
 	SetContainerState(context.Context, string, string) error
 	PullImage(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error)
+	ListImages(context.Context, runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error)
+	RemoveImage(context.Context, runtimeapi.RemoveImageOptions) error
 }
 
 type Server struct {

@@ -2,6 +2,7 @@ package runtimeapi
 
 type SandboxCreateOptions struct {
 	Namespace      string
+	PodNamespace   string
 	PodSandboxID   string
 	SandboxID      string
 	Name           string
@@ -62,4 +63,35 @@ type PullImageOptions struct {
 
 type PullImageResult struct {
 	Refs map[string]string
+}
+
+type ListImagesOptions struct {
+	Namespace string
+	Filters   []string
+}
+
+type RemoveImageOptions struct {
+	Namespace   string
+	ImageName   string
+	Synchronous bool
+}
+
+type ImageRecord struct {
+	Name            string
+	TargetDigest    string
+	RepoDigests     []string
+	TargetMediaType string
+	Size            int64
+	Kind            string
+	Labels          map[string]string
+}
+
+type ListSnapshotsOptions struct {
+	Namespace string
+	Filters   []string
+}
+
+type RemoveSnapshotOptions struct {
+	Namespace string
+	Key       string
 }

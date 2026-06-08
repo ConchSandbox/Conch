@@ -28,8 +28,12 @@ const (
 	pauseSandbox       = "/api/sandbox/pause"
 	pullImage          = "/api/image/pull"
 	pushImage          = "/api/image/push"
+	listImages         = "/api/image/list"
+	removeImage        = "/api/image/remove"
 	unpackImage        = "/api/image/unpack"
 	convertImage       = "/api/image/convert"
+	listSnapshots      = "/api/snapshot/list"
+	removeSnapshot     = "/api/snapshot/remove"
 	snapshotExport     = "/api/snapshot/export"
 	defaultHTTPTimeout = 120 * time.Second
 )
@@ -92,6 +96,32 @@ type ImageResponse struct {
 	Results map[string]string `json:"results"`
 }
 
+type ListImagesRequest struct {
+	Namespace string   `json:"namespace,omitempty"`
+	Filters   []string `json:"filters,omitempty"`
+}
+
+type ImageRecord struct {
+	Name            string            `json:"name"`
+	TargetDigest    string            `json:"target_digest"`
+	TargetMediaType string            `json:"target_media_type"`
+	Size            int64             `json:"size,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
+}
+
+type ListImagesResponse struct {
+	Images []ImageRecord `json:"images"`
+}
+
+type RemoveImageRequest struct {
+	ImageName   string `json:"image_name"`
+	Namespace   string `json:"namespace,omitempty"`
+	Synchronous bool   `json:"synchronous,omitempty"`
+}
+
 type ConvertImageRequest struct {
 	Source       string
 	KernelPath   string
@@ -132,6 +162,31 @@ type SnapshotExportRequest struct {
 type SnapshotExportResponse struct {
 	BootIndexDigest string `json:"boot_index_digest"`
 	BootIndexTag    string `json:"boot_index_tag"`
+}
+
+type ListSnapshotsRequest struct {
+	Namespace string   `json:"namespace,omitempty"`
+	Filters   []string `json:"filters,omitempty"`
+}
+
+type SnapshotRecord struct {
+	Key         string            `json:"key"`
+	Kind        string            `json:"kind,omitempty"`
+	Parent      string            `json:"parent,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	StoragePath string            `json:"storage_path,omitempty"`
+	CreatedAt   time.Time         `json:"created_at,omitempty"`
+	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
+}
+
+type ListSnapshotsResponse struct {
+	Snapshots []SnapshotRecord `json:"snapshots"`
+}
+
+type RemoveSnapshotRequest struct {
+	Key       string `json:"key"`
+	Namespace string `json:"namespace,omitempty"`
+	Cascade   bool   `json:"cascade,omitempty"`
 }
 
 // Client communicates with Conch conchd HTTP API
@@ -304,6 +359,19 @@ func (c *Client) PushImage(ctx context.Context, req PushImageRequest) error {
 	return c.postJSON(ctx, pushImage, req, &resp)
 }
 
+func (c *Client) ListImages(ctx context.Context, req ListImagesRequest) ([]ImageRecord, error) {
+	var resp ListImagesResponse
+	if err := c.postJSON(ctx, listImages, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Images, nil
+}
+
+func (c *Client) RemoveImage(ctx context.Context, req RemoveImageRequest) error {
+	var resp map[string]string
+	return c.postJSON(ctx, removeImage, req, &resp)
+}
+
 // UnpackImage calls POST /api/image/unpack and returns snapshot IDs by component kind.
 func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[string]string, error) {
 	var resp ImageResponse
@@ -403,6 +471,19 @@ func (c *Client) ExportSnapshot(ctx context.Context, req SnapshotExportRequest) 
 		return SnapshotExportResponse{}, err
 	}
 	return out, nil
+}
+
+func (c *Client) ListSnapshots(ctx context.Context, req ListSnapshotsRequest) ([]SnapshotRecord, error) {
+	var resp ListSnapshotsResponse
+	if err := c.postJSON(ctx, listSnapshots, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Snapshots, nil
+}
+
+func (c *Client) RemoveSnapshot(ctx context.Context, req RemoveSnapshotRequest) error {
+	var resp map[string]string
+	return c.postJSON(ctx, removeSnapshot, req, &resp)
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, payload any, out any) error {

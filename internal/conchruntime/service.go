@@ -12,10 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	digestpkg "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -30,6 +32,8 @@ type SandboxOps interface {
 type ImageOps interface {
 	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
 	Push(context.Context, imageSvc.PushRequest) error
+	List(context.Context, imageSvc.ListRequest) ([]imageSvc.Meta, error)
+	Remove(context.Context, imageSvc.RemoveRequest) error
 	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
 	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
 	ExportArchive(context.Context, io.Writer, imageSvc.ExportArchiveRequest) error
@@ -39,6 +43,8 @@ type ImageOps interface {
 
 type SnapshotOps interface {
 	LinkVM(context.Context, snapshotSvc.LinkVMRequest) error
+	List(context.Context, snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error)
+	Remove(context.Context, snapshotSvc.RemoveRequest) error
 	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
 	Chain(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Chain, error)
 }
@@ -115,6 +121,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		PodSandboxID:    opts.PodSandboxID,
 		ConchSandboxID:  opts.SandboxID,
 		Namespace:       namespace,
+		PodNamespace:    firstNonEmpty(opts.PodNamespace, opts.Namespace),
 		Name:            opts.Name,
 		UID:             opts.UID,
 		Attempt:         opts.Attempt,
@@ -302,6 +309,118 @@ func (s *Service) PushImageRequest(ctx context.Context, req imageSvc.PushRequest
 	return s.Image.Push(ctx, req)
 }
 
+func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
+	items, err := s.ListImageRequest(ctx, imageSvc.ListRequest{
+		Namespace: opts.Namespace,
+		Filters:   opts.Filters,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runtimeapi.ImageRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, runtimeapi.ImageRecord{
+			Name:            item.Name,
+			TargetDigest:    item.TargetDigest,
+			RepoDigests:     imageRepoDigests(item.Name, item.TargetDigest),
+			TargetMediaType: item.TargetMediaType,
+			Size:            item.Size,
+			Kind:            firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels)),
+			Labels:          item.Labels,
+		})
+	}
+	return out, nil
+}
+
+func imageRepoDigests(name, digest string) []string {
+	name = strings.TrimSpace(name)
+	digest = strings.TrimSpace(digest)
+	if name == "" || digest == "" {
+		return nil
+	}
+	if isDigestOnlyRef(name) {
+		return nil
+	}
+	base := name
+	if repo, _, ok := strings.Cut(base, "@"); ok {
+		base = repo
+	} else {
+		lastSlash := strings.LastIndex(base, "/")
+		lastColon := strings.LastIndex(base, ":")
+		if lastColon > lastSlash {
+			base = base[:lastColon]
+		}
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return nil
+	}
+	return []string{base + "@" + digest}
+}
+
+func isDigestOnlyRef(ref string) bool {
+	if _, err := digestpkg.Parse(ref); err == nil {
+		return true
+	}
+	algo, _, ok := strings.Cut(ref, ":")
+	if !ok || strings.Contains(algo, "/") {
+		return false
+	}
+	switch algo {
+	case "sha256", "sha384", "sha512":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageKindFromLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	if kind := strings.TrimSpace(labels["io.conch.kind"]); kind != "" {
+		return kind
+	}
+	if kind := strings.TrimSpace(labels["kind"]); kind != "" {
+		return kind
+	}
+	if kind := strings.TrimSpace(labels["conch.io/kind"]); kind != "" {
+		return kind
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (s *Service) ListImageRequest(ctx context.Context, req imageSvc.ListRequest) ([]imageSvc.Meta, error) {
+	if s == nil || s.Image == nil {
+		return nil, fmt.Errorf("image service is not configured")
+	}
+	return s.Image.List(ctx, req)
+}
+
+func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
+	return s.RemoveImageRequest(ctx, imageSvc.RemoveRequest{
+		Namespace:   opts.Namespace,
+		ImageName:   opts.ImageName,
+		Synchronous: opts.Synchronous,
+	})
+}
+
+func (s *Service) RemoveImageRequest(ctx context.Context, req imageSvc.RemoveRequest) error {
+	if s == nil || s.Image == nil {
+		return fmt.Errorf("image service is not configured")
+	}
+	return s.Image.Remove(ctx, req)
+}
+
 func (s *Service) UnpackImage(ctx context.Context, req imageSvc.UnpackRequest) (map[string]string, error) {
 	if s == nil || s.Image == nil {
 		return nil, fmt.Errorf("image service is not configured")
@@ -342,6 +461,20 @@ func (s *Service) LinkSnapshotVM(ctx context.Context, req snapshotSvc.LinkVMRequ
 		return fmt.Errorf("snapshot service is not configured")
 	}
 	return s.Snapshot.LinkVM(ctx, req)
+}
+
+func (s *Service) ListSnapshotRequest(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+	if s == nil || s.Snapshot == nil {
+		return nil, fmt.Errorf("snapshot service is not configured")
+	}
+	return s.Snapshot.List(ctx, req)
+}
+
+func (s *Service) RemoveSnapshotRequest(ctx context.Context, req snapshotSvc.RemoveRequest) error {
+	if s == nil || s.Snapshot == nil {
+		return fmt.Errorf("snapshot service is not configured")
+	}
+	return s.Snapshot.Remove(ctx, req)
 }
 
 func (s *Service) SnapshotInfo(ctx context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {

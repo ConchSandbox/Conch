@@ -40,7 +40,7 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 	ramMB := parseInt64(annotations[annotationRAMMB], 0)
 
 	res, err := s.runtime.CreateSandbox(ctx, runtimeapi.SandboxCreateOptions{
-		Namespace:      meta.GetNamespace(),
+		PodNamespace:   meta.GetNamespace(),
 		PodSandboxID:   sandboxID,
 		SandboxID:      sandboxID,
 		Name:           meta.GetName(),
@@ -141,10 +141,14 @@ func sandboxStatus(rec state.SandboxRecord) *runtimev1.PodSandboxStatus {
 }
 
 func sandboxMetadata(rec state.SandboxRecord) *runtimev1.PodSandboxMetadata {
+	namespace := rec.PodNamespace
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
 	return &runtimev1.PodSandboxMetadata{
 		Name:      rec.Name,
 		Uid:       rec.UID,
-		Namespace: rec.Namespace,
+		Namespace: namespace,
 		Attempt:   rec.Attempt,
 	}
 }

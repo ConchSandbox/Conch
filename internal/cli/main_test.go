@@ -27,11 +27,16 @@ func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 		"conch pull [options] <image-name>",
 		"conch unpack [options] <image-name>",
 		"conch snapshot export [options]",
+		"conch snapshot ls [options]",
+		"conch snapshot rm [options] <snapshot-key>",
 		"Subcommands:",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("help output missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "conch snapshots ls [options]") {
+		t.Fatalf("help output still contains deprecated snapshots command:\n%s", got)
 	}
 }
 
@@ -330,20 +335,62 @@ func TestParseConvertArgs(t *testing.T) {
 	}
 }
 
-func TestPrintSnapshotHelpIncludesExport(t *testing.T) {
+func TestPrintSnapshotHelpIncludesExportListAndRemove(t *testing.T) {
 	var buf bytes.Buffer
 	printSnapshotHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
 		"conch snapshot export [options]",
+		"conch snapshot ls [options]",
+		"conch snapshot rm [options] <snapshot-key>",
 		"export  Export a sandbox-snapshot image",
+		"ls      List EROFS snapshots",
+		"rm      Remove an EROFS snapshot",
 		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
 		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("snapshot help output missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "conch snapshots ls") {
+		t.Fatalf("snapshot help output unexpectedly contains snapshots alias:\n%s", got)
+	}
+}
+
+func TestPrintSnapshotAliasesUseSnapshotHelp(t *testing.T) {
+	var buf bytes.Buffer
+	printSnapshotsHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch snapshot ls [options]",
+		"conch snapshot rm [options] <snapshot-key>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("snapshots alias help output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunSnapshotsAliasUsesSnapshotHelp(t *testing.T) {
+	var buf bytes.Buffer
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	err = runSnapshotsAlias(context.Background(), []string{"--help"})
+	_ = w.Close()
+	os.Stdout = oldStdout
+	_, _ = buf.ReadFrom(r)
+	if err != nil {
+		t.Fatalf("alias help error = %v", err)
+	}
+	if !strings.Contains(buf.String(), "conch snapshot export [options]") {
+		t.Fatalf("alias help output missing new snapshot command:\n%s", buf.String())
 	}
 }
 
