@@ -299,6 +299,9 @@ func verifyViewSnapshot(rec state.ViewSnapshotRecord) string {
 	if !pathExists(rec.MountPoint) {
 		return "view mount point is missing"
 	}
+	if !runtimeSnapshot.IsMountPoint(rec.MountPoint) {
+		return "view mount point is not mounted"
+	}
 	return ""
 }
 

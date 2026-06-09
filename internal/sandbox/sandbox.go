@@ -24,11 +24,7 @@ const (
 )
 
 func SandboxVsockSocketPath(sandboxId string) (string, error) {
-	socketDir, err := vmm.EnsureWorkSubDir("vsock")
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(socketDir, fmt.Sprintf("conch-vmm-%s.vsock", sandboxId)), nil
+	return vmm.SandboxSocketPath("x", sandboxId)
 }
 
 func validateVCPUNum(vcpuNum, vcpuMax int64) error {

@@ -394,6 +394,16 @@ func (m *Manager) resolveParentSnapshotIDs(
 			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("imageName or snapshotID is required")
 		}
 
+		if parents, ok, err := image.ResolveBootParentSnapshotIDs(ctx, m.daemonClient, namespace, req.ImageName); err != nil {
+			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve boot image snapshots: %w", err)
+		} else if ok {
+			return snapshot.ParentSnapshotIDs{
+				Rootfs: parents.Rootfs,
+				Mem:    parents.Mem,
+				VM:     parents.VM,
+			}, nil
+		}
+
 		var err error
 		rootfsSnapshotID, err = image.GetSnapshotID(ctx, m.daemonClient, namespace, req.ImageName)
 		if err != nil {

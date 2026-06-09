@@ -37,12 +37,12 @@ type ImageOps interface {
 	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
 	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
 	ExportArchive(context.Context, io.Writer, imageSvc.ExportArchiveRequest) error
+	PublishBootImage(context.Context, imageSvc.PublishBootImageRequest) (imageSvc.PublishBootImageResponse, error)
 	PrepareRootfsSource(context.Context, imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error)
 	ConvertRootfsToErofs(context.Context, imageSvc.ConvertRootfsToErofsRequest) (imageSvc.ConvertRootfsToErofsResponse, error)
 }
 
 type SnapshotOps interface {
-	LinkVM(context.Context, snapshotSvc.LinkVMRequest) error
 	List(context.Context, snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error)
 	Remove(context.Context, snapshotSvc.RemoveRequest) error
 	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
@@ -442,6 +442,13 @@ func (s *Service) ExportImageArchive(ctx context.Context, writer io.Writer, req 
 	return s.Image.ExportArchive(ctx, writer, req)
 }
 
+func (s *Service) PublishBootImage(ctx context.Context, req imageSvc.PublishBootImageRequest) (imageSvc.PublishBootImageResponse, error) {
+	if s == nil || s.Image == nil {
+		return imageSvc.PublishBootImageResponse{}, fmt.Errorf("image service is not configured")
+	}
+	return s.Image.PublishBootImage(ctx, req)
+}
+
 func (s *Service) PrepareRootfsSource(ctx context.Context, req imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error) {
 	if s == nil || s.Image == nil {
 		return imageSvc.PrepareRootfsSourceResponse{}, fmt.Errorf("image service is not configured")
@@ -454,13 +461,6 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req imageSvc.Convert
 		return imageSvc.ConvertRootfsToErofsResponse{}, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.ConvertRootfsToErofs(ctx, req)
-}
-
-func (s *Service) LinkSnapshotVM(ctx context.Context, req snapshotSvc.LinkVMRequest) error {
-	if s == nil || s.Snapshot == nil {
-		return fmt.Errorf("snapshot service is not configured")
-	}
-	return s.Snapshot.LinkVM(ctx, req)
 }
 
 func (s *Service) ListSnapshotRequest(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {

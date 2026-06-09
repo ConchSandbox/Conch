@@ -12,7 +12,7 @@ import (
 
 const (
 	vsockReadyPort       = 4065
-	expectedAgentVersion = "0.0.2"
+	expectedAgentVersion = "0.0.3"
 )
 
 func WaitReady(ctx context.Context, sandboxID, vsockSocketPath string, retry, timeout time.Duration) (net.Conn, error) {

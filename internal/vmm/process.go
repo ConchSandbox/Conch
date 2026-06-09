@@ -2,6 +2,8 @@ package vmm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +20,7 @@ import (
 const waitInterval = 10 * time.Millisecond
 
 const SocketDirPerm = 0755
+const unixSocketPathMax = 107
 
 // EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
 func EnsureWorkSubDir(subDir string) (string, error) {
@@ -30,6 +33,21 @@ func EnsureWorkSubDir(subDir string) (string, error) {
 		return "", fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+// SandboxSocketPath returns a short Unix socket path for sandbox-scoped VMM resources.
+func SandboxSocketPath(subDir, sandboxId string) (string, error) {
+	socketDir, err := EnsureWorkSubDir(subDir)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(subDir + ":" + sandboxId))
+	name := hex.EncodeToString(sum[:8]) + ".sock"
+	path := filepath.Join(socketDir, name)
+	if len(path) > unixSocketPathMax {
+		return "", fmt.Errorf("sandbox socket path length %d exceeds unix socket limit %d: %s; configure a shorter server.work_dir", len(path), unixSocketPathMax, path)
+	}
+	return path, nil
 }
 
 type Process struct {
@@ -47,11 +65,7 @@ type Process struct {
 }
 
 func SandboxVmmSocketPath(sandboxId string) (string, error) {
-	socketDir, err := EnsureWorkSubDir("vmm")
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(socketDir, fmt.Sprintf("conch-vmm-%s.sock", sandboxId)), nil
+	return SandboxSocketPath("v", sandboxId)
 }
 
 func NewProcess(

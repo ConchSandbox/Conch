@@ -22,19 +22,11 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-const SnapshotLabelVMSnapshot = "conch/snapshotter/vm-snapshot"
-
 var ErrInvalidRequest = errors.New("invalid snapshot request")
 
 type Config struct {
 	Enabled bool   `toml:"enabled" json:"enabled"`
 	WorkDir string `toml:"work_dir" json:"workDir"`
-}
-
-type LinkVMRequest struct {
-	RootfsSnapshotID string
-	VMSnapshotID     string
-	Namespace        string
 }
 
 type InfoRequest struct {
@@ -86,24 +78,6 @@ func (s *Service) Close() error {
 	finishClose := cleanupdiag.Start("snapshot_service.close")
 	err := conchsnapshot.Close()
 	finishClose(err)
-	return err
-}
-
-func (s *Service) LinkVM(ctx context.Context, req LinkVMRequest) error {
-	if req.RootfsSnapshotID == "" || req.VMSnapshotID == "" {
-		return fmt.Errorf("rootfs and sandbox snapshot IDs are required")
-	}
-	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
-	if err != nil {
-		return err
-	}
-	_, err = snapshotter.Update(snapshotCtx, snapshots.Info{
-		Name: req.RootfsSnapshotID,
-		Labels: map[string]string{
-			SnapshotLabelVMSnapshot: req.VMSnapshotID,
-		},
-	}, "labels."+SnapshotLabelVMSnapshot)
 	return err
 }
 

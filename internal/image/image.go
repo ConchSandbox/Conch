@@ -76,6 +76,44 @@ func GetSnapshotID(ctx context.Context, client *containerdclient.Client, namespa
 	return snapshotID, nil
 }
 
+type BootParentSnapshotIDs struct {
+	Rootfs string
+	Mem    string
+	VM     string
+}
+
+func ResolveBootParentSnapshotIDs(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (BootParentSnapshotIDs, bool, error) {
+	nsCtx, err := client.WithNamespace(ctx, namespace)
+	if err != nil {
+		return BootParentSnapshotIDs{}, false, fmt.Errorf("create namespace context: %w", err)
+	}
+
+	imageMeta, err := client.ImageService().Get(nsCtx, imageName)
+	if err != nil {
+		return BootParentSnapshotIDs{}, false, fmt.Errorf("get image by name %s: %w", imageName, err)
+	}
+	if imageMeta.Target.MediaType != ocispec.MediaTypeImageIndex {
+		return BootParentSnapshotIDs{}, false, nil
+	}
+	if err := ValidateConchImageIndex(nsCtx, client.Client, imageName); err != nil {
+		return BootParentSnapshotIDs{}, false, nil
+	}
+
+	snapshotMap, err := UnpackAllSubImages(nsCtx, client.Client, imageName)
+	if err != nil {
+		return BootParentSnapshotIDs{}, true, fmt.Errorf("unpack boot image %s: %w", imageName, err)
+	}
+	parents := BootParentSnapshotIDs{
+		Rootfs: snapshotMap[KindRootfs],
+		Mem:    snapshotMap[KindMemSnapshot],
+		VM:     snapshotMap[KindSandbox],
+	}
+	if parents.Rootfs == "" || parents.VM == "" {
+		return BootParentSnapshotIDs{}, true, fmt.Errorf("boot image %s missing required parent snapshots", imageName)
+	}
+	return parents, true, nil
+}
+
 // manifestProbe parses manifest blob for platform and config info
 type manifestProbe struct {
 	MediaType string               `json:"mediaType"`

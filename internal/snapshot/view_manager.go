@@ -46,7 +46,7 @@ func (vm *viewManager) addViewAliasWithoutLock(namespace, key, parentSnapshotID 
 	vm.viewAliases[namespace][key] = parentSnapshotID
 }
 
-func (vm *viewManager) restoreViewMount(namespace, parentSnapshotID, viewSnapshotKey, mountPoint string, refCount int) {
+func (vm *viewManager) restoreViewMount(namespace, parentSnapshotID, viewSnapshotKey, mountPoint string, refCount int, mounts []mount.Mount, activationKey string) {
 	if refCount < 0 {
 		refCount = 0
 	}
@@ -56,11 +56,13 @@ func (vm *viewManager) restoreViewMount(namespace, parentSnapshotID, viewSnapsho
 		vm.viewMounts[namespace] = make(map[string]*viewMountRef)
 	}
 	vm.viewMounts[namespace][parentSnapshotID] = &viewMountRef{
-		namespace:   namespace,
-		snapshotID:  parentSnapshotID,
-		snapshotKey: viewSnapshotKey,
-		mountPoint:  mountPoint,
-		refCount:    refCount,
+		namespace:     namespace,
+		snapshotID:    parentSnapshotID,
+		snapshotKey:   viewSnapshotKey,
+		mountPoint:    mountPoint,
+		mounts:        append([]mount.Mount(nil), mounts...),
+		activationKey: activationKey,
+		refCount:      refCount,
 	}
 }
 
@@ -176,76 +178,95 @@ func (vm *viewManager) getOrCreateViewMount(
 	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) (_ *viewMountRef, created bool, err error) {
-	vm.viewLock.Lock()
-	if nsMap, ok := vm.viewMounts[namespace]; ok {
-		if ref, ok := nsMap[parentSnapshotID]; ok {
-			if ref.ready != nil {
-				readyCh := ref.ready
-				vm.viewLock.Unlock()
-				select {
-				case <-readyCh:
-				case <-ctx.Done():
-					return nil, false, ctx.Err()
-				}
-				vm.viewLock.Lock()
-				ref, ok = nsMap[parentSnapshotID]
-				if !ok || ref.initErr != nil {
+	for {
+		vm.viewLock.Lock()
+		if nsMap, ok := vm.viewMounts[namespace]; ok {
+			if ref, ok := nsMap[parentSnapshotID]; ok {
+				if ref.ready != nil {
+					readyCh := ref.ready
 					vm.viewLock.Unlock()
-					if !ok {
-						return nil, false, fmt.Errorf("view mount for %s/%s was removed during init", namespace, parentSnapshotID)
+					select {
+					case <-readyCh:
+					case <-ctx.Done():
+						return nil, false, ctx.Err()
 					}
-					return nil, false, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
+					vm.viewLock.Lock()
+					nsMap, ok = vm.viewMounts[namespace]
+					if ok {
+						ref, ok = nsMap[parentSnapshotID]
+					}
+					if !ok || ref.initErr != nil {
+						vm.viewLock.Unlock()
+						if !ok {
+							return nil, false, fmt.Errorf("view mount for %s/%s was removed during init", namespace, parentSnapshotID)
+						}
+						return nil, false, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
+					}
 				}
-			}
-			if ref.mountPoint != mountPoint {
+				if ref.mountPoint != mountPoint {
+					vm.viewLock.Unlock()
+					return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
+				}
+				if !IsMountPoint(ref.mountPoint) {
+					delete(nsMap, parentSnapshotID)
+					if len(nsMap) == 0 {
+						delete(vm.viewMounts, namespace)
+					}
+					vm.viewLock.Unlock()
+					if ref.activationKey != "" && mountMgr != nil {
+						deactivateCtx := namespaces.WithNamespace(context.Background(), namespace)
+						if err := mountMgr.Deactivate(deactivateCtx, ref.activationKey); err != nil && !errdefs.IsNotFound(err) {
+							slog.Warn("stale view mount deactivate failed", "activationKey", ref.activationKey, "err", err)
+						}
+					}
+					continue
+				}
 				vm.viewLock.Unlock()
-				return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
+				return ref, false, nil
 			}
-			vm.viewLock.Unlock()
-			return ref, false, nil
 		}
-	}
 
-	readyCh := make(chan struct{})
-	placeholder := &viewMountRef{
-		namespace:   namespace,
-		snapshotID:  parentSnapshotID,
-		snapshotKey: viewSnapshotKey,
-		mountPoint:  mountPoint,
-		refCount:    0,
-		ready:       readyCh,
-	}
-	if _, ok := vm.viewMounts[namespace]; !ok {
-		vm.viewMounts[namespace] = make(map[string]*viewMountRef)
-	}
-	vm.viewMounts[namespace][parentSnapshotID] = placeholder
-	vm.viewLock.Unlock()
+		readyCh := make(chan struct{})
+		placeholder := &viewMountRef{
+			namespace:   namespace,
+			snapshotID:  parentSnapshotID,
+			snapshotKey: viewSnapshotKey,
+			mountPoint:  mountPoint,
+			refCount:    0,
+			ready:       readyCh,
+		}
+		if _, ok := vm.viewMounts[namespace]; !ok {
+			vm.viewMounts[namespace] = make(map[string]*viewMountRef)
+		}
+		vm.viewMounts[namespace][parentSnapshotID] = placeholder
+		vm.viewLock.Unlock()
 
-	mounts, err := snt.View(ctx, namespace, viewSnapshotKey, parentSnapshotID, opts...)
-	if err != nil {
-		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
-		return nil, false, err
-	}
-	if err = os.MkdirAll(mountPoint, common.DirMode); err != nil {
-		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
-		return nil, false, err
-	}
-	activationKey := mountActivationKey("view", namespace, viewSnapshotKey)
-	activatedKey, err := activateAndMount(ctx, mountMgr, namespace, activationKey, mounts, mountPoint)
-	if err != nil {
-		mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewSnapshotKey, err)
-		vm.removePlaceholder(namespace, parentSnapshotID, readyCh, mountErr)
-		return nil, false, mountErr
-	}
+		mounts, err := snt.View(ctx, namespace, viewSnapshotKey, parentSnapshotID, opts...)
+		if err != nil {
+			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
+			return nil, false, err
+		}
+		if err = os.MkdirAll(mountPoint, common.DirMode); err != nil {
+			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
+			return nil, false, err
+		}
+		activationKey := mountActivationKey("view", namespace, viewSnapshotKey)
+		activatedKey, err := activateAndMount(ctx, mountMgr, namespace, activationKey, mounts, mountPoint)
+		if err != nil {
+			mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewSnapshotKey, err)
+			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, mountErr)
+			return nil, false, mountErr
+		}
 
-	vm.viewLock.Lock()
-	placeholder.mounts = append([]mount.Mount(nil), mounts...)
-	placeholder.activationKey = activatedKey
-	placeholder.ready = nil
-	vm.viewLock.Unlock()
-	close(readyCh)
+		vm.viewLock.Lock()
+		placeholder.mounts = append([]mount.Mount(nil), mounts...)
+		placeholder.activationKey = activatedKey
+		placeholder.ready = nil
+		vm.viewLock.Unlock()
+		close(readyCh)
 
-	return placeholder, true, nil
+		return placeholder, true, nil
+	}
 }
 
 // removePlaceholder cleans up a failed placeholder ref and signals waiting goroutines.

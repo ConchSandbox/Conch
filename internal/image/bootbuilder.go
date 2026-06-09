@@ -26,58 +26,19 @@ type NativeLayer struct {
 }
 
 type BootIndexOptions struct {
-	RootfsArchivePath  string
-	SandboxArchivePath string
-	MemChainPaths      []string
-	SandboxChainPaths  []string
-	Tag                string
-	ArchivePath        string
-}
-
-func BuildKernelArchiveFromFiles(ctx context.Context, kernelPath, initrdPath, tag, archivePath string) (digest.Digest, error) {
-	tmpDir, err := os.MkdirTemp("", "conch-kernel-component-*")
-	if err != nil {
-		return "", fmt.Errorf("create kernel component temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	root := filepath.Join(tmpDir, "root")
-	if err := os.MkdirAll(filepath.Join(root, "boot"), 0o755); err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
-		return "", err
-	}
-	if err := copyFile(kernelPath, filepath.Join(root, "boot", "vmlinuz")); err != nil {
-		return "", err
-	}
-	if err := copyFile(initrdPath, filepath.Join(root, "data", "conch.initrd")); err != nil {
-		return "", err
-	}
-
-	layoutDir := filepath.Join(tmpDir, "layout")
-	desc, _, err := writeNativeComponent(ctx, layoutDir, []string{root}, KindSandbox, tag)
-	if err != nil {
-		return "", err
-	}
-	desc.Annotations = mergeAnnotations(desc.Annotations, map[string]string{
-		"io.conch.kind": KindSandbox,
-	})
-	if _, err := writeIndex(layoutDir, []ocispec.Descriptor{withRefName(desc, tag)}); err != nil {
-		return "", err
-	}
-	if err := util.TarDirectory(layoutDir, archivePath); err != nil {
-		return "", err
-	}
-	return desc.Digest, nil
+	RootfsArchivePath string
+	MemChainPaths     []string
+	SandboxChainPaths []string
+	Tag               string
+	ArchivePath       string
 }
 
 func BuildBootIndexArchive(ctx context.Context, opts BootIndexOptions) (digest.Digest, error) {
 	if opts.RootfsArchivePath == "" {
 		return "", fmt.Errorf("rootfs archive path is required")
 	}
-	if opts.SandboxArchivePath == "" && len(opts.SandboxChainPaths) == 0 {
-		return "", fmt.Errorf("sandbox component archive or snapshot chain is required")
+	if len(opts.SandboxChainPaths) == 0 {
+		return "", fmt.Errorf("sandbox snapshot chain is required")
 	}
 	if opts.Tag == "" {
 		return "", fmt.Errorf("boot index tag is required")
@@ -115,18 +76,9 @@ func BuildBootIndexArchive(ctx context.Context, opts BootIndexOptions) (digest.D
 		manifests = append(manifests, memDesc)
 	}
 
-	var sandboxDesc ocispec.Descriptor
-	if opts.SandboxArchivePath != "" {
-		sandboxDesc, err = importFirstManifestFromArchive(opts.SandboxArchivePath, layoutDir)
-		if err != nil {
-			return "", fmt.Errorf("import sandbox manifest: %w", err)
-		}
-	} else {
-		var err error
-		sandboxDesc, _, err = writeNativeComponent(ctx, layoutDir, opts.SandboxChainPaths, KindSandbox, opts.Tag+"-sandbox")
-		if err != nil {
-			return "", err
-		}
+	sandboxDesc, _, err := writeNativeComponent(ctx, layoutDir, opts.SandboxChainPaths, KindSandbox, opts.Tag+"-sandbox")
+	if err != nil {
+		return "", err
 	}
 	sandboxDesc.Annotations = mergeAnnotations(sandboxDesc.Annotations, map[string]string{
 		"io.conch.kind":                     KindSandbox,
@@ -429,13 +381,6 @@ func copyFile(srcPath, dstPath string) error {
 	}
 	cleanup = false
 	return nil
-}
-
-func withRefName(desc ocispec.Descriptor, tag string) ocispec.Descriptor {
-	desc.Annotations = mergeAnnotations(desc.Annotations, map[string]string{
-		"org.opencontainers.image.ref.name": tag,
-	})
-	return desc
 }
 
 func mergeAnnotations(base, extra map[string]string) map[string]string {

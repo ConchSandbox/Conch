@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type RehydrateResult struct {
@@ -45,11 +45,16 @@ func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 		}
 	}
 	aliasRefs := make(map[string]int, len(aliases))
+	aliasKinds := make(map[string]string, len(aliases))
 	for _, rec := range aliases {
 		if rec.Namespace == "" || rec.ParentSnapshotID == "" {
 			continue
 		}
-		aliasRefs[rec.Namespace+"/"+rec.ParentSnapshotID]++
+		key := rec.Namespace + "/" + rec.ParentSnapshotID
+		aliasRefs[key]++
+		if rec.MountKind != "" {
+			aliasKinds[key] = rec.MountKind
+		}
 	}
 	restoredViews := make(map[string]struct{}, len(views))
 	for _, rec := range views {
@@ -59,16 +64,30 @@ func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 		if rec.MountPoint == "" {
 			continue
 		}
-		if _, err := os.Stat(rec.MountPoint); err != nil {
-			errs = append(errs, fmt.Errorf("stat view mount %s/%s: %w", rec.Namespace, rec.MountPoint, err))
+		if !IsMountPoint(rec.MountPoint) {
+			errs = append(errs, fmt.Errorf("view mount %s/%s is not mounted", rec.Namespace, rec.MountPoint))
+			continue
+		}
+		key := rec.Namespace + "/" + rec.ParentSnapshotID
+		snt := s.snt
+		if aliasKinds[key] == common.SnapshotMountRootfs && s.rootfsSnt != nil {
+			snt = s.rootfsSnt
+		}
+		mounts, err := snt.Mounts(ctx, rec.Namespace, rec.ViewSnapshotKey)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve view mount %s/%s: %w", rec.Namespace, rec.ViewSnapshotKey, err))
+			continue
+		}
+		if len(mounts) == 0 {
+			errs = append(errs, fmt.Errorf("resolve view mount %s/%s: no mount info", rec.Namespace, rec.ViewSnapshotKey))
 			continue
 		}
 		refCount := rec.RefCount
-		if aliasCount := aliasRefs[rec.Namespace+"/"+rec.ParentSnapshotID]; aliasCount > refCount {
+		if aliasCount := aliasRefs[key]; aliasCount > refCount {
 			refCount = aliasCount
 		}
-		s.viewMgr.restoreViewMount(rec.Namespace, rec.ParentSnapshotID, rec.ViewSnapshotKey, rec.MountPoint, refCount)
-		restoredViews[rec.Namespace+"/"+rec.ParentSnapshotID] = struct{}{}
+		s.viewMgr.restoreViewMount(rec.Namespace, rec.ParentSnapshotID, rec.ViewSnapshotKey, rec.MountPoint, refCount, mounts, mountActivationKey("view", rec.Namespace, rec.ViewSnapshotKey))
+		restoredViews[key] = struct{}{}
 		result.ViewMounts++
 	}
 	for _, rec := range aliases {
