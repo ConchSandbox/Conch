@@ -40,7 +40,7 @@ const (
 
 // ResolveBaseURL returns conchd base URL: CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
 func ResolveBaseURL() string {
-	baseURL, _ := resolveClientTransport("", "")
+	baseURL, _ := resolveClientTransport("", "", 0)
 	return baseURL
 }
 
@@ -201,15 +201,28 @@ func NewClient(baseURL string) *Client {
 
 // NewClientWithConfig creates a Conch API client using configPath when baseURL is empty.
 func NewClientWithConfig(baseURL, configPath string) *Client {
-	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath)
+	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, 0)
 	return &Client{
 		baseURL:    resolvedURL,
 		httpClient: httpClient,
 	}
 }
 
-func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
-	timeout := resolveHTTPTimeout()
+// NewClientWithConfigAndTimeout creates a Conch API client with an optional
+// per-call HTTP timeout override.
+func NewClientWithConfigAndTimeout(baseURL, configPath string, timeoutOverride time.Duration) *Client {
+	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, timeoutOverride)
+	return &Client{
+		baseURL:    resolvedURL,
+		httpClient: httpClient,
+	}
+}
+
+func resolveClientTransport(baseURL, configPath string, timeoutOverride time.Duration) (string, *http.Client) {
+	timeout := timeoutOverride
+	if timeout <= 0 {
+		timeout = resolveHTTPTimeout()
+	}
 	if strings.TrimSpace(baseURL) != "" {
 		return baseURL, &http.Client{Timeout: timeout}
 	}
@@ -246,12 +259,13 @@ func resolveClientTransport(baseURL, configPath string) (string, *http.Client) {
 }
 
 type PushImageRequest struct {
-	LocalImage  string `json:"local_image"`
-	RemoteImage string `json:"remote_image"`
-	Namespace   string `json:"namespace,omitempty"`
-	PlainHTTP   bool   `json:"plain_http,omitempty"`
-	Username    string `json:"username,omitempty"`
-	Password    string `json:"password,omitempty"`
+	LocalImage      string `json:"local_image"`
+	RemoteImage     string `json:"remote_image"`
+	Namespace       string `json:"namespace,omitempty"`
+	PlainHTTP       bool   `json:"plain_http,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Password        string `json:"password,omitempty"`
+	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
 
 func resolveHTTPTimeout() time.Duration {
