@@ -375,21 +375,29 @@ func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent
 func (p *Process) waitForVmmSocket(ctx context.Context) error {
 	logger := ulog.GetLogger()
 
-	// Wait bounded only by the request context deadline (request_timeout, 60s),
-	// matching the old Conch behavior. Under high-concurrency snapshot starts on
-	// ARM, StratoVirt can take longer than a short fixed timeout to bind its QMP
-	// socket; a hardcoded cap here caused spurious "timeout waiting for vmm socket".
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
+	// Wait is bounded only by the request context deadline. Probe aggressively at
+	// first for the normal fast path, then back off to avoid hammering the fs when
+	// high-concurrency starts delay QMP socket creation.
+	delay := 2 * time.Millisecond
+	const maxDelay = 100 * time.Millisecond
 	for {
+		if _, err := os.Stat(p.VmmSocketPath); err == nil {
+			logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
+			return nil
+		}
+
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", p.VmmSocketPath, ctx.Err())
-		case <-ticker.C:
-			if _, err := os.Stat(p.VmmSocketPath); err == nil {
-				logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
-				return nil
+		case <-timer.C:
+		}
+
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
 			}
 		}
 	}
