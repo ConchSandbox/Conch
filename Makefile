@@ -1,4 +1,4 @@
-.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor install build-agent-initramfs
+.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor install build-agent-initramfs conch-committer-image
 
 # project name
 PROJECT_NAME := Conch
@@ -23,6 +23,12 @@ CLEANSCRIPT := ./scripts/cleancode.sh
 
 # get all cmd directory subdirectories as binary names
 CMDS := $(shell find cmd -mindepth 1 -maxdepth 1 -type d ! -name conch-unpack -exec basename {} \;)
+
+# conch-committer is a drop-in replacement for OpenSandbox's image-committer; its
+# binary is auto-discovered in CMDS (make build-conch-committer), and its
+# deployment artifact is a container image referenced by OpenSandbox's
+# SandboxSnapshotController via --image-committer-image.
+COMMITTER_IMAGE ?= conch-committer:latest
 
 export GO111MODULE=on
 
@@ -84,6 +90,12 @@ build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) $(GO_TAG_FLAGS) -o $(BIN_DIR)/$* ./cmd/$*
+
+conch-committer-image: ## Build the conch-committer container image (OpenSandbox image-committer drop-in)
+	@echo "building conch-committer image $(COMMITTER_IMAGE)..."
+	docker build -f cmd/conch-committer/Dockerfile -t $(COMMITTER_IMAGE) .
+	@echo "conch-committer image built: $(COMMITTER_IMAGE)"
+	@echo "deploy: set OpenSandbox controller --image-committer-image=$(COMMITTER_IMAGE)"
 
 build-agent-initramfs: gen-proto-go ## Build Alpine initramfs that runs conch-agent as PID 1
 	@echo "building static conch-agent for initramfs..."

@@ -249,6 +249,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
 	s.router.HandleFunc("/api/image/convert", s.handleConvertImage)
 	s.router.HandleFunc("/api/snapshot/export", s.handleSnapshotExport)
+	s.router.HandleFunc("/api/snapshot/checkpoint", s.handleSnapshotCheckpoint)
 	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
 	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
