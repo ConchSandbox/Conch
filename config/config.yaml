@@ -69,3 +69,6 @@ state:
 cri:
   enabled: false
   socket: /var/run/conchd/conch-cri.sock
+  snapshot:
+    # true: push the checkpoint image to a registry (cross-node); false: keep it local-only on this node.
+    push: false

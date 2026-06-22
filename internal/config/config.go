@@ -91,8 +91,22 @@ type StateConfig struct {
 }
 
 type CRIConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Socket  string `yaml:"socket"`
+	Enabled  bool              `yaml:"enabled"`
+	Socket   string            `yaml:"socket"`
+	Snapshot CRISnapshotConfig `yaml:"snapshot"`
+}
+
+// CRISnapshotConfig configures the CheckpointContainer push target and registry credentials.
+type CRISnapshotConfig struct {
+	// DefaultRepo is the fallback when a Pod sets no snapshot-image/snapshot-repo annotation.
+	DefaultRepo string `yaml:"default_repo"`
+	// Push controls whether the checkpoint image is pushed to a registry.
+	// Default false = local-only (commit to the node's content store, no push;
+	// restore is pinned to the same node). Set true for cross-node/durable snapshots.
+	Push      bool   `yaml:"push"`
+	PlainHTTP bool   `yaml:"plain_http"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
 }
 
 // DefaultConfig returns the default configuration

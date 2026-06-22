@@ -287,7 +287,7 @@ func TestImageServiceGRPCListStatusAndRemove(t *testing.T) {
 		},
 	}
 	socketPath := filepath.Join(t.TempDir(), "conch-cri.sock")
-	server := New(Config{Socket: socketPath}, runtime, nil)
+	server := New(Config{Socket: socketPath}, runtime, nil, nil)
 	if err := server.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
