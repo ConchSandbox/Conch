@@ -7,7 +7,6 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
@@ -51,7 +50,7 @@ func (sc *snapshotCleaner) Cleanup() {
 	if sc.activationKey != "" && sc.mountMgr != nil {
 		ctx := namespaces.WithNamespace(sc.ctx, sc.namespace)
 		if deactivateErr := sc.mountMgr.Deactivate(ctx, sc.activationKey); deactivateErr != nil {
-			if !errdefs.IsNotFound(deactivateErr) {
+			if !isMountCleanupNotFound(deactivateErr) {
 				slog.Warn("failed to deactivate mount", "key", sc.activationKey, "err", deactivateErr)
 			}
 		}

@@ -38,6 +38,10 @@ type viewManager struct {
 	viewLock    sync.Mutex
 }
 
+func isMountCleanupNotFound(err error) bool {
+	return errdefs.IsNotFound(err) || os.IsNotExist(err) || errors.Is(err, unix.ENOENT)
+}
+
 // addViewAliasWithoutLock adds a view alias (must be called with viewLock held).
 func (vm *viewManager) addViewAliasWithoutLock(namespace, key, parentSnapshotID string) {
 	if _, ok := vm.viewAliases[namespace]; !ok {
@@ -215,7 +219,7 @@ func (vm *viewManager) getOrCreateViewMount(
 					vm.viewLock.Unlock()
 					if ref.activationKey != "" && mountMgr != nil {
 						deactivateCtx := namespaces.WithNamespace(context.Background(), namespace)
-						if err := mountMgr.Deactivate(deactivateCtx, ref.activationKey); err != nil && !errdefs.IsNotFound(err) {
+						if err := mountMgr.Deactivate(deactivateCtx, ref.activationKey); err != nil && !isMountCleanupNotFound(err) {
 							slog.Warn("stale view mount deactivate failed", "activationKey", ref.activationKey, "err", err)
 						}
 					}
@@ -325,7 +329,7 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, mountMgr mo
 	if activationKey != "" && mountMgr != nil {
 		ctx := namespaces.WithNamespace(context.Background(), namespace)
 		if deactivateErr := mountMgr.Deactivate(ctx, activationKey); deactivateErr != nil {
-			if !errdefs.IsNotFound(deactivateErr) {
+			if !isMountCleanupNotFound(deactivateErr) {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("deactivate mount %s: %w", activationKey, deactivateErr))
 			}
 		}
@@ -383,7 +387,7 @@ func (vm *viewManager) CleanupAllViews(snt snapshotter.Snapshotter, mountMgr mou
 		if item.activationKey != "" && mountMgr != nil {
 			ctx := namespaces.WithNamespace(context.Background(), item.namespace)
 			if err := mountMgr.Deactivate(ctx, item.activationKey); err != nil {
-				if !errdefs.IsNotFound(err) {
+				if !isMountCleanupNotFound(err) {
 					slog.Warn("cleanup: failed to deactivate mount", "activationKey", item.activationKey, "err", err)
 				}
 			}

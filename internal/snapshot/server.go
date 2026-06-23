@@ -11,7 +11,6 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -562,7 +561,7 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 		}
 		if s.mountMgr != nil {
 			activationKey := mountActivationKey("active", namespace, item.key)
-			if err := s.mountMgr.Deactivate(namespaces.WithNamespace(ctx, namespace), activationKey); err != nil && !errdefs.IsNotFound(err) {
+			if err := s.mountMgr.Deactivate(namespaces.WithNamespace(ctx, namespace), activationKey); err != nil && !isMountCleanupNotFound(err) {
 				unmountErrs = append(unmountErrs, fmt.Errorf("deactivate mount %s: %w", activationKey, err))
 			}
 		}

@@ -3,11 +3,13 @@ package snapshot
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
 )
@@ -162,6 +164,25 @@ func TestGetOrCreateViewMountRechecksAfterStaleDeactivate(t *testing.T) {
 	}
 }
 
+func TestReleaseViewMountIgnoresBareNotExistDeactivate(t *testing.T) {
+	mountPoint := filepath.Join(t.TempDir(), "snapshot", "default", "missing-view")
+	vm := &viewManager{
+		viewMounts:  make(map[string]map[string]*viewMountRef),
+		viewAliases: make(map[string]map[string]string),
+	}
+	vm.restoreViewMount("default", "parent", "view-parent", mountPoint, 1, nil, "view-parent")
+
+	err := vm.releaseViewMount(fakeSnapshotter{}, errorMountManager{deactivateErr: unix.ENOENT}, "default", "parent")
+	if err != nil {
+		t.Fatalf("releaseViewMount() error = %v, want nil for idempotent missing mount cleanup", err)
+	}
+	if nsMap := vm.viewMounts["default"]; nsMap != nil {
+		if _, ok := nsMap["parent"]; ok {
+			t.Fatalf("view mount ref was not released")
+		}
+	}
+}
+
 type fakeSnapshotter struct {
 	viewErr     error
 	mounts      []mount.Mount
@@ -248,5 +269,29 @@ func (m *blockingMountManager) Update(context.Context, mount.ActivationInfo, ...
 }
 
 func (m *blockingMountManager) List(context.Context, ...string) ([]mount.ActivationInfo, error) {
+	return nil, nil
+}
+
+type errorMountManager struct {
+	deactivateErr error
+}
+
+func (m errorMountManager) Activate(context.Context, string, []mount.Mount, ...mount.ActivateOpt) (mount.ActivationInfo, error) {
+	return mount.ActivationInfo{}, nil
+}
+
+func (m errorMountManager) Deactivate(context.Context, string) error {
+	return m.deactivateErr
+}
+
+func (m errorMountManager) Info(context.Context, string) (mount.ActivationInfo, error) {
+	return mount.ActivationInfo{}, nil
+}
+
+func (m errorMountManager) Update(context.Context, mount.ActivationInfo, ...string) (mount.ActivationInfo, error) {
+	return mount.ActivationInfo{}, nil
+}
+
+func (m errorMountManager) List(context.Context, ...string) ([]mount.ActivationInfo, error) {
 	return nil, nil
 }
