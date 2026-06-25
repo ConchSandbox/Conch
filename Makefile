@@ -1,4 +1,4 @@
-.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor install build-agent-initramfs
+.PHONY: build clean test fmt vet lint help gen-proto gen-proto-py mod-tidy mod-vendor install build-conch-init-initramfs build-conch-init
 
 # project name
 PROJECT_NAME := Conch
@@ -12,12 +12,19 @@ GOGET := $(GOCMD) get
 GOMOD := $(GOCMD) mod
 GO_TAGS ?= exclude_graphdriver_btrfs
 GO_TAG_FLAGS := $(if $(strip $(GO_TAGS)),-tags $(GO_TAGS),)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+RUST_INIT_TARGET := x86_64-unknown-linux-musl
+else ifeq ($(UNAME_M),aarch64)
+RUST_INIT_TARGET := aarch64-unknown-linux-musl
+else
+$(error unsupported architecture: $(UNAME_M))
+endif
 
 # binary output directory
 BIN_DIR := bin
 
 CONCH_AGENT_PROTO_DIR := ./api
-CONCH_AGENT_GEN_DIR := ./api/go_proto
 CONCH_PY_PROTO_DIR := ./api/py_proto
 CLEANSCRIPT := ./scripts/cleancode.sh
 
@@ -32,23 +39,7 @@ help: ## Show this help message
 	@echo "available commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-gen-proto: gen-proto-go gen-proto-py ## Generate Go and Python protobuf code
-
-gen-proto-go: ## Generate Go protobuf code
-	@echo "installing proto tools (if not exist)..."
-	@which protoc-gen-go >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-	@which protoc-gen-go-grpc >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-
-	@echo "generating Go proto code..."
-	@mkdir -p $(CONCH_AGENT_GEN_DIR)
-	@protoc \
-		--proto_path=$(CONCH_AGENT_PROTO_DIR) \
-		--go_out=$(CONCH_AGENT_GEN_DIR) \
-		--go_opt=paths=source_relative \
-		--go-grpc_out=$(CONCH_AGENT_GEN_DIR) \
-		--go-grpc_opt=paths=source_relative,require_unimplemented_servers=false \
-		$(CONCH_AGENT_PROTO_DIR)/*.proto;
-	@echo "Go proto code generated to $(CONCH_AGENT_GEN_DIR)"
+gen-proto: gen-proto-py ## Generate Python protobuf code
 
 gen-proto-py: ## Generate Python protobuf code (auto-installs grpcio-tools if missing)
 	@echo "ensuring grpcio-tools (for Python proto)..."
@@ -85,24 +76,23 @@ build-%: ## Build specific binary (e.g., make build-conchd)
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) $(GO_TAG_FLAGS) -o $(BIN_DIR)/$* ./cmd/$*
 
-build-agent-initramfs: gen-proto-go ## Build Alpine initramfs that runs conch-agent as PID 1
-	@echo "building static conch-agent for initramfs..."
+build-conch-init-initramfs: build-conch-init ## Build Alpine initramfs that runs Rust conch-init as PID 1
+	./scripts/build-conch-init-initramfs.sh --init-bin "$(BIN_DIR)/conch-init"
+
+build-conch-init: ## Build Rust conch-init binary
+	@echo "building Rust conch-init..."
+	$(MAKE) -C conch-init build RUST_INIT_TARGET=$(RUST_INIT_TARGET)
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) \
-		$(GOBUILD) -tags "netgo,osusergo" \
-		-ldflags '-s -w -extldflags "-static"' \
-		-o $(BIN_DIR)/conch-agent ./cmd/conch-agent
-	./scripts/build-agent-initramfs.sh --agent-bin "$(BIN_DIR)/conch-agent"
+	cp conch-init/target/$(RUST_INIT_TARGET)/release/conch-init $(BIN_DIR)/conch-init
 
 clean: ## Clean build artifacts
 	@echo "cleaning build artifacts..."
 	$(GOCLEAN)
 	rm -rf $(BIN_DIR)
-	rm -rf $(CONCH_AGENT_GEN_DIR)
 	rm -rf $(CONCH_PY_PROTO_DIR)
 	@echo "cleaning completed"
 
-test: gen-proto-go ## Run all tests
+test: ## Run all tests
 	@echo "running tests..."
 	$(GOTEST) $(GO_TAG_FLAGS) -v ./...
 

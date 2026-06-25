@@ -124,7 +124,7 @@ COPY --from=code-interpreter-source /out/ipython/ /root/.ipython/
 COPY --chmod=0755 conch-entrypoint.sh /etc/conch/entrypoint
 
 RUN chmod +x /root/.jupyter/jupyter-healthcheck.sh \
-    && mkdir -p /etc/conch/features /var/log/conch-agent /run/conch /home/user \
+    && mkdir -p /etc/conch/features /var/log/conch-init /run/conch /home/user \
     && touch /etc/conch/features/envd /etc/conch/features/code-interpreter \
     && python3 -m venv /root/.server/.venv \
     && /root/.server/.venv/bin/python -m pip install --upgrade pip \

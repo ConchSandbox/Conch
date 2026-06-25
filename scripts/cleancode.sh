@@ -12,7 +12,6 @@ declare -a EXCLUDE_DIRS=(
   ".pytest_cache"
   "node_modules"
   "bin"
-  "api/go_proto"
   "api/py_proto"
 )
 

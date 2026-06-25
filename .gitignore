@@ -33,6 +33,7 @@ Thumbs.db
 bin/
 dist/
 build/
+target/
 
 # Logs
 *.log

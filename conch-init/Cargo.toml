@@ -1,0 +1,22 @@
+[package]
+name = "conch-init"
+version = "0.0.4"
+edition = "2024"
+
+[dependencies]
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+constant_time_eq = "0.3"
+futures-core = "0.3"
+http = "1"
+libc = "0.2"
+prost = "0.13"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+tonic-reflection = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[build-dependencies]
+tonic-build = "0.12"
