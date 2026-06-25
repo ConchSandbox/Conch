@@ -69,6 +69,8 @@ type SandboxPauseRequest struct {
 const (
 	vsockReadyPort       = 4065
 	expectedAgentVersion = "0.0.2"
+	// vsockReadTimeout bounds a single READY read so a silent agent can't block forever.
+	vsockReadTimeout = 2 * time.Second
 )
 
 func sandboxMapKey(namespace, sandboxID string) string {
@@ -240,8 +242,8 @@ func (w *unixProxyVsockWaiter) waitForAgentReady(ctx context.Context, sbx *Sandb
 }
 
 // vhostVsockWaiter waits for the agent over a real AF_VSOCK connection (StratoVirt
-// uses vhost-vsock-pci, talking to (CID, port) directly). If AF_VSOCK is unavailable it
-// falls back to the QMP startup check.
+// uses vhost-vsock-pci, talking to (CID, port) directly). VM/QMP readiness is not
+// sufficient: sandbox startup completes only after the agent returns a valid READY.
 type vhostVsockWaiter struct {
 	vsockCID uint32
 }
@@ -255,41 +257,55 @@ func (w *vhostVsockWaiter) waitForAgentReady(ctx context.Context, sbx *Sandbox, 
 	timer := time.NewTimer(vsockSignalTimeout)
 	defer timer.Stop()
 
+	var lastErr error
 	for {
 		select {
 		case <-timer.C:
-			logger.Error("vsock signal attempts timed out for Stratovirt", ulog.F("sandboxId", sandboxId), ulog.F("timeout", vsockSignalTimeout))
-			errCh <- fmt.Errorf("vsock signal timeout after %v", vsockSignalTimeout)
+			logger.Error("vsock signal attempts timed out for Stratovirt",
+				ulog.F("sandboxId", sandboxId),
+				ulog.F("timeout", vsockSignalTimeout),
+				ulog.F("last_error", lastErr))
+			errCh <- fmt.Errorf("vsock signal timeout after %v (last error: %v)", vsockSignalTimeout, lastErr)
 			return
 		case <-ctx.Done():
 			errCh <- ctx.Err()
 			return
 		default:
-			if w.trySignalAgent(sbx, sandboxId, payload, logger) {
+			done, err := w.trySignalAgent(sbx, sandboxId, payload, logger)
+			if done {
 				errCh <- nil
 				return
+			}
+			if err != nil {
+				if errors.Is(err, errVsockUnsupported) {
+					logger.Error("AF_VSOCK is unsupported or not permitted on this host; aborting sandbox startup",
+						ulog.F("sandboxId", sandboxId),
+						ulog.F("error", err))
+					errCh <- err
+					return
+				}
+				lastErr = err
 			}
 			time.Sleep(vsockSignalRetry)
 		}
 	}
 }
 
-// trySignalAgent runs one connect -> send-payload -> await-READY cycle. It returns true when
-// the wait is done (agent READY, or AF_VSOCK unavailable so we defer to QMP) and false to
-// retry. It owns the socket fd, closing it on every path except the one handed to sbx.
-func (w *vhostVsockWaiter) trySignalAgent(sbx *Sandbox, sandboxId, payload string, logger ulog.Logger) bool {
-	fd, unsupported, err := w.dialVsock(sandboxId, logger)
-	if unsupported {
-		return true
-	}
+// trySignalAgent runs one connect -> send-payload -> await-READY cycle. It returns (true, nil)
+// once the agent reply contains a READY: marker, using the same loose substring matching as the
+// cloud-hypervisor path; version mismatches are warnings. On a failed attempt it returns
+// (false, err) so the caller can surface the last error if the wait times out. It owns the
+// socket fd, closing it on every path except the one handed to sbx.
+func (w *vhostVsockWaiter) trySignalAgent(sbx *Sandbox, sandboxId, payload string, logger ulog.Logger) (bool, error) {
+	fd, err := w.dialVsock(sandboxId, logger)
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	if _, err := unix.Write(fd, []byte(payload)); err != nil {
 		logger.Warn("failed to send payload to Stratovirt VM, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
 		unix.Close(fd)
-		return false
+		return false, err
 	}
 	logger.Debug("payload sent to Stratovirt VM, waiting for READY signal", ulog.F("sandboxId", sandboxId))
 
@@ -298,103 +314,111 @@ func (w *vhostVsockWaiter) trySignalAgent(sbx *Sandbox, sandboxId, payload strin
 	if err != nil {
 		logger.Debug("failed to read from Stratovirt vsock, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
 		unix.Close(fd)
-		return false
+		return false, err
 	}
 
 	agentMsg := string(buf[:n])
-	switch {
-	case strings.Contains(agentMsg, "NOT_READY"):
+	if strings.Contains(agentMsg, "NOT_READY") {
 		logger.Error("Agent gRPC service not started in Stratovirt VM", ulog.F("sandboxId", sandboxId))
 		unix.Close(fd)
-		return false
-	case strings.Contains(agentMsg, "READY:"):
-		w.adoptReadyConn(sbx, sandboxId, fd, agentMsg, logger)
-		return true
-	default:
-		logger.Warn("Received unknown message from Stratovirt Agent", ulog.F("msg", agentMsg))
-		unix.Close(fd)
-		return false
+		return false, fmt.Errorf("agent reported NOT_READY")
 	}
+
+	if strings.Contains(agentMsg, "READY:") {
+		parts := strings.SplitN(agentMsg, "READY:", 2)
+		agentVersion := ""
+		if len(parts) > 1 {
+			agentVersion = strings.TrimSpace(parts[1])
+		}
+
+		if agentVersion != expectedAgentVersion {
+			logger.Warn("Received Stratovirt agent signal but version mismatch",
+				ulog.F("sandboxId", sandboxId),
+				ulog.F("agent_version", agentVersion),
+				ulog.F("expected_version", expectedAgentVersion))
+		} else {
+			logger.Info("Stratovirt Sandbox Agent is officially READY!",
+				ulog.F("sandboxId", sandboxId),
+				ulog.F("agent_version", agentVersion))
+		}
+
+		w.adoptReadyConn(sbx, sandboxId, fd, logger)
+		return true, nil
+	}
+
+	logger.Warn("Received unknown message from Stratovirt Agent", ulog.F("msg", agentMsg))
+	unix.Close(fd)
+	return false, fmt.Errorf("unknown agent message: %q", agentMsg)
 }
 
-// dialVsock opens an AF_VSOCK socket and connects it to the agent's ready port. unsupported
-// is true when AF_VSOCK is unavailable (stop retrying); the fd is closed on every non-success path.
-func (w *vhostVsockWaiter) dialVsock(sandboxId string, logger ulog.Logger) (fd int, unsupported bool, err error) {
+// dialVsock opens an AF_VSOCK socket and connects it to the agent's ready port. Every
+// failure is retryable by the caller until the configured vsock timeout expires. In
+// particular, ENODEV can occur while StratoVirt's vhost-vsock device is still initializing.
+func (w *vhostVsockWaiter) dialVsock(sandboxId string, logger ulog.Logger) (fd int, err error) {
 	fd, err = unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
-		if isVsockUnavailable(err) {
-			logger.Warn("AF_VSOCK not supported on this system, skipping vsock detection for Stratovirt", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
-			return -1, true, err
+		if isVsockUnsupported(err) {
+			// Permanent host-level failure (no kernel support or no permission): wrap it as
+			// non-retryable so waitForAgentReady aborts instead of waiting out the timeout.
+			return -1, fmt.Errorf("%w: %w", errVsockUnsupported, err)
 		}
 		logger.Debug("failed to create AF_VSOCK socket for Stratovirt, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
-		return -1, false, err
+		return -1, err
 	}
 
 	sa := &unix.SockaddrVM{CID: w.vsockCID, Port: vsockReadyPort}
 	if err = unix.Connect(fd, sa); err != nil {
 		unix.Close(fd)
-		if isVsockUnavailable(err) {
-			// Host has AF_VSOCK but the agent's endpoint isn't connectable yet (e.g. ENODEV);
-			// benign, so defer readiness to the QMP startup check.
-			logger.Info("Agent vsock endpoint not reachable over AF_VSOCK; relying on the QMP VM startup check for readiness",
+		if !errors.Is(err, unix.ECONNRESET) && !errors.Is(err, unix.ENODEV) {
+			logger.Debug("failed to connect to VM vsock for Stratovirt, retrying...",
 				ulog.F("sandboxId", sandboxId),
 				ulog.F("cid", w.vsockCID),
 				ulog.F("port", vsockReadyPort),
 				ulog.F("error", err))
-			return -1, true, err
 		}
-		logger.Debug("failed to connect to VM vsock for Stratovirt, retrying...",
-			ulog.F("sandboxId", sandboxId),
-			ulog.F("cid", w.vsockCID),
-			ulog.F("port", vsockReadyPort),
-			ulog.F("error", err))
-		return -1, false, err
+		return -1, err
+	}
+
+	// SO_RCVTIMEO bounds the READY read so a silent agent can't block unix.Read forever.
+	tv := unix.NsecToTimeval(int64(vsockReadTimeout))
+	if err = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		unix.Close(fd)
+		logger.Debug("failed to set AF_VSOCK read timeout for Stratovirt, retrying...", ulog.F("sandboxId", sandboxId), ulog.F("error", err))
+		return -1, err
 	}
 
 	logger.Debug("Connected to Stratovirt VM via AF_VSOCK",
 		ulog.F("sandboxId", sandboxId),
 		ulog.F("cid", w.vsockCID),
 		ulog.F("port", vsockReadyPort))
-	return fd, false, nil
+	return fd, nil
 }
 
-// adoptReadyConn logs the agent version from a READY message and stores a net.Conn wrapping
-// the vsock fd on sbx. If the fd can't be wrapped (Go's net lacks AF_VSOCK support) it's
-// dropped, but the VM is still ready since the agent already signalled READY.
-func (w *vhostVsockWaiter) adoptReadyConn(sbx *Sandbox, sandboxId string, fd int, agentMsg string, logger ulog.Logger) {
-	agentVersion := ""
-	if parts := strings.SplitN(agentMsg, "READY:", 2); len(parts) > 1 {
-		agentVersion = strings.TrimSpace(parts[1])
-	}
-	if agentVersion != expectedAgentVersion {
-		logger.Warn("Received Stratovirt agent signal but version mismatch",
-			ulog.F("sandboxId", sandboxId),
-			ulog.F("agent_version", agentVersion),
-			ulog.F("expected_version", expectedAgentVersion))
-	} else {
-		logger.Info("Stratovirt Sandbox Agent is officially READY!",
-			ulog.F("sandboxId", sandboxId),
-			ulog.F("agent_version", agentVersion))
-	}
-
+// adoptReadyConn stores the connection after the caller has validated the READY message.
+func (w *vhostVsockWaiter) adoptReadyConn(sbx *Sandbox, sandboxId string, fd int, logger ulog.Logger) {
 	file := os.NewFile(uintptr(fd), "vsock")
+	defer file.Close()
+
 	vsockConn, err := net.FileConn(file)
 	if err != nil {
 		logger.Info("vsock fd not convertible to net.Conn (vsock protocol not supported by Go net package), but Agent is READY - connection established via raw fd",
 			ulog.F("sandboxId", sandboxId),
 			ulog.F("error", err))
-		file.Close()
 		return
 	}
 	sbx.vsockConn = vsockConn
 }
 
-// isVsockUnavailable reports whether err means AF_VSOCK is unusable (stop retrying), as opposed
-// to a transient failure like ECONNREFUSED. Matches the errno, not the locale-dependent text.
-func isVsockUnavailable(err error) bool {
+// errVsockUnsupported marks a permanent host-level AF_VSOCK failure (no kernel support or no
+// permission) so the readiness loop fails fast instead of waiting out vsockSignalTimeout.
+var errVsockUnsupported = errors.New("AF_VSOCK unsupported on host")
+
+// isVsockUnsupported identifies permanent host-level AF_VSOCK support or permission failures.
+// It deliberately excludes ENODEV, which is transient during device initialization and must
+// stay retryable. A match makes dialVsock return a non-retryable errVsockUnsupported.
+func isVsockUnsupported(err error) bool {
 	return errors.Is(err, unix.EAFNOSUPPORT) ||
 		errors.Is(err, unix.EPROTONOSUPPORT) ||
-		errors.Is(err, unix.ENODEV) ||
 		errors.Is(err, unix.EPERM) ||
 		errors.Is(err, unix.EACCES)
 }
