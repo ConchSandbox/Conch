@@ -399,7 +399,6 @@ func TestPullImageResolvesToIndexedImageID(t *testing.T) {
 		}},
 	}
 	svc := &service{
-		cfg:     Config{DefaultKernelImage: "default-kernel"},
 		runtime: runtime,
 	}
 
@@ -419,8 +418,7 @@ func TestPullImageResolvesToIndexedImageID(t *testing.T) {
 	if runtime.pullImageReq.ImageName != "registry.example.invalid/conch/pull-demo:latest" ||
 		runtime.pullImageReq.Namespace != "" ||
 		runtime.pullImageReq.Username != "user" ||
-		runtime.pullImageReq.Password != "pass" ||
-		runtime.pullImageReq.DefaultKernelImage != "default-kernel" {
+		runtime.pullImageReq.Password != "pass" {
 		t.Fatalf("PullImage request = %#v", runtime.pullImageReq)
 	}
 	if runtime.listImagesReq.Namespace != "" {

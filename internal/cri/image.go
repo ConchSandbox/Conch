@@ -14,10 +14,9 @@ func (s *service) PullImage(ctx context.Context, req *runtimev1.PullImageRequest
 	imageName := req.GetImage().GetImage()
 	auth := req.GetAuth()
 	result, err := s.runtime.PullImage(ctx, runtimeapi.PullImageOptions{
-		ImageName:          imageName,
-		Username:           auth.GetUsername(),
-		Password:           auth.GetPassword(),
-		DefaultKernelImage: s.cfg.DefaultKernelImage,
+		ImageName: imageName,
+		Username:  auth.GetUsername(),
+		Password:  auth.GetPassword(),
 	})
 	if err != nil {
 		return nil, err

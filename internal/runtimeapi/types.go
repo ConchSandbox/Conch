@@ -57,15 +57,11 @@ type ContainerCreateResult struct {
 }
 
 type PullImageOptions struct {
-	ImageName              string
-	Namespace              string
-	PlainHTTP              bool
-	Username               string
-	Password               string
-	DefaultKernelImage     string
-	KernelPlainHTTP        bool
-	KernelRegistryUsername string
-	KernelRegistryPassword string
+	ImageName string
+	Namespace string
+	PlainHTTP bool
+	Username  string
+	Password  string
 }
 
 type PullImageResult struct {

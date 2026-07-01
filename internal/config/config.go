@@ -70,7 +70,10 @@ type ContainerdConfig struct {
 
 // ImageConfig holds image workflow defaults.
 type ImageConfig struct {
-	DefaultKernelImage string `yaml:"default_kernel_image"`
+	DefaultKernelImage            string `yaml:"default_kernel_image"`
+	DefaultKernelPlainHTTP        bool   `yaml:"default_kernel_plain_http"`
+	DefaultKernelRegistryUsername string `yaml:"default_kernel_registry_username"`
+	DefaultKernelRegistryPassword string `yaml:"default_kernel_registry_password"`
 }
 
 const DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
@@ -134,7 +137,10 @@ func DefaultConfig() *Config {
 			DefaultNamespace: "default",
 		},
 		Image: ImageConfig{
-			DefaultKernelImage: DefaultKernelImage,
+			DefaultKernelImage:            DefaultKernelImage,
+			DefaultKernelPlainHTTP:        false,
+			DefaultKernelRegistryUsername: "",
+			DefaultKernelRegistryPassword: "",
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,

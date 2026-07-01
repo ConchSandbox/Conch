@@ -125,7 +125,7 @@ func TestLoadConfig(t *testing.T) {
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
-			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n" +
+			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n  default_kernel_plain_http: true\n  default_kernel_registry_username: kernel-user\n  default_kernel_registry_password: kernel-pass\n" +
 			"sandbox:\n  default_image: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
@@ -205,6 +205,15 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Image.DefaultKernelImage != "registry.example.invalid/conch/kernel:6.6.0" {
 		t.Errorf("LoadConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, "registry.example.invalid/conch/kernel:6.6.0")
+	}
+	if !cfg.Image.DefaultKernelPlainHTTP {
+		t.Errorf("LoadConfig().Image.DefaultKernelPlainHTTP = false, want true")
+	}
+	if cfg.Image.DefaultKernelRegistryUsername != "kernel-user" {
+		t.Errorf("LoadConfig().Image.DefaultKernelRegistryUsername = %q, want %q", cfg.Image.DefaultKernelRegistryUsername, "kernel-user")
+	}
+	if cfg.Image.DefaultKernelRegistryPassword != "kernel-pass" {
+		t.Errorf("LoadConfig().Image.DefaultKernelRegistryPassword = %q, want %q", cfg.Image.DefaultKernelRegistryPassword, "kernel-pass")
 	}
 	if cfg.Sandbox.DefaultImage != "registry.example.invalid/conch/sandbox:latest" {
 		t.Errorf("LoadConfig().Sandbox.DefaultImage = %q, want %q", cfg.Sandbox.DefaultImage, "registry.example.invalid/conch/sandbox:latest")
@@ -293,6 +302,15 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	}
 	if cfg.Image.DefaultKernelImage != DefaultKernelImage {
 		t.Errorf("DefaultConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, DefaultKernelImage)
+	}
+	if cfg.Image.DefaultKernelPlainHTTP {
+		t.Errorf("DefaultConfig().Image.DefaultKernelPlainHTTP = true, want false")
+	}
+	if cfg.Image.DefaultKernelRegistryUsername != "" {
+		t.Errorf("DefaultConfig().Image.DefaultKernelRegistryUsername = %q, want empty", cfg.Image.DefaultKernelRegistryUsername)
+	}
+	if cfg.Image.DefaultKernelRegistryPassword != "" {
+		t.Errorf("DefaultConfig().Image.DefaultKernelRegistryPassword = %q, want empty", cfg.Image.DefaultKernelRegistryPassword)
 	}
 	if cfg.State.Path != "/var/lib/conch/state.db" {
 		t.Errorf("DefaultConfig().State.Path = %q, want %q", cfg.State.Path, "/var/lib/conch/state.db")

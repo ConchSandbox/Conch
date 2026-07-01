@@ -7,15 +7,11 @@ import (
 )
 
 type pullImageRequest struct {
-	ImageName              string `json:"image_name"`
-	Namespace              string `json:"namespace,omitempty"`
-	PlainHTTP              bool   `json:"plain_http,omitempty"`
-	Username               string `json:"username,omitempty"`
-	Password               string `json:"password,omitempty"`
-	DefaultKernelImage     string `json:"default_kernel_image,omitempty"`
-	KernelPlainHTTP        bool   `json:"kernel_plain_http,omitempty"`
-	KernelRegistryUsername string `json:"kernel_username,omitempty"`
-	KernelRegistryPassword string `json:"kernel_password,omitempty"`
+	ImageName string `json:"image_name"`
+	Namespace string `json:"namespace,omitempty"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+	Username  string `json:"username,omitempty"`
+	Password  string `json:"password,omitempty"`
 }
 
 type pushImageRequest struct {

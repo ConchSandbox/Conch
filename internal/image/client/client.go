@@ -75,15 +75,11 @@ type PauseResponse struct {
 
 // PullImageRequest matches POST /api/image/pull.
 type PullImageRequest struct {
-	ImageName          string `json:"image_name"`
-	Namespace          string `json:"namespace,omitempty"`
-	PlainHTTP          bool   `json:"plain_http,omitempty"`
-	Username           string `json:"username,omitempty"`
-	Password           string `json:"password,omitempty"`
-	DefaultKernelImage string `json:"default_kernel_image,omitempty"`
-	KernelPlainHTTP    bool   `json:"kernel_plain_http,omitempty"`
-	KernelUsername     string `json:"kernel_username,omitempty"`
-	KernelPassword     string `json:"kernel_password,omitempty"`
+	ImageName string `json:"image_name"`
+	Namespace string `json:"namespace,omitempty"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+	Username  string `json:"username,omitempty"`
+	Password  string `json:"password,omitempty"`
 }
 
 // UnpackImageRequest matches POST /api/image/unpack.

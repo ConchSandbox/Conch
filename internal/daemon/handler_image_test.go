@@ -14,11 +14,11 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
-func TestHandlePullImageUsesDefaultKernel(t *testing.T) {
+func TestHandlePullImageForwardsTargetImageOptions(t *testing.T) {
 	svc := &fakeImageService{results: map[string]string{"rootfs": "rootfs-id"}}
 	server := newImageHandlerServer(svc)
 
-	body := bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest","namespace":"team-a"}`)
+	body := bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest","namespace":"team-a","plain_http":true,"username":"user","password":"pass"}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", body)
 	server.router.ServeHTTP(rec, req)
@@ -26,8 +26,12 @@ func TestHandlePullImageUsesDefaultKernel(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.pullReq.DefaultKernelImage != "hub.oepkgs.net/conch/kernel:6.6.0" {
-		t.Fatalf("default kernel = %q", svc.pullReq.DefaultKernelImage)
+	if svc.pullReq.ImageName != "docker.io/library/nginx:latest" ||
+		svc.pullReq.Namespace != "team-a" ||
+		!svc.pullReq.PlainHTTP ||
+		svc.pullReq.Username != "user" ||
+		svc.pullReq.Password != "pass" {
+		t.Fatalf("pull request = %#v", svc.pullReq)
 	}
 	var got struct {
 		Results map[string]string `json:"results"`

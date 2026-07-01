@@ -21,8 +21,7 @@ const (
 )
 
 type Config struct {
-	Socket             string
-	DefaultKernelImage string
+	Socket string
 }
 
 type Runtime interface {

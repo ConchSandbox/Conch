@@ -172,7 +172,6 @@ func newImageHandlerServer(svc conchruntime.ImageOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
 		runtimeService: newRuntimeForTest(svc, nil, nil),
-		defaultKernel:  "hub.oepkgs.net/conch/kernel:6.6.0",
 	}
 	s.routes()
 	return s

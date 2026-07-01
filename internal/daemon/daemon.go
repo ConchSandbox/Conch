@@ -50,7 +50,6 @@ type Daemon struct {
 	listener       net.Listener
 	unixSocketPath string
 	cleanupOnce    sync.Once
-	defaultKernel  string
 
 	// TODO: need ListCachedBuilds()
 }
@@ -116,6 +115,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 		RootDir:          cfg.Containerd.RootDir,
 		StateDir:         cfg.Containerd.StateDir,
 		DefaultNamespace: cfg.Containerd.DefaultNamespace,
+		Image: containerdhost.ImageConfig{
+			DefaultKernelImage:            cfg.Image.DefaultKernelImage,
+			DefaultKernelPlainHTTP:        cfg.Image.DefaultKernelPlainHTTP,
+			DefaultKernelRegistryUsername: cfg.Image.DefaultKernelRegistryUsername,
+			DefaultKernelRegistryPassword: cfg.Image.DefaultKernelRegistryPassword,
+		},
 		Snapshot: containerdhost.SnapshotConfig{
 			Enabled: true,
 			WorkDir: cfg.Server.WorkDir,
@@ -142,7 +147,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.containerdHost = host
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
-	s.defaultKernel = cfg.Image.DefaultKernelImage
 
 	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
 	s.runtimeService.Snapshot = host.SnapshotService()
@@ -186,8 +190,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	if cfg.CRI.Enabled {
 		s.criServer = cri.New(cri.Config{
-			Socket:             cfg.CRI.Socket,
-			DefaultKernelImage: cfg.Image.DefaultKernelImage,
+			Socket: cfg.CRI.Socket,
 		}, s.runtimeService, store)
 		if err := s.criServer.Start(); err != nil {
 			cancel()
@@ -487,19 +490,12 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.DefaultKernelImage == "" {
-		req.DefaultKernelImage = s.defaultKernel
-	}
 	opts := runtimeapi.PullImageOptions{
-		ImageName:              req.ImageName,
-		Namespace:              req.Namespace,
-		PlainHTTP:              req.PlainHTTP,
-		Username:               req.Username,
-		Password:               req.Password,
-		DefaultKernelImage:     req.DefaultKernelImage,
-		KernelPlainHTTP:        req.KernelPlainHTTP,
-		KernelRegistryUsername: req.KernelRegistryUsername,
-		KernelRegistryPassword: req.KernelRegistryPassword,
+		ImageName: req.ImageName,
+		Namespace: req.Namespace,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
 	}
 
 	result, err := s.runtimeService.PullImage(r.Context(), opts)
