@@ -20,7 +20,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
-	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
@@ -59,35 +58,6 @@ type Daemon struct {
 var (
 	buildBootIndexArchive = conchimage.BuildBootIndexArchive
 )
-
-type convertImageRequest struct {
-	Source       string `json:"source"`
-	Namespace    string `json:"namespace,omitempty"`
-	BootIndexTag string `json:"boot_index_tag"`
-	PlainHTTP    bool   `json:"plain_http,omitempty"`
-	Username     string `json:"username,omitempty"`
-	Password     string `json:"password,omitempty"`
-	Snapshot     bool   `json:"snapshot,omitempty"`
-}
-
-type convertImageResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
-	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
-	SourceImageRef  string `json:"source_image_ref,omitempty"`
-}
-
-type snapshotExportRequest struct {
-	Namespace        string `json:"namespace,omitempty"`
-	BootIndexTag     string `json:"boot_index_tag"`
-	RootfsSnapshotID string `json:"snapshot_id,omitempty"`
-	SandboxID        string `json:"sandbox_id,omitempty"`
-}
-
-type snapshotExportResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
-}
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Daemon) {
 	go func() {
@@ -511,7 +481,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req imageSvc.PullRequest
+	var req pullImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -520,19 +490,30 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultKernelImage == "" {
 		req.DefaultKernelImage = s.defaultKernel
 	}
+	opts := runtimeapi.PullImageOptions{
+		ImageName:              req.ImageName,
+		Namespace:              req.Namespace,
+		PlainHTTP:              req.PlainHTTP,
+		Username:               req.Username,
+		Password:               req.Password,
+		DefaultKernelImage:     req.DefaultKernelImage,
+		KernelPlainHTTP:        req.KernelPlainHTTP,
+		KernelRegistryUsername: req.KernelRegistryUsername,
+		KernelRegistryPassword: req.KernelRegistryPassword,
+	}
 
-	results, err := s.runtimeService.PullImageRequest(r.Context(), req)
+	result, err := s.runtimeService.PullImage(r.Context(), opts)
 	if err != nil {
 		logger.Error("Failed to pull image",
-			ulog.F("image_name", req.ImageName),
+			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
 		)
 		writeImageError(w, "Failed to pull image", err)
 		return
 	}
 
-	logger.Info("Image pulled successfully", ulog.F("image_name", req.ImageName))
-	writeImageResults(w, results)
+	logger.Info("Image pulled successfully", ulog.F("image_name", opts.ImageName))
+	writeImageResults(w, result.Refs)
 }
 
 func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
@@ -548,24 +529,33 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req imageSvc.PushRequest
+	var req pushImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.PushImageRequest(r.Context(), req); err != nil {
+	opts := runtimeapi.PushImageOptions{
+		LocalImage:      req.LocalImage,
+		RemoteImage:     req.RemoteImage,
+		Namespace:       req.Namespace,
+		PlainHTTP:       req.PlainHTTP,
+		Username:        req.Username,
+		Password:        req.Password,
+		RegistryTimeout: req.RegistryTimeout,
+	}
+	if err := s.runtimeService.PushImage(r.Context(), opts); err != nil {
 		logger.Error("Failed to push image",
-			ulog.F("local_image", req.LocalImage),
-			ulog.F("remote_image", req.RemoteImage),
+			ulog.F("local_image", opts.LocalImage),
+			ulog.F("remote_image", opts.RemoteImage),
 			ulog.F("error", err),
 		)
 		writeImageError(w, "Failed to push image", err)
 		return
 	}
 	logger.Info("Image pushed successfully",
-		ulog.F("local_image", req.LocalImage),
-		ulog.F("remote_image", req.RemoteImage),
+		ulog.F("local_image", opts.LocalImage),
+		ulog.F("remote_image", opts.RemoteImage),
 	)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -584,19 +574,22 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req imageSvc.ListRequest
+	var req listImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	images, err := s.runtimeService.ListImageRequest(r.Context(), req)
+	images, err := s.runtimeService.ListImages(r.Context(), runtimeapi.ListImagesOptions{
+		Namespace: req.Namespace,
+		Filters:   req.Filters,
+	})
 	if err != nil {
 		logger.Error("Failed to list images", ulog.F("error", err))
 		writeImageError(w, "Failed to list images", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]imageSvc.Meta{"images": images})
+	_ = json.NewEncoder(w).Encode(listImageResponse{Images: imageRecordResponses(images)})
 }
 
 func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
@@ -612,14 +605,19 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req imageSvc.RemoveRequest
+	var req removeImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.RemoveImageRequest(r.Context(), req); err != nil {
+	opts := runtimeapi.RemoveImageOptions{
+		Namespace:   req.Namespace,
+		ImageName:   req.ImageName,
+		Synchronous: req.Synchronous,
+	}
+	if err := s.runtimeService.RemoveImage(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove image",
-			ulog.F("image_name", req.ImageName),
+			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
 		)
 		writeImageError(w, "Failed to remove image", err)
@@ -642,24 +640,28 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req imageSvc.UnpackRequest
+	var req unpackImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	results, err := s.runtimeService.UnpackImage(r.Context(), req)
+	opts := runtimeapi.UnpackImageOptions{
+		ImageName: req.ImageName,
+		Namespace: req.Namespace,
+	}
+	results, err := s.runtimeService.UnpackImage(r.Context(), opts)
 	if err != nil {
 		logger.Error("Failed to unpack image",
-			ulog.F("image_name", req.ImageName),
+			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
 		)
 		writeImageError(w, "Failed to unpack image", err)
 		return
 	}
 
-	logger.Info("Image unpacked successfully", ulog.F("image_name", req.ImageName))
+	logger.Info("Image unpacked successfully", ulog.F("image_name", opts.ImageName))
 	writeImageResults(w, results)
 }
 
@@ -687,7 +689,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	resp, err := s.runtimeService.ImportImageArchive(r.Context(), file, imageSvc.ImportArchiveRequest{
+	resp, err := s.runtimeService.ImportImageArchive(r.Context(), file, runtimeapi.ImportImageArchiveOptions{
 		Namespace:   r.FormValue("namespace"),
 		ImportedTag: r.FormValue("imported_tag"),
 	})
@@ -698,7 +700,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(importImageArchiveHTTPResponse(resp))
 }
 
 func (s *Daemon) handleConvertImage(w http.ResponseWriter, r *http.Request) {
@@ -801,14 +803,14 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 	source := strings.TrimSpace(req.Source)
 	bootIndexTag := strings.TrimSpace(req.BootIndexTag)
 	if source == "" {
-		return convertImageResponse{}, fmt.Errorf("%w: source is required", imageSvc.ErrInvalidRequest)
+		return convertImageResponse{}, fmt.Errorf("%w: source is required", conchimage.ErrInvalidRequest)
 	}
 	if bootIndexTag == "" {
-		return convertImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", imageSvc.ErrInvalidRequest)
+		return convertImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
 	}
 	namespace := s.resolveNamespace(req.Namespace)
 
-	prepared, err := s.runtimeService.PrepareRootfsSource(ctx, imageSvc.PrepareRootfsSourceRequest{
+	prepared, err := s.runtimeService.PrepareRootfsSource(ctx, conchimage.PrepareRootfsSourceOptions{
 		Source:    source,
 		Namespace: namespace,
 		PlainHTTP: req.PlainHTTP,
@@ -820,7 +822,7 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 	}
 
 	convertTarget := fmt.Sprintf("conch-erofs-rootfs:convert-%d", time.Now().UnixNano())
-	convertResp, err := s.runtimeService.ConvertRootfsToErofs(ctx, imageSvc.ConvertRootfsToErofsRequest{
+	convertResp, err := s.runtimeService.ConvertRootfsToErofs(ctx, erofsconvert.ConvertRootfsRequest{
 		Namespace:   namespace,
 		SourceImage: prepared.ImageName,
 		TargetImage: convertTarget,
@@ -835,7 +837,7 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 	if req.Snapshot {
 		publishTag = fmt.Sprintf("conch-boot:convert-%d", time.Now().UnixNano())
 	}
-	bootResp, err := s.runtimeService.PublishBootImage(ctx, imageSvc.PublishBootImageRequest{
+	bootResp, err := s.runtimeService.PublishBootImage(ctx, conchimage.PublishBootImageOptions{
 		Namespace:       namespace,
 		RootfsImageName: convertResp.ImageName,
 		KernelPath:      kernelPath,
@@ -850,7 +852,7 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 		defer func() {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 			defer cancel()
-			if err := s.runtimeService.RemoveImageRequest(cleanupCtx, imageSvc.RemoveRequest{
+			if err := s.runtimeService.RemoveImage(cleanupCtx, runtimeapi.RemoveImageOptions{
 				Namespace: namespace,
 				ImageName: bootResp.ImageName,
 			}); err != nil {
@@ -913,10 +915,10 @@ func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kern
 
 func (s *Daemon) exportSnapshotImage(ctx context.Context, req snapshotExportRequest) (snapshotExportResponse, error) {
 	if strings.TrimSpace(req.BootIndexTag) == "" {
-		return snapshotExportResponse{}, fmt.Errorf("%w: boot_index_tag is required", imageSvc.ErrInvalidRequest)
+		return snapshotExportResponse{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
 	}
 	if (strings.TrimSpace(req.RootfsSnapshotID) == "") == (strings.TrimSpace(req.SandboxID) == "") {
-		return snapshotExportResponse{}, fmt.Errorf("%w: exactly one of snapshot_id or sandbox_id is required", imageSvc.ErrInvalidRequest)
+		return snapshotExportResponse{}, fmt.Errorf("%w: exactly one of snapshot_id or sandbox_id is required", conchimage.ErrInvalidRequest)
 	}
 	namespace := s.resolveNamespace(req.Namespace)
 	rootfsSnapshotID := strings.TrimSpace(req.RootfsSnapshotID)
@@ -996,13 +998,13 @@ func (s *Daemon) exportNativeRootfsArchive(ctx context.Context, tmpDir string, r
 	return archivePath, nil
 }
 
-func (s *Daemon) importImageArchiveFromPath(ctx context.Context, archivePath, namespace, importedTag string) (imageSvc.ImportArchiveResponse, error) {
+func (s *Daemon) importImageArchiveFromPath(ctx context.Context, archivePath, namespace, importedTag string) (runtimeapi.ImportImageArchiveResult, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
-		return imageSvc.ImportArchiveResponse{}, fmt.Errorf("open archive: %w", err)
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("open archive: %w", err)
 	}
 	defer file.Close()
-	return s.runtimeService.ImportImageArchive(ctx, file, imageSvc.ImportArchiveRequest{
+	return s.runtimeService.ImportImageArchive(ctx, file, runtimeapi.ImportImageArchiveOptions{
 		Namespace:   namespace,
 		ImportedTag: importedTag,
 	})
@@ -1014,7 +1016,7 @@ func (s *Daemon) exportImageArchiveToPath(ctx context.Context, archivePath, name
 		return fmt.Errorf("create archive: %w", err)
 	}
 	defer file.Close()
-	return s.runtimeService.ExportImageArchive(ctx, file, imageSvc.ExportArchiveRequest{
+	return s.runtimeService.ExportImageArchive(ctx, file, runtimeapi.ExportImageArchiveOptions{
 		Namespace: namespace,
 		ImageName: imageName,
 	})
@@ -1090,15 +1092,10 @@ func writeImageResults(w http.ResponseWriter, results map[string]string) {
 
 func writeImageError(w http.ResponseWriter, prefix string, err error) {
 	status := http.StatusInternalServerError
-	if errors.Is(err, imageSvc.ErrInvalidRequest) || errors.Is(err, imageSvc.ErrOCIConversionFailed) {
+	if errors.Is(err, conchimage.ErrInvalidRequest) || errors.Is(err, conchimage.ErrOCIConversionFailed) {
 		status = http.StatusBadRequest
 	}
 	http.Error(w, prefix+": "+err.Error(), status)
-}
-
-type snapshotInfoRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
 }
 
 func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
@@ -1181,7 +1178,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	snapshots, err := s.runtimeService.ListSnapshotRequest(r.Context(), req)
+	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), req)
 	if err != nil {
 		logger.Error("Failed to list snapshots", ulog.F("error", err))
 		http.Error(w, "Failed to list snapshots: "+err.Error(), http.StatusInternalServerError)
@@ -1209,7 +1206,7 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.RemoveSnapshotRequest(r.Context(), req); err != nil {
+	if err := s.runtimeService.RemoveSnapshot(r.Context(), req); err != nil {
 		logger.Error("Failed to remove snapshot",
 			ulog.F("key", req.Key),
 			ulog.F("error", err),

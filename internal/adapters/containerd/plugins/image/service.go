@@ -30,116 +30,14 @@ import (
 	"github.com/openeuler/Conch/internal/conchplugins"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
-
-var (
-	ErrInvalidRequest      = errors.New("invalid image request")
-	ErrOCIConversionFailed = errors.New("oci conversion failed")
-)
-
-const SnapshotLabelVMSnapshot = "conch/snapshotter/vm-snapshot"
 
 const (
 	defaultRegistryResponseHeaderTimeout = 10 * time.Minute
 	registryTimeoutEnv                   = "CONCH_REGISTRY_TIMEOUT"
 )
-
-type PullRequest struct {
-	ImageName              string `json:"image_name"`
-	Namespace              string `json:"namespace,omitempty"`
-	PlainHTTP              bool   `json:"plain_http,omitempty"`
-	Username               string `json:"username,omitempty"`
-	Password               string `json:"password,omitempty"`
-	DefaultKernelImage     string `json:"default_kernel_image,omitempty"`
-	KernelPlainHTTP        bool   `json:"kernel_plain_http,omitempty"`
-	KernelRegistryUsername string `json:"kernel_username,omitempty"`
-	KernelRegistryPassword string `json:"kernel_password,omitempty"`
-}
-
-type PushRequest struct {
-	LocalImage      string `json:"local_image"`
-	RemoteImage     string `json:"remote_image"`
-	Namespace       string `json:"namespace,omitempty"`
-	PlainHTTP       bool   `json:"plain_http,omitempty"`
-	Username        string `json:"username,omitempty"`
-	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
-}
-
-type UnpackRequest struct {
-	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type ImportArchiveRequest struct {
-	Namespace   string `json:"namespace,omitempty"`
-	ImportedTag string `json:"imported_tag,omitempty"`
-}
-
-type ImportArchiveResponse struct {
-	SnapshotKey string `json:"snapshot_key"`
-	ImageName   string `json:"image_name"`
-}
-
-type ExportArchiveRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	ImageName string `json:"image_name"`
-}
-
-type ListRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
-}
-
-type RemoveRequest struct {
-	Namespace   string `json:"namespace,omitempty"`
-	ImageName   string `json:"image_name"`
-	Synchronous bool   `json:"synchronous,omitempty"`
-}
-
-type Meta struct {
-	Name            string            `json:"name"`
-	TargetDigest    string            `json:"target_digest"`
-	TargetMediaType string            `json:"target_media_type"`
-	Size            int64             `json:"size,omitempty"`
-	Kind            string            `json:"kind,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	CreatedAt       time.Time         `json:"created_at,omitempty"`
-	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
-}
-
-type PublishBootImageRequest struct {
-	Namespace       string `json:"namespace,omitempty"`
-	RootfsImageName string `json:"rootfs_image_name"`
-	KernelPath      string `json:"kernel_path"`
-	InitrdPath      string `json:"initrd_path"`
-	BootIndexTag    string `json:"boot_index_tag"`
-}
-
-type PublishBootImageResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	SnapshotKey     string `json:"snapshot_key"`
-	ImageName       string `json:"image_name"`
-}
-
-type PrepareRootfsSourceRequest struct {
-	Source      string `json:"source"`
-	Namespace   string `json:"namespace,omitempty"`
-	TargetImage string `json:"target_image,omitempty"`
-	PlainHTTP   bool   `json:"plain_http,omitempty"`
-	Username    string `json:"username,omitempty"`
-	Password    string `json:"password,omitempty"`
-}
-
-type PrepareRootfsSourceResponse struct {
-	ImageName      string `json:"image_name"`
-	ManifestDigest string `json:"manifest_digest"`
-}
-
-type ConvertRootfsToErofsRequest = erofsconvert.ConvertRootfsRequest
-type ConvertRootfsToErofsResponse = erofsconvert.ConvertRootfsResult
-type ErofsLayer = erofsconvert.ErofsLayer
 
 type Service struct {
 	client    *containerdclient.Client
@@ -158,12 +56,12 @@ func (s *Service) SetRootfsErofsConverter(converter erofsconvert.RootfsErofsConv
 	s.converter = converter
 }
 
-func (s *Service) Pull(ctx context.Context, req PullRequest) (map[string]string, error) {
+func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
 	if s == nil || s.client == nil {
-		return nil, fmt.Errorf("image service has no containerd client")
+		return runtimeapi.PullImageResult{}, fmt.Errorf("image service has no containerd client")
 	}
 	if req.ImageName == "" {
-		return nil, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
 	ns := req.Namespace
@@ -184,19 +82,19 @@ func (s *Service) Pull(ctx context.Context, req PullRequest) (map[string]string,
 		containerd.WithResolver(resolver),
 	}
 	if _, err := s.client.Pull(pullCtx, req.ImageName, pullOpts...); err != nil {
-		return nil, fmt.Errorf("pull image %s: %w", req.ImageName, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("pull image %s: %w", req.ImageName, err)
 	}
 
 	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
-		return nil, fmt.Errorf("fetch all Conch image content: %w", err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
 	}
 
 	results, err := conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
 	if err == nil {
-		return results, nil
+		return runtimeapi.PullImageResult{Refs: results}, nil
 	}
 	if !errors.Is(err, conchimage.ErrMissingSandbox) || req.DefaultKernelImage == "" {
-		return nil, fmt.Errorf("unpack pulled image: %w", err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
 	}
 
 	kernelResolver := docker.NewResolver(docker.ResolverOptions{
@@ -206,24 +104,24 @@ func (s *Service) Pull(ctx context.Context, req PullRequest) (map[string]string,
 		},
 	})
 	if _, err := s.client.Pull(pullCtx, req.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
-		return nil, fmt.Errorf("pull default kernel image %s: %w", req.DefaultKernelImage, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("pull default kernel image %s: %w", req.DefaultKernelImage, err)
 	}
 	if _, err := s.client.Fetch(pullCtx, req.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
-		return nil, fmt.Errorf("fetch default kernel image %s content: %w", req.DefaultKernelImage, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch default kernel image %s content: %w", req.DefaultKernelImage, err)
 	}
 	results, err = conchimage.UnpackAllSubImagesWithDefaultSandbox(pullCtx, s.client.Client, req.ImageName, req.DefaultKernelImage)
 	if err != nil {
-		return nil, fmt.Errorf("unpack pulled image with default kernel image %s: %w", req.DefaultKernelImage, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image with default kernel image %s: %w", req.DefaultKernelImage, err)
 	}
-	return results, nil
+	return runtimeapi.PullImageResult{Refs: results}, nil
 }
 
-func (s *Service) PrepareRootfsSource(ctx context.Context, req PrepareRootfsSourceRequest) (PrepareRootfsSourceResponse, error) {
+func (s *Service) PrepareRootfsSource(ctx context.Context, req conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error) {
 	if s == nil || s.client == nil {
-		return PrepareRootfsSourceResponse{}, fmt.Errorf("image service has no containerd client")
+		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("image service has no containerd client")
 	}
 	if req.Source == "" {
-		return PrepareRootfsSourceResponse{}, fmt.Errorf("%w: source is required", ErrInvalidRequest)
+		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("%w: source is required", conchimage.ErrInvalidRequest)
 	}
 	ns := req.Namespace
 	if ns == "" {
@@ -237,7 +135,7 @@ func (s *Service) PrepareRootfsSource(ctx context.Context, req PrepareRootfsSour
 	img, err := s.client.GetImage(sourceCtx, req.Source)
 	if err != nil {
 		if !errdefs.IsNotFound(err) {
-			return PrepareRootfsSourceResponse{}, fmt.Errorf("lookup rootfs source image %s: %w", req.Source, err)
+			return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("lookup rootfs source image %s: %w", req.Source, err)
 		}
 		resolver := docker.NewResolver(docker.ResolverOptions{
 			PlainHTTP: req.PlainHTTP,
@@ -247,7 +145,7 @@ func (s *Service) PrepareRootfsSource(ctx context.Context, req PrepareRootfsSour
 		})
 		pulled, err := s.client.Pull(sourceCtx, req.Source, containerd.WithResolver(resolver))
 		if err != nil {
-			return PrepareRootfsSourceResponse{}, fmt.Errorf("pull rootfs source image %s: %w", req.Source, err)
+			return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("pull rootfs source image %s: %w", req.Source, err)
 		}
 		img = pulled
 	}
@@ -258,30 +156,30 @@ func (s *Service) PrepareRootfsSource(ctx context.Context, req PrepareRootfsSour
 		if _, err := s.client.ImageService().Create(sourceCtx, alias); err != nil {
 			if errdefs.IsAlreadyExists(err) {
 				if _, updateErr := s.client.ImageService().Update(sourceCtx, alias, "target"); updateErr != nil {
-					return PrepareRootfsSourceResponse{}, fmt.Errorf("update rootfs source image alias %s: %w", req.TargetImage, updateErr)
+					return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("update rootfs source image alias %s: %w", req.TargetImage, updateErr)
 				}
 			} else {
-				return PrepareRootfsSourceResponse{}, fmt.Errorf("create rootfs source image alias %s: %w", req.TargetImage, err)
+				return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("create rootfs source image alias %s: %w", req.TargetImage, err)
 			}
 		}
 		imageName = req.TargetImage
 	}
 
-	return PrepareRootfsSourceResponse{
+	return conchimage.PrepareRootfsSourceResult{
 		ImageName:      imageName,
 		ManifestDigest: img.Target().Digest.String(),
 	}, nil
 }
 
-func (s *Service) Push(ctx context.Context, req PushRequest) error {
+func (s *Service) Push(ctx context.Context, req runtimeapi.PushImageOptions) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("image service has no containerd client")
 	}
 	if req.LocalImage == "" {
-		return fmt.Errorf("%w: local_image is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: local_image is required", conchimage.ErrInvalidRequest)
 	}
 	if req.RemoteImage == "" {
-		return fmt.Errorf("%w: remote_image is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: remote_image is required", conchimage.ErrInvalidRequest)
 	}
 	ns := req.Namespace
 	if ns == "" {
@@ -308,7 +206,7 @@ func (s *Service) Push(ctx context.Context, req PushRequest) error {
 	return nil
 }
 
-func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
+func (s *Service) List(ctx context.Context, req runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("image service has no containerd client")
 	}
@@ -324,13 +222,13 @@ func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list images: %w", err)
 	}
-	out := make([]Meta, 0, len(items))
+	out := make([]runtimeapi.ImageRecord, 0, len(items))
 	for _, item := range items {
 		kind := imageKindFromLabels(item.Labels)
 		if kind == "" {
 			kind = s.classifyImageKind(listCtx, item)
 		}
-		out = append(out, Meta{
+		out = append(out, runtimeapi.ImageRecord{
 			Name:            item.Name,
 			TargetDigest:    item.Target.Digest.String(),
 			TargetMediaType: item.Target.MediaType,
@@ -347,12 +245,12 @@ func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
 	return out, nil
 }
 
-func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
+func (s *Service) Remove(ctx context.Context, req runtimeapi.RemoveImageOptions) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("image service has no containerd client")
 	}
 	if req.ImageName == "" {
-		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 	ns := req.Namespace
 	if ns == "" {
@@ -472,12 +370,12 @@ func parseRegistryResponseHeaderTimeout(raw string) time.Duration {
 	return timeout
 }
 
-func (s *Service) Unpack(ctx context.Context, req UnpackRequest) (map[string]string, error) {
+func (s *Service) Unpack(ctx context.Context, req runtimeapi.UnpackImageOptions) (map[string]string, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("image service has no containerd client")
 	}
 	if req.ImageName == "" {
-		return nil, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return nil, fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
 	ns := req.Namespace
@@ -495,12 +393,12 @@ func (s *Service) Unpack(ctx context.Context, req UnpackRequest) (map[string]str
 	return results, nil
 }
 
-func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req ImportArchiveRequest) (ImportArchiveResponse, error) {
+func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error) {
 	if s == nil || s.client == nil {
-		return ImportArchiveResponse{}, fmt.Errorf("image service has no containerd client")
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("image service has no containerd client")
 	}
 	if archive == nil {
-		return ImportArchiveResponse{}, fmt.Errorf("%w: archive is required", ErrInvalidRequest)
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("%w: archive is required", conchimage.ErrInvalidRequest)
 	}
 
 	ns := req.Namespace
@@ -517,10 +415,10 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req Impo
 	}
 	importedImages, err := s.client.Import(importCtx, archive, importOpts...)
 	if err != nil {
-		return ImportArchiveResponse{}, fmt.Errorf("containerd import failed: %w", err)
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("containerd import failed: %w", err)
 	}
 	if len(importedImages) == 0 {
-		return ImportArchiveResponse{}, fmt.Errorf("no images were imported")
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("no images were imported")
 	}
 
 	snapshotter := s.client.SnapshotService("erofs")
@@ -554,13 +452,13 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req Impo
 		},
 	)
 	if err != nil {
-		return ImportArchiveResponse{}, err
+		return runtimeapi.ImportImageArchiveResult{}, err
 	}
 
 	if finalSnapshotKey == "" {
-		return ImportArchiveResponse{}, fmt.Errorf("no snapshot key generated")
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("no snapshot key generated")
 	}
-	return ImportArchiveResponse{
+	return runtimeapi.ImportImageArchiveResult{
 		SnapshotKey: finalSnapshotKey,
 		ImageName:   finalImageName,
 	}, nil
@@ -589,15 +487,15 @@ func selectImportedSnapshot(importedImages []images.Image, unpackConchIndex func
 	return "", "", nil
 }
 
-func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req ExportArchiveRequest) error {
+func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req runtimeapi.ExportImageArchiveOptions) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("image service has no containerd client")
 	}
 	if w == nil {
-		return fmt.Errorf("%w: archive writer is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: archive writer is required", conchimage.ErrInvalidRequest)
 	}
 	if req.ImageName == "" {
-		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
 	ns := req.Namespace
@@ -617,21 +515,21 @@ func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req ExportArch
 	return nil
 }
 
-func (s *Service) PublishBootImage(ctx context.Context, req PublishBootImageRequest) (PublishBootImageResponse, error) {
+func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error) {
 	if s == nil || s.client == nil {
-		return PublishBootImageResponse{}, fmt.Errorf("image service has no containerd client")
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("image service has no containerd client")
 	}
 	if req.RootfsImageName == "" {
-		return PublishBootImageResponse{}, fmt.Errorf("%w: rootfs_image_name is required", ErrInvalidRequest)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("%w: rootfs_image_name is required", conchimage.ErrInvalidRequest)
 	}
 	if req.KernelPath == "" {
-		return PublishBootImageResponse{}, fmt.Errorf("%w: kernel_path is required", ErrInvalidRequest)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("%w: kernel_path is required", conchimage.ErrInvalidRequest)
 	}
 	if req.InitrdPath == "" {
-		return PublishBootImageResponse{}, fmt.Errorf("%w: initrd_path is required", ErrInvalidRequest)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("%w: initrd_path is required", conchimage.ErrInvalidRequest)
 	}
 	if req.BootIndexTag == "" {
-		return PublishBootImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidRequest)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
 	}
 
 	ns := req.Namespace
@@ -644,13 +542,13 @@ func (s *Service) PublishBootImage(ctx context.Context, req PublishBootImageRequ
 	namespaceCtx := namespaces.WithNamespace(ctx, ns)
 	publishCtx, done, err := s.client.WithLease(namespaceCtx)
 	if err != nil {
-		return PublishBootImageResponse{}, fmt.Errorf("create content lease: %w", err)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("create content lease: %w", err)
 	}
 	defer done(publishCtx)
 
 	rootfsImage, err := s.client.ImageService().Get(publishCtx, req.RootfsImageName)
 	if err != nil {
-		return PublishBootImageResponse{}, fmt.Errorf("lookup rootfs image %s: %w", req.RootfsImageName, err)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("lookup rootfs image %s: %w", req.RootfsImageName, err)
 	}
 	indexDesc, err := conchimage.BuildBootIndexInContent(publishCtx, s.client.ContentStore(), conchimage.BootIndexContentOptions{
 		RootfsDescriptor: rootfsImage.Target,
@@ -659,44 +557,44 @@ func (s *Service) PublishBootImage(ctx context.Context, req PublishBootImageRequ
 		Tag:              req.BootIndexTag,
 	})
 	if err != nil {
-		return PublishBootImageResponse{}, fmt.Errorf("build boot index content: %w", err)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("build boot index content: %w", err)
 	}
 
 	labelHandler := images.SetChildrenLabels(s.client.ContentStore(), images.ChildrenHandler(s.client.ContentStore()))
 	if err := images.WalkNotEmpty(publishCtx, labelHandler, indexDesc); err != nil {
-		return PublishBootImageResponse{}, fmt.Errorf("label boot index content: %w", err)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("label boot index content: %w", err)
 	}
 	imageRecord := images.Image{Name: req.BootIndexTag, Target: indexDesc}
 	if _, err := s.client.ImageService().Update(publishCtx, imageRecord, "target"); err != nil {
 		if !errdefs.IsNotFound(err) {
-			return PublishBootImageResponse{}, fmt.Errorf("update boot image record %s: %w", req.BootIndexTag, err)
+			return conchimage.PublishBootImageResult{}, fmt.Errorf("update boot image record %s: %w", req.BootIndexTag, err)
 		}
 		if _, err := s.client.ImageService().Create(publishCtx, imageRecord); err != nil {
-			return PublishBootImageResponse{}, fmt.Errorf("create boot image record %s: %w", req.BootIndexTag, err)
+			return conchimage.PublishBootImageResult{}, fmt.Errorf("create boot image record %s: %w", req.BootIndexTag, err)
 		}
 	}
 
 	snapshotMap, err := conchimage.UnpackAllSubImages(publishCtx, s.client.Client, req.BootIndexTag)
 	if err != nil {
-		return PublishBootImageResponse{}, fmt.Errorf("unpack boot image %s: %w", req.BootIndexTag, err)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("unpack boot image %s: %w", req.BootIndexTag, err)
 	}
 	snapshotKey := snapshotMap[conchimage.KindRootfs]
 	if snapshotKey == "" {
-		return PublishBootImageResponse{}, fmt.Errorf("boot image %s unpack returned empty rootfs snapshot key", req.BootIndexTag)
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("boot image %s unpack returned empty rootfs snapshot key", req.BootIndexTag)
 	}
-	return PublishBootImageResponse{
+	return conchimage.PublishBootImageResult{
 		BootIndexDigest: indexDesc.Digest.String(),
 		SnapshotKey:     snapshotKey,
 		ImageName:       req.BootIndexTag,
 	}, nil
 }
 
-func (s *Service) ConvertRootfsToErofs(ctx context.Context, req ConvertRootfsToErofsRequest) (ConvertRootfsToErofsResponse, error) {
+func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error) {
 	if s == nil || s.client == nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("image service has no containerd client")
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("image service has no containerd client")
 	}
 	if s.converter == nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("rootfs erofs converter is not configured")
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("rootfs erofs converter is not configured")
 	}
 
 	if req.Namespace == "" {
@@ -707,23 +605,23 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req ConvertRootfsToE
 	}
 	normalized, err := erofsconvert.NormalizeRequest(req)
 	if err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("%w: %v", conchimage.ErrInvalidRequest, err)
 	}
 	result, err := s.converter.Convert(ctx, normalized)
 	if err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("convert rootfs to erofs: %w", err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 	convertCtx := namespaces.WithNamespace(ctx, normalized.Namespace)
 	imgInfo, err := s.client.ImageService().Get(convertCtx, result.ImageName)
 	if err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("lookup converted image: %w", err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("lookup converted image: %w", err)
 	}
 	if err := containerd.NewImage(s.client.Client, imgInfo).Unpack(convertCtx, "erofs"); err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
 	}
 	snapshotKey, err := conchimage.GetSnapshotID(ctx, s.client, normalized.Namespace, result.ImageName)
 	if err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("resolve converted rootfs snapshot key: %w", err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("resolve converted rootfs snapshot key: %w", err)
 	}
 	if _, err := s.client.SnapshotService("erofs").Update(convertCtx, snapshots.Info{
 		Name: snapshotKey,
@@ -732,7 +630,7 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req ConvertRootfsToE
 			common.SnapshotLabelRootfsManifest: result.ManifestDigest,
 		},
 	}, "labels."+common.SnapshotLabelRootfsImage, "labels."+common.SnapshotLabelRootfsManifest); err != nil {
-		return ConvertRootfsToErofsResponse{}, fmt.Errorf("label converted rootfs snapshot: %w", err)
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("label converted rootfs snapshot: %w", err)
 	}
 	result.SnapshotKey = snapshotKey
 	return result, nil
