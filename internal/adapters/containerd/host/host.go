@@ -54,7 +54,6 @@ type ImageConfig struct {
 }
 
 type SnapshotConfig struct {
-	Enabled bool
 	WorkDir string
 }
 
@@ -178,18 +177,10 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	requiredPlugins := []string{
 		PluginURI,
 		conchplugins.ImageServiceURI,
+		conchplugins.SnapshotServiceURI,
 	}
 	var disabledPlugins []string
-	if cfg.Snapshot.Enabled {
-		requiredPlugins = append(requiredPlugins, conchplugins.SnapshotServiceURI)
-	} else {
-		disabledPlugins = append(disabledPlugins, conchplugins.SnapshotServiceURI)
-	}
 	if cfg.Sandbox != nil {
-		if !cfg.Snapshot.Enabled {
-			cancel()
-			return nil, fmt.Errorf("sandbox service requires snapshot service")
-		}
 		requiredPlugins = append(requiredPlugins, conchplugins.SandboxServiceURI)
 	} else {
 		disabledPlugins = append(disabledPlugins, conchplugins.SandboxServiceURI)
@@ -216,7 +207,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 			"mkfs_options": []string{"--fsalignblks=512"},
 		},
 		conchplugins.SnapshotServiceURI: map[string]any{
-			"enabled":  cfg.Snapshot.Enabled,
 			"work_dir": cfg.Snapshot.WorkDir,
 		},
 	}
@@ -246,7 +236,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		sandbox  *sandboxSvc.Service
 		timeout  = time.After(startTimeout)
 	)
-	for inst == nil || image == nil || (cfg.Snapshot.Enabled && snapshot == nil) || (cfg.Sandbox != nil && sandbox == nil) {
+	for inst == nil || image == nil || snapshot == nil || (cfg.Sandbox != nil && sandbox == nil) {
 		select {
 		case inst = <-ready:
 		case image = <-imageReady:

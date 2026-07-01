@@ -122,7 +122,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 			DefaultKernelRegistryPassword: cfg.Image.DefaultKernelRegistryPassword,
 		},
 		Snapshot: containerdhost.SnapshotConfig{
-			Enabled: true,
 			WorkDir: cfg.Server.WorkDir,
 		},
 		Sandbox: &containerdhost.SandboxConfig{

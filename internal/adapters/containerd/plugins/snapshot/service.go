@@ -25,7 +25,6 @@ import (
 var ErrInvalidRequest = errors.New("invalid snapshot request")
 
 type Config struct {
-	Enabled bool   `toml:"enabled" json:"enabled"`
 	WorkDir string `toml:"work_dir" json:"workDir"`
 }
 
@@ -479,9 +478,6 @@ func init() {
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
 			cfg := ic.Config.(*Config)
-			if !cfg.Enabled {
-				return nil, plugin.ErrSkipPlugin
-			}
 			inst, err := ic.GetByID(conchplugins.HostPluginType, conchplugins.HostPluginID)
 			if err != nil {
 				return nil, err

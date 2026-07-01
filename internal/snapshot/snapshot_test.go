@@ -25,6 +25,9 @@ func TestPrepare(t *testing.T) {
 		RootDir:          t.TempDir(),
 		StateDir:         t.TempDir(),
 		DefaultNamespace: "default",
+		Snapshot: containerdhost.SnapshotConfig{
+			WorkDir: t.TempDir(),
+		},
 	})
 	if err != nil {
 		t.Fatalf("start embedded containerd: %v", err)

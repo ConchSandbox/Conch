@@ -15,7 +15,6 @@ func TestStartAndClose(t *testing.T) {
 		StateDir:         stateDir,
 		DefaultNamespace: "test",
 		Snapshot: SnapshotConfig{
-			Enabled: true,
 			WorkDir: t.TempDir(),
 		},
 	})
@@ -50,7 +49,6 @@ func TestStartAndClose(t *testing.T) {
 		StateDir:         t.TempDir(),
 		DefaultNamespace: "test",
 		Snapshot: SnapshotConfig{
-			Enabled: true,
 			WorkDir: t.TempDir(),
 		},
 	})
