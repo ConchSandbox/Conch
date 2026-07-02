@@ -16,7 +16,7 @@ import (
 
 // snapshotOps provides helper operations for snapshot management.
 type snapshotOps struct {
-	server *server
+	server *Server
 }
 
 func mountActivationKey(prefix, namespace, key string) string {

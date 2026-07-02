@@ -25,21 +25,26 @@ type Manager struct {
 	lifecycleMu        sync.Mutex
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
+	snapshotServer     *snapshot.Server
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
 }
 
-func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) *Manager {
+func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, snapshotServer *snapshot.Server, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
+	if snapshotServer == nil {
+		return nil, fmt.Errorf("snapshot server is required")
+	}
 	return &Manager{
 		pool:               p,
 		daemonClient:       daemonClient,
+		snapshotServer:     snapshotServer,
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
 		cidAllocator:       NewCIDAllocator(),
-	}
+	}, nil
 }
 
 type SandboxCreateRequest struct {
@@ -252,10 +257,10 @@ func (m *Manager) prepareSnapshotWorkspace(ctx context.Context, namespace string
 	)
 	if resume {
 		logger.Debug("creating sandbox by snapshotId")
-		snapshotConf, err = snapshot.AcquireResumeWorkspace(ctx, namespace, runtimeIDs.key, parentIDs, runtimeIDs.vsockCID, runtimeIDs.vsockSocketPath, memOpt)
+		snapshotConf, err = m.snapshotServer.AcquireResumeWorkspace(ctx, namespace, runtimeIDs.key, parentIDs, runtimeIDs.vsockCID, runtimeIDs.vsockSocketPath, memOpt)
 	} else {
 		logger.Debug("creating sandbox by image", ulog.F("imageName", req.ImageName))
-		snapshotConf, err = snapshot.Prepare(ctx, namespace, runtimeIDs.key, parentIDs, memOpt)
+		snapshotConf, err = m.snapshotServer.Prepare(ctx, namespace, runtimeIDs.key, parentIDs, memOpt)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare/acquire snapshot: %w", err)
@@ -268,7 +273,7 @@ func (m *Manager) removeSnapshotOnCreateFailure(createErr *error, ctx context.Co
 		return
 	}
 	logger := ulog.GetLogger()
-	rmErr := snapshot.Remove(ctx, namespace, key)
+	rmErr := m.snapshotServer.Remove(ctx, namespace, key)
 	if rmErr != nil {
 		logger.Error("failed to remove snapshot", ulog.F("key", key), ulog.F("error", rmErr))
 		return
@@ -437,7 +442,7 @@ func (m *Manager) resolveParentSnapshotIDs(
 		}
 	}
 
-	parents, err := snapshot.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
+	parents, err := m.snapshotServer.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
 	if err != nil {
 		return snapshot.ParentSnapshotIDs{}, err
 	}
@@ -490,7 +495,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 		}
 	}
 	finishSnapshot := cleanupdiag.Start("sandbox.snapshot.remove", fields...)
-	err = snapshot.Remove(snapshotCtx, sbx.namespace, sandboxID)
+	err = m.snapshotServer.Remove(snapshotCtx, sbx.namespace, sandboxID)
 	finishSnapshot(err)
 	if err != nil {
 		logger.Warn("failed to remove sandbox snapshot",
@@ -572,7 +577,7 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		if err := sbx.Close(ctx); err != nil {
 			logger.Error("sandbox close error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
 		}
-		if err := snapshot.Remove(leaseCtx, sbx.namespace, req.SandboxId); err != nil {
+		if err := m.snapshotServer.Remove(leaseCtx, sbx.namespace, req.SandboxId); err != nil {
 			logger.Error("sandbox remove error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
 		}
 		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
@@ -589,7 +594,7 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 
 	var key = req.SandboxId
 
-	info, err := snapshot.Stat(leaseCtx, sbx.namespace, key)
+	info, err := m.snapshotServer.Stat(leaseCtx, sbx.namespace, key)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat snapshot %s: %w", key, err)
 	}
@@ -599,7 +604,7 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		return "", fmt.Errorf("failed to calculate snapshot id: %w", err)
 	}
 
-	snapshotId, err = snapshot.Commit(leaseCtx, sbx.namespace, snapshotId, key)
+	snapshotId, err = m.snapshotServer.Commit(leaseCtx, sbx.namespace, snapshotId, key)
 	if err != nil {
 		return "", fmt.Errorf("error committing snapshot %s: %v", req.SandboxId, err)
 	}

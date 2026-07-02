@@ -17,7 +17,7 @@ func TestRehydrateRuntimeStateSkipsAliasesForUnrestoredViews(t *testing.T) {
 	mountPoint := "/"
 	unmountedMountPoint := t.TempDir()
 
-	srv := &server{
+	srv := &Server{
 		snt: fakeSnapshotter{
 			mounts: []mount.Mount{{Type: "bind", Source: "/"}},
 		},

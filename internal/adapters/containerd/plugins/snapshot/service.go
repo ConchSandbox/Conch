@@ -18,6 +18,7 @@ import (
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
@@ -71,23 +72,47 @@ const (
 
 type Service struct {
 	client *containerdclient.Client
+	server *conchsnapshot.Server
+}
+
+// ServerProvider exposes the runtime snapshot server held by the snapshot plugin.
+type ServerProvider interface {
+	SnapshotServer() *conchsnapshot.Server
 }
 
 func New(client *containerdclient.Client, workDir string) (*Service, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("snapshot work dir is required")
 	}
-	if err := conchsnapshot.NewServer(workDir, client); err != nil {
+	server, err := conchsnapshot.NewServer(workDir, client)
+	if err != nil {
 		return nil, err
 	}
-	return &Service{client: client}, nil
+	return &Service{client: client, server: server}, nil
 }
 
 func (s *Service) Close() error {
 	finishClose := cleanupdiag.Start("snapshot_service.close")
-	err := conchsnapshot.Close()
+	var err error
+	if s != nil && s.server != nil {
+		err = s.server.Close()
+	}
 	finishClose(err)
 	return err
+}
+
+func (s *Service) SnapshotServer() *conchsnapshot.Server {
+	if s == nil {
+		return nil
+	}
+	return s.server
+}
+
+func (s *Service) RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (conchsnapshot.RehydrateResult, error) {
+	if s == nil || s.server == nil {
+		return conchsnapshot.RehydrateResult{}, fmt.Errorf("snapshot service has no server")
+	}
+	return s.server.RehydrateRuntimeState(ctx, runtimes, views, aliases)
 }
 
 func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {

@@ -12,7 +12,7 @@ import (
 
 func TestCommitMemSnapshotLabelsComponentKind(t *testing.T) {
 	snapshotter := &recordingOpsSnapshotter{}
-	ops := &snapshotOps{server: &server{snt: snapshotter}}
+	ops := &snapshotOps{server: &Server{snt: snapshotter}}
 
 	if err := ops.commitMemSnapshot(context.Background(), "default", "mem-active", "mem-committed", "rootfs-id"); err != nil {
 		t.Fatalf("commitMemSnapshot() error = %v", err)

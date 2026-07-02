@@ -26,11 +26,16 @@ type SandboxRehydrator interface {
 	CleanupAssignedWithoutReadySandbox(map[string]struct{}) error
 }
 
+type SnapshotRehydrator interface {
+	RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (runtimeSnapshot.RehydrateResult, error)
+}
+
 type Config struct {
-	Store             state.Store
-	LeaseClient       LeaseClient
-	SandboxRehydrator SandboxRehydrator
-	DefaultNamespace  string
+	Store              state.Store
+	LeaseClient        LeaseClient
+	SandboxRehydrator  SandboxRehydrator
+	SnapshotRehydrator SnapshotRehydrator
+	DefaultNamespace   string
 }
 
 type Result struct {
@@ -181,7 +186,10 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 	}
 
 	if len(reconciledSnapshotRuntimes) > 0 || len(reconciledViewSnapshots) > 0 || len(viewAliases) > 0 {
-		if snapshotResult, err := runtimeSnapshot.RehydrateRuntimeState(ctx, reconciledSnapshotRuntimes, reconciledViewSnapshots, viewAliases); err != nil {
+		if r.cfg.SnapshotRehydrator == nil {
+			result.RehydrateErrors++
+			result.RehydrateError = joinReasons(result.RehydrateError, "snapshot rehydrator is not configured")
+		} else if snapshotResult, err := r.cfg.SnapshotRehydrator.RehydrateRuntimeState(ctx, reconciledSnapshotRuntimes, reconciledViewSnapshots, viewAliases); err != nil {
 			result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
 			result.ViewMountsRestored = snapshotResult.ViewMounts
 			result.ViewAliasesRestored = snapshotResult.ViewAliases

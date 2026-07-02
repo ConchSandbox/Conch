@@ -15,14 +15,14 @@ type RehydrateResult struct {
 	ViewAliases     int
 }
 
-func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
-	if gServer == nil || gServer.snt == nil {
+func (s *Server) RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
+	if s == nil || s.snt == nil {
 		return RehydrateResult{}, fmt.Errorf("server not init")
 	}
-	return gServer.rehydrateRuntimeState(ctx, runtimes, views, aliases)
+	return s.rehydrateRuntimeState(ctx, runtimes, views, aliases)
 }
 
-func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
+func (s *Server) rehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
 	var (
 		result RehydrateResult
 		errs   []error

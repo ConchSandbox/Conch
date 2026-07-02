@@ -19,8 +19,8 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/snapshotter"
 )
 
-// server manages snapshot lifecycle with caching and view sharing.
-type server struct {
+// Server manages snapshot lifecycle with caching and view sharing.
+type Server struct {
 	snt              snapshotter.Snapshotter
 	rootfsSnt        snapshotter.Snapshotter
 	mountMgr         mount.Manager
@@ -31,12 +31,10 @@ type server struct {
 	viewMgr          *viewManager
 }
 
-var gServer *server
-
 // NewServer initializes the snapshot server with containerd client.
-func NewServer(workDir string, daemonClient *containerdclient.Client) error {
+func NewServer(workDir string, daemonClient *containerdclient.Client) (*Server, error) {
 	if daemonClient == nil {
-		return fmt.Errorf("containerd client is nil")
+		return nil, fmt.Errorf("containerd client is nil")
 	}
 	erofsSn, err := snapshotter.NewContainerdSnap(
 		daemonClient.SnapshotService("erofs"),
@@ -45,9 +43,9 @@ func NewServer(workDir string, daemonClient *containerdclient.Client) error {
 		snapshotter.WithNamespaceContext(daemonClient.WithNamespace),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	gServer = &server{
+	srv := &Server{
 		snt:              erofsSn,
 		rootfsSnt:        erofsSn,
 		mountMgr:         daemonClient.MountManager(),
@@ -59,12 +57,27 @@ func NewServer(workDir string, daemonClient *containerdclient.Client) error {
 			viewAliases: make(map[string]map[string]string),
 		},
 	}
+	if err := srv.validate(); err != nil {
+		return nil, err
+	}
+	return srv, nil
+}
 
+func (s *Server) validate() error {
+	if s == nil {
+		return fmt.Errorf("snapshot server is nil")
+	}
+	if s.snt == nil {
+		return fmt.Errorf("snapshot server snapshotter is nil")
+	}
+	if s.viewMgr == nil {
+		return fmt.Errorf("snapshot server view manager is nil")
+	}
 	return nil
 }
 
 // getActiveSnapshot retrieves runtime active snapshot info from cache.
-func (s *server) getActiveSnapshot(ns, key string) *snapshots.Info {
+func (s *Server) getActiveSnapshot(ns, key string) *snapshots.Info {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if m, ok := s.activeSnapshots[ns]; ok {
@@ -74,7 +87,7 @@ func (s *server) getActiveSnapshot(ns, key string) *snapshots.Info {
 }
 
 // addActiveSnapshot adds active snapshot info to the runtime cache.
-func (s *server) addActiveSnapshot(ns, key string, info *snapshots.Info) {
+func (s *Server) addActiveSnapshot(ns, key string, info *snapshots.Info) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if m, ok := s.activeSnapshots[ns]; ok {
@@ -87,7 +100,7 @@ func (s *server) addActiveSnapshot(ns, key string, info *snapshots.Info) {
 }
 
 // removeActiveSnapshot removes active snapshot info from the runtime cache.
-func (s *server) removeActiveSnapshot(ns, key string) {
+func (s *Server) removeActiveSnapshot(ns, key string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if m, ok := s.activeSnapshots[ns]; ok {
@@ -98,7 +111,7 @@ func (s *server) removeActiveSnapshot(ns, key string) {
 	}
 }
 
-func (s *server) addActiveRootfsPmem(ns, key string, files []string) {
+func (s *Server) addActiveRootfsPmem(ns, key string, files []string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.activeRootfsPmem == nil {
@@ -110,7 +123,7 @@ func (s *server) addActiveRootfsPmem(ns, key string, files []string) {
 	s.activeRootfsPmem[ns][key] = append([]string(nil), files...)
 }
 
-func (s *server) getActiveRootfsPmem(ns, key string) []string {
+func (s *Server) getActiveRootfsPmem(ns, key string) []string {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if m, ok := s.activeRootfsPmem[ns]; ok {
@@ -121,7 +134,7 @@ func (s *server) getActiveRootfsPmem(ns, key string) []string {
 	return nil
 }
 
-func (s *server) removeRootfsSnapshot(namespace, key string) {
+func (s *Server) removeRootfsSnapshot(namespace, key string) {
 	if s.rootfsSnt != nil {
 		_ = s.rootfsSnt.Remove(context.Background(), namespace, key)
 	}
@@ -129,13 +142,13 @@ func (s *server) removeRootfsSnapshot(namespace, key string) {
 }
 
 // mkdirAll creates a directory with common.DirMode permissions.
-func (s *server) mkdirAll(path string, perm os.FileMode) error {
+func (s *Server) mkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
 
 // unmountPath unmounts a filesystem path and removes the directory.
 // Skips if path doesn't exist (may have been cleaned up already).
-func (s *server) unmountPath(path string) error {
+func (s *Server) unmountPath(path string) error {
 	// Check if path exists first
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
@@ -158,7 +171,7 @@ func (s *server) unmountPath(path string) error {
 }
 
 // Prepare creates active snapshots for rootfs/mem and a shared view for vm.
-func (s *server) Prepare(
+func (s *Server) Prepare(
 	ctx context.Context,
 	namespace, key string,
 	parents ParentSnapshotIDs,
@@ -247,7 +260,7 @@ func (s *server) Prepare(
 
 // AcquireView views and mounts 3 committed snapshots for snapshot-based startup.
 // If already viewed and mounted, reuses existing mounts (refCount++).
-func (s *server) AcquireView(
+func (s *Server) AcquireView(
 	ctx context.Context,
 	namespace, key string,
 	parents ParentSnapshotIDs,
@@ -316,7 +329,7 @@ func (s *server) AcquireView(
 // AcquireResumeWorkspace prepares a restore workspace for snapshot-based startup.
 // Rootfs and VM remain shared views, while mem is prepared as an active layer so
 // the snapshot config can be rewritten before restore.
-func (s *server) AcquireResumeWorkspace(
+func (s *Server) AcquireResumeWorkspace(
 	ctx context.Context,
 	namespace, key string,
 	parents ParentSnapshotIDs,
@@ -413,7 +426,7 @@ func (s *server) AcquireResumeWorkspace(
 	return conf, nil
 }
 
-func (s *server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMem bool) (ParentSnapshotIDs, error) {
+func (s *Server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMem bool) (ParentSnapshotIDs, error) {
 	if rootfs == "" {
 		return ParentSnapshotIDs{}, nil
 	}
@@ -438,19 +451,19 @@ func (s *server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMe
 
 // ResolveParentSnapshotIDs resolves parent mem/vm snapshots from a committed rootfs snapshot.
 // This is the strict path used for snapshot-based startup and requires both group refs.
-func (s *server) ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
+func (s *Server) ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	return s.resolveParentSnapshotIDs(namespace, rootfs, false)
 }
 
 // ResolveImageParentSnapshotIDs resolves image startup parents from a rootfs snapshot.
 // For image startup, the group mem ref is optional and an empty mem parent means
 // a fresh writable mem layer will be prepared for the sandbox.
-func (s *server) ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
+func (s *Server) ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	return s.resolveParentSnapshotIDs(namespace, rootfs, true)
 }
 
 // Commit commits an active snapshot with externally calculated snapshotID.
-func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) (string, error) {
+func (s *Server) Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) (string, error) {
 	si := s.getActiveSnapshot(namespace, key)
 	if si == nil {
 		return "", fmt.Errorf("snapshot [%s:%s] not found", namespace, key)
@@ -504,7 +517,7 @@ func (s *server) Commit(ctx context.Context, namespace, snapshotID, key string, 
 }
 
 // Remove removes snapshots and cleans up associated resources.
-func (s *server) Remove(ctx context.Context, namespace, key string) error {
+func (s *Server) Remove(ctx context.Context, namespace, key string) error {
 	memKey := getMemKeyFromRootfs(key)
 	rootfsViewAliasKey := getRootfsViewAliasKey(key)
 	memViewAliasKey := getMemViewAliasKey(key)
@@ -593,7 +606,7 @@ func (s *server) Remove(ctx context.Context, namespace, key string) error {
 
 // CleanupAllViews unmounts and removes all view snapshots.
 // Should be called during graceful shutdown before Close().
-func (s *server) CleanupAllViews() {
+func (s *Server) CleanupAllViews() {
 	if s == nil || s.viewMgr == nil {
 		return
 	}
@@ -601,12 +614,12 @@ func (s *server) CleanupAllViews() {
 }
 
 // Close releases snapshot resources.
-func (s *server) Close() error {
+func (s *Server) Close() error {
 	return nil
 }
 
 // Stat gets snapshot information.
-func (s *server) Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
+func (s *Server) Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
 	if info := s.getActiveSnapshot(namespace, key); info != nil {
 		return *info, nil
 	}

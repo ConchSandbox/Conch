@@ -1,12 +1,9 @@
 package snapshot
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"github.com/containerd/containerd/v2/core/snapshots"
 
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
@@ -92,103 +89,4 @@ type ParentSnapshotIDs struct {
 	Rootfs string
 	Mem    string
 	VM     string
-}
-
-func requireServer() (*server, error) {
-	if gServer == nil {
-		return nil, fmt.Errorf("snapshot server not initialized")
-	}
-	return gServer, nil
-}
-
-// Prepare creates 3 new active snapshots for image-based startup.
-func Prepare(ctx context.Context, namespace, key string, parents ParentSnapshotIDs, opts ...Opt) (*SnapshotConfig, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return nil, err
-	}
-	return srv.Prepare(ctx, namespace, key, parents, opts...)
-}
-
-// AcquireView views and mounts 3 committed snapshots for snapshot-based startup.
-// Reuses existing view mounts if already mounted (refCount++).
-func AcquireView(ctx context.Context, namespace, key string, parents ParentSnapshotIDs, opts ...Opt) (*SnapshotConfig, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return nil, err
-	}
-	return srv.AcquireView(ctx, namespace, key, parents, opts...)
-}
-
-// AcquireResumeWorkspace prepares a snapshot-based restore workspace.
-// Rootfs and VM are mounted as shared views, while mem is mounted as an active
-// layer so the snapshot config can be updated before restore.
-func AcquireResumeWorkspace(ctx context.Context, namespace, key string, parents ParentSnapshotIDs, cid uint32, socketPath string, opts ...Opt) (*SnapshotConfig, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return nil, err
-	}
-	return srv.AcquireResumeWorkspace(ctx, namespace, key, parents, cid, socketPath, opts...)
-}
-
-// ResolveParentSnapshotIDs resolves parent mem/vm snapshots from rootfs snapshot.
-func ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return ParentSnapshotIDs{}, err
-	}
-	return srv.ResolveParentSnapshotIDs(namespace, rootfs)
-}
-
-// ResolveImageParentSnapshotIDs resolves image startup parents from a rootfs snapshot.
-// Unlike snapshot resume, image startup allows mem label to be empty.
-func ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return ParentSnapshotIDs{}, err
-	}
-	return srv.ResolveImageParentSnapshotIDs(namespace, rootfs)
-}
-
-func Commit(ctx context.Context, namespace, snapshotID, key string, opts ...Opt) (string, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return "", err
-	}
-	return srv.Commit(ctx, namespace, snapshotID, key, opts...)
-}
-
-func Remove(ctx context.Context, namespace, key string) error {
-	srv, err := requireServer()
-	if err != nil {
-		return err
-	}
-	return srv.Remove(ctx, namespace, key)
-}
-
-// CleanupAllViews unmounts and removes all view snapshots.
-// Should be called during graceful shutdown before Close().
-func CleanupAllViews() {
-	if gServer == nil {
-		return
-	}
-	gServer.CleanupAllViews()
-}
-
-// Close releases snapshot resources and closes provider if present.
-func Close() error {
-	srv, err := requireServer()
-	if err != nil {
-		return err
-	}
-	return srv.Close()
-}
-
-// Stat gets snapshot information
-func Stat(ctx context.Context, namespace, key string) (snapshots.Info, error) {
-	srv, err := requireServer()
-	if err != nil {
-		return snapshots.Info{}, err
-	}
-	return srv.Stat(ctx, namespace, key)
 }

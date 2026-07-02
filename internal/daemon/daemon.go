@@ -157,10 +157,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 		RamMB:     cfg.Sandbox.DefaultRAMMB,
 	})
 	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
-		Store:             store,
-		LeaseClient:       daemonClient,
-		SandboxRehydrator: host.SandboxService(),
-		DefaultNamespace:  cfg.Containerd.DefaultNamespace,
+		Store:              store,
+		LeaseClient:        daemonClient,
+		SandboxRehydrator:  host.SandboxService(),
+		SnapshotRehydrator: host.SnapshotService(),
+		DefaultNamespace:   cfg.Containerd.DefaultNamespace,
 	})
 	if err != nil {
 		cancel()

@@ -10,7 +10,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
-func (s *server) resolveRootfsPmemFiles(ctx context.Context, namespace, rootfsKey string) ([]string, error) {
+func (s *Server) resolveRootfsPmemFiles(ctx context.Context, namespace, rootfsKey string) ([]string, error) {
 	if s.rootfsSnt == nil {
 		return nil, fmt.Errorf("rootfs erofs snapshotter is not configured")
 	}

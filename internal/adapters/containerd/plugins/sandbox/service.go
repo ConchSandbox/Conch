@@ -11,11 +11,13 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -38,7 +40,10 @@ type Service struct {
 	closed   bool
 }
 
-func New(ctx context.Context, client *containerdclient.Client, cfg Config) (*Service, error) {
+func New(ctx context.Context, client *containerdclient.Client, snapshotServer *conchsnapshot.Server, cfg Config) (*Service, error) {
+	if snapshotServer == nil {
+		return nil, fmt.Errorf("snapshot server is required")
+	}
 	vsockSignalRetry, err := parseDuration(cfg.VsockSignalRetry, 10*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("invalid vsock_signal_retry: %w", err)
@@ -62,7 +67,10 @@ func New(ctx context.Context, client *containerdclient.Client, cfg Config) (*Ser
 		}
 		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))
 	}
-	manager := conchsandbox.NewManager(pool, client, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
+	manager, err := conchsandbox.NewManager(pool, client, snapshotServer, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
+	if err != nil {
+		return nil, err
+	}
 	go pool.Populate(netstack.WithPreserveOnCancel(ctx))
 	return &Service{manager: manager}, nil
 }
@@ -176,7 +184,15 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("%s does not provide daemon client", conchplugins.HostPluginURI)
 			}
-			svc, err := New(ic.Context, provider.DaemonClient(), *cfg)
+			snapshotInst, err := ic.GetByID(conchplugins.SnapshotServicePluginType, conchplugins.SnapshotServiceID)
+			if err != nil {
+				return nil, err
+			}
+			snapshotProvider, ok := snapshotInst.(snapshotSvc.ServerProvider)
+			if !ok {
+				return nil, fmt.Errorf("%s does not provide snapshot server", conchplugins.SnapshotServiceURI)
+			}
+			svc, err := New(ic.Context, provider.DaemonClient(), snapshotProvider.SnapshotServer(), *cfg)
 			if err != nil {
 				return nil, err
 			}

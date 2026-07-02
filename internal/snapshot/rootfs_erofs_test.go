@@ -23,7 +23,7 @@ func TestSnapshotConfigSnapDirTreatsRootDirAsMemRelative(t *testing.T) {
 }
 
 func TestStatReturnsActiveSnapshotBeforeSnapshotterLookup(t *testing.T) {
-	srv := &server{
+	srv := &Server{
 		snt:             statMissingSnapshotter{},
 		activeSnapshots: make(map[string]map[string]*snapshots.Info),
 	}
