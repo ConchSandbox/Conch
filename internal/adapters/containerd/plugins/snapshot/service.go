@@ -47,6 +47,8 @@ type RemoveRequest struct {
 type Meta struct {
 	Key         string            `json:"key"`
 	Kind        string            `json:"kind,omitempty"`
+	ConchRole   string            `json:"conch_role,omitempty"`
+	GroupID     string            `json:"group_id,omitempty"`
 	Parent      string            `json:"parent,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	StoragePath string            `json:"storage_path,omitempty"`
@@ -58,6 +60,14 @@ type Chain struct {
 	Info       Meta     `json:"info"`
 	ChainPaths []string `json:"chain_paths"`
 }
+
+const (
+	conchRoleStandalone = "standalone"
+	conchRoleRootfs     = "rootfs"
+	conchRoleMem        = "mem"
+	conchRoleVM         = "vm"
+	conchRoleUnknown    = "unknown"
+)
 
 type Service struct {
 	client *containerdclient.Client
@@ -126,6 +136,38 @@ func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
 	return nil
 }
 
+func removeSnapshotCascade(ctx context.Context, snapshotter snapshots.Snapshotter, key string) error {
+	info, err := snapshotter.Stat(ctx, key)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("stat snapshot %s: %w", key, err)
+	}
+	if componentRootfs := snapshotComponentRootfs(info); componentRootfs != "" {
+		return fmt.Errorf("snapshot %s is a Conch snapshot component of rootfs %s; cascade remove requires the group rootfs snapshot key", key, componentRootfs)
+	}
+
+	group := snapshotGroup{Rootfs: key}
+	if labelsConchSnapshotGroup(info.Labels) {
+		group = groupFromRootfsInfo(info)
+	}
+
+	if err := removeSnapshotKey(ctx, snapshotter, group.Rootfs); err != nil {
+		return fmt.Errorf("remove snapshot %s: %w", group.Rootfs, err)
+	}
+	var removeErr error
+	for _, removeKey := range group.componentRemoveOrder() {
+		if err := removeSnapshotKey(ctx, snapshotter, removeKey); err != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove snapshot %s: %w", removeKey, err))
+		}
+	}
+	if removeErr != nil {
+		return removeErr
+	}
+	return nil
+}
+
 func ensureSnapshotCanRemoveAlone(ctx context.Context, snapshotter snapshots.Snapshotter, key string) error {
 	info, err := snapshotter.Stat(ctx, key)
 	if err != nil {
@@ -134,70 +176,12 @@ func ensureSnapshotCanRemoveAlone(ctx context.Context, snapshotter snapshots.Sna
 		}
 		return fmt.Errorf("stat snapshot %s: %w", key, err)
 	}
+	componentRootfs := snapshotComponentRootfs(info)
+	if componentRootfs != "" {
+		return fmt.Errorf("snapshot %s is a Conch snapshot component of rootfs %s; use --cascade on the group rootfs snapshot", key, componentRootfs)
+	}
 	if labelsConchSnapshotGroup(info.Labels) {
-		return fmt.Errorf("snapshot %s is a Conch snapshot group root; use cascade remove", key)
-	}
-	rootfs, err := findReferencingRootfs(ctx, snapshotter, key)
-	if err != nil {
-		return err
-	}
-	if rootfs != "" {
-		return fmt.Errorf("snapshot %s is referenced by Conch rootfs snapshot %s; use cascade remove", key, rootfs)
-	}
-	return nil
-}
-
-func removeSnapshotCascade(ctx context.Context, snapshotter snapshots.Snapshotter, key string) error {
-	group, err := resolveSnapshotGroup(ctx, snapshotter, key)
-	if err != nil {
-		return err
-	}
-	if err := preserveSnapshotGroupLabels(ctx, snapshotter, group); err != nil {
-		return err
-	}
-	var removeErr error
-	for _, removeKey := range group.removeOrder() {
-		if err := removeSnapshotKey(ctx, snapshotter, removeKey); err != nil {
-			err = fmt.Errorf("remove snapshot %s: %w", removeKey, err)
-			if removeKey == group.Rootfs {
-				return err
-			}
-			removeErr = errors.Join(removeErr, err)
-		}
-	}
-	return removeErr
-}
-
-func preserveSnapshotGroupLabels(ctx context.Context, snapshotter snapshots.Snapshotter, group snapshotGroup) error {
-	labels := group.labels()
-	if len(labels) == 0 {
-		return nil
-	}
-	for _, key := range group.componentKeys() {
-		info, err := snapshotter.Stat(ctx, key)
-		if err != nil {
-			if errdefs.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("stat snapshot %s before cascade remove: %w", key, err)
-		}
-		if info.Labels == nil {
-			info.Labels = map[string]string{}
-		}
-		var fieldpaths []string
-		for label, value := range labels {
-			if value == "" || info.Labels[label] == value {
-				continue
-			}
-			info.Labels[label] = value
-			fieldpaths = append(fieldpaths, "labels."+label)
-		}
-		if len(fieldpaths) == 0 {
-			continue
-		}
-		if _, err := snapshotter.Update(ctx, info, fieldpaths...); err != nil {
-			return fmt.Errorf("preserve snapshot group labels on %s: %w", key, err)
-		}
+		return fmt.Errorf("snapshot %s is the rootfs anchor of a Conch snapshot group; use --cascade to remove the group", key)
 	}
 	return nil
 }
@@ -221,24 +205,10 @@ type snapshotGroup struct {
 	VM     string
 }
 
-func (g snapshotGroup) labels() map[string]string {
-	labels := map[string]string{}
-	if strings.TrimSpace(g.Rootfs) != "" {
-		labels[common.SnapshotLabelRootfsSnapshot] = strings.TrimSpace(g.Rootfs)
-	}
-	if strings.TrimSpace(g.Mem) != "" {
-		labels[common.SnapshotLabelMemSnapshot] = strings.TrimSpace(g.Mem)
-	}
-	if strings.TrimSpace(g.VM) != "" {
-		labels[common.SnapshotLabelVMSnapshot] = strings.TrimSpace(g.VM)
-	}
-	return labels
-}
-
-func (g snapshotGroup) componentKeys() []string {
+func (g snapshotGroup) componentRemoveOrder() []string {
 	out := []string{}
 	for _, key := range []string{g.Mem, g.VM} {
-		if strings.TrimSpace(key) == "" {
+		if strings.TrimSpace(key) == "" || key == g.Rootfs {
 			continue
 		}
 		if !containsString(out, key) {
@@ -246,58 +216,17 @@ func (g snapshotGroup) componentKeys() []string {
 		}
 	}
 	return out
-}
-
-func (g snapshotGroup) removeOrder() []string {
-	out := []string{}
-	for _, key := range []string{g.Rootfs, g.Mem, g.VM} {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
-		if !containsString(out, key) {
-			out = append(out, key)
-		}
-	}
-	return out
-}
-
-func resolveSnapshotGroup(ctx context.Context, snapshotter snapshots.Snapshotter, key string) (snapshotGroup, error) {
-	info, err := snapshotter.Stat(ctx, key)
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return snapshotGroup{}, nil
-		}
-		return snapshotGroup{}, fmt.Errorf("stat snapshot %s: %w", key, err)
-	}
-	if labelsConchSnapshotGroup(info.Labels) {
-		return groupFromRootfsInfo(info), nil
-	}
-	rootfs, err := findReferencingRootfs(ctx, snapshotter, key)
-	if err != nil {
-		return snapshotGroup{}, err
-	}
-	if rootfs == "" {
-		return snapshotGroup{Rootfs: key}, nil
-	}
-	rootfsInfo, err := snapshotter.Stat(ctx, rootfs)
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return snapshotGroup{Rootfs: key}, nil
-		}
-		return snapshotGroup{}, fmt.Errorf("stat referencing rootfs snapshot %s: %w", rootfs, err)
-	}
-	return groupFromRootfsInfo(rootfsInfo), nil
 }
 
 func groupFromRootfsInfo(info snapshots.Info) snapshotGroup {
-	rootfs := strings.TrimSpace(info.Labels[common.SnapshotLabelRootfsSnapshot])
+	rootfs := strings.TrimSpace(info.Labels[common.SnapshotLabelGroupID])
 	if rootfs == "" {
 		rootfs = info.Name
 	}
 	return snapshotGroup{
 		Rootfs: rootfs,
-		Mem:    strings.TrimSpace(info.Labels[common.SnapshotLabelMemSnapshot]),
-		VM:     strings.TrimSpace(info.Labels[common.SnapshotLabelVMSnapshot]),
+		Mem:    strings.TrimSpace(info.Labels[common.SnapshotLabelGroupMemRef]),
+		VM:     strings.TrimSpace(info.Labels[common.SnapshotLabelGroupVMRef]),
 	}
 }
 
@@ -305,33 +234,16 @@ func labelsConchSnapshotGroup(labels map[string]string) bool {
 	if len(labels) == 0 {
 		return false
 	}
-	return strings.TrimSpace(labels[common.SnapshotLabelMemSnapshot]) != "" ||
-		strings.TrimSpace(labels[common.SnapshotLabelVMSnapshot]) != ""
+	return strings.TrimSpace(labels[common.SnapshotLabelGroupMemRef]) != "" ||
+		strings.TrimSpace(labels[common.SnapshotLabelGroupVMRef]) != ""
 }
 
-func findReferencingRootfs(ctx context.Context, snapshotter snapshots.Snapshotter, key string) (string, error) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "", nil
+func snapshotComponentRootfs(info snapshots.Info) string {
+	rootfs := strings.TrimSpace(info.Labels[common.SnapshotLabelGroupID])
+	if rootfs == "" || rootfs == info.Name {
+		return ""
 	}
-	var refs []string
-	if err := snapshotter.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Labels[common.SnapshotLabelMemSnapshot] == key ||
-			info.Labels[common.SnapshotLabelVMSnapshot] == key {
-			refs = append(refs, info.Name)
-		}
-		return nil
-	}); err != nil {
-		return "", fmt.Errorf("walk snapshots: %w", err)
-	}
-	sort.Strings(refs)
-	if len(refs) == 0 {
-		return "", nil
-	}
-	if len(refs) > 1 {
-		return "", errors.New("snapshot is referenced by multiple Conch rootfs snapshots")
-	}
-	return refs[0], nil
+	return rootfs
 }
 
 func containsString(values []string, value string) bool {
@@ -416,13 +328,36 @@ func (s *Service) Chain(ctx context.Context, req InfoRequest) (Chain, error) {
 }
 
 func snapshotMeta(info snapshots.Info) Meta {
-	return Meta{
+	meta := Meta{
 		Key:       info.Name,
 		Kind:      strings.ToLower(info.Kind.String()),
 		Parent:    info.Parent,
 		Labels:    info.Labels,
 		CreatedAt: info.Created,
 		UpdatedAt: info.Updated,
+	}
+	if rootfs := snapshotComponentRootfs(info); rootfs != "" {
+		meta.ConchRole = snapshotComponentRole(info)
+		meta.GroupID = rootfs
+		return meta
+	}
+	if labelsConchSnapshotGroup(info.Labels) {
+		meta.ConchRole = conchRoleRootfs
+		meta.GroupID = info.Name
+		return meta
+	}
+	meta.ConchRole = conchRoleStandalone
+	return meta
+}
+
+func snapshotComponentRole(info snapshots.Info) string {
+	switch strings.TrimSpace(info.Labels[common.SnapshotLabelComponentKind]) {
+	case common.SnapshotComponentKindMem:
+		return conchRoleMem
+	case common.SnapshotComponentKindVM:
+		return conchRoleVM
+	default:
+		return conchRoleUnknown
 	}
 }
 

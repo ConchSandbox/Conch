@@ -167,6 +167,8 @@ type ListSnapshotsRequest struct {
 type SnapshotRecord struct {
 	Key         string            `json:"key"`
 	Kind        string            `json:"kind,omitempty"`
+	ConchRole   string            `json:"conch_role,omitempty"`
+	GroupID     string            `json:"group_id,omitempty"`
 	Parent      string            `json:"parent,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	StoragePath string            `json:"storage_path,omitempty"`

@@ -211,7 +211,7 @@ func (m *Manager) prepareParentSnapshots(ctx context.Context, namespace string, 
 	}
 	resume := req.SnapshotId != "" || req.UseSnapshot
 	if resume && parentIDs.Mem == "" {
-		return snapshot.ParentSnapshotIDs{}, false, fmt.Errorf("mem snapshot label not found on rootfs snapshot %s", parentIDs.Rootfs)
+		return snapshot.ParentSnapshotIDs{}, false, fmt.Errorf("group mem ref label not found on rootfs snapshot %s", parentIDs.Rootfs)
 	}
 	return parentIDs, resume, nil
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
@@ -174,9 +175,15 @@ func runSnapshotList(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch snapshot ls: %w", err)
 	}
-	fmt.Printf("%-12s %-64s %s\n", "KIND", "KEY", "PARENT")
+	fmt.Fprintf(os.Stdout, "%-12s %-12s %-64s %-64s %-64s\n", "KIND", "CONCH_ROLE", "GROUP_ID", "KEY", "PARENT")
 	for _, snapshot := range snapshots {
-		fmt.Printf("%-12s %-64s %s\n", snapshot.Kind, snapshot.Key, snapshot.Parent)
+		fmt.Fprintf(os.Stdout, "%-12s %-12s %-64s %-64s %-64s\n",
+			snapshot.Kind,
+			cmp.Or(snapshot.ConchRole, "standalone"),
+			cmp.Or(snapshot.GroupID, "-"),
+			snapshot.Key,
+			cmp.Or(snapshot.Parent, "-"),
+		)
 	}
 	return nil
 }
@@ -186,7 +193,7 @@ func runSnapshotRemove(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	cascade := fs.Bool("cascade", false, "remove the whole Conch rootfs/mem/vm snapshot group")
+	cascade := fs.Bool("cascade", false, "remove a whole Conch snapshot group from its rootfs anchor")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err

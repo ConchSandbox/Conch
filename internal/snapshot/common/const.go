@@ -29,10 +29,32 @@ const (
 	SnapshotLabelSnapshotDir = "conch/snapshotter/snapshot-dir"
 	SnapshotLabelMemSize     = "conch/snapshotter/snapshot-memsize"
 
-	// binding labels between mem and rootfs snapshots
-	SnapshotLabelMemSnapshot    = "conch/snapshotter/mem-snapshot"
-	SnapshotLabelRootfsSnapshot = "conch/snapshotter/rootfs-snapshot"
-	SnapshotLabelVMSnapshot     = "conch/snapshotter/vm-snapshot"
-	SnapshotLabelRootfsImage    = "conch/snapshotter/rootfs-image"
+	// Conch snapshot group labels. A group is anchored by its rootfs snapshot.
+
+	// SnapshotLabelGroupID is set on a component snapshot and stores the rootfs
+	// snapshot key of the group it belongs to.
+	SnapshotLabelGroupID = "conch/snapshotter/group-id"
+
+	// SnapshotLabelGroupMemRef is set on a group rootfs snapshot and points to
+	// the group's mem snapshot component.
+	SnapshotLabelGroupMemRef = "conch/snapshotter/group.mem-ref"
+
+	// SnapshotLabelGroupVMRef is set on a group rootfs snapshot and points to
+	// the group's VM/sandbox snapshot component.
+	SnapshotLabelGroupVMRef = "conch/snapshotter/group.vm-ref"
+
+	// SnapshotLabelComponentKind is set on a component snapshot to distinguish
+	// mem and VM components within the group.
+	SnapshotLabelComponentKind = "conch/snapshotter/component-kind"
+
+	// SnapshotLabelRootfsImage records the source image name used to create the
+	// rootfs snapshot.
+	SnapshotLabelRootfsImage = "conch/snapshotter/rootfs-image"
+
+	// SnapshotLabelRootfsManifest records the source image manifest digest used
+	// to create the rootfs snapshot.
 	SnapshotLabelRootfsManifest = "conch/snapshotter/rootfs-manifest"
+
+	SnapshotComponentKindMem = "mem"
+	SnapshotComponentKindVM  = "vm"
 )

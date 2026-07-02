@@ -421,13 +421,13 @@ func (s *server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMe
 	if err != nil {
 		return ParentSnapshotIDs{}, fmt.Errorf("rootfs snapshot %s not found (maybe not unpacked): %v", rootfs, err)
 	}
-	parentMem, ok := info.Labels[common.SnapshotLabelMemSnapshot]
+	parentMem, ok := info.Labels[common.SnapshotLabelGroupMemRef]
 	if (!ok || parentMem == "") && !allowEmptyMem {
-		return ParentSnapshotIDs{}, fmt.Errorf("mem snapshot label not found on rootfs snapshot %s", rootfs)
+		return ParentSnapshotIDs{}, fmt.Errorf("group mem ref label not found on rootfs snapshot %s", rootfs)
 	}
-	parentVM, ok := info.Labels[common.SnapshotLabelVMSnapshot]
+	parentVM, ok := info.Labels[common.SnapshotLabelGroupVMRef]
 	if !ok || parentVM == "" {
-		return ParentSnapshotIDs{}, fmt.Errorf("vm snapshot label not found on rootfs snapshot %s", rootfs)
+		return ParentSnapshotIDs{}, fmt.Errorf("group vm ref label not found on rootfs snapshot %s", rootfs)
 	}
 	return ParentSnapshotIDs{
 		Rootfs: rootfs,
@@ -437,13 +437,13 @@ func (s *server) resolveParentSnapshotIDs(namespace, rootfs string, allowEmptyMe
 }
 
 // ResolveParentSnapshotIDs resolves parent mem/vm snapshots from a committed rootfs snapshot.
-// This is the strict path used for snapshot-based startup and requires both mem/vm labels.
+// This is the strict path used for snapshot-based startup and requires both group refs.
 func (s *server) ResolveParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	return s.resolveParentSnapshotIDs(namespace, rootfs, false)
 }
 
 // ResolveImageParentSnapshotIDs resolves image startup parents from a rootfs snapshot.
-// For image startup, mem snapshot label is optional and an empty mem parent means
+// For image startup, the group mem ref is optional and an empty mem parent means
 // a fresh writable mem layer will be prepared for the sandbox.
 func (s *server) ResolveImageParentSnapshotIDs(namespace, rootfs string) (ParentSnapshotIDs, error) {
 	return s.resolveParentSnapshotIDs(namespace, rootfs, true)

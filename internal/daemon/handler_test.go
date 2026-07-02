@@ -217,8 +217,8 @@ func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoReques
 		Key:    req.Key,
 		Parent: "parent-id",
 		Labels: map[string]string{
-			common.SnapshotLabelMemSnapshot: "mem-id",
-			common.SnapshotLabelVMSnapshot:  "vm-id",
+			common.SnapshotLabelGroupMemRef: "mem-id",
+			common.SnapshotLabelGroupVMRef:  "vm-id",
 			common.SnapshotLabelRootfsImage: "rootfs-image:latest",
 		},
 		StoragePath: "/snap/rootfs",

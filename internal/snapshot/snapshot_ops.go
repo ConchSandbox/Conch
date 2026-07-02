@@ -273,8 +273,8 @@ func (ops *snapshotOps) commitRootfsSnapshot(ctx context.Context, namespace, key
 		for k, v := range conf.Labels {
 			info.Labels[k] = v
 		}
-		info.Labels[common.SnapshotLabelMemSnapshot] = memSnapshotID
-		info.Labels[common.SnapshotLabelVMSnapshot] = parentVMSnapshotID
+		info.Labels[common.SnapshotLabelGroupMemRef] = memSnapshotID
+		info.Labels[common.SnapshotLabelGroupVMRef] = parentVMSnapshotID
 		return nil
 	})
 	if err == nil {
@@ -299,11 +299,11 @@ func (ops *snapshotOps) commitRootfsSnapshot(ctx context.Context, namespace, key
 		parentInfo.Labels[k] = v
 		fieldpaths = append(fieldpaths, "labels."+k)
 	}
-	parentInfo.Labels[common.SnapshotLabelMemSnapshot] = memSnapshotID
-	parentInfo.Labels[common.SnapshotLabelVMSnapshot] = parentVMSnapshotID
+	parentInfo.Labels[common.SnapshotLabelGroupMemRef] = memSnapshotID
+	parentInfo.Labels[common.SnapshotLabelGroupVMRef] = parentVMSnapshotID
 	fieldpaths = append(fieldpaths,
-		"labels."+common.SnapshotLabelMemSnapshot,
-		"labels."+common.SnapshotLabelVMSnapshot,
+		"labels."+common.SnapshotLabelGroupMemRef,
+		"labels."+common.SnapshotLabelGroupVMRef,
 	)
 	if _, updateErr := ops.server.rootfsSnt.Update(ctx, namespace, parentInfo, fieldpaths...); updateErr != nil {
 		return "", fmt.Errorf("update native rootfs snapshot labels %s: %w", activeInfo.Parent, updateErr)
@@ -318,7 +318,8 @@ func (ops *snapshotOps) commitMemSnapshot(ctx context.Context, namespace, memKey
 		if info.Labels == nil {
 			info.Labels = make(map[string]string)
 		}
-		info.Labels[common.SnapshotLabelRootfsSnapshot] = rootfsSnapshotID
+		info.Labels[common.SnapshotLabelGroupID] = rootfsSnapshotID
+		info.Labels[common.SnapshotLabelComponentKind] = common.SnapshotComponentKindMem
 		return nil
 	})
 	if err != nil {

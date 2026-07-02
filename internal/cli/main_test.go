@@ -391,6 +391,7 @@ func TestPrintSnapshotHelpIncludesExportListAndRemove(t *testing.T) {
 		"rm      Remove an EROFS snapshot",
 		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
 		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
+		"conch snapshot rm --cascade <rootfs-snapshot-key>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("snapshot help output missing %q:\n%s", want, got)

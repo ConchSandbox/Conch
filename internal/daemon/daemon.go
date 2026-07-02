@@ -1067,13 +1067,13 @@ func validateSnapshotChainPaths(paths []string) ([]string, error) {
 }
 
 func resolveSnapshotComponentIDs(rootfsInfo snapshotSvc.Meta) (string, string, error) {
-	memName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelMemSnapshot])
+	memName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelGroupMemRef])
 	if memName == "" {
-		return "", "", fmt.Errorf("rootfs snapshot %s missing mem snapshot label %q", rootfsInfo.Key, common.SnapshotLabelMemSnapshot)
+		return "", "", fmt.Errorf("rootfs snapshot %s missing group mem ref label %q", rootfsInfo.Key, common.SnapshotLabelGroupMemRef)
 	}
-	vmName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelVMSnapshot])
+	vmName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelGroupVMRef])
 	if vmName == "" {
-		return "", "", fmt.Errorf("rootfs snapshot %s missing sandbox snapshot label %q", rootfsInfo.Key, common.SnapshotLabelVMSnapshot)
+		return "", "", fmt.Errorf("rootfs snapshot %s missing group vm ref label %q", rootfsInfo.Key, common.SnapshotLabelGroupVMRef)
 	}
 	return memName, vmName, nil
 }
