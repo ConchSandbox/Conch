@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type RehydrateResult struct {
@@ -45,16 +44,12 @@ func (s *Server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 		}
 	}
 	aliasRefs := make(map[string]int, len(aliases))
-	aliasKinds := make(map[string]string, len(aliases))
 	for _, rec := range aliases {
 		if rec.Namespace == "" || rec.ParentSnapshotID == "" {
 			continue
 		}
 		key := rec.Namespace + "/" + rec.ParentSnapshotID
 		aliasRefs[key]++
-		if rec.MountKind != "" {
-			aliasKinds[key] = rec.MountKind
-		}
 	}
 	restoredViews := make(map[string]struct{}, len(views))
 	for _, rec := range views {
@@ -69,11 +64,7 @@ func (s *Server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 			continue
 		}
 		key := rec.Namespace + "/" + rec.ParentSnapshotID
-		snt := s.snt
-		if aliasKinds[key] == common.SnapshotMountRootfs && s.rootfsSnt != nil {
-			snt = s.rootfsSnt
-		}
-		mounts, err := snt.Mounts(ctx, rec.Namespace, rec.ViewSnapshotKey)
+		mounts, err := s.snt.Mounts(ctx, rec.Namespace, rec.ViewSnapshotKey)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("resolve view mount %s/%s: %w", rec.Namespace, rec.ViewSnapshotKey, err))
 			continue

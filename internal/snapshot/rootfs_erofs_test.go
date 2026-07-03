@@ -12,29 +12,29 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 )
 
-func TestSnapshotConfigSnapDirTreatsRootDirAsMemRelative(t *testing.T) {
-	conf := &SnapshotConfig{
-		MemDir:  "/var/lib/conch/mem",
-		RootDir: "/conch/snapshot",
+func TestBootLayoutSnapDirTreatsSnapshotDirAsMemRelative(t *testing.T) {
+	layout := &BootLayout{
+		MemMount:    "/var/lib/conch/mem",
+		SnapshotDir: "/conch/snapshot",
 	}
-	if got, want := conf.SnapDir(), "/var/lib/conch/mem/conch/snapshot"; got != want {
+	if got, want := layout.SnapDir(), "/var/lib/conch/mem/conch/snapshot"; got != want {
 		t.Fatalf("SnapDir() = %q, want %q", got, want)
 	}
 }
 
-func TestStatReturnsActiveSnapshotBeforeSnapshotterLookup(t *testing.T) {
+func TestSnapshotInfoReturnsActiveSnapshotBeforeSnapshotterLookup(t *testing.T) {
 	srv := &Server{
 		snt:             statMissingSnapshotter{},
-		activeSnapshots: make(map[string]map[string]*snapshots.Info),
+		activeSnapshots: make(map[runtimeSnapshotKey]*snapshots.Info),
 	}
 	srv.addActiveSnapshot("default", "active-rootfs", &snapshots.Info{
 		Name:   "active-rootfs",
 		Parent: "parent-rootfs",
 	})
 
-	info, err := srv.Stat(context.Background(), "default", "active-rootfs")
+	info, err := srv.SnapshotInfo(context.Background(), "default", "active-rootfs")
 	if err != nil {
-		t.Fatalf("Stat active snapshot: %v", err)
+		t.Fatalf("SnapshotInfo active snapshot: %v", err)
 	}
 	if info.Parent != "parent-rootfs" {
 		t.Fatalf("Parent = %q, want parent-rootfs", info.Parent)
@@ -61,15 +61,15 @@ func TestCleanupEmptySnapshotParentsKeepsNamespaceRoot(t *testing.T) {
 	}
 }
 
-func TestPmemFilesFromErofsMountsUsesSourceAndDeviceOptions(t *testing.T) {
+func TestPmemFilesFromErofsMountsUsesErofsSources(t *testing.T) {
 	got, err := pmemFilesFromErofsMounts([]mount.Mount{
 		{Type: "overlay", Source: "overlay"},
 		{Type: "erofs", Source: "/var/lib/containerd/erofs/layer0.erofs", Options: []string{
 			"ro",
-			"device=/var/lib/containerd/erofs/layer1.erofs",
-			"device=/var/lib/containerd/erofs/layer1.erofs",
 		}},
+		{Type: "erofs", Source: "/var/lib/containerd/erofs/layer1.erofs"},
 		{Type: "erofs", Source: "/var/lib/containerd/erofs/layer2.erofs"},
+		{Type: "erofs", Source: "/var/lib/containerd/erofs/layer1.erofs"},
 	})
 	if err != nil {
 		t.Fatalf("pmemFilesFromErofsMounts: %v", err)
@@ -86,6 +86,23 @@ func TestPmemFilesFromErofsMountsUsesSourceAndDeviceOptions(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("files = %#v, want %#v", got, want)
 		}
+	}
+}
+
+func TestPmemFilesFromErofsMountsRejectsFsmergeDeviceOptions(t *testing.T) {
+	_, err := pmemFilesFromErofsMounts([]mount.Mount{{
+		Type:   "erofs",
+		Source: "/var/lib/containerd/erofs/fsmeta.erofs",
+		Options: []string{
+			"ro",
+			"device=/var/lib/containerd/erofs/layer1.erofs",
+		},
+	}})
+	if err == nil {
+		t.Fatal("expected fsmerge device options to fail")
+	}
+	if !strings.Contains(err.Error(), "fsmerge") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
