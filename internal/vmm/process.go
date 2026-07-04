@@ -227,11 +227,11 @@ func (p *Process) Create(ctx context.Context) error {
 	}
 	p.markAPIReady()
 
-	// check conch-agent alive
+	// check conch-init alive
 	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-init in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil
@@ -269,11 +269,11 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
 	}
 
-	// check conch-agent alive
+	// check conch-init alive
 	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-init in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil

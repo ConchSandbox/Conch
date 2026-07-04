@@ -535,7 +535,7 @@ func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
 }
 
 func (c *CLHClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
-	// TODO: call conch-agent GetHealth
+	// TODO: call conch-init GetHealth
 	return nil
 }
 

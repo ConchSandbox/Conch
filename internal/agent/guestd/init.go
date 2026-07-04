@@ -1,5 +1,5 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-// Description: PID 1 initialization logic for conch-agent
+// Description: PID 1 initialization logic for conch-init
 
 package guestd
 
@@ -21,7 +21,7 @@ import (
 const (
 	// MergeTarget is the OverlayFS merge point
 	MergeTarget      = "/mnt/conch/merge"
-	initLogPath      = "/var/log/conch-agent/conch-agent.log"
+	initLogPath      = "/var/log/conch-init/conch-init.log"
 	initMergeLogPath = MergeTarget + initLogPath
 )
 
@@ -62,7 +62,7 @@ func setupMergeFileLogging() {
 	ulog.GetLogger().Info("Using rootfs log file", ulog.F("path", initLogPath))
 }
 
-// runAsInit runs conch-agent as PID 1 (init process)
+// runAsInit runs conch-init as PID 1 (init process)
 func runAsInit() {
 	os.Setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin")
 	ensureProcMounted()
@@ -71,7 +71,7 @@ func runAsInit() {
 	if sandboxID != "" {
 		fields = append(fields, ulog.F("sandbox_id", sandboxID))
 	}
-	ulog.GetLogger().Info("Starting conch-agent as init process", fields...)
+	ulog.GetLogger().Info("Starting conch-init as init process", fields...)
 
 	createDevNull()
 	mountEssentialFilesystems()

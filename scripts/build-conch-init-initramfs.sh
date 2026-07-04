@@ -7,8 +7,8 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 ALPINE_VERSION="${ALPINE_VERSION:-3.20.3}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_ARCH="${ALPINE_ARCH:-}"
-AGENT_BIN="${AGENT_BIN:-${REPO_ROOT}/bin/conch-agent}"
-OUTPUT="${OUTPUT:-${REPO_ROOT}/build-artifacts/conch-agent-initramfs.cpio.gz}"
+INIT_BIN="${INIT_BIN:-${REPO_ROOT}/bin/conch-init}"
+OUTPUT="${OUTPUT:-${REPO_ROOT}/build-artifacts/conch-init-initramfs.cpio.gz}"
 WORK_DIR="${WORK_DIR:-}"
 ROOTFS_DIR="${ROOTFS_DIR:-}"
 MODULES_DIR="${MODULES_DIR:-}"
@@ -18,11 +18,11 @@ usage() {
     cat <<EOF
 Usage: $0 [options]
 
-Build an Alpine initramfs that runs conch-agent as PID 1.
+Build an Alpine initramfs that runs conch-init as PID 1.
 
 Options:
-  --agent-bin PATH       conch-agent binary to install into /sbin/conch-agent
-                         (default: ${AGENT_BIN})
+  --init-bin PATH        conch-init binary to install into /sbin/conch-init
+                         (default: ${INIT_BIN})
   --output PATH          output initramfs path
                          (default: ${OUTPUT})
   --work-dir DIR         working directory for downloads and temporary files
@@ -58,9 +58,9 @@ detect_alpine_arch() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --agent-bin)
+        --init-bin)
             [ $# -ge 2 ] || die "missing value for $1"
-            AGENT_BIN="$2"
+            INIT_BIN="$2"
             shift 2
             ;;
         --output)
@@ -116,7 +116,7 @@ for tool in curl tar gzip cpio find install mkdir ln rm cp ls mktemp dirname; do
     require_cmd "$tool"
 done
 
-[ -f "$AGENT_BIN" ] || die "conch-agent binary does not exist: $AGENT_BIN"
+[ -f "$INIT_BIN" ] || die "conch-init binary does not exist: $INIT_BIN"
 [ -z "$MODULES_DIR" ] || [ -d "$MODULES_DIR" ] || die "kernel modules directory does not exist: $MODULES_DIR"
 
 if [ -z "$ALPINE_ARCH" ]; then
@@ -157,15 +157,15 @@ echo "Downloading Alpine minirootfs: $alpine_url"
 curl -fsSL "$alpine_url" -o "$WORK_DIR/$alpine_tar"
 tar -xzf "$WORK_DIR/$alpine_tar" -C "$ROOTFS_DIR"
 
-install -m 0755 "$AGENT_BIN" "$ROOTFS_DIR/sbin/conch-agent"
-mkdir -p "$ROOTFS_DIR"/{proc,sys,dev,run,tmp,var/log/conch-agent}
+install -m 0755 "$INIT_BIN" "$ROOTFS_DIR/sbin/conch-init"
+mkdir -p "$ROOTFS_DIR"/{proc,sys,dev,run,tmp,var/log/conch-init}
 
 if [ -n "$MODULES_DIR" ]; then
     mkdir -p "$ROOTFS_DIR/lib/modules"
     cp -a "$MODULES_DIR"/. "$ROOTFS_DIR/lib/modules"/
 fi
 
-ln -sf sbin/conch-agent "$ROOTFS_DIR/init"
+ln -sf sbin/conch-init "$ROOTFS_DIR/init"
 
 (
     cd "$ROOTFS_DIR"

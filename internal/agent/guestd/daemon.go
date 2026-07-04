@@ -156,7 +156,7 @@ func listenVsockLoop(handler VsockHandler) {
 }
 
 func Run(args []string) error {
-	flags := flag.NewFlagSet("conch-agent", flag.ExitOnError)
+	flags := flag.NewFlagSet("conch-init", flag.ExitOnError)
 	var asInit bool
 	var chrootPath string
 	flags.BoolVar(&asInit, "init", false, "Run as init process (PID 1)")
@@ -175,7 +175,7 @@ func Run(args []string) error {
 	}
 
 	// Initialize logger
-	logDir := "/var/log/conch-agent/"
+	logDir := "/var/log/conch-init/"
 	err := os.MkdirAll(logDir, 0755)
 	if err != nil {
 		panic(err)
@@ -208,7 +208,7 @@ func Run(args []string) error {
 	ulog.SetLogger(rootLogger.With(ulog.F("sandboxId", currentSandboxID)))
 	logger := ulog.GetLogger()
 
-	logger.Info("Starting conch-agent",
+	logger.Info("Starting conch-init",
 		ulog.F("version", ServerVersion),
 		ulog.F("server_port", ServerPort),
 		ulog.F("vsock_port", vsockReadyPort),

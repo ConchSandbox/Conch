@@ -60,9 +60,9 @@ func (c *blockingDaemonClient) CheckAgentAlive(ctx context.Context, processExite
 		return nil
 	case waitErr, ok := <-processExited:
 		if !ok || waitErr == nil {
-			return errors.New("vmm process exited before conch-agent became ready")
+			return errors.New("vmm process exited before conch-init became ready")
 		}
-		return errors.Join(errors.New("vmm process exited before conch-agent became ready"), waitErr)
+		return errors.Join(errors.New("vmm process exited before conch-init became ready"), waitErr)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -102,7 +102,7 @@ func TestWaitForAgentAliveReturnsProcessExitError(t *testing.T) {
 	if !errors.Is(err, processErr) {
 		t.Fatalf("waitForAgentAlive() error = %v, want %v", err, processErr)
 	}
-	if !strings.Contains(err.Error(), "exited before conch-agent became ready") {
+	if !strings.Contains(err.Error(), "exited before conch-init became ready") {
 		t.Fatalf("waitForAgentAlive() error = %q, want early exit context", err.Error())
 	}
 }
