@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -68,6 +70,7 @@ type fakeSandboxOps struct {
 	pauseReq   sandbox.SandboxPauseRequest
 	deleteReqs []sandbox.SandboxDeleteRequest
 	createErr  error
+	deleteErr  error
 	pauseErr   error
 }
 
@@ -204,6 +207,33 @@ func newConvertHandlerServer(imageSvc conchruntime.ImageOps, snapshotSvc conchru
 	return s
 }
 
+func newConvertHandlerServerWithStore(t *testing.T, imageSvc conchruntime.ImageOps, snapshotSvc conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps, seedSandboxes ...state.SandboxRecord) *Daemon {
+	t.Helper()
+
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	for _, rec := range seedSandboxes {
+		if err := store.UpsertSandbox(context.Background(), rec); err != nil {
+			t.Fatalf("UpsertSandbox(%q) error = %v", rec.PodSandboxID, err)
+		}
+	}
+
+	rt := conchruntime.New(sandboxOps, imageSvc, store, "default")
+	rt.Snapshot = snapshotSvc
+	s := &Daemon{
+		router:         http.NewServeMux(),
+		stateStore:     store,
+		runtimeService: rt,
+	}
+	s.routes()
+	return s
+}
+
 func (f *fakeSnapshotService) List(_ context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
 	f.listReq = req
 	if f.listErr != nil {
@@ -253,12 +283,17 @@ func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.Sandb
 	if f.createErr != nil {
 		return sandbox.SandboxCreateResult{}, f.createErr
 	}
-	return sandbox.SandboxCreateResult{IP: "192.0.2.2", Namespace: req.Namespace, SandboxID: req.SandboxId}, nil
+	return sandbox.SandboxCreateResult{
+		IP:         "192.0.2.2",
+		Namespace:  req.Namespace,
+		SandboxID:  req.SandboxId,
+		AgentToken: req.AgentToken,
+	}, nil
 }
 
 func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
 	f.deleteReqs = append(f.deleteReqs, req)
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) {
@@ -267,6 +302,70 @@ func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) 
 		return "", f.pauseErr
 	}
 	return "paused-rootfs-id", nil
+}
+
+func TestHandleCreateSandboxGeneratesID(t *testing.T) {
+	manager := &fakeSandboxOps{}
+	server := newConvertHandlerServer(nil, nil, manager)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/sandbox/create", bytes.NewBufferString(`{"image_name":"rootfs:latest"}`))
+
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["sandbox_id"] == "" || response["sandbox_id"] != manager.createReq.SandboxId {
+		t.Fatalf("response sandbox_id = %q, create request = %#v", response["sandbox_id"], manager.createReq)
+	}
+}
+
+func TestHandleCreateSandboxRejectsSuppliedID(t *testing.T) {
+	manager := &fakeSandboxOps{}
+	server := newConvertHandlerServer(nil, nil, manager)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/sandbox/create", bytes.NewBufferString(`{"sandbox_id":"caller-id","image_name":"rootfs:latest"}`))
+
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if manager.createReq.SandboxId != "" {
+		t.Fatalf("runtime create was called: %#v", manager.createReq)
+	}
+}
+
+func TestHandleSandboxLifecycleConflictReturnsConflict(t *testing.T) {
+	t.Run("delete", func(t *testing.T) {
+		manager := &fakeSandboxOps{deleteErr: state.ErrStateConflict}
+		server := newConvertHandlerServer(nil, nil, manager)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/sandbox/delete", bytes.NewBufferString(`{"sandbox_id":"sandbox-1"}`))
+
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("pause", func(t *testing.T) {
+		manager := &fakeSandboxOps{pauseErr: state.ErrStateConflict}
+		server := newConvertHandlerServer(nil, nil, manager)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/sandbox/pause", bytes.NewBufferString(`{"sandbox_id":"sandbox-1"}`))
+
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestHandlePullImageUsesDefaultKernel(t *testing.T) {
@@ -452,7 +551,7 @@ func TestHandleConvertImageSnapshotPauseFailureCleansSandbox(t *testing.T) {
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
 	manager := &fakeSandboxOps{pauseErr: errors.New("pause failed")}
-	server := newConvertHandlerServer(imgSvc, snapSvc, manager)
+	server := newConvertHandlerServerWithStore(t, imgSvc, snapSvc, manager)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -512,7 +611,12 @@ func TestHandleSnapshotExport(t *testing.T) {
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
 	manager := &fakeSandboxOps{}
-	server := newConvertHandlerServer(imgSvc, snapSvc, manager)
+	server := newConvertHandlerServerWithStore(t, imgSvc, snapSvc, manager, state.SandboxRecord{
+		PodSandboxID:   "sandbox-123",
+		ConchSandboxID: "sandbox-123",
+		Namespace:      "team-a",
+		State:          state.SandboxReady,
+	})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/export", bytes.NewBufferString(`{"sandbox_id":"sandbox-123","namespace":"team-a","boot_index_tag":"localhost/conch/snap:latest"}`))

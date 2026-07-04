@@ -85,7 +85,6 @@ SDK 需要通过配置文件指定 conchd 的连接方式和沙箱参数。项�
 sandbox:
   unix_socket: "/var/run/conchd/conchd.sock"   # 优先使用 Unix Socket 连接
   api_url: "http://localhost:4063"              # unix_socket 为空时使用 HTTP 连接
-  sandbox_id: ""                                # 留空则自动生成
 
 snapshot:
   snapshot_id: ""                               # 快照 ID (可选：快照启动)
@@ -124,6 +123,7 @@ sudo conch-sdk-init-config -f     # 强制覆盖已有配置
 ```python
 from conch import Sandbox
 
+sandbox = None
 try:
     sandbox = Sandbox.create()
     print(f"Sandbox created: {sandbox.sandbox_id}")
@@ -138,10 +138,11 @@ try:
     # 执行带参数的系统命令
     result = sandbox.execute(cmd="ls", args=["-l", "/root"])
     print(result)
-except RuntimeError as e:
+except (ValueError, RuntimeError) as e:
     print(f"Error: {e}")
 finally:
-    sandbox.delete()
+    if sandbox is not None:
+        sandbox.delete()
 ```
 
 调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。

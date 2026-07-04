@@ -355,16 +355,20 @@ func TestCreateSandboxIncludesNamespace(t *testing.T) {
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","ip":"192.0.2.2"}`)),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","sandbox_id":"sandbox-123","ip":"192.0.2.2"}`)),
 				Header:     make(http.Header),
 			}, nil
 		}),
 	}
 
-	if err := c.CreateSandbox("rootfs:latest", "sandbox-123", "team-a", DefaultRamMB); err != nil {
+	sandboxID, err := c.CreateSandbox("rootfs:latest", "team-a", DefaultRamMB)
+	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if got.ImageName != "rootfs:latest" || got.SandboxId != "sandbox-123" {
+	if sandboxID != "sandbox-123" {
+		t.Fatalf("sandboxID = %q, want sandbox-123", sandboxID)
+	}
+	if got.ImageName != "rootfs:latest" {
 		t.Fatalf("create request = %#v", got)
 	}
 	if got.Namespace != "team-a" {

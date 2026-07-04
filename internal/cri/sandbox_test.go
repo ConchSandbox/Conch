@@ -23,7 +23,7 @@ type fakeRuntime struct {
 
 func (f *fakeRuntime) CreateSandbox(_ context.Context, req runtimeapi.SandboxCreateOptions) (runtimeapi.SandboxCreateResult, error) {
 	f.createReq = req
-	return runtimeapi.SandboxCreateResult{PodSandboxID: req.PodSandboxID, SandboxID: req.SandboxID, Namespace: req.Namespace}, nil
+	return runtimeapi.SandboxCreateResult{PodSandboxID: "generated-sandbox", SandboxID: "generated-sandbox", Namespace: req.Namespace}, nil
 }
 
 func (f *fakeRuntime) StopSandbox(context.Context, string, string) error {
@@ -68,7 +68,7 @@ func TestRunPodSandboxPassesConchAnnotations(t *testing.T) {
 	runtime := &fakeRuntime{}
 	svc := &service{runtime: runtime}
 
-	_, err := svc.RunPodSandbox(context.Background(), &runtimev1.RunPodSandboxRequest{
+	resp, err := svc.RunPodSandbox(context.Background(), &runtimev1.RunPodSandboxRequest{
 		Config: &runtimev1.PodSandboxConfig{
 			Metadata: &runtimev1.PodSandboxMetadata{
 				Name:      "pod-a",
@@ -89,6 +89,9 @@ func TestRunPodSandboxPassesConchAnnotations(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("RunPodSandbox() error = %v", err)
+	}
+	if resp.GetPodSandboxId() != "generated-sandbox" {
+		t.Fatalf("PodSandboxId = %q, want generated-sandbox", resp.GetPodSandboxId())
 	}
 
 	if runtime.createReq.ImageName != "registry.example.invalid/conch/sandbox:latest" {

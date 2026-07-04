@@ -7,8 +7,8 @@
 ```
 >>> from conch import Sandbox
 >>> sandbox = Sandbox.create()
->>> sandbox.sandbox_id
-'sandbox_a1b2c3d4e5f6'
+>>> sandbox.sandbox_id # Generated and returned by conchd
+'7f3a81c04db249f3a0a197ce5b64d207'
 >>> result = sandbox.execute(cmd="ls", args=["-l", "/root"])
 >>> print(result)
 total 0
@@ -56,13 +56,13 @@ with Sandbox.create() as sbx:
 Sandbox.create(snapshot_id=None, **kwargs) -> Sandbox
 ```
 
-基于镜像或快照创建沙箱。`**kwargs` 可透传所有构造函数参数（如 `image_name`、`vcpu_num`、`ram_mb`、`namespace`、`config_path` 等）。
+基于镜像或快照创建沙箱。`sandbox_id` 由 conchd 生成并写入返回的 `Sandbox` 对象；调用方应将其视为不透明字符串，不依赖固定前缀或格式。其他 `**kwargs` 可透传至构造函数。
 
 **参数：**
 - `snapshot_id` (可选): 从指定快照创建
-- `**kwargs`: 透传至构造函数，参见 [Sandbox 构造函数](#sandbox-构造函数)
+- `**kwargs`: 透传至构造函数，但不接受 `sandbox_id`
 
-**返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
+**返回：** 成功返回 `Sandbox` 对象。参数或本地配置无效时抛出 `ValueError`；请求或 conchd 创建失败时抛出 `RuntimeError`
 
 **示例：**
 ```python
@@ -205,7 +205,7 @@ sbx = Sandbox.create()
 sbx.delete()
 
 # 直接删除指定沙箱
-Sandbox.delete_sandbox("sandbox_abc")
+Sandbox.delete_sandbox("<sandbox_id>")
 ```
 
 ---
@@ -355,7 +355,7 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
 |------|------|------|
 | `unix_socket` | str | Unix socket 路径，默认从配置文件读取 |
 | `api_url` | str | 服务地址，仅当 `unix_socket` 为空时使用 |
-| `sandbox_id` | str | 沙箱 ID，默认自动生成 |
+| `sandbox_id` | str | 已存在沙箱的 ID；`Sandbox.create()` 不接受此参数 |
 | `image_name` | str | 镜像名称 |
 | `namespace` | str | 命名空间 |
 | `snapshot_id` | str | 快照 ID |
@@ -445,7 +445,7 @@ try:
     # 列出文件
     files = sbx.list_files()
     print(f"Files: {files}")
-except RuntimeError as e:
+except (ValueError, RuntimeError) as e:
     print(f"Error: {e}")
 finally:
     if sbx:
@@ -501,7 +501,7 @@ sbx = None
 try:
     sbx = Sandbox.create()
     result = sbx.execute(cmd='invalid_command')
-except RuntimeError as e:
+except (ValueError, RuntimeError) as e:
     print(f"Error: {e}")
 finally:
     if sbx:

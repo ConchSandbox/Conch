@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -109,5 +110,68 @@ func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
 	}
 	if _, err := store.GetNetworkSlot(ctx, slot.SlotKey); err == nil {
 		t.Fatalf("GetNetworkSlot() after delete got nil error")
+	}
+}
+
+func TestReserveSandboxRejectsDuplicateID(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	rec := SandboxRecord{PodSandboxID: "sandbox-1", State: SandboxCreating}
+	if err := store.ReserveSandbox(ctx, rec); err != nil {
+		t.Fatalf("ReserveSandbox() error = %v", err)
+	}
+	if err := store.ReserveSandbox(ctx, rec); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("ReserveSandbox() duplicate error = %v, want ErrAlreadyExists", err)
+	}
+	if _, err := store.TransitionSandbox(ctx, "sandbox-1", SandboxCreating, SandboxReady, &rec); err != nil {
+		t.Fatalf("TransitionSandbox() error = %v", err)
+	}
+}
+
+func TestSandboxPauseAndDeleteTransitions(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.UpsertSandbox(ctx, SandboxRecord{
+		PodSandboxID:   "sandbox-1",
+		ConchSandboxID: "sandbox-1",
+		State:          SandboxReady,
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+
+	rec, err := store.GetSandbox(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if _, err := store.TransitionSandbox(ctx, "sandbox-1", SandboxReady, SandboxPausing, &rec); err != nil {
+		t.Fatalf("TransitionSandbox() to PAUSING error = %v", err)
+	}
+	rec.SnapshotID = "snapshot-1"
+	if _, err := store.TransitionSandbox(ctx, "sandbox-1", SandboxPausing, SandboxStopped, &rec); err != nil {
+		t.Fatalf("TransitionSandbox() pause completion error = %v", err)
+	}
+
+	rec, err = store.GetSandbox(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("GetSandbox() before delete error = %v", err)
+	}
+	if _, err := store.TransitionSandbox(ctx, "sandbox-1", SandboxStopped, SandboxDeleting, &rec); err != nil {
+		t.Fatalf("TransitionSandbox() to DELETING error = %v", err)
+	}
+	if err := store.DeleteSandboxIfState(ctx, "sandbox-1", SandboxDeleting); err != nil {
+		t.Fatalf("DeleteSandboxIfState() error = %v", err)
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetSandbox() after delete error = %v, want ErrNotFound", err)
 	}
 }
