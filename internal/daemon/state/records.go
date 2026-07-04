@@ -1,9 +1,12 @@
 package state
 
 const (
+	SandboxCreating = "CREATING"
 	SandboxReady    = "READY"
 	SandboxNotReady = "NOTREADY"
+	SandboxPausing  = "PAUSING"
 	SandboxStopped  = "STOPPED"
+	SandboxDeleting = "DELETING"
 	SandboxUnknown  = "UNKNOWN"
 
 	NetworkSlotCreating = "CREATING"

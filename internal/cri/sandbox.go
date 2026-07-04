@@ -2,10 +2,7 @@ package cri
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"strconv"
 
 	runtimev1 "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -27,10 +24,6 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 	cfg := req.GetConfig()
 	meta := cfg.GetMetadata()
 	annotations := cfg.GetAnnotations()
-	sandboxID, err := newID()
-	if err != nil {
-		return nil, err
-	}
 
 	imageName := annotations[annotationSandboxImage]
 	useSnapshot := parseBool(annotations[annotationUseSnapshot])
@@ -41,8 +34,6 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 
 	res, err := s.runtime.CreateSandbox(ctx, runtimeapi.SandboxCreateOptions{
 		PodNamespace:   meta.GetNamespace(),
-		PodSandboxID:   sandboxID,
-		SandboxID:      sandboxID,
 		Name:           meta.GetName(),
 		UID:            meta.GetUid(),
 		Attempt:        meta.GetAttempt(),
@@ -60,14 +51,6 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 		return nil, err
 	}
 	return &runtimev1.RunPodSandboxResponse{PodSandboxId: res.PodSandboxID}, nil
-}
-
-func newID() (string, error) {
-	var data [16]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", fmt.Errorf("generate id: %w", err)
-	}
-	return hex.EncodeToString(data[:]), nil
 }
 
 func (s *service) StopPodSandbox(ctx context.Context, req *runtimev1.StopPodSandboxRequest) (*runtimev1.StopPodSandboxResponse, error) {

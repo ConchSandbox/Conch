@@ -50,15 +50,15 @@ type CreateRequest struct {
 	SnapshotId string `json:"snapshot_id,omitempty"`
 	ImageName  string `json:"image_name"`
 	VmmName    string `json:"vmm_name"`
-	SandboxId  string `json:"sandbox_id"`
 	VcpuNum    int64  `json:"vcpu_num"`
 	RamMB      int64  `json:"ram_mb"`
 }
 
 // CreateResponse is the JSON response from sandbox create
 type CreateResponse struct {
-	Status string `json:"status"`
-	IP     string `json:"ip"`
+	Status    string `json:"status"`
+	SandboxID string `json:"sandbox_id"`
+	IP        string `json:"ip"`
 }
 
 // PauseRequest matches Conch SandboxPauseRequest
@@ -294,39 +294,41 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 }
 
 // CreateSandbox calls POST /api/sandbox/create using image_name-based startup.
-func (c *Client) CreateSandbox(rootfsImageName, sandboxID, namespace string, ramMB int64) error {
+func (c *Client) CreateSandbox(rootfsImageName, namespace string, ramMB int64) (string, error) {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
 	}
 	req := CreateRequest{
 		Namespace: strings.TrimSpace(namespace),
 		ImageName: rootfsImageName,
-		SandboxId: sandboxID,
 		VmmName:   defaultVmmName,
 		VcpuNum:   1,
 		RamMB:     ramMB,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshaling create request: %w", err)
+		return "", fmt.Errorf("marshaling create request: %w", err)
 	}
 	resp, err := c.httpClient.Post(c.baseURL+createSandbox, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("POST %s: %w", createSandbox, err)
+		return "", fmt.Errorf("POST %s: %w", createSandbox, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("create sandbox returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("create sandbox returned status %d: %s", resp.StatusCode, string(body))
 	}
 	var cr CreateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		return fmt.Errorf("decoding create response: %w", err)
+		return "", fmt.Errorf("decoding create response: %w", err)
 	}
 	if cr.Status != "ok" {
-		return fmt.Errorf("create sandbox status: %s", cr.Status)
+		return "", fmt.Errorf("create sandbox status: %s", cr.Status)
 	}
-	return nil
+	if cr.SandboxID == "" {
+		return "", fmt.Errorf("create sandbox response missing sandbox_id")
+	}
+	return cr.SandboxID, nil
 }
 
 // PauseSandbox calls POST /api/sandbox/pause, returns the rootfs snapshot name (snapshotId)

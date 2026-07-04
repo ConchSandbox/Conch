@@ -1,11 +1,22 @@
 package state
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var (
+	ErrAlreadyExists = errors.New("state record already exists")
+	ErrStateConflict = errors.New("state transition conflict")
+)
 
 type Store interface {
 	Close() error
 
 	UpsertSandbox(context.Context, SandboxRecord) error
+	ReserveSandbox(context.Context, SandboxRecord) error
+	TransitionSandbox(context.Context, string, string, string, *SandboxRecord) (SandboxRecord, error)
+	DeleteSandboxIfState(context.Context, string, string) error
 	GetSandbox(context.Context, string) (SandboxRecord, error)
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error

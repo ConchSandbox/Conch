@@ -9,11 +9,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	digestpkg "github.com/opencontainers/go-digest"
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -54,6 +55,7 @@ type Service struct {
 	Image            ImageOps
 	Snapshot         SnapshotOps
 	Store            state.Store
+	sandboxStates    sync.Map
 	DefaultNamespace string
 	SandboxDefaults  SandboxDefaults
 }
@@ -78,23 +80,75 @@ func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
 	s.SandboxDefaults = defaults
 }
 
+func (s *Service) setSandboxState(namespace, sandboxID, currentState, nextState string, expectedStates ...string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("sandbox service is not configured")
+	}
+	mapKey := namespace + ":" + sandboxID
+	for {
+		actualState := currentState
+		current, loaded := s.sandboxStates.Load(mapKey)
+		if loaded {
+			if stateValue, ok := current.(string); ok {
+				actualState = stateValue
+			}
+		}
+		allowed := false
+		for _, expectedState := range expectedStates {
+			if actualState == expectedState {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			if actualState == "" {
+				actualState = "ABSENT"
+			}
+			return mapKey, fmt.Errorf("%w: sandbox %s is %s", state.ErrStateConflict, sandboxID, actualState)
+		}
+		if !loaded {
+			current, loaded = s.sandboxStates.LoadOrStore(mapKey, nextState)
+			if !loaded {
+				return mapKey, nil
+			}
+			continue
+		}
+		if s.sandboxStates.CompareAndSwap(mapKey, current, nextState) {
+			return mapKey, nil
+		}
+	}
+}
+
+func (s *Service) HydrateSandboxStates(ctx context.Context) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	records, err := s.Store.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("list sandboxes for guard hydration: %w", err)
+	}
+	for _, rec := range records {
+		switch rec.State {
+		case state.SandboxCreating, state.SandboxPausing, state.SandboxDeleting:
+		default:
+			continue
+		}
+		sandboxID := rec.PodSandboxID
+		if sandboxID == "" {
+			sandboxID = rec.ConchSandboxID
+		}
+		if sandboxID == "" {
+			continue
+		}
+		mapKey := s.normalizeNamespace(rec.Namespace) + ":" + sandboxID
+		s.sandboxStates.Store(mapKey, rec.State)
+	}
+	return nil
+}
+
 func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (SandboxCreateResult, error) {
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
-	}
-	if opts.SandboxID == "" {
-		opts.SandboxID = opts.PodSandboxID
-	}
-	if opts.PodSandboxID == "" {
-		opts.PodSandboxID = opts.SandboxID
-	}
-	if opts.PodSandboxID == "" {
-		id, err := NewID()
-		if err != nil {
-			return SandboxCreateResult{}, err
-		}
-		opts.PodSandboxID = id
-		opts.SandboxID = id
 	}
 	namespace := s.normalizeNamespace(opts.Namespace)
 	if opts.LeaseID == "" {
@@ -106,13 +160,53 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, err
 	}
 
+	var createdAt int64
+	var sandboxID string
+	for {
+		id, err := NewID()
+		if err != nil {
+			return SandboxCreateResult{}, err
+		}
+		sandboxID = id
+		createdAt = time.Now().UnixNano()
+		if s.Store == nil {
+			break
+		}
+		err = s.Store.ReserveSandbox(ctx, state.SandboxRecord{
+			PodSandboxID:   sandboxID,
+			ConchSandboxID: sandboxID,
+			Namespace:      namespace,
+			PodNamespace:   firstNonEmpty(opts.PodNamespace, opts.Namespace),
+			Name:           opts.Name,
+			UID:            opts.UID,
+			Attempt:        opts.Attempt,
+			State:          state.SandboxCreating,
+			CreatedAt:      createdAt,
+			Labels:         copyMap(opts.Labels),
+			Annotations:    copyMap(opts.Annotations),
+			RuntimeHandler: opts.RuntimeHandler,
+			LeaseID:        opts.LeaseID,
+			ImageName:      opts.ImageName,
+			SnapshotID:     opts.SnapshotID,
+			VMMName:        opts.VMMName,
+			VCPUNum:        opts.VCPUNum,
+			RamMB:          opts.RamMB,
+		})
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, state.ErrAlreadyExists) {
+			return SandboxCreateResult{}, fmt.Errorf("reserve sandbox %s: %w", sandboxID, err)
+		}
+	}
+
 	req := sandbox.SandboxCreateRequest{
 		Namespace:   namespace,
 		SnapshotId:  opts.SnapshotID,
 		ImageName:   opts.ImageName,
 		UseSnapshot: opts.UseSnapshot,
 		VmmName:     opts.VMMName,
-		SandboxId:   opts.SandboxID,
+		SandboxId:   sandboxID,
 		LeaseID:     opts.LeaseID,
 		VcpuNum:     opts.VCPUNum,
 		VcpuMax:     opts.VCPUMax,
@@ -120,17 +214,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		AgentToken:  agentToken,
 	}
 
-	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
 	rec := state.SandboxRecord{
-		PodSandboxID:    opts.PodSandboxID,
-		ConchSandboxID:  opts.SandboxID,
+		PodSandboxID:    sandboxID,
+		ConchSandboxID:  sandboxID,
 		Namespace:       namespace,
 		PodNamespace:    firstNonEmpty(opts.PodNamespace, opts.Namespace),
 		Name:            opts.Name,
 		UID:             opts.UID,
 		Attempt:         opts.Attempt,
-		State:           state.SandboxReady,
 		CreatedAt:       createdAt,
 		Labels:          copyMap(opts.Labels),
 		Annotations:     copyMap(opts.Annotations),
@@ -159,24 +251,76 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		SnapshotRootDir: createResult.RootDir,
 	}
 	if err != nil {
-		rec.State = state.SandboxUnknown
+		if s.Store != nil && sandbox.CreateCleanupComplete(err) {
+			deleteErr := s.Store.DeleteSandboxIfState(ctx, sandboxID, state.SandboxCreating)
+			if deleteErr == nil || errors.Is(deleteErr, state.ErrNotFound) {
+				return SandboxCreateResult{}, err
+			}
+			return SandboxCreateResult{}, errors.Join(err, deleteErr)
+		}
 		rec.LastError = err.Error()
-		_ = s.upsertSandbox(ctx, rec)
+		if s.Store != nil {
+			_, transitionErr := s.Store.TransitionSandbox(ctx, sandboxID, state.SandboxCreating, state.SandboxUnknown, &rec)
+			err = errors.Join(err, transitionErr)
+		}
 		return SandboxCreateResult{}, err
 	}
-	if err := s.upsertSandbox(ctx, rec); err != nil {
-		return SandboxCreateResult{}, err
-	}
+	rec.LastError = ""
 	if err := s.upsertSandboxRuntimeState(ctx, rec, createResult); err != nil {
-		return SandboxCreateResult{}, err
+		return SandboxCreateResult{}, errors.Join(err, s.rollbackCreatedSandbox(ctx, namespace, sandboxID))
+	}
+	if s.Store != nil {
+		if _, err := s.Store.TransitionSandbox(ctx, sandboxID, state.SandboxCreating, state.SandboxReady, &rec); err != nil {
+			readyErr := fmt.Errorf("mark sandbox %s ready: %w", sandboxID, err)
+			return SandboxCreateResult{}, errors.Join(readyErr, s.rollbackCreatedSandbox(ctx, namespace, sandboxID))
+		}
 	}
 	return SandboxCreateResult{
-		PodSandboxID: opts.PodSandboxID,
-		SandboxID:    opts.SandboxID,
+		PodSandboxID: sandboxID,
+		SandboxID:    sandboxID,
 		Namespace:    namespace,
 		IP:           createResult.IP,
 		AgentToken:   createResult.AgentToken,
 	}, nil
+}
+
+func (s *Service) rollbackCreatedSandbox(ctx context.Context, namespace, sandboxID string) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	rec, recErr := s.getSandbox(ctx, sandboxID)
+	stateFound := recErr == nil
+	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
+		return fmt.Errorf("get sandbox state: %w", recErr)
+	}
+	if namespace == "" && stateFound {
+		namespace = rec.Namespace
+	}
+	namespace = s.normalizeNamespace(namespace)
+	err := s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
+	runtimeMissing := err != nil && strings.Contains(err.Error(), "not found")
+	if runtimeMissing {
+		err = nil
+		if stateFound {
+			err = terminateRecordedVMM(rec)
+		}
+	}
+	if err == nil {
+		err = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+	}
+	if !stateFound {
+		return err
+	}
+	if err == nil {
+		deleteErr := s.Store.DeleteSandboxIfState(ctx, sandboxID, state.SandboxCreating)
+		if errors.Is(deleteErr, state.ErrNotFound) {
+			return nil
+		}
+		return deleteErr
+	}
+	rec.LastError = err.Error()
+	_, transitionErr := s.Store.TransitionSandbox(ctx, sandboxID, state.SandboxCreating, state.SandboxUnknown, &rec)
+	return errors.Join(err, transitionErr)
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -202,6 +346,10 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 }
 
 func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID string) error {
+	return s.stopSandbox(ctx, namespace, podSandboxID, false)
+}
+
+func (s *Service) stopSandbox(ctx context.Context, namespace, podSandboxID string, removeRecord bool) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
@@ -218,7 +366,26 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
+	currentState := ""
+	if stateFound {
+		currentState = rec.State
+		rec.LastError = ""
+	}
+	mapKey, err := s.setSandboxState(
+		namespace, podSandboxID, currentState, state.SandboxDeleting,
+		state.SandboxReady, state.SandboxNotReady, state.SandboxStopped, state.SandboxUnknown,
+	)
+	if err != nil {
+		return err
+	}
+	defer s.sandboxStates.Delete(mapKey)
+	if stateFound {
+		rec.State = state.SandboxDeleting
+		if err := s.upsertSandbox(ctx, rec); err != nil {
+			return err
+		}
+	}
+	err = s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
 	runtimeMissing := err != nil && strings.Contains(err.Error(), "not found")
 	if runtimeMissing {
 		err = nil
@@ -226,40 +393,54 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 			err = terminateRecordedVMM(rec)
 		}
 	}
-	if err == nil {
-		_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
-	}
 	if !stateFound {
 		return err
+	}
+	if err == nil {
+		err = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
 	}
 	if rec.PodSandboxID == "" {
 		rec.PodSandboxID = podSandboxID
 		rec.ConchSandboxID = sandboxID
 		rec.Namespace = namespace
 	}
-	rec.StoppedAt = time.Now().UnixNano()
-	rec.State = state.SandboxStopped
 	if err != nil {
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
+		if upsertErr := s.upsertSandbox(ctx, rec); upsertErr != nil {
+			return errors.Join(err, upsertErr)
+		}
+		return err
 	}
-	_ = s.upsertSandbox(ctx, rec)
-	return err
+	if removeRecord {
+		if s != nil && s.Store != nil {
+			return s.Store.DeleteSandbox(ctx, podSandboxID)
+		}
+		return nil
+	}
+	rec.StoppedAt = time.Now().UnixNano()
+	rec.State = state.SandboxStopped
+	rec.LastError = ""
+	return s.upsertSandbox(ctx, rec)
 }
 
 func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID string) error {
-	err := s.StopSandbox(ctx, namespace, podSandboxID)
-	if err == nil && s != nil && s.Store != nil {
-		_ = s.Store.DeleteSandbox(ctx, podSandboxID)
-	}
-	return err
+	return s.stopSandbox(ctx, namespace, podSandboxID, true)
 }
 
 func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID string) (string, error) {
 	if s == nil || s.Sandbox == nil {
 		return "", fmt.Errorf("sandbox service is not configured")
 	}
-	rec, _ := s.getSandbox(ctx, podSandboxID)
+	rec, recErr := s.getSandbox(ctx, podSandboxID)
+	stateFound := recErr == nil
+	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
+		return "", fmt.Errorf("failed to get sandbox %s for pause: %w", podSandboxID, recErr)
+	}
+	if stateFound {
+		rec.SnapshotID = ""
+		rec.LastError = ""
+	}
 	sandboxID := rec.ConchSandboxID
 	if sandboxID == "" {
 		sandboxID = podSandboxID
@@ -268,20 +449,50 @@ func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID stri
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	snapshotID, err := s.Sandbox.Pause(sandbox.SandboxPauseRequest{Namespace: namespace, SandboxId: sandboxID})
-	if rec.PodSandboxID != "" {
-		rec.SnapshotID = snapshotID
-		rec.StoppedAt = time.Now().UnixNano()
-		rec.State = state.SandboxStopped
-		if err != nil {
-			rec.State = state.SandboxUnknown
-			rec.LastError = err.Error()
-		} else {
-			_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
-		}
-		_ = s.upsertSandbox(ctx, rec)
+	currentState := ""
+	if stateFound {
+		currentState = rec.State
 	}
-	return snapshotID, err
+	mapKey, err := s.setSandboxState(namespace, podSandboxID, currentState, state.SandboxPausing, state.SandboxReady)
+	if err != nil {
+		return "", err
+	}
+	defer s.sandboxStates.Delete(mapKey)
+	if stateFound {
+		rec.State = state.SandboxPausing
+		if err := s.upsertSandbox(ctx, rec); err != nil {
+			return "", err
+		}
+	}
+	snapshotID, err := s.Sandbox.Pause(sandbox.SandboxPauseRequest{Namespace: namespace, SandboxId: sandboxID})
+	if err == nil && snapshotID == "" {
+		err = fmt.Errorf("pause returned an empty snapshot id")
+	}
+	if !stateFound {
+		return snapshotID, err
+	}
+	if err != nil {
+		rec.State = state.SandboxNotReady
+		rec.LastError = err.Error()
+		if upsertErr := s.upsertSandbox(ctx, rec); upsertErr != nil {
+			return snapshotID, errors.Join(err, upsertErr)
+		}
+		return snapshotID, err
+	}
+	rec.SnapshotID = snapshotID
+	rec.StoppedAt = time.Now().UnixNano()
+	cleanupErr := s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+	if cleanupErr != nil {
+		rec.State = state.SandboxNotReady
+		rec.LastError = cleanupErr.Error()
+		if upsertErr := s.upsertSandbox(ctx, rec); upsertErr != nil {
+			return snapshotID, errors.Join(cleanupErr, upsertErr)
+		}
+		return snapshotID, cleanupErr
+	}
+	rec.State = state.SandboxStopped
+	rec.LastError = ""
+	return snapshotID, s.upsertSandbox(ctx, rec)
 }
 
 func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullImageResult, error) {
@@ -582,6 +793,11 @@ func (s *Service) upsertSandboxRuntimeState(ctx context.Context, rec state.Sandb
 			return err
 		}
 	}
+	if createResult.Resume && rec.ParentMemID != "" && rec.MemMount != "" {
+		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentMemID, common.SnapshotMountMem, rec.MemMount, rec.LeaseID); err != nil {
+			return err
+		}
+	}
 	if createResult.Resume && rec.ParentRootfsID != "" && rec.RootfsMount != "" {
 		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentRootfsID, common.SnapshotMountRootfs, rec.RootfsMount, rec.LeaseID); err != nil {
 			return err
@@ -716,6 +932,9 @@ func terminateRecordedVMM(rec state.SandboxRecord) error {
 		return err
 	}
 	if !matched {
+		if err := syscall.Kill(rec.VMMPID, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("refuse to signal vmm pid %d: process does not match sandbox %s", rec.VMMPID, rec.ConchSandboxID)
 	}
 	if err := syscall.Kill(rec.VMMPID, syscall.SIGTERM); err != nil {
@@ -731,7 +950,7 @@ func recordedVMMProcessMatches(rec state.SandboxRecord) (bool, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", rec.VMMPID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
+			return false, nil
 		}
 		return false, fmt.Errorf("read vmm pid %d cmdline: %w", rec.VMMPID, err)
 	}

@@ -115,6 +115,88 @@ func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error 
 	return s.upsert(ctx, []byte("sandboxes"), rec.PodSandboxID, rec)
 }
 
+func (s *BoltStore) ReserveSandbox(ctx context.Context, rec SandboxRecord) error {
+	return s.updateSandbox(ctx, rec.PodSandboxID, func(current *SandboxRecord) (*SandboxRecord, error) {
+		if current != nil {
+			return nil, fmt.Errorf("%w: %s", ErrAlreadyExists, rec.PodSandboxID)
+		}
+		return &rec, nil
+	})
+}
+
+func (s *BoltStore) TransitionSandbox(
+	ctx context.Context,
+	id, expected, next string,
+	replacement *SandboxRecord,
+) (SandboxRecord, error) {
+	var result SandboxRecord
+	err := s.updateSandbox(ctx, id, func(current *SandboxRecord) (*SandboxRecord, error) {
+		if current == nil {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		if current.State != expected {
+			return nil, fmt.Errorf("%w: sandbox %s is %s, expected %s", ErrStateConflict, id, current.State, expected)
+		}
+		if expected == SandboxCreating && next == SandboxReady && current.LastError != "" {
+			return nil, fmt.Errorf("%w: sandbox %s creation failed: %s", ErrStateConflict, id, current.LastError)
+		}
+		result = *current
+		if replacement != nil {
+			result = *replacement
+		}
+		result.State = next
+		return &result, nil
+	})
+	return result, err
+}
+
+func (s *BoltStore) DeleteSandboxIfState(ctx context.Context, id, expected string) error {
+	return s.updateSandbox(ctx, id, func(current *SandboxRecord) (*SandboxRecord, error) {
+		if current == nil {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		if current.State != expected {
+			return nil, fmt.Errorf("%w: sandbox %s is %s, expected %s", ErrStateConflict, id, current.State, expected)
+		}
+		return nil, nil
+	})
+}
+
+func (s *BoltStore) updateSandbox(_ context.Context, id string, update func(*SandboxRecord) (*SandboxRecord, error)) error {
+	if id == "" {
+		return fmt.Errorf("state key is required")
+	}
+	if update == nil {
+		return fmt.Errorf("sandbox update is required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("sandboxes"))
+		currentData := bucket.Get([]byte(id))
+		var current *SandboxRecord
+		if currentData != nil {
+			current = &SandboxRecord{}
+			if err := json.Unmarshal(currentData, current); err != nil {
+				return fmt.Errorf("unmarshal state record %s: %w", id, err)
+			}
+		}
+		next, err := update(current)
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			return bucket.Delete([]byte(id))
+		}
+		if next.PodSandboxID != id {
+			return fmt.Errorf("sandbox state key mismatch: %s != %s", id, next.PodSandboxID)
+		}
+		data, err := json.Marshal(next)
+		if err != nil {
+			return fmt.Errorf("marshal state record: %w", err)
+		}
+		return bucket.Put([]byte(id), data)
+	})
+}
+
 func (s *BoltStore) GetSandbox(ctx context.Context, id string) (SandboxRecord, error) {
 	var rec SandboxRecord
 	err := s.get(ctx, []byte("sandboxes"), id, &rec)

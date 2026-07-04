@@ -52,6 +52,18 @@ type Sandbox struct {
 	vsockConn    net.Conn
 }
 
+type createResourceCleanupFailure struct {
+	err error
+}
+
+func (e *createResourceCleanupFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e *createResourceCleanupFailure) Unwrap() error {
+	return e.err
+}
+
 func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*Sandbox, error) {
 	if rec.VMMName == "" {
 		return nil, fmt.Errorf("missing vmm name")
@@ -131,7 +143,9 @@ func ResumeSandbox(
 	defer func() {
 		if e != nil {
 			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
-			e = errors.Join(e, cleanupErr)
+			if cleanupErr != nil {
+				e = errors.Join(e, &createResourceCleanupFailure{err: cleanupErr})
+			}
 		}
 	}()
 
@@ -217,7 +231,9 @@ func CreateSandbox(
 	defer func() {
 		if e != nil {
 			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
-			e = errors.Join(e, cleanupErr)
+			if cleanupErr != nil {
+				e = errors.Join(e, &createResourceCleanupFailure{err: cleanupErr})
+			}
 		}
 	}()
 

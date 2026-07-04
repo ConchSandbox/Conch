@@ -22,7 +22,6 @@ import (
 
 type Manager struct {
 	sandboxes          sync.Map
-	lifecycleMu        sync.Mutex
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
 	vsockSignalRetry   time.Duration
@@ -91,6 +90,24 @@ type SandboxCreateResult struct {
 	Resume          bool
 }
 
+type CreateFailure struct {
+	Err             error
+	CleanupComplete bool
+}
+
+func (e *CreateFailure) Error() string {
+	return e.Err.Error()
+}
+
+func (e *CreateFailure) Unwrap() error {
+	return e.Err
+}
+
+func CreateCleanupComplete(err error) bool {
+	var failure *CreateFailure
+	return errors.As(err, &failure) && failure.CleanupComplete
+}
+
 func GenerateAgentToken() (string, error) {
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -136,6 +153,7 @@ type createRuntimeIDs struct {
 func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, err error) {
 	logger := ulog.GetLogger()
 	logger.Debug("creating sandbox in manager")
+	cleanupComplete := true
 
 	if req.AgentToken == "" {
 		return SandboxCreateResult{}, fmt.Errorf("agent token is required")
@@ -144,13 +162,15 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
-
 	namespace, leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
+	defer func() {
+		if err != nil {
+			err = &CreateFailure{Err: err, CleanupComplete: cleanupComplete}
+		}
+	}()
 
 	parentIDs, resume, err := m.prepareParentSnapshots(leaseCtx, namespace, req)
 	if err != nil {
@@ -166,6 +186,8 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 		if err != nil && cidAllocated {
 			if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
 				logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
+				cleanupComplete = false
+				err = errors.Join(err, fmt.Errorf("release CID after create failure: %w", releaseErr))
 			}
 		}
 	}()
@@ -174,16 +196,23 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
-	defer m.removeSnapshotOnCreateFailure(&err, leaseCtx, namespace, runtimeIDs.key)
+	defer m.removeSnapshotOnCreateFailure(&err, &cleanupComplete, leaseCtx, namespace, runtimeIDs.key)
 
 	sbx, err := m.startSandbox(ctx, namespace, req, snapshotConf, runtimeIDs, resume)
 	if err != nil {
-		m.cleanupCreateFailure(sbx, req.SandboxId)
-		return SandboxCreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
+		var cleanupFailure *createResourceCleanupFailure
+		if errors.As(err, &cleanupFailure) {
+			cleanupComplete = false
+		}
+		cleanupErr := m.cleanupCreateFailure(sbx, req.SandboxId)
+		if cleanupErr != nil {
+			cleanupComplete = false
+		}
+		return SandboxCreateResult{}, errors.Join(fmt.Errorf("failed to create sandbox: %w", err), cleanupErr)
 	}
 	sbx.leaseID = leaseID
 
-	m.trackSandbox(ctx, namespace, req.SandboxId, sbx)
+	m.trackSandbox(context.Background(), namespace, req.SandboxId, sbx)
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
@@ -263,7 +292,7 @@ func (m *Manager) prepareSnapshotWorkspace(ctx context.Context, namespace string
 	return snapshotConf, nil
 }
 
-func (m *Manager) removeSnapshotOnCreateFailure(createErr *error, ctx context.Context, namespace, key string) {
+func (m *Manager) removeSnapshotOnCreateFailure(createErr *error, cleanupComplete *bool, ctx context.Context, namespace, key string) {
 	if createErr == nil || *createErr == nil {
 		return
 	}
@@ -271,6 +300,10 @@ func (m *Manager) removeSnapshotOnCreateFailure(createErr *error, ctx context.Co
 	rmErr := snapshot.Remove(ctx, namespace, key)
 	if rmErr != nil {
 		logger.Error("failed to remove snapshot", ulog.F("key", key), ulog.F("error", rmErr))
+		if cleanupComplete != nil {
+			*cleanupComplete = false
+		}
+		*createErr = errors.Join(*createErr, fmt.Errorf("remove snapshot after create failure: %w", rmErr))
 		return
 	}
 	logger.Info("removed snapshot due to error", ulog.F("key", key))
@@ -295,7 +328,7 @@ func (m *Manager) startSandbox(ctx context.Context, namespace string, req Sandbo
 	)
 }
 
-func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
+func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) error {
 	logger := ulog.GetLogger()
 	if sbx != nil {
 		if closeErr := sbx.Close(context.Background()); closeErr != nil {
@@ -303,26 +336,27 @@ func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
 				ulog.F("sandbox_id", sandboxID),
 				ulog.F("error", closeErr),
 			)
+			return fmt.Errorf("close sandbox after create failure: %w", closeErr)
 		}
 	}
+	return nil
 }
 
-func (m *Manager) trackSandbox(ctx context.Context, namespace, sandboxID string, sbx *Sandbox) {
+func (m *Manager) trackSandbox(_ context.Context, namespace, sandboxID string, sbx *Sandbox) {
 	logger := ulog.GetLogger()
 	mapKey := sandboxMapKey(namespace, sandboxID)
+	if sbx == nil {
+		return
+	}
 	m.sandboxes.Store(mapKey, sbx)
 	go func() {
-		waitErr := sbx.Wait(ctx)
+		waitErr := sbx.Wait(context.Background())
 		if waitErr != nil {
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
-
-		m.lifecycleMu.Lock()
-		defer m.lifecycleMu.Unlock()
 		if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
 			return
 		}
-
 		if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
 			logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		}
@@ -392,7 +426,7 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 				continue
 			}
 		}
-		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), sb)
+		m.trackSandbox(context.Background(), rec.Namespace, rec.ConchSandboxID, sb)
 		restoredSandboxIDs[rec.ConchSandboxID] = struct{}{}
 		restored++
 	}
@@ -513,57 +547,35 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	namespace := m.resolveNamespace(req.Namespace)
-	mapKey := sandboxMapKey(namespace, req.SandboxId)
-	m.lifecycleMu.Lock()
-	sbxVal, exists := m.sandboxes.Load(mapKey)
+	value, exists := m.sandboxes.LoadAndDelete(sandboxMapKey(namespace, req.SandboxId))
 	if !exists {
-		m.lifecycleMu.Unlock()
 		return fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
 
-	sbx, ok := sbxVal.(*Sandbox)
+	sbx, ok := value.(*Sandbox)
 	if !ok {
-		m.lifecycleMu.Unlock()
 		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
-
-	if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
-		m.lifecycleMu.Unlock()
-		return nil
-	}
-	m.lifecycleMu.Unlock()
-
 	return m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
 }
 
-func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
+func (m *Manager) Pause(req SandboxPauseRequest) (snapshotID string, retErr error) {
 	logger := ulog.GetLogger()
 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	namespace := m.resolveNamespace(req.Namespace)
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
-
-	sbxVal, exists := m.sandboxes.LoadAndDelete(sandboxMapKey(namespace, req.SandboxId))
+	value, exists := m.sandboxes.LoadAndDelete(sandboxMapKey(namespace, req.SandboxId))
 	if !exists {
 		return "", fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
 
-	sbx, ok := sbxVal.(*Sandbox)
+	sbx, ok := value.(*Sandbox)
 	if !ok {
 		return "", fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
 	}
-
 	leaseCtx := ctx
-	if sbx.leaseID != "" && m.daemonClient != nil {
-		var leaseErr error
-		leaseCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, namespace, sbx.leaseID)
-		if leaseErr != nil {
-			return "", fmt.Errorf("failed to restore runtime lease context: %w", leaseErr)
-		}
-	}
 	defer func() {
 		logger.Info("sandbox stop in pause", ulog.F("sandboxId", req.SandboxId))
 		if err := sbx.Stop(ctx); err != nil {
@@ -580,6 +592,14 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		}
 	}()
 
+	if sbx.leaseID != "" && m.daemonClient != nil {
+		var leaseErr error
+		leaseCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, namespace, sbx.leaseID)
+		if leaseErr != nil {
+			return "", fmt.Errorf("failed to restore runtime lease context: %w", leaseErr)
+		}
+	}
+
 	if err := sbx.Pause(ctx); err != nil {
 		return "", fmt.Errorf("sandbox %s pause failed: %w", req.SandboxId, err)
 	}
@@ -594,17 +614,17 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		return "", fmt.Errorf("failed to stat snapshot %s: %w", key, err)
 	}
 	parent := info.Parent
-	snapshotId, err := snapshot.CalculateSnapshotID(sbx.namespace, key, parent)
+	snapshotID, err = snapshot.CalculateSnapshotID(sbx.namespace, key, parent)
 	if err != nil {
 		return "", fmt.Errorf("failed to calculate snapshot id: %w", err)
 	}
 
-	snapshotId, err = snapshot.Commit(leaseCtx, sbx.namespace, snapshotId, key)
+	snapshotID, err = snapshot.Commit(leaseCtx, sbx.namespace, snapshotID, key)
 	if err != nil {
 		return "", fmt.Errorf("error committing snapshot %s: %v", req.SandboxId, err)
 	}
 
-	return snapshotId, nil
+	return snapshotID, nil
 }
 
 func (m *Manager) CleanupPool() error {

@@ -1,7 +1,6 @@
 sandbox:
   unix_socket: "/var/run/conchd/conchd.sock"      # Preferred: talk to conchd over local Unix socket
   api_url: "http://localhost:4063"                # Fallback: used only when unix_socket is empty
-  sandbox_id: ""                                  # Optional: sandbox ID (default:auto generate)
 
 snapshot:
   snapshot_id: ""                                 # Snapshot ID (default:auto generate)
