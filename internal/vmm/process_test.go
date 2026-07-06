@@ -111,3 +111,24 @@ func TestCreateVmmFdsCleanupRemovesSocket(t *testing.T) {
 		t.Fatalf("socket path still exists after cleanup, stat err = %v", err)
 	}
 }
+
+func TestVmmFdsCleanupNilSafe(t *testing.T) {
+	var fds *VmmFds
+	fds.cleanup()
+}
+
+func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	process := &Process{VmmSocketPath: socketPath}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(socketPath, []byte{}, 0644)
+	}()
+
+	if err := process.waitForVmmSocket(ctx); err != nil {
+		t.Fatalf("waitForVmmSocket() error = %v", err)
+	}
+}

@@ -318,8 +318,8 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	if cfg.Sandbox.DefaultImage != "hub.oepkgs.net/conch/openeuler:odd-x86" {
 		t.Errorf("DefaultConfig().Sandbox.DefaultImage = %q", cfg.Sandbox.DefaultImage)
 	}
-	if cfg.Sandbox.DefaultVMMName != "cloud-hypervisor" {
-		t.Errorf("DefaultConfig().Sandbox.DefaultVMMName = %q", cfg.Sandbox.DefaultVMMName)
+	if cfg.Sandbox.DefaultVMMName != DefaultVMMName {
+		t.Errorf("DefaultConfig().Sandbox.DefaultVMMName = %q, want %q", cfg.Sandbox.DefaultVMMName, DefaultVMMName)
 	}
 	if cfg.Sandbox.DefaultVCPUNum != 2 {
 		t.Errorf("DefaultConfig().Sandbox.DefaultVCPUNum = %d, want 2", cfg.Sandbox.DefaultVCPUNum)

@@ -1,5 +1,6 @@
 from conch import Sandbox
 from conch.config_loader import load_config
+from conch.sandbox import VMM_NAME_KEY
 
 
 def test_create_default(sandbox):
@@ -43,3 +44,15 @@ def test_context_manager():
         assert sbx.sandbox_id is not None
         result = sbx.execute(cmd="echo", args=["hello"])
         assert result.exit_code == 0
+
+
+def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
+    config = load_config()
+    config["image"].pop(VMM_NAME_KEY, None)
+    config["snapshot"].pop(VMM_NAME_KEY, None)
+
+    monkeypatch.setattr("conch.sandbox.load_config", lambda config_path=None: config)
+    sbx = Sandbox(sandbox_id="sandbox-test", image_name=config["image"]["image_name"])
+
+    payload = sbx._build_create_payload()
+    assert payload[VMM_NAME_KEY] == ""

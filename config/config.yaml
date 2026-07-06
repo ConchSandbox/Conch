@@ -62,7 +62,9 @@ sandbox:
   vsock_signal_timeout: 60s
   request_timeout: 60s
   default_image: hub.oepkgs.net/conch/openeuler:odd-x86
-  default_vmm_name: cloud-hypervisor
+  # Hypervisor launched when a create request does not specify vmm_name.
+  # Supported: "cloud-hypervisor", "stratovirt"
+  default_vmm_name: stratovirt
   default_vcpu_num: 2
   default_vcpu_max: 2
   default_ram_mb: 4096

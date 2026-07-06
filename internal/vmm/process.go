@@ -124,6 +124,9 @@ func (f *VmmFds) closeChildFdsInParent() {
 
 // cleanup closes all fds and removes the socket file.
 func (f *VmmFds) cleanup() {
+	if f == nil {
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	closeFd(&f.conchEventFd)
@@ -189,14 +192,17 @@ func NewProcess(
 		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
 	}
 
-	vmmFds, err := createVmmFds(vmmSocketPath)
-	if err != nil {
-		logger.Error("Failed to create vmm fds", ulog.F("error", err))
-		return nil, err
-	}
+	var vmmFds *VmmFds
+	if vmmType == CLHVmmType {
+		vmmFds, err = createVmmFds(vmmSocketPath)
+		if err != nil {
+			logger.Error("Failed to create vmm fds", ulog.F("error", err))
+			return nil, err
+		}
 
-	vmmResourceArgs.EventMonitorFd = vmmFds.clhEventFd
-	vmmResourceArgs.ApiSocketFd = vmmFds.apiSocketFd
+		vmmResourceArgs.EventMonitorFd = vmmFds.clhEventFd
+		vmmResourceArgs.ApiSocketFd = vmmFds.apiSocketFd
+	}
 
 	client, err := newVmmClient(vmmType, vmmSocketPath)
 	if err != nil {
@@ -428,6 +434,27 @@ func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent
 	}
 }
 
+// waitForVmmSocket waits for VMM-managed Unix sockets, such as StratoVirt's QMP
+// socket. Cloud-hypervisor uses a pre-bound fd API socket and does not need this.
+func (p *Process) waitForVmmSocket(ctx context.Context) error {
+	logger := ulog.GetLogger()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", p.VmmSocketPath, ctx.Err())
+		case <-ticker.C:
+			if _, err := os.Stat(p.VmmSocketPath); err == nil {
+				logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
+				return nil
+			}
+		}
+	}
+}
+
 func (p *Process) Create(ctx context.Context) error {
 	logger := ulog.GetLogger()
 
@@ -443,8 +470,15 @@ func (p *Process) Create(ctx context.Context) error {
 	if err := p.waitForSourceEvent(ctx, "vm", EventBooted); err != nil {
 		return err
 	}
-	p.markAPIReady()
 	logger.Info("VM booted, ready for vsock")
+
+	if p.vmmFds == nil {
+		if err := p.waitForVmmSocket(ctx); err != nil {
+			vmmStopErr := p.Stop()
+			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
+		}
+	}
+	p.markAPIReady()
 
 	// check conchd alive
 	err = p.client.CheckDaemonAlive()
@@ -469,8 +503,14 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
-	// With fd-based api socket, no need to wait for api-ready event
-	// The socket is already bound and listening when cloud-hypervisor starts
+	// With fd-based api socket, no need to wait for api-ready event. StratoVirt
+	// creates its QMP socket after process start, so wait before QMP calls.
+	if p.vmmFds == nil {
+		if err := p.waitForVmmSocket(ctx); err != nil {
+			vmmStopErr := p.Stop()
+			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
+		}
+	}
 
 	// preferVNC=false: to achieve fast startup, load memory on demand.
 	err = p.client.LoadSnapshot(snapfilePath, false)

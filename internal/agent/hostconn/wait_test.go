@@ -2,9 +2,14 @@ package hostconn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/pkg/ulog"
+	"golang.org/x/sys/unix"
 )
 
 func TestWaitForVsockAgentReadyReportsTimeout(t *testing.T) {
@@ -12,11 +17,13 @@ func TestWaitForVsockAgentReadyReportsTimeout(t *testing.T) {
 	go func() {
 		conn, err := WaitReady(
 			context.Background(),
-			"sandbox-timeout",
-			"token",
-			t.TempDir()+"/missing.vsock",
-			time.Millisecond,
-			10*time.Millisecond,
+			ReadyOptions{
+				SandboxID:       "sandbox-timeout",
+				AgentToken:      "token",
+				VsockSocketPath: t.TempDir() + "/missing.vsock",
+				Retry:           time.Millisecond,
+				Timeout:         10 * time.Millisecond,
+			},
 		)
 		if conn != nil {
 			_ = conn.Close()
@@ -43,16 +50,46 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 
 	conn, err := WaitReady(
 		ctx,
-		"sandbox-canceled",
-		"token",
-		t.TempDir()+"/missing.vsock",
-		time.Millisecond,
-		time.Second,
+		ReadyOptions{
+			SandboxID:       "sandbox-canceled",
+			AgentToken:      "token",
+			VsockSocketPath: t.TempDir() + "/missing.vsock",
+			Retry:           time.Millisecond,
+			Timeout:         time.Second,
+		},
 	)
 	if conn != nil {
 		_ = conn.Close()
 	}
 	if err == nil || err != context.Canceled {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestValidateAgentReadyAcceptsVersionMismatch(t *testing.T) {
+	if err := validateAgentReady("READY:0.0.0", "sandbox-version", ulog.GetLogger(), ""); err != nil {
+		t.Fatalf("validateAgentReady() error = %v, want nil for version mismatch", err)
+	}
+}
+
+func TestValidateAgentReadyRejectsNotReadyAndUnknown(t *testing.T) {
+	if err := validateAgentReady("NOT_READY", "sandbox-not-ready", ulog.GetLogger(), ""); err == nil {
+		t.Fatal("validateAgentReady(NOT_READY) error = nil, want error")
+	}
+	if err := validateAgentReady("hello", "sandbox-unknown", ulog.GetLogger(), ""); err == nil {
+		t.Fatal("validateAgentReady(unknown) error = nil, want error")
+	}
+}
+
+func TestIsVsockUnsupported(t *testing.T) {
+	if !isVsockUnsupported(unix.EAFNOSUPPORT) {
+		t.Fatal("EAFNOSUPPORT should be unsupported")
+	}
+	if isVsockUnsupported(unix.ENODEV) {
+		t.Fatal("ENODEV should stay retryable")
+	}
+	wrapped := fmt.Errorf("%w: %w", errVsockUnsupported, unix.EAFNOSUPPORT)
+	if !errors.Is(wrapped, errVsockUnsupported) {
+		t.Fatal("wrapped errVsockUnsupported should match errors.Is")
 	}
 }
