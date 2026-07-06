@@ -21,8 +21,7 @@ import (
 )
 
 type Manager struct {
-	sandboxes          sync.Map
-	lifecycleMu        sync.Mutex
+	sandboxes          sync.Map // map[string]*sandboxEntry
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
 	snapshotServer     *snapshot.Server
@@ -30,6 +29,39 @@ type Manager struct {
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
+}
+
+type sandboxLifecycleState uint8
+
+const (
+	sandboxCreating sandboxLifecycleState = iota
+	sandboxReady
+	sandboxPausing
+	sandboxDeleting
+	sandboxExited
+)
+
+func (s sandboxLifecycleState) String() string {
+	switch s {
+	case sandboxCreating:
+		return "creating"
+	case sandboxReady:
+		return "ready"
+	case sandboxPausing:
+		return "pausing"
+	case sandboxDeleting:
+		return "deleting"
+	case sandboxExited:
+		return "exited"
+	default:
+		return "unknown"
+	}
+}
+
+type sandboxEntry struct {
+	mu    sync.Mutex
+	state sandboxLifecycleState
+	sbx   *Sandbox
 }
 
 func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, snapshotServer *snapshot.Server, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
@@ -108,6 +140,44 @@ func sandboxMapKey(namespace, sandboxID string) string {
 	return namespace + ":" + sandboxID
 }
 
+func (m *Manager) reserveSandboxEntry(namespace, sandboxID string) (string, *sandboxEntry, error) {
+	mapKey := sandboxMapKey(namespace, sandboxID)
+	entry := &sandboxEntry{state: sandboxCreating}
+	entry.mu.Lock()
+
+	actual, loaded := m.sandboxes.LoadOrStore(mapKey, entry)
+	if !loaded {
+		return mapKey, entry, nil
+	}
+	entry.mu.Unlock()
+
+	existing, ok := actual.(*sandboxEntry)
+	if !ok {
+		return "", nil, fmt.Errorf("invalid sandbox entry type for %s", sandboxID)
+	}
+	existing.mu.Lock()
+	state := existing.state
+	existing.mu.Unlock()
+	return "", nil, fmt.Errorf("sandbox %s already exists or is %s", sandboxID, state)
+}
+
+func (m *Manager) loadSandboxEntry(mapKey, sandboxID string) (*sandboxEntry, error) {
+	entryVal, exists := m.sandboxes.Load(mapKey)
+	if !exists {
+		return nil, fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	entry, ok := entryVal.(*sandboxEntry)
+	if !ok {
+		return nil, fmt.Errorf("invalid sandbox entry type for %s", sandboxID)
+	}
+	return entry, nil
+}
+
+func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool {
+	actual, ok := m.sandboxes.Load(mapKey)
+	return ok && actual == entry
+}
+
 func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
@@ -149,10 +219,19 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
+	namespace := m.resolveNamespace(req.Namespace)
+	mapKey, entry, err := m.reserveSandboxEntry(namespace, req.SandboxId)
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
+	defer entry.mu.Unlock()
+	defer func() {
+		if err != nil {
+			m.sandboxes.CompareAndDelete(mapKey, entry)
+		}
+	}()
 
-	namespace, leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
+	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, namespace, req)
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
@@ -199,25 +278,26 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	}
 	sbx.leaseID = leaseID
 
-	m.trackSandbox(ctx, namespace, req.SandboxId, sbx)
+	entry.sbx = sbx
+	entry.state = sandboxReady
+	m.trackSandbox(ctx, mapKey, entry, req.SandboxId, sbx)
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
 	return buildSandboxCreateResult(namespace, leaseID, req, sbx, layout, parentIDs, runtimeIDs, resume), nil
 }
 
-func (m *Manager) prepareRuntimeLease(ctx context.Context, req SandboxCreateRequest) (string, context.Context, string, error) {
-	namespace := m.resolveNamespace(req.Namespace)
+func (m *Manager) prepareRuntimeLease(ctx context.Context, namespace string, req SandboxCreateRequest) (context.Context, string, error) {
 	leaseCtx := ctx
 	leaseID := req.LeaseID
 	if m.daemonClient == nil {
-		return namespace, leaseCtx, leaseID, nil
+		return leaseCtx, leaseID, nil
 	}
 	leaseCtx, leaseID, err := m.daemonClient.WithRuntimeLease(ctx, namespace, leaseID)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("failed to ensure runtime lease: %w", err)
+		return nil, "", fmt.Errorf("failed to ensure runtime lease: %w", err)
 	}
-	return namespace, leaseCtx, leaseID, nil
+	return leaseCtx, leaseID, nil
 }
 
 func (m *Manager) prepareParentSnapshots(ctx context.Context, namespace string, req SandboxCreateRequest) (snapshot.ParentSnapshotIDs, bool, error) {
@@ -306,25 +386,28 @@ func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
 	}
 }
 
-func (m *Manager) trackSandbox(ctx context.Context, namespace, sandboxID string, sbx *Sandbox) {
+func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
 	logger := ulog.GetLogger()
-	mapKey := sandboxMapKey(namespace, sandboxID)
-	m.sandboxes.Store(mapKey, sbx)
 	go func() {
 		waitErr := sbx.Wait(ctx)
 		if waitErr != nil {
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
 
-		m.lifecycleMu.Lock()
-		defer m.lifecycleMu.Unlock()
-		if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
+		if !m.isCurrentSandboxEntry(mapKey, entry) {
+			return
+		}
+		if entry.state != sandboxReady || entry.sbx != sbx {
 			return
 		}
 
+		entry.state = sandboxExited
 		if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
 			logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		}
+		m.sandboxes.CompareAndDelete(mapKey, entry)
 	}()
 }
 
@@ -391,7 +474,10 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 				continue
 			}
 		}
-		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), sb)
+		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), &sandboxEntry{
+			state: sandboxReady,
+			sbx:   sb,
+		})
 		restoredSandboxIDs[rec.ConchSandboxID] = struct{}{}
 		restored++
 	}
@@ -513,26 +599,29 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxId)
-	m.lifecycleMu.Lock()
-	sbxVal, exists := m.sandboxes.Load(mapKey)
-	if !exists {
-		m.lifecycleMu.Unlock()
-		return fmt.Errorf("sandbox %s not found", req.SandboxId)
+	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
+	if err != nil {
+		return err
 	}
 
-	sbx, ok := sbxVal.(*Sandbox)
-	if !ok {
-		m.lifecycleMu.Unlock()
-		return fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
-	}
-
-	if !m.sandboxes.CompareAndDelete(mapKey, sbx) {
-		m.lifecycleMu.Unlock()
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
 		return nil
 	}
-	m.lifecycleMu.Unlock()
 
-	return m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
+	if entry.state != sandboxReady {
+		return fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
+	}
+	sbx := entry.sbx
+	if sbx == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
+	}
+
+	entry.state = sandboxDeleting
+	err = m.cleanupSandbox(context.Background(), sbx, req.SandboxId)
+	m.sandboxes.CompareAndDelete(mapKey, entry)
+	return err
 }
 
 func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
@@ -542,24 +631,32 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	defer cancel()
 
 	namespace := m.resolveNamespace(req.Namespace)
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
+	mapKey := sandboxMapKey(namespace, req.SandboxId)
+	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
+	if err != nil {
+		return "", err
+	}
 
-	sbxVal, exists := m.sandboxes.LoadAndDelete(sandboxMapKey(namespace, req.SandboxId))
-	if !exists {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
 		return "", fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
-
-	sbx, ok := sbxVal.(*Sandbox)
-	if !ok {
-		return "", fmt.Errorf("invalid sandbox type for %s", req.SandboxId)
+	if entry.state != sandboxReady {
+		return "", fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
 	}
+	sbx := entry.sbx
+	if sbx == nil {
+		return "", fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
+	}
+	entry.state = sandboxPausing
 
 	leaseCtx := ctx
 	if sbx.leaseID != "" && m.daemonClient != nil {
 		var leaseErr error
 		leaseCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, namespace, sbx.leaseID)
 		if leaseErr != nil {
+			entry.state = sandboxReady
 			return "", fmt.Errorf("failed to restore runtime lease context: %w", leaseErr)
 		}
 	}
@@ -577,6 +674,7 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
 			logger.Warn("failed to release CID after pause", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
 		}
+		m.sandboxes.CompareAndDelete(mapKey, entry)
 	}()
 
 	if err := sbx.Pause(ctx); err != nil {
