@@ -439,17 +439,26 @@ func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent
 func (p *Process) waitForVmmSocket(ctx context.Context) error {
 	logger := ulog.GetLogger()
 
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
+	delay := 2 * time.Millisecond
+	const maxDelay = 100 * time.Millisecond
 	for {
+		if _, err := os.Stat(p.VmmSocketPath); err == nil {
+			logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
+			return nil
+		}
+
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", p.VmmSocketPath, ctx.Err())
-		case <-ticker.C:
-			if _, err := os.Stat(p.VmmSocketPath); err == nil {
-				logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
-				return nil
+		case <-timer.C:
+		}
+
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
 			}
 		}
 	}

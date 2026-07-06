@@ -391,22 +391,10 @@ func (s *StratovirtClient) PauseVM() error {
 	return nil
 }
 
+// StratoVirt resume is driven by "-incoming file:<path>" at process launch.
+// CheckDaemonAlive sends "cont" if the restored VM is paused.
 func (s *StratovirtClient) ResumeVM() error {
-	logger := ulog.GetLogger()
-	logger.Debug("Resuming VM (Stratovirt)")
-
-	status, err := s.queryStatus()
-	if err != nil {
-		logger.Warn("Failed to query VM status before resume", ulog.F("error", err))
-	} else {
-		logger.Debug("VM status before ResumeVM", ulog.F("status", status))
-		if status == "running" {
-			logger.Info("VM is already running, skip resume")
-			return nil
-		}
-	}
-
-	return s.executeQMPCommand("cont", nil)
+	return nil
 }
 
 func (s *StratovirtClient) DeleteVM() error {
@@ -543,26 +531,8 @@ func (s *StratovirtClient) generateSnapshotConfig(snapfilePath string) error {
 	return nil
 }
 
+// StratoVirt consumes the snapshot during process launch via "-incoming file:<path>".
+// There is no separate QMP load-snapshot step here.
 func (s *StratovirtClient) LoadSnapshot(snapfilePath string, preferVNC bool) error {
-	logger := ulog.GetLogger()
-	logger.Info("Loading snapshot (Stratovirt)",
-		ulog.F("path", snapfilePath),
-	)
-
-	status, err := s.queryStatus()
-	if err != nil {
-		logger.Warn("Failed to query VM status before resume", ulog.F("error", err))
-	} else {
-		logger.Debug("VM status before LoadSnapshot", ulog.F("status", status))
-		if status == "running" {
-			logger.Info("VM is already running, skip cont command")
-			return nil
-		}
-	}
-
-	if err := s.executeQMPCommand("cont", nil); err != nil {
-		return fmt.Errorf("failed to resume vm: %w", err)
-	}
-
 	return nil
 }
