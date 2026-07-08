@@ -1,9 +1,11 @@
-package vmm
+package clh
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,8 +14,13 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
+	"time"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -72,12 +79,255 @@ type StartScriptCLHArgs struct {
 type CLHClient struct {
 	vmmType    int
 	socketPath string
+	fds        *VmmFds
 }
 
 func NewCLHClient(vmmType int, socketPath string) *CLHClient {
 	return &CLHClient{
 		vmmType:    vmmType,
 		socketPath: socketPath,
+	}
+}
+
+// Cloud-hypervisor event types.
+const (
+	EventBooted = "booted"
+)
+
+// VmmFds holds file descriptors for communicating with cloud-hypervisor.
+type VmmFds struct {
+	mu           sync.Mutex
+	conchEventFd int
+	clhEventFd   int
+	apiSocketFd  int
+	socketPath   string // for cleanup
+}
+
+func closeFd(fd *int) {
+	if *fd > 0 {
+		_ = unix.Close(*fd)
+		*fd = 0
+	}
+}
+
+// closeChildFdsInParent closes the parent's copies of the descriptors inherited
+// by cloud-hypervisor. The child process keeps its copies after Start.
+func (f *VmmFds) closeChildFdsInParent() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	closeFd(&f.clhEventFd)
+	closeFd(&f.apiSocketFd)
+}
+
+// cleanup closes all fds and removes the socket file.
+func (f *VmmFds) cleanup() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	closeFd(&f.conchEventFd)
+	closeFd(&f.clhEventFd)
+	closeFd(&f.apiSocketFd)
+	if f.socketPath != "" {
+		_ = unix.Unlink(f.socketPath)
+		f.socketPath = ""
+	}
+}
+
+// createVmmFds creates file descriptors needed for cloud-hypervisor communication:
+// - event-monitor socketpair
+// - api-socket unix socket (bind + listen)
+func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
+	vmmFds := &VmmFds{socketPath: vmmSocketPath}
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		vmmFds.cleanup()
+		return nil, fmt.Errorf("failed to create socketpair: %w", err)
+	}
+	vmmFds.conchEventFd = fds[0]
+	vmmFds.clhEventFd = fds[1]
+
+	// Set conchd fd to close-on-exec (cloud-hypervisor fd should NOT be close-on-exec).
+	unix.CloseOnExec(vmmFds.conchEventFd)
+
+	vmmFds.apiSocketFd, err = unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		vmmFds.cleanup()
+		return nil, fmt.Errorf("failed to create api socket: %w", err)
+	}
+
+	sockAddr := &unix.SockaddrUnix{Name: vmmSocketPath}
+	if err := unix.Bind(vmmFds.apiSocketFd, sockAddr); err != nil {
+		vmmFds.cleanup()
+		return nil, fmt.Errorf("failed to bind api socket: %w", err)
+	}
+	if err := unix.Listen(vmmFds.apiSocketFd, 1); err != nil {
+		vmmFds.cleanup()
+		return nil, fmt.Errorf("failed to listen on api socket: %w", err)
+	}
+
+	return vmmFds, nil
+}
+
+func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs) error {
+	fds, err := createVmmFds(c.socketPath)
+	if err != nil {
+		return err
+	}
+	c.fds = fds
+	args.EventMonitorFd = fds.clhEventFd
+	args.ApiSocketFd = fds.apiSocketFd
+	return nil
+}
+
+func (c *CLHClient) AfterProcessStart() {
+	if c.fds != nil {
+		c.fds.closeChildFdsInParent()
+	}
+}
+
+func (c *CLHClient) Cleanup() {
+	if c.fds != nil {
+		c.fds.cleanup()
+	}
+}
+
+func (c *CLHClient) WaitForCreateReady(ctx context.Context, processExited <-chan error) error {
+	return c.waitForSourceEvent(ctx, "vm", EventBooted)
+}
+
+func (c *CLHClient) WaitForResumeReady(ctx context.Context, processExited <-chan error) error {
+	return nil
+}
+
+// waitForSourceEvent waits for a specific event from a specific source.
+func (c *CLHClient) waitForSourceEvent(ctx context.Context, source, eventName string) error {
+	if c.fds == nil || c.fds.conchEventFd <= 0 {
+		return nil
+	}
+
+	logger := ulog.GetLogger()
+	logger.Info("Waiting for VM event", ulog.F("event_fd", c.fds.conchEventFd), ulog.F("source", source), ulog.F("event", eventName))
+	if err := waitVmReadyFd(ctx, c.fds.conchEventFd, source, eventName); err != nil {
+		return fmt.Errorf("error waiting for %s/%s event: %w", source, eventName, err)
+	}
+
+	return nil
+}
+
+// CloudHypervisorEvent represents an event from cloud-hypervisor event-monitor.
+type CloudHypervisorEvent struct {
+	Timestamp interface{} `json:"timestamp"`
+	Source    string      `json:"source"`
+	Event     string      `json:"event"`
+}
+
+type cloudHypervisorEventParser struct {
+	pending []byte
+}
+
+func (p *cloudHypervisorEventParser) parse(chunk []byte) ([]CloudHypervisorEvent, error) {
+	p.pending = append(p.pending, chunk...)
+
+	var parsed []CloudHypervisorEvent
+	decoder := json.NewDecoder(bytes.NewReader(p.pending))
+	for {
+		var event CloudHypervisorEvent
+		err := decoder.Decode(&event)
+		if err == nil {
+			parsed = append(parsed, event)
+			continue
+		}
+
+		consumed := int(decoder.InputOffset())
+		switch {
+		case errors.Is(err, io.EOF):
+			p.pending = bytes.TrimLeft(p.pending[consumed:], " \t\r\n")
+			return parsed, nil
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			p.pending = bytes.TrimLeft(p.pending[consumed:], " \t\r\n")
+			return parsed, nil
+		default:
+			return parsed, fmt.Errorf("decode event monitor payload: %w", err)
+		}
+	}
+}
+
+func (p *cloudHypervisorEventParser) readFromFd(eventFd int, buf []byte) ([]CloudHypervisorEvent, error) {
+	readN, readErr := unix.Read(eventFd, buf)
+	if readN <= 0 {
+		if readErr == unix.EAGAIN || readErr == unix.EWOULDBLOCK {
+			return nil, nil
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read error: %w", readErr)
+		}
+		return nil, io.EOF
+	}
+	return p.parse(buf[:readN])
+}
+
+// parseEventsFromFd reads and parses JSON events from a file descriptor.
+// It returns all parsed events or an error if parsing fails.
+func parseEventsFromFd(eventFd int, buf []byte) ([]CloudHypervisorEvent, error) {
+	var parser cloudHypervisorEventParser
+	return parser.readFromFd(eventFd, buf)
+}
+
+// waitVmReadyFd waits for the VM to be ready by reading events from fd.
+// It watches for the specified event which indicates the VM has started successfully.
+func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent string) error {
+	epollFd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
+	if err != nil {
+		return fmt.Errorf("failed to create epoll: %w", err)
+	}
+	defer unix.Close(epollFd)
+
+	epollEvent := unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(eventFd)}
+	if err := unix.EpollCtl(epollFd, unix.EPOLL_CTL_ADD, eventFd, &epollEvent); err != nil {
+		return fmt.Errorf("failed to add event fd to epoll: %w", err)
+	}
+
+	events := make([]unix.EpollEvent, 1)
+	buf := make([]byte, 4096)
+	var parser cloudHypervisorEventParser
+
+	for {
+		if ctx.Err() != nil {
+			return fmt.Errorf("cancelled waiting for VM ready: %w", ctx.Err())
+		}
+
+		timeoutMs := -1 // -1 means wait indefinitely
+		if deadline, ok := ctx.Deadline(); ok {
+			timeoutMs = int(time.Until(deadline).Milliseconds())
+			if timeoutMs <= 0 {
+				return fmt.Errorf("timeout waiting for VM ready event")
+			}
+		}
+
+		n, err := unix.EpollWait(epollFd, events, timeoutMs)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return fmt.Errorf("epoll wait error: %w", err)
+		}
+
+		if n == 0 {
+			return fmt.Errorf("timeout waiting for VM ready event")
+		}
+
+		clhEvents, err := parser.readFromFd(eventFd, buf)
+		if err != nil {
+			return err
+		}
+		for _, event := range clhEvents {
+			if event.Source == waitForSource && event.Event == waitForEvent {
+				return nil
+			}
+		}
 	}
 }
 
@@ -108,7 +358,7 @@ func buildRequest(method, fullCommand, requestBody string) string {
 	return request
 }
 
-func (clh *CLHClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, error) {
+func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
 	logger := ulog.GetLogger()
 
 	vmmBinaryPath := defaultVmmBinary

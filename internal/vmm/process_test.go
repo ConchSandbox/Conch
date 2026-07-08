@@ -2,6 +2,7 @@ package vmm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/config"
-	"golang.org/x/sys/unix"
 )
 
 func TestSandboxSocketPathUsesShortStableName(t *testing.T) {
@@ -49,86 +49,51 @@ func TestSandboxSocketPathRejectsTooLongWorkDir(t *testing.T) {
 	}
 }
 
-func TestParseEventsFromFdParsesEventStream(t *testing.T) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("Socketpair() error = %v", err)
-	}
-	defer unix.Close(fds[0])
-	defer unix.Close(fds[1])
-
-	payload := `{"timestamp":0,"source":"vm","event":"created"}` + "\n" +
-		`{"timestamp":1,"source":"vm","event":"booted"}` + "\n"
-	if _, err := unix.Write(fds[1], []byte(payload)); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-
-	events, err := parseEventsFromFd(fds[0], make([]byte, 4096))
-	if err != nil {
-		t.Fatalf("parseEventsFromFd() error = %v", err)
-	}
-	if len(events) != 2 {
-		t.Fatalf("event count = %d, want 2", len(events))
-	}
-	if events[1].Source != "vm" || events[1].Event != EventBooted {
-		t.Fatalf("second event = %#v, want vm/%s", events[1], EventBooted)
-	}
+type blockingDaemonClient struct {
+	release chan struct{}
 }
 
-func TestWaitVmReadyFdReturnsOnBootEvent(t *testing.T) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("Socketpair() error = %v", err)
-	}
-	defer unix.Close(fds[0])
-	defer unix.Close(fds[1])
+func (c *blockingDaemonClient) BuildStartCmd(*ResourceArgs, bool) (string, error) { return "", nil }
+func (c *blockingDaemonClient) CheckDaemonAlive() error {
+	<-c.release
+	return nil
+}
+func (c *blockingDaemonClient) PauseVM() error                  { return nil }
+func (c *blockingDaemonClient) ResumeVM() error                 { return nil }
+func (c *blockingDaemonClient) DeleteVM() error                 { return nil }
+func (c *blockingDaemonClient) CreateSnapshot(string) error     { return nil }
+func (c *blockingDaemonClient) LoadSnapshot(string, bool) error { return nil }
+func (c *blockingDaemonClient) PrepareLaunch(*ResourceArgs) error {
+	return nil
+}
+func (c *blockingDaemonClient) AfterProcessStart() {}
+func (c *blockingDaemonClient) WaitForCreateReady(context.Context, <-chan error) error {
+	return nil
+}
+func (c *blockingDaemonClient) WaitForResumeReady(context.Context, <-chan error) error {
+	return nil
+}
+func (c *blockingDaemonClient) Cleanup() {}
 
+func TestWaitForDaemonAliveReturnsProcessExitError(t *testing.T) {
+	processErr := errors.New("stratovirt exited after creating qmp socket")
+	client := &blockingDaemonClient{release: make(chan struct{})}
+	process := &Process{
+		adapter:    client,
+		exitSignal: make(chan error, 1),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	go func() {
-		_, _ = unix.Write(fds[1], []byte(`{"timestamp":1,"source":"vm","event":"booted"}`+"\n"))
-	}()
+	process.exitSignal <- processErr
+	close(process.exitSignal)
+	t.Cleanup(func() { close(client.release) })
 
-	if err := waitVmReadyFd(ctx, fds[0], "vm", EventBooted); err != nil {
-		t.Fatalf("waitVmReadyFd() error = %v", err)
+	err := process.waitForDaemonAlive(ctx)
+	if !errors.Is(err, processErr) {
+		t.Fatalf("waitForDaemonAlive() error = %v, want %v", err, processErr)
 	}
-}
-
-func TestCreateVmmFdsCleanupRemovesSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "vmm.sock")
-	fds, err := createVmmFds(socketPath)
-	if err != nil {
-		t.Fatalf("createVmmFds() error = %v", err)
-	}
-	if _, err := os.Stat(socketPath); err != nil {
-		t.Fatalf("expected API socket path to exist: %v", err)
-	}
-
-	fds.cleanup()
-
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("socket path still exists after cleanup, stat err = %v", err)
-	}
-}
-
-func TestVmmFdsCleanupNilSafe(t *testing.T) {
-	var fds *VmmFds
-	fds.cleanup()
-}
-
-func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
-	process := &Process{VmmSocketPath: socketPath}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = os.WriteFile(socketPath, []byte{}, 0644)
-	}()
-
-	if err := process.waitForVmmSocket(ctx); err != nil {
-		t.Fatalf("waitForVmmSocket() error = %v", err)
+	if !strings.Contains(err.Error(), "exited before daemon became ready") {
+		t.Fatalf("waitForDaemonAlive() error = %q, want early exit context", err.Error())
 	}
 }

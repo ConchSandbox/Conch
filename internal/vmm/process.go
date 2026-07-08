@@ -4,19 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -24,11 +19,6 @@ import (
 
 const SocketDirPerm = 0755
 const unixSocketPathMax = 107
-
-// Cloud-hypervisor event types
-const (
-	EventBooted = "booted"
-)
 
 // EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
 func EnsureWorkSubDir(subDir string) (string, error) {
@@ -64,14 +54,10 @@ type Process struct {
 	attached        bool
 	VmmSocketPath   string
 	VsockSocketPath string
-	vmmFds          *VmmFds
 	apiReadyMu      sync.Mutex
 	apiReady        bool
-	rootfsPaths     []string
-	kernelPath      string
-	initrdPath      string
 	// Exit *utils.SetOnce[struct{}]
-	client     vmmClient
+	adapter    vmmAdapter
 	exitSignal chan error
 }
 
@@ -91,89 +77,6 @@ func (p *Process) isAPIReady() bool {
 	return p.apiReady
 }
 
-func (p *Process) cleanupVmmFds() {
-	if p.vmmFds != nil {
-		p.vmmFds.cleanup()
-	}
-}
-
-// VmmFds holds file descriptors for communicating with cloud-hypervisor
-type VmmFds struct {
-	mu           sync.Mutex
-	conchEventFd int
-	clhEventFd   int
-	apiSocketFd  int
-	socketPath   string // for cleanup
-}
-
-func closeFd(fd *int) {
-	if *fd > 0 {
-		_ = unix.Close(*fd)
-		*fd = 0
-	}
-}
-
-// closeChildFdsInParent closes the parent's copies of the descriptors inherited
-// by cloud-hypervisor. The child process keeps its copies after Start.
-func (f *VmmFds) closeChildFdsInParent() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	closeFd(&f.clhEventFd)
-	closeFd(&f.apiSocketFd)
-}
-
-// cleanup closes all fds and removes the socket file.
-func (f *VmmFds) cleanup() {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	closeFd(&f.conchEventFd)
-	closeFd(&f.clhEventFd)
-	closeFd(&f.apiSocketFd)
-	if f.socketPath != "" {
-		_ = unix.Unlink(f.socketPath)
-		f.socketPath = ""
-	}
-}
-
-// createVmmFds creates file descriptors needed for cloud-hypervisor communication:
-// - event-monitor socketpair
-// - api-socket unix socket (bind + listen)
-func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
-	vmmFds := &VmmFds{socketPath: vmmSocketPath}
-
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		vmmFds.cleanup()
-		return nil, fmt.Errorf("failed to create socketpair: %w", err)
-	}
-	vmmFds.conchEventFd = fds[0]
-	vmmFds.clhEventFd = fds[1]
-
-	// Set conchd fd to close-on-exec (cloud-hypervisor fd should NOT be close-on-exec)
-	unix.CloseOnExec(vmmFds.conchEventFd)
-
-	vmmFds.apiSocketFd, err = unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		vmmFds.cleanup()
-		return nil, fmt.Errorf("failed to create api socket: %w", err)
-	}
-
-	sockAddr := &unix.SockaddrUnix{Name: vmmSocketPath}
-	if err := unix.Bind(vmmFds.apiSocketFd, sockAddr); err != nil {
-		vmmFds.cleanup()
-		return nil, fmt.Errorf("failed to bind api socket: %w", err)
-	}
-	if err := unix.Listen(vmmFds.apiSocketFd, 1); err != nil {
-		vmmFds.cleanup()
-		return nil, fmt.Errorf("failed to listen on api socket: %w", err)
-	}
-
-	return vmmFds, nil
-}
-
 func NewProcess(
 	vmmName, sandboxId string,
 	vmmResourceArgs *ResourceArgs, isResume bool,
@@ -186,60 +89,43 @@ func NewProcess(
 		return nil, err
 	}
 
-	vmmType, exists := GetVmmType(vmmName)
-	if !exists {
-		logger.Error("Invalid VMM type", ulog.F("vmm_name", vmmName))
-		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
-	}
-
-	var vmmFds *VmmFds
-	if vmmType == CLHVmmType {
-		vmmFds, err = createVmmFds(vmmSocketPath)
-		if err != nil {
-			logger.Error("Failed to create vmm fds", ulog.F("error", err))
-			return nil, err
-		}
-
-		vmmResourceArgs.EventMonitorFd = vmmFds.clhEventFd
-		vmmResourceArgs.ApiSocketFd = vmmFds.apiSocketFd
-	}
-
-	client, err := newVmmClient(vmmType, vmmSocketPath)
+	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
 	if err != nil {
-		logger.Error("Failed to create VMM client", ulog.F("error", err))
-		vmmFds.cleanup()
+		logger.Error("Failed to create VMM adapter", ulog.F("error", err))
+		return nil, err
+	}
+
+	if err := adapter.PrepareLaunch(vmmResourceArgs); err != nil {
+		logger.Error("Failed to prepare VMM launch", ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, err
 	}
 
 	p := Process{
 		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
-		vmmFds:          vmmFds,
 		VmmSocketPath:   vmmSocketPath,
-		rootfsPaths:     vmmResourceArgs.PmemPaths,
-		kernelPath:      vmmResourceArgs.KernelPath,
-		initrdPath:      vmmResourceArgs.InitrdPath,
-		client:          client,
+		adapter:         adapter,
 		exitSignal:      make(chan error, 1),
 	}
 
-	startScript, err := client.BuildStartCmd(vmmResourceArgs, isResume)
+	startScript, err := adapter.BuildStartCmd(vmmResourceArgs, isResume)
 	if err != nil {
 		logger.Error("Failed to build start command", ulog.F("error", err))
-		vmmFds.cleanup()
+		adapter.Cleanup()
 		return nil, fmt.Errorf("failed to Build Start Cmd: %w", err)
 	}
 
-	_, err = os.Stat(p.kernelPath)
+	_, err = os.Stat(vmmResourceArgs.KernelPath)
 	if err != nil {
-		logger.Error("Error stating kernel file", ulog.F("path", p.kernelPath), ulog.F("error", err))
-		vmmFds.cleanup()
+		logger.Error("Error stating kernel file", ulog.F("path", vmmResourceArgs.KernelPath), ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, fmt.Errorf("error stating kernel file: %w", err)
 	}
 
-	_, err = os.Stat(p.initrdPath)
+	_, err = os.Stat(vmmResourceArgs.InitrdPath)
 	if err != nil {
-		logger.Error("Error stating disk file", ulog.F("path", p.initrdPath), ulog.F("error", err))
-		vmmFds.cleanup()
+		logger.Error("Error stating disk file", ulog.F("path", vmmResourceArgs.InitrdPath), ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, fmt.Errorf("error stating disk file: %w", err)
 	}
 
@@ -254,11 +140,7 @@ func NewProcess(
 }
 
 func NewAttachedProcess(vmmName, vmmSocketPath, vsockSocketPath string, pid int) (*Process, error) {
-	vmmType, exists := GetVmmType(vmmName)
-	if !exists {
-		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
-	}
-	client, err := newVmmClient(vmmType, vmmSocketPath)
+	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
 	if err != nil {
 		return nil, err
 	}
@@ -269,44 +151,9 @@ func NewAttachedProcess(vmmName, vmmSocketPath, vsockSocketPath string, pid int)
 		VmmSocketPath:   vmmSocketPath,
 		VsockSocketPath: vsockSocketPath,
 		apiReady:        true,
-		client:          client,
+		adapter:         adapter,
 		exitSignal:      make(chan error, 1),
 	}, nil
-}
-
-// CloudHypervisorEvent represents an event from cloud-hypervisor event-monitor
-type CloudHypervisorEvent struct {
-	Timestamp interface{} `json:"timestamp"`
-	Source    string      `json:"source"`
-	Event     string      `json:"event"`
-}
-
-// parseEventsFromFd reads and parses JSON events from a file descriptor.
-// It returns all parsed events or an error if parsing fails.
-func parseEventsFromFd(eventFd int, buf []byte) ([]CloudHypervisorEvent, error) {
-	readN, readErr := unix.Read(eventFd, buf)
-	if readN <= 0 {
-		if readErr == unix.EAGAIN || readErr == unix.EWOULDBLOCK {
-			return nil, nil
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read error: %w", readErr)
-		}
-		return nil, io.EOF
-	}
-
-	var events []CloudHypervisorEvent
-	decoder := json.NewDecoder(strings.NewReader(string(buf[:readN])))
-	for {
-		var event CloudHypervisorEvent
-		if err := decoder.Decode(&event); err != nil {
-			if errors.Is(err, io.EOF) {
-				return events, nil
-			}
-			return events, fmt.Errorf("decode event monitor payload: %w", err)
-		}
-		events = append(events, event)
-	}
 }
 
 func (p *Process) startCmd(
@@ -324,13 +171,11 @@ func (p *Process) startCmd(
 		logger.Error("Error starting VMM process",
 			ulog.F("error", err),
 		)
-		p.cleanupVmmFds()
+		p.adapter.Cleanup()
 		return fmt.Errorf("error starting vmm process: %w", err)
 	}
 
-	if p.vmmFds != nil {
-		p.vmmFds.closeChildFdsInParent()
-	}
+	p.adapter.AfterProcessStart()
 
 	go func() {
 		// TODO: close fd after redirecting stderr/stdout
@@ -362,105 +207,22 @@ func (p *Process) startCmd(
 	return nil
 }
 
-// waitForSourceEvent waits for a specific event from a specific source.
-// It stops the VMM process if waiting fails.
-func (p *Process) waitForSourceEvent(ctx context.Context, source, eventName string) error {
-	if p.vmmFds == nil || p.vmmFds.conchEventFd <= 0 {
-		return nil
-	}
+func (p *Process) waitForDaemonAlive(ctx context.Context) error {
+	checkDone := make(chan error, 1)
+	go func() {
+		checkDone <- p.adapter.CheckDaemonAlive()
+	}()
 
-	logger := ulog.GetLogger()
-	logger.Info("Waiting for VM event", ulog.F("event_fd", p.vmmFds.conchEventFd), ulog.F("source", source), ulog.F("event", eventName))
-	err := waitVmReadyFd(ctx, p.vmmFds.conchEventFd, source, eventName)
-	if err != nil {
-		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error waiting for %s/%s event: %w", source, eventName, err), vmmStopErr)
-	}
-
-	return nil
-}
-
-// waitVmReadyFd waits for the VM to be ready by reading events from fd.
-// It watches for the specified event which indicates the VM has started successfully.
-func waitVmReadyFd(ctx context.Context, eventFd int, waitForSource, waitForEvent string) error {
-	epollFd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
-	if err != nil {
-		return fmt.Errorf("failed to create epoll: %w", err)
-	}
-	defer unix.Close(epollFd)
-
-	epollEvent := unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(eventFd)}
-	if err := unix.EpollCtl(epollFd, unix.EPOLL_CTL_ADD, eventFd, &epollEvent); err != nil {
-		return fmt.Errorf("failed to add event fd to epoll: %w", err)
-	}
-
-	events := make([]unix.EpollEvent, 1)
-	buf := make([]byte, 4096)
-
-	for {
-		if ctx.Err() != nil {
-			return fmt.Errorf("cancelled waiting for VM ready: %w", ctx.Err())
+	select {
+	case err := <-checkDone:
+		return err
+	case waitErr, ok := <-p.exitSignal:
+		if !ok || waitErr == nil {
+			return fmt.Errorf("vmm process exited before daemon became ready")
 		}
-
-		timeoutMs := -1 // -1 means wait indefinitely
-		if deadline, ok := ctx.Deadline(); ok {
-			timeoutMs = int(time.Until(deadline).Milliseconds())
-			if timeoutMs <= 0 {
-				return fmt.Errorf("timeout waiting for VM ready event")
-			}
-		}
-
-		n, err := unix.EpollWait(epollFd, events, timeoutMs)
-		if err != nil {
-			if err == unix.EINTR {
-				continue
-			}
-			return fmt.Errorf("epoll wait error: %w", err)
-		}
-
-		if n == 0 {
-			return fmt.Errorf("timeout waiting for VM ready event")
-		}
-
-		clhEvents, err := parseEventsFromFd(eventFd, buf)
-		if err != nil {
-			return err
-		}
-		for _, event := range clhEvents {
-			if event.Source == waitForSource && event.Event == waitForEvent {
-				return nil
-			}
-		}
-	}
-}
-
-// waitForVmmSocket waits for VMM-managed Unix sockets, such as StratoVirt's QMP
-// socket. Cloud-hypervisor uses a pre-bound fd API socket and does not need this.
-func (p *Process) waitForVmmSocket(ctx context.Context) error {
-	logger := ulog.GetLogger()
-
-	delay := 2 * time.Millisecond
-	const maxDelay = 100 * time.Millisecond
-	for {
-		if _, err := os.Stat(p.VmmSocketPath); err == nil {
-			logger.Debug("VMM socket ready", ulog.F("socket", p.VmmSocketPath))
-			return nil
-		}
-
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", p.VmmSocketPath, ctx.Err())
-		case <-timer.C:
-		}
-
-		if delay < maxDelay {
-			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
-			}
-		}
+		return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
+	case <-ctx.Done():
+		return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
 	}
 }
 
@@ -474,23 +236,14 @@ func (p *Process) Create(ctx context.Context) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
-	// Wait for VM boot event
-	logger.Info("Waiting for VM boot event")
-	if err := p.waitForSourceEvent(ctx, "vm", EventBooted); err != nil {
-		return err
-	}
-	logger.Info("VM booted, ready for vsock")
-
-	if p.vmmFds == nil {
-		if err := p.waitForVmmSocket(ctx); err != nil {
-			vmmStopErr := p.Stop()
-			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
-		}
+	if err := p.adapter.WaitForCreateReady(ctx, p.exitSignal); err != nil {
+		vmmStopErr := p.Stop()
+		return errors.Join(fmt.Errorf("error waiting for vmm create readiness: %w", err), vmmStopErr)
 	}
 	p.markAPIReady()
 
 	// check conchd alive
-	err = p.client.CheckDaemonAlive()
+	err = p.waitForDaemonAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
@@ -512,31 +265,27 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
-	// With fd-based api socket, no need to wait for api-ready event. StratoVirt
-	// creates its QMP socket after process start, so wait before QMP calls.
-	if p.vmmFds == nil {
-		if err := p.waitForVmmSocket(ctx); err != nil {
-			vmmStopErr := p.Stop()
-			return errors.Join(fmt.Errorf("error waiting for vmm socket: %w", err), vmmStopErr)
-		}
+	if err := p.adapter.WaitForResumeReady(ctx, p.exitSignal); err != nil {
+		vmmStopErr := p.Stop()
+		return errors.Join(fmt.Errorf("error waiting for vmm resume readiness: %w", err), vmmStopErr)
 	}
 
 	// preferVNC=false: to achieve fast startup, load memory on demand.
-	err = p.client.LoadSnapshot(snapfilePath, false)
+	err = p.adapter.LoadSnapshot(snapfilePath, false)
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error loading snapshot: %w", err), vmmStopErr)
 	}
 	p.markAPIReady()
 
-	err = p.client.ResumeVM()
+	err = p.adapter.ResumeVM()
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
 	}
 
 	// check conchd alive
-	err = p.client.CheckDaemonAlive()
+	err = p.waitForDaemonAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
@@ -563,7 +312,7 @@ func (p *Process) Stop() error {
 		if p.attached {
 			if p.isAPIReady() {
 				if _, err := os.Stat(p.VmmSocketPath); err == nil {
-					if deleteErr := p.client.DeleteVM(); deleteErr != nil {
+					if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
 						errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
 					}
 				}
@@ -577,7 +326,7 @@ func (p *Process) Stop() error {
 			}
 			return errors.Join(errs...)
 		}
-		p.cleanupVmmFds()
+		p.adapter.Cleanup()
 		logger.Warn("VMM process not started")
 		return fmt.Errorf("vmm process not started")
 	}
@@ -585,14 +334,14 @@ func (p *Process) Stop() error {
 	select {
 	case <-p.exitSignal:
 		// Already exited
-		p.cleanupVmmFds()
+		p.adapter.Cleanup()
 		return errors.Join(errs...)
 	default:
 	}
 
 	if p.isAPIReady() {
 		if _, err := os.Stat(p.VmmSocketPath); err == nil {
-			if deleteErr := p.client.DeleteVM(); deleteErr != nil {
+			if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
 				errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
 			}
 		}
@@ -623,7 +372,7 @@ func (p *Process) Stop() error {
 	)
 
 	<-p.exitSignal
-	p.cleanupVmmFds()
+	p.adapter.Cleanup()
 	return errors.Join(errs...)
 }
 
@@ -640,7 +389,7 @@ func (p *Process) Pid() int {
 }
 
 func (p *Process) Pause(ctx context.Context) error {
-	return p.client.PauseVM()
+	return p.adapter.PauseVM()
 }
 
 func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error {
@@ -648,7 +397,7 @@ func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error
 	logger.Info("Creating snapshot",
 		ulog.F("path", snapfilePath),
 	)
-	return p.client.CreateSnapshot(snapfilePath)
+	return p.adapter.CreateSnapshot(snapfilePath)
 }
 
 func (p *Process) Wait() error {
@@ -660,10 +409,10 @@ func (p *Process) Wait() error {
 	if !ok {
 		// Channel closed, process already reaped.
 		logger.Debug("Process already reaped")
-		p.cleanupVmmFds()
+		p.adapter.Cleanup()
 		return nil
 	}
-	p.cleanupVmmFds()
+	p.adapter.Cleanup()
 	if err != nil {
 		logger.Error("VMM process wait error",
 			ulog.F("error", err),

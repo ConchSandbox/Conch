@@ -1,8 +1,9 @@
-package vmm
+package stratovirt
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -115,7 +117,57 @@ func NewStratovirtClient(vmmType int, socketPath string) *StratovirtClient {
 	}
 }
 
-func (s *StratovirtClient) BuildStartCmd(args *ResourceArgs, isResume bool) (string, error) {
+func (s *StratovirtClient) PrepareLaunch(args *driver.ResourceArgs) error {
+	return nil
+}
+
+func (s *StratovirtClient) AfterProcessStart() {}
+
+func (s *StratovirtClient) Cleanup() {}
+
+func (s *StratovirtClient) WaitForCreateReady(ctx context.Context, processExited <-chan error) error {
+	return waitForVmmSocket(ctx, s.socketPath, processExited)
+}
+
+func (s *StratovirtClient) WaitForResumeReady(ctx context.Context, processExited <-chan error) error {
+	return waitForVmmSocket(ctx, s.socketPath, processExited)
+}
+
+func waitForVmmSocket(ctx context.Context, socketPath string, processExited <-chan error) error {
+	logger := ulog.GetLogger()
+
+	delay := 2 * time.Millisecond
+	const maxDelay = 100 * time.Millisecond
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			logger.Debug("VMM socket ready", ulog.F("socket", socketPath))
+			return nil
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", socketPath, ctx.Err())
+		case waitErr, ok := <-processExited:
+			timer.Stop()
+			if !ok || waitErr == nil {
+				return fmt.Errorf("vmm process exited before vmm socket %s was ready", socketPath)
+			}
+			return fmt.Errorf("vmm process exited before vmm socket %s was ready: %w", socketPath, waitErr)
+		case <-timer.C:
+		}
+
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+}
+
+func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
 	logger := ulog.GetLogger()
 
 	vmmBinaryPath := defaultStratovirtBinary

@@ -1,21 +1,16 @@
-package vmm
+package stratovirt
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-)
+	"time"
 
-func TestNewVmmClientCreatesStratovirtClient(t *testing.T) {
-	client, err := newVmmClient(StratovirtVmmType, "/tmp/qmp.sock")
-	if err != nil {
-		t.Fatalf("newVmmClient() error = %v", err)
-	}
-	if _, ok := client.(*StratovirtClient); !ok {
-		t.Fatalf("client type = %T, want *StratovirtClient", client)
-	}
-}
+	"github.com/openeuler/Conch/internal/vmm/driver"
+)
 
 func TestStratovirtBuildStartCmd(t *testing.T) {
 	binDir := t.TempDir()
@@ -25,8 +20,8 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	client := NewStratovirtClient(StratovirtVmmType, "/tmp/conch-qmp.sock")
-	script, err := client.BuildStartCmd(&ResourceArgs{
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:     2,
 		CPUMax:      4,
 		MemorySize:  1024,
@@ -73,5 +68,39 @@ func TestBuildStratovirtPmemDevices(t *testing.T) {
 	}
 	if !strings.Contains(got, "-device virtio-pmem-pci,id=pmem0pci,memdev=pmem0") {
 		t.Fatalf("pmem device missing: %q", got)
+	}
+}
+
+func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(socketPath, []byte{}, 0644)
+	}()
+
+	if err := waitForVmmSocket(ctx, socketPath, nil); err != nil {
+		t.Fatalf("waitForVmmSocket() error = %v", err)
+	}
+}
+
+func TestWaitForVmmSocketReturnsProcessExitError(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	processErr := errors.New("stratovirt exited before creating qmp socket")
+	processExited := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	processExited <- processErr
+	close(processExited)
+
+	err := waitForVmmSocket(ctx, socketPath, processExited)
+	if !errors.Is(err, processErr) {
+		t.Fatalf("waitForVmmSocket() error = %v, want %v", err, processErr)
+	}
+	if !strings.Contains(err.Error(), "exited before vmm socket") {
+		t.Fatalf("waitForVmmSocket() error = %q, want early exit context", err.Error())
 	}
 }

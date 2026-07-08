@@ -331,3 +331,12 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 		t.Errorf("DefaultConfig().Sandbox.DefaultRAMMB = %d, want 4096", cfg.Sandbox.DefaultRAMMB)
 	}
 }
+
+func TestDefaultVMMNameStaysStratovirt(t *testing.T) {
+	if DefaultVMMName != "stratovirt" {
+		t.Fatalf("DefaultVMMName = %q, want stratovirt", DefaultVMMName)
+	}
+	if got := DefaultConfig().Sandbox.DefaultVMMName; got != "stratovirt" {
+		t.Fatalf("DefaultConfig().Sandbox.DefaultVMMName = %q, want stratovirt", got)
+	}
+}

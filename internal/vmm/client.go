@@ -3,6 +3,9 @@ package vmm
 import (
 	"fmt"
 
+	"github.com/openeuler/Conch/internal/vmm/clh"
+	"github.com/openeuler/Conch/internal/vmm/driver"
+	"github.com/openeuler/Conch/internal/vmm/stratovirt"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -23,59 +26,26 @@ func GetVmmType(vmmName string) (int, bool) {
 	return vmmType, exists
 }
 
-type ResourceArgs struct {
-	// CPU
-	CPUBoot int64
-	CPUMax  int64
+type ResourceArgs = driver.ResourceArgs
+type vmmAdapter = driver.Adapter
 
-	// Memory
-	MemorySize int64
-	MemoryPath string
-
-	// Net
-	NamespaceID string
-	TapName     string
-
-	// Kernel
-	KernelPath string
-
-	// Rootfs
-	InitrdPath string
-	PmemPaths  []string
-
-	// Snapshot
-	SnapfilePath string
-
-	// Vsock
-	VsockCID        uint32
-	VsockSocketPath string
-
-	// Sandbox ID (passed via kernel cmdline)
-	SandboxId string
-
-	EventMonitorFd int
-	ApiSocketFd    int
+func newVmmAdapter(vmmName, vmmSocketPath string) (vmmAdapter, error) {
+	vmmType, exists := GetVmmType(vmmName)
+	if !exists {
+		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
+	}
+	return newVmmAdapterByType(vmmType, vmmSocketPath)
 }
 
-type vmmClient interface {
-	BuildStartCmd(args *ResourceArgs, isResume bool) (string, error)
-	CheckDaemonAlive() error
-	PauseVM() error
-	ResumeVM() error
-	DeleteVM() error
-	CreateSnapshot(snapfilePath string) error
-	LoadSnapshot(snapfilePath string, preferVNC bool) error
-}
-
-func newVmmClient(vmmType int, vmmSocketPath string) (vmmClient, error) {
+func newVmmAdapterByType(vmmType int, vmmSocketPath string) (vmmAdapter, error) {
 	switch vmmType {
 	case CLHVmmType:
 		logger := ulog.GetLogger()
 		logger.Info("Creating CLH client", ulog.F("socket", vmmSocketPath))
-		return NewCLHClient(vmmType, vmmSocketPath), nil
+		return clh.NewCLHClient(vmmType, vmmSocketPath), nil
 	case StratovirtVmmType:
 		ulog.GetLogger().Info("Creating Stratovirt client", ulog.F("socket", vmmSocketPath))
-		return NewStratovirtClient(vmmType, vmmSocketPath), nil
+		return stratovirt.NewStratovirtClient(vmmType, vmmSocketPath), nil
 	default:
 		ulog.GetLogger().Error("Unknown VMM type",
 			ulog.F("type", vmmType),
