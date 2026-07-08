@@ -10,8 +10,6 @@ GOCLEAN := $(GOCMD) clean
 GOTEST := $(GOCMD) test
 GOGET := $(GOCMD) get
 GOMOD := $(GOCMD) mod
-GO_TAGS ?= exclude_graphdriver_btrfs
-GO_TAG_FLAGS := $(if $(strip $(GO_TAGS)),-tags $(GO_TAGS),)
 
 # binary output directory
 BIN_DIR := bin
@@ -76,14 +74,14 @@ build-offline: gen-proto
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
 		echo "building cmd/$$cmd..."; \
-			$(GOBUILD) $(GO_TAG_FLAGS) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
+			$(GOBUILD) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
 	done
 	@git checkout go.mod go.sum 2>/dev/null || true
 
 build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) $(GO_TAG_FLAGS) -o $(BIN_DIR)/$* ./cmd/$*
+	$(GOBUILD) -o $(BIN_DIR)/$* ./cmd/$*
 
 build-agent-initramfs: gen-proto-go ## Build Alpine initramfs that runs conch-agent as PID 1
 	@echo "building static conch-agent for initramfs..."
@@ -104,11 +102,11 @@ clean: ## Clean build artifacts
 
 test: gen-proto-go ## Run all tests
 	@echo "running tests..."
-	$(GOTEST) $(GO_TAG_FLAGS) -v ./...
+	$(GOTEST) -v ./...
 
 test-coverage: ## Run tests with coverage report
 	@echo "running tests and generating coverage report..."
-	$(GOTEST) $(GO_TAG_FLAGS) -v -coverprofile=coverage.out ./...
+	$(GOTEST) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "coverage report generated: coverage.html"
 
@@ -119,7 +117,7 @@ fmt: cleancode ## Format code (go fmt + cleancode)
 
 vet: ## Run go vet
 	@echo "running go vet..."
-	$(GOCMD) vet $(GO_TAG_FLAGS) ./...
+	$(GOCMD) vet ./...
 
 lint: fmt vet ## Tidy go modules
 

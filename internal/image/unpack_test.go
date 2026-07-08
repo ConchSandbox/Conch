@@ -17,6 +17,8 @@ import (
 type recordingSnapshotter struct {
 	updatedInfo       snapshots.Info
 	updatedFieldpaths []string
+	updatedInfos      map[string]snapshots.Info
+	updatedFields     map[string][]string
 	updateErr         error
 	statInfo          map[string]snapshots.Info
 	statErr           map[string]error
@@ -36,6 +38,14 @@ func (r *recordingSnapshotter) Stat(_ context.Context, key string) (snapshots.In
 func (r *recordingSnapshotter) Update(_ context.Context, info snapshots.Info, fieldpaths ...string) (snapshots.Info, error) {
 	r.updatedInfo = info
 	r.updatedFieldpaths = append([]string(nil), fieldpaths...)
+	if r.updatedInfos == nil {
+		r.updatedInfos = make(map[string]snapshots.Info)
+	}
+	if r.updatedFields == nil {
+		r.updatedFields = make(map[string][]string)
+	}
+	r.updatedInfos[info.Name] = info
+	r.updatedFields[info.Name] = append([]string(nil), fieldpaths...)
 	if r.updateErr != nil {
 		return snapshots.Info{}, r.updateErr
 	}
@@ -180,17 +190,32 @@ func TestLinkSnapshotLabelsLinksSandboxAndOptionalMem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("linkSnapshotLabels: %v", err)
 	}
-	if snapshotter.updatedInfo.Name != "rootfs-id" {
-		t.Fatalf("updated snapshot: got %q want %q", snapshotter.updatedInfo.Name, "rootfs-id")
+	rootfsInfo := snapshotter.updatedInfos["rootfs-id"]
+	if rootfsInfo.Name != "rootfs-id" {
+		t.Fatalf("updated rootfs snapshot: got %q want %q", rootfsInfo.Name, "rootfs-id")
 	}
-	if snapshotter.updatedInfo.Labels[common.SnapshotLabelVMSnapshot] != "sandbox-id" {
-		t.Fatalf("sandbox label: got %q want %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelVMSnapshot], "sandbox-id")
+	if rootfsInfo.Labels[common.SnapshotLabelGroupVMRef] != "sandbox-id" {
+		t.Fatalf("sandbox label: got %q want %q", rootfsInfo.Labels[common.SnapshotLabelGroupVMRef], "sandbox-id")
 	}
-	if snapshotter.updatedInfo.Labels[common.SnapshotLabelMemSnapshot] != "mem-id" {
-		t.Fatalf("mem label: got %q want %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelMemSnapshot], "mem-id")
+	if rootfsInfo.Labels[common.SnapshotLabelGroupMemRef] != "mem-id" {
+		t.Fatalf("mem label: got %q want %q", rootfsInfo.Labels[common.SnapshotLabelGroupMemRef], "mem-id")
 	}
-	if snapshotter.updatedInfo.Labels[common.SnapshotLabelRootfsImage] != "localhost/conch/rootfs-component:abc" {
-		t.Fatalf("rootfs image label: got %q", snapshotter.updatedInfo.Labels[common.SnapshotLabelRootfsImage])
+	if rootfsInfo.Labels[common.SnapshotLabelRootfsImage] != "localhost/conch/rootfs-component:abc" {
+		t.Fatalf("rootfs image label: got %q", rootfsInfo.Labels[common.SnapshotLabelRootfsImage])
+	}
+	sandboxInfo := snapshotter.updatedInfos["sandbox-id"]
+	if sandboxInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
+		t.Fatalf("sandbox group id label: got %q want rootfs-id", sandboxInfo.Labels[common.SnapshotLabelGroupID])
+	}
+	if sandboxInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindVM {
+		t.Fatalf("sandbox component kind = %q, want %q", sandboxInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindVM)
+	}
+	memInfo := snapshotter.updatedInfos["mem-id"]
+	if memInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
+		t.Fatalf("mem group id label: got %q want rootfs-id", memInfo.Labels[common.SnapshotLabelGroupID])
+	}
+	if memInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindMem {
+		t.Fatalf("mem component kind = %q, want %q", memInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindMem)
 	}
 }
 

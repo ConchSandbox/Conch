@@ -1,5 +1,7 @@
 package runtimeapi
 
+import "time"
+
 type SandboxCreateOptions struct {
 	Namespace      string
 	PodNamespace   string
@@ -55,15 +57,25 @@ type ContainerCreateResult struct {
 }
 
 type PullImageOptions struct {
-	ImageName          string
-	Namespace          string
-	Username           string
-	Password           string
-	DefaultKernelImage string
+	ImageName string
+	Namespace string
+	PlainHTTP bool
+	Username  string
+	Password  string
 }
 
 type PullImageResult struct {
 	Refs map[string]string
+}
+
+type PushImageOptions struct {
+	LocalImage      string
+	RemoteImage     string
+	Namespace       string
+	PlainHTTP       bool
+	Username        string
+	Password        string
+	RegistryTimeout string
 }
 
 type ListImagesOptions struct {
@@ -77,6 +89,26 @@ type RemoveImageOptions struct {
 	Synchronous bool
 }
 
+type UnpackImageOptions struct {
+	ImageName string
+	Namespace string
+}
+
+type ImportImageArchiveOptions struct {
+	Namespace   string
+	ImportedTag string
+}
+
+type ImportImageArchiveResult struct {
+	SnapshotKey string
+	ImageName   string
+}
+
+type ExportImageArchiveOptions struct {
+	Namespace string
+	ImageName string
+}
+
 type ImageRecord struct {
 	Name            string
 	TargetDigest    string
@@ -85,6 +117,8 @@ type ImageRecord struct {
 	Size            int64
 	Kind            string
 	Labels          map[string]string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type ListSnapshotsOptions struct {

@@ -328,12 +328,12 @@ func linkSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, 
 	labels := make(map[string]string)
 	fieldpaths := []string{}
 	if sandboxSID != "" {
-		labels[common.SnapshotLabelVMSnapshot] = sandboxSID
-		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelVMSnapshot)
+		labels[common.SnapshotLabelGroupVMRef] = sandboxSID
+		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelGroupVMRef)
 	}
 	if memSID != "" {
-		labels[common.SnapshotLabelMemSnapshot] = memSID
-		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelMemSnapshot)
+		labels[common.SnapshotLabelGroupMemRef] = memSID
+		fieldpaths = append(fieldpaths, "labels."+common.SnapshotLabelGroupMemRef)
 	}
 	if rootfsImageName != "" {
 		labels[common.SnapshotLabelRootfsImage] = rootfsImageName
@@ -349,6 +349,33 @@ func linkSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, 
 	}, fieldpaths...)
 	if err != nil {
 		return fmt.Errorf("failed to link component SnapshotIDs to rootfs: %w", err)
+	}
+	if err := updateComponentSnapshotLabels(ctx, snapshotter, sandboxSID, rootfsSID, common.SnapshotComponentKindVM); err != nil {
+		return err
+	}
+	if memSID != "" {
+		if err := updateComponentSnapshotLabels(ctx, snapshotter, memSID, rootfsSID, common.SnapshotComponentKindMem); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func updateComponentSnapshotLabels(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotID, rootfsSID, kind string) error {
+	labels := map[string]string{
+		common.SnapshotLabelGroupID:       rootfsSID,
+		common.SnapshotLabelComponentKind: kind,
+	}
+	fieldpaths := []string{
+		"labels." + common.SnapshotLabelGroupID,
+		"labels." + common.SnapshotLabelComponentKind,
+	}
+	_, err := snapshotter.Update(ctx, snapshots.Info{
+		Name:   snapshotID,
+		Labels: labels,
+	}, fieldpaths...)
+	if err != nil {
+		return fmt.Errorf("failed to link component snapshot %s to rootfs %s: %w", snapshotID, rootfsSID, err)
 	}
 	return nil
 }

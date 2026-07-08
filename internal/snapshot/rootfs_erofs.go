@@ -10,11 +10,11 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
-func (s *server) resolveRootfsPmemFiles(ctx context.Context, namespace, rootfsKey string) ([]string, error) {
-	if s.rootfsSnt == nil {
+func (s *Server) resolveRootfsPmemFiles(ctx context.Context, namespace, rootfsKey string) ([]string, error) {
+	if s.snt == nil {
 		return nil, fmt.Errorf("rootfs erofs snapshotter is not configured")
 	}
-	mounts, err := s.rootfsSnt.Mounts(ctx, namespace, rootfsKey)
+	mounts, err := s.snt.Mounts(ctx, namespace, rootfsKey)
 	if err != nil {
 		return nil, fmt.Errorf("resolve erofs rootfs mounts for %s: %w", rootfsKey, err)
 	}
@@ -44,15 +44,13 @@ func pmemFilesFromErofsMounts(mounts []mount.Mount) ([]string, error) {
 		if m.Type != "erofs" {
 			continue
 		}
+		for _, opt := range m.Options {
+			if _, ok := strings.CutPrefix(opt, "device="); ok {
+				return nil, fmt.Errorf("erofs fsmerge mounts are not supported: %s", opt)
+			}
+		}
 		if err := add(m.Source); err != nil {
 			return nil, err
-		}
-		for _, opt := range m.Options {
-			if device, ok := strings.CutPrefix(opt, "device="); ok {
-				if err := add(device); err != nil {
-					return nil, err
-				}
-			}
 		}
 	}
 	if len(files) == 0 {

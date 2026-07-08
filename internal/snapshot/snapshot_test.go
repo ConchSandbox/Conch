@@ -16,7 +16,7 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-func TestPrepare(t *testing.T) {
+func TestCreateBootLayout(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("erofs snapshot integration test requires root privileges")
 	}
@@ -25,6 +25,9 @@ func TestPrepare(t *testing.T) {
 		RootDir:          t.TempDir(),
 		StateDir:         t.TempDir(),
 		DefaultNamespace: "default",
+		Snapshot: containerdhost.SnapshotConfig{
+			WorkDir: t.TempDir(),
+		},
 	})
 	if err != nil {
 		t.Fatalf("start embedded containerd: %v", err)
@@ -32,11 +35,12 @@ func TestPrepare(t *testing.T) {
 	defer host.Close()
 
 	workDir := t.TempDir()
-	if err := snapshot.NewServer(workDir, host.Client()); err != nil {
+	server, err := snapshot.NewServer(workDir, host.Client())
+	if err != nil {
 		t.Fatalf("init server with %s: %v", workDir, err)
 	}
-	defer snapshot.Close()
-	defer snapshot.CleanupAllViews()
+	defer server.Close()
+	defer server.CleanupAllViews()
 
 	ns := "default"
 	rootfsParent := "test-rootfs-parent"
@@ -71,7 +75,7 @@ func TestPrepare(t *testing.T) {
 		Mem:    memParent,
 		VM:     vmParent,
 	}
-	conf, err := snapshot.Prepare(context.Background(), ns, key, parents)
+	layout, err := server.CreateBootLayout(context.Background(), ns, key, parents, 0)
 	if err != nil {
 		if isMountPermissionError(err) {
 			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
@@ -81,23 +85,23 @@ func TestPrepare(t *testing.T) {
 	activePrepared := true
 	defer func() {
 		if activePrepared {
-			_ = snapshot.Remove(context.Background(), ns, key)
+			_ = server.ReleaseBootLayout(context.Background(), ns, key)
 		}
 	}()
-	t.Logf("prepare snapshot result: %v\n", conf)
+	t.Logf("create layout result: %v\n", layout)
 
 	newKey := "hello-commit"
-	if _, err := snapshot.Commit(context.Background(), ns, newKey, key); err != nil {
-		t.Fatalf("commit snapshot failed: %v\n", err)
+	if _, err := server.CommitBootLayout(context.Background(), ns, newKey, key); err != nil {
+		t.Fatalf("commit layout failed: %v\n", err)
 	}
-	t.Logf("finish commit snapshot: %s\n", newKey)
-	if _, err := snapshot.Stat(context.Background(), ns, newKey); err != nil {
-		t.Fatalf("stat committed snapshot failed: %v\n", err)
+	t.Logf("finish commit layout: %s\n", newKey)
+	if _, err := server.SnapshotInfo(context.Background(), ns, newKey); err != nil {
+		t.Fatalf("get committed snapshot info failed: %v\n", err)
 	}
 
-	t.Logf("run remove active snapshot: %s\n", key)
-	if err := snapshot.Remove(context.Background(), ns, key); err != nil {
-		t.Fatalf("remove snapshot failed: %v\n", err)
+	t.Logf("run release active layout: %s\n", key)
+	if err := server.ReleaseBootLayout(context.Background(), ns, key); err != nil {
+		t.Fatalf("release layout failed: %v\n", err)
 	}
 	activePrepared = false
 }

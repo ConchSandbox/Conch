@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type RehydrateResult struct {
@@ -15,14 +14,14 @@ type RehydrateResult struct {
 	ViewAliases     int
 }
 
-func RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
-	if gServer == nil || gServer.snt == nil {
+func (s *Server) RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
+	if s == nil || s.snt == nil {
 		return RehydrateResult{}, fmt.Errorf("server not init")
 	}
-	return gServer.rehydrateRuntimeState(ctx, runtimes, views, aliases)
+	return s.rehydrateRuntimeState(ctx, runtimes, views, aliases)
 }
 
-func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
+func (s *Server) rehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (RehydrateResult, error) {
 	var (
 		result RehydrateResult
 		errs   []error
@@ -45,16 +44,12 @@ func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 		}
 	}
 	aliasRefs := make(map[string]int, len(aliases))
-	aliasKinds := make(map[string]string, len(aliases))
 	for _, rec := range aliases {
 		if rec.Namespace == "" || rec.ParentSnapshotID == "" {
 			continue
 		}
 		key := rec.Namespace + "/" + rec.ParentSnapshotID
 		aliasRefs[key]++
-		if rec.MountKind != "" {
-			aliasKinds[key] = rec.MountKind
-		}
 	}
 	restoredViews := make(map[string]struct{}, len(views))
 	for _, rec := range views {
@@ -69,11 +64,7 @@ func (s *server) rehydrateRuntimeState(ctx context.Context, runtimes []state.Sna
 			continue
 		}
 		key := rec.Namespace + "/" + rec.ParentSnapshotID
-		snt := s.snt
-		if aliasKinds[key] == common.SnapshotMountRootfs && s.rootfsSnt != nil {
-			snt = s.rootfsSnt
-		}
-		mounts, err := snt.Mounts(ctx, rec.Namespace, rec.ViewSnapshotKey)
+		mounts, err := s.snt.Mounts(ctx, rec.Namespace, rec.ViewSnapshotKey)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("resolve view mount %s/%s: %w", rec.Namespace, rec.ViewSnapshotKey, err))
 			continue

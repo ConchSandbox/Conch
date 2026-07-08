@@ -27,24 +27,24 @@ set -euo pipefail
 ###############################################################################
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64)  
+    x86_64)
         ARCH_SUFFIX="x86"
         CLH_BINARY="cloud-hypervisor-static"
         ;;
-    aarch64) 
+    aarch64)
         ARCH_SUFFIX="aarch"
         CLH_BINARY="cloud-hypervisor-static-aarch64"
         ;;
-    *)       
-        echo "Unsupported architecture: $ARCH"; exit 1 
+    *)
+        echo "Unsupported architecture: $ARCH"; exit 1
         ;;
 esac
 
 F_IMG_DEFAULT="hub.oepkgs.net/conch/openeuler:odd-${ARCH_SUFFIX}"
 
 # Cloud-Hypervisor version and download URL
-CLH_VER="51"
-CLH_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v${CLH_VER}.0/${CLH_BINARY}"
+CLH_VER="52.0-conch"
+CLH_URL="https://github.com/ConchSandbox/cloud-hypervisor/releases/download/v${CLH_VER}/${CLH_BINARY}"
 
 show_help() {
     echo "Usage: $0 [COMMAND] [OPTIONS]"
@@ -105,15 +105,16 @@ install_clh() {
     if [ "$CLH_NEED_INSTALL" -eq 1 ]; then
         # Remove potentially invalid binary first
         rm -f /usr/local/bin/cloud-hypervisor
-        echo "Downloading cloud-hypervisor v${CLH_VER}.0 for ${ARCH}..."
+
+        echo "Downloading cloud-hypervisor v${CLH_VER} for ${ARCH}..."
         echo "URL: $CLH_URL"
         if ! wget --progress=bar:force "$CLH_URL" -O /usr/local/bin/cloud-hypervisor 2>&1; then
             echo "Error: Failed to download cloud-hypervisor."
-            echo "Manual download: https://github.com/cloud-hypervisor/cloud-hypervisor/releases"
+            echo "Manual download: https://github.com/ConchSandbox/cloud-hypervisor/releases"
             return 1
         fi
         chmod +x /usr/local/bin/cloud-hypervisor
-        echo "cloud-hypervisor v${CLH_VER}.0 installed successfully for ${ARCH}."
+        echo "cloud-hypervisor v${CLH_VER} installed successfully for ${ARCH}."
     fi
 }
 
@@ -155,7 +156,6 @@ pull_function() {
 
 run_build() {
     echo "--- Building Conch binaries locally ---"
-    GO_TAGS="${GO_TAGS:-exclude_graphdriver_btrfs}"
     make gen-proto
     mkdir -p bin
     for dir in cmd/*; do
@@ -163,7 +163,7 @@ run_build() {
         name=$(basename "$dir")
         [ "$name" = "conch-unpack" ] && continue
         echo "building $name..."
-        go build -tags "$GO_TAGS" -o "bin/$name" "./cmd/$name"
+        go build -o "bin/$name" "./cmd/$name"
     done
 }
 
@@ -174,7 +174,7 @@ install_sdk() {
             echo "Error: Failed to install SDK with pip."
             return 1
         fi
-        
+
         # Setup config
         [ ! -d "/etc/conch" ] && mkdir -p /etc/conch
         if [ ! -f "/etc/conch/sdk-config.yaml" ] && [ -f "./config/sdk-config.yaml" ]; then

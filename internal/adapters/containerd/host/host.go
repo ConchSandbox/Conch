@@ -41,12 +41,19 @@ type Config struct {
 	RootDir          string
 	StateDir         string
 	DefaultNamespace string
+	Image            ImageConfig
 	Snapshot         SnapshotConfig
 	Sandbox          *SandboxConfig
 }
 
+type ImageConfig struct {
+	DefaultKernelImage            string
+	DefaultKernelPlainHTTP        bool
+	DefaultKernelRegistryUsername string
+	DefaultKernelRegistryPassword string
+}
+
 type SnapshotConfig struct {
-	Enabled bool
 	WorkDir string
 }
 
@@ -170,18 +177,10 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	requiredPlugins := []string{
 		PluginURI,
 		conchplugins.ImageServiceURI,
+		conchplugins.SnapshotServiceURI,
 	}
 	var disabledPlugins []string
-	if cfg.Snapshot.Enabled {
-		requiredPlugins = append(requiredPlugins, conchplugins.SnapshotServiceURI)
-	} else {
-		disabledPlugins = append(disabledPlugins, conchplugins.SnapshotServiceURI)
-	}
 	if cfg.Sandbox != nil {
-		if !cfg.Snapshot.Enabled {
-			cancel()
-			return nil, fmt.Errorf("sandbox service requires snapshot service")
-		}
 		requiredPlugins = append(requiredPlugins, conchplugins.SandboxServiceURI)
 	} else {
 		disabledPlugins = append(disabledPlugins, conchplugins.SandboxServiceURI)
@@ -191,6 +190,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		PluginURI: map[string]any{
 			"default_namespace": cfg.DefaultNamespace,
 		},
+		conchplugins.ImageServiceURI: imagePluginConfig(cfg.Image),
 		string(plugins.ServicePlugin) + "." + services.DiffService: map[string]any{
 			"default": []string{"erofs", "walking"},
 		},
@@ -207,7 +207,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 			"mkfs_options": []string{"--fsalignblks=512"},
 		},
 		conchplugins.SnapshotServiceURI: map[string]any{
-			"enabled":  cfg.Snapshot.Enabled,
 			"work_dir": cfg.Snapshot.WorkDir,
 		},
 	}
@@ -237,7 +236,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		sandbox  *sandboxSvc.Service
 		timeout  = time.After(startTimeout)
 	)
-	for inst == nil || image == nil || (cfg.Snapshot.Enabled && snapshot == nil) || (cfg.Sandbox != nil && sandbox == nil) {
+	for inst == nil || image == nil || snapshot == nil || (cfg.Sandbox != nil && sandbox == nil) {
 		select {
 		case inst = <-ready:
 		case image = <-imageReady:
@@ -277,6 +276,15 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
 		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
 		"request_timeout":      cfg.RequestTimeout.String(),
+	}
+}
+
+func imagePluginConfig(cfg ImageConfig) map[string]any {
+	return map[string]any{
+		"default_kernel_image":             cfg.DefaultKernelImage,
+		"default_kernel_plain_http":        cfg.DefaultKernelPlainHTTP,
+		"default_kernel_registry_username": cfg.DefaultKernelRegistryUsername,
+		"default_kernel_registry_password": cfg.DefaultKernelRegistryPassword,
 	}
 }
 

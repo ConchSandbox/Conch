@@ -59,9 +59,8 @@ func TestImageAPIMethods(t *testing.T) {
 
 	c := NewClient(server.URL)
 	pullResults, err := c.PullImage(context.Background(), PullImageRequest{
-		ImageName:          "docker.io/library/nginx:latest",
-		Namespace:          "team-a",
-		DefaultKernelImage: "hub.oepkgs.net/conch/kernel:6.6.0",
+		ImageName: "docker.io/library/nginx:latest",
+		Namespace: "team-a",
 	})
 	if err != nil {
 		t.Fatalf("PullImage: %v", err)

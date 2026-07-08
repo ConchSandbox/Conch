@@ -33,14 +33,10 @@ func printPullHelp(out io.Writer) {
 	fmt.Fprintln(out, "        allow plain HTTP / disable TLS verification for source image pulls")
 	fmt.Fprintln(out, "  --user string")
 	fmt.Fprintln(out, "        registry credentials in username:password format for source image pulls")
-	fmt.Fprintln(out, "  --kernel-plain-http")
-	fmt.Fprintln(out, "        allow plain HTTP / disable TLS verification for default kernel image pulls")
-	fmt.Fprintln(out, "  --kernel-user string")
-	fmt.Fprintln(out, "        registry credentials in username:password format for default kernel image pulls")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
 	fmt.Fprintln(out, "  conch pull -n default hub.oepkgs.net/conch/sandbox-snapshot:latest")
-	fmt.Fprintln(out, "  conch pull --kernel-plain-http --kernel-user example-user:example-password docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  conch pull --plain-http --user example-user:example-password docker.io/library/nginx:latest")
 }
 
 func runPull(ctx context.Context, args []string) error {
@@ -62,8 +58,6 @@ func runPull(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "", "config file path")
 	plainHTTP := fs.Bool("plain-http", false, "allow plain HTTP / disable TLS verification for source image pulls")
 	user := fs.String("user", "", "registry credentials in username:password format for source image pulls")
-	kernelPlainHTTP := fs.Bool("kernel-plain-http", false, "allow plain HTTP / disable TLS verification for default kernel image pulls")
-	kernelUser := fs.String("kernel-user", "", "registry credentials in username:password format for default kernel image pulls")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
 	fs.Usage = func() { printPullHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
@@ -84,24 +78,16 @@ func runPull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch pull: %w", err)
 	}
-	kernelUsername, kernelPassword, err := parseRegistryUser(*kernelUser)
-	if err != nil {
-		return fmt.Errorf("conch pull: %w", err)
-	}
 
 	conchClient := client.NewClientWithConfig(resolveConchAPIURL(*apiURL, *addr), *configPath)
 	fmt.Println("------------------------------------------------------------")
 	fmt.Printf("Pulling image: %s\n", imageName)
 	results, err := conchClient.PullImage(ctx, client.PullImageRequest{
-		ImageName:          imageName,
-		Namespace:          ns,
-		PlainHTTP:          *plainHTTP,
-		Username:           username,
-		Password:           password,
-		DefaultKernelImage: cfg.Image.DefaultKernelImage,
-		KernelPlainHTTP:    *kernelPlainHTTP,
-		KernelUsername:     kernelUsername,
-		KernelPassword:     kernelPassword,
+		ImageName: imageName,
+		Namespace: ns,
+		PlainHTTP: *plainHTTP,
+		Username:  username,
+		Password:  password,
 	})
 	if err != nil {
 		return fmt.Errorf("conch pull: %w", err)

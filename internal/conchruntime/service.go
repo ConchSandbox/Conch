@@ -14,9 +14,10 @@ import (
 
 	digestpkg "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
-	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
@@ -30,16 +31,16 @@ type SandboxOps interface {
 }
 
 type ImageOps interface {
-	Pull(context.Context, imageSvc.PullRequest) (map[string]string, error)
-	Push(context.Context, imageSvc.PushRequest) error
-	List(context.Context, imageSvc.ListRequest) ([]imageSvc.Meta, error)
-	Remove(context.Context, imageSvc.RemoveRequest) error
-	Unpack(context.Context, imageSvc.UnpackRequest) (map[string]string, error)
-	ImportArchive(context.Context, io.Reader, imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error)
-	ExportArchive(context.Context, io.Writer, imageSvc.ExportArchiveRequest) error
-	PublishBootImage(context.Context, imageSvc.PublishBootImageRequest) (imageSvc.PublishBootImageResponse, error)
-	PrepareRootfsSource(context.Context, imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error)
-	ConvertRootfsToErofs(context.Context, imageSvc.ConvertRootfsToErofsRequest) (imageSvc.ConvertRootfsToErofsResponse, error)
+	Pull(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error)
+	Push(context.Context, runtimeapi.PushImageOptions) error
+	List(context.Context, runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error)
+	Remove(context.Context, runtimeapi.RemoveImageOptions) error
+	Unpack(context.Context, runtimeapi.UnpackImageOptions) (map[string]string, error)
+	ImportArchive(context.Context, io.Reader, runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error)
+	ExportArchive(context.Context, io.Writer, runtimeapi.ExportImageArchiveOptions) error
+	PrepareRootfsSource(context.Context, conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error)
+	PublishBootImage(context.Context, conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error)
+	ConvertRootfsToErofs(context.Context, erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error)
 }
 
 type SnapshotOps interface {
@@ -288,52 +289,33 @@ func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullIma
 	if s == nil || s.Image == nil {
 		return PullImageResult{}, fmt.Errorf("image service is not configured")
 	}
-	refs, err := s.PullImageRequest(ctx, imageSvc.PullRequest{
-		ImageName:          opts.ImageName,
-		Namespace:          opts.Namespace,
-		Username:           opts.Username,
-		Password:           opts.Password,
-		DefaultKernelImage: opts.DefaultKernelImage,
-	})
+	result, err := s.Image.Pull(ctx, opts)
 	if err != nil {
 		return PullImageResult{}, err
 	}
-	return PullImageResult{Refs: refs}, nil
+	return result, nil
 }
 
-func (s *Service) PullImageRequest(ctx context.Context, req imageSvc.PullRequest) (map[string]string, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Pull(ctx, req)
-}
-
-func (s *Service) PushImageRequest(ctx context.Context, req imageSvc.PushRequest) error {
+func (s *Service) PushImage(ctx context.Context, opts runtimeapi.PushImageOptions) error {
 	if s == nil || s.Image == nil {
 		return fmt.Errorf("image service is not configured")
 	}
-	return s.Image.Push(ctx, req)
+	return s.Image.Push(ctx, opts)
 }
 
 func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
-	items, err := s.ListImageRequest(ctx, imageSvc.ListRequest{
-		Namespace: opts.Namespace,
-		Filters:   opts.Filters,
-	})
+	if s == nil || s.Image == nil {
+		return nil, fmt.Errorf("image service is not configured")
+	}
+	items, err := s.Image.List(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]runtimeapi.ImageRecord, 0, len(items))
 	for _, item := range items {
-		out = append(out, runtimeapi.ImageRecord{
-			Name:            item.Name,
-			TargetDigest:    item.TargetDigest,
-			RepoDigests:     imageRepoDigests(item.Name, item.TargetDigest),
-			TargetMediaType: item.TargetMediaType,
-			Size:            item.Size,
-			Kind:            firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels)),
-			Labels:          item.Labels,
-		})
+		item.RepoDigests = imageRepoDigests(item.Name, item.TargetDigest)
+		item.Kind = firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels))
+		out = append(out, item)
 	}
 	return out, nil
 }
@@ -405,78 +387,63 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (s *Service) ListImageRequest(ctx context.Context, req imageSvc.ListRequest) ([]imageSvc.Meta, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.List(ctx, req)
-}
-
 func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
-	return s.RemoveImageRequest(ctx, imageSvc.RemoveRequest{
-		Namespace:   opts.Namespace,
-		ImageName:   opts.ImageName,
-		Synchronous: opts.Synchronous,
-	})
-}
-
-func (s *Service) RemoveImageRequest(ctx context.Context, req imageSvc.RemoveRequest) error {
 	if s == nil || s.Image == nil {
 		return fmt.Errorf("image service is not configured")
 	}
-	return s.Image.Remove(ctx, req)
+	return s.Image.Remove(ctx, opts)
 }
 
-func (s *Service) UnpackImage(ctx context.Context, req imageSvc.UnpackRequest) (map[string]string, error) {
+func (s *Service) UnpackImage(ctx context.Context, req runtimeapi.UnpackImageOptions) (map[string]string, error) {
 	if s == nil || s.Image == nil {
 		return nil, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.Unpack(ctx, req)
 }
 
-func (s *Service) ImportImageArchive(ctx context.Context, reader io.Reader, req imageSvc.ImportArchiveRequest) (imageSvc.ImportArchiveResponse, error) {
+func (s *Service) ImportImageArchive(ctx context.Context, reader io.Reader, req runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error) {
 	if s == nil || s.Image == nil {
-		return imageSvc.ImportArchiveResponse{}, fmt.Errorf("image service is not configured")
+		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.ImportArchive(ctx, reader, req)
 }
 
-func (s *Service) ExportImageArchive(ctx context.Context, writer io.Writer, req imageSvc.ExportArchiveRequest) error {
+func (s *Service) ExportImageArchive(ctx context.Context, writer io.Writer, req runtimeapi.ExportImageArchiveOptions) error {
 	if s == nil || s.Image == nil {
 		return fmt.Errorf("image service is not configured")
 	}
 	return s.Image.ExportArchive(ctx, writer, req)
 }
 
-func (s *Service) PublishBootImage(ctx context.Context, req imageSvc.PublishBootImageRequest) (imageSvc.PublishBootImageResponse, error) {
+func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error) {
 	if s == nil || s.Image == nil {
-		return imageSvc.PublishBootImageResponse{}, fmt.Errorf("image service is not configured")
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.PublishBootImage(ctx, req)
 }
 
-func (s *Service) PrepareRootfsSource(ctx context.Context, req imageSvc.PrepareRootfsSourceRequest) (imageSvc.PrepareRootfsSourceResponse, error) {
+func (s *Service) PrepareRootfsSource(ctx context.Context, req conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error) {
 	if s == nil || s.Image == nil {
-		return imageSvc.PrepareRootfsSourceResponse{}, fmt.Errorf("image service is not configured")
+		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.PrepareRootfsSource(ctx, req)
 }
 
-func (s *Service) ConvertRootfsToErofs(ctx context.Context, req imageSvc.ConvertRootfsToErofsRequest) (imageSvc.ConvertRootfsToErofsResponse, error) {
+func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error) {
 	if s == nil || s.Image == nil {
-		return imageSvc.ConvertRootfsToErofsResponse{}, fmt.Errorf("image service is not configured")
+		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("image service is not configured")
 	}
 	return s.Image.ConvertRootfsToErofs(ctx, req)
 }
 
-func (s *Service) ListSnapshotRequest(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+func (s *Service) ListSnapshots(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
 	if s == nil || s.Snapshot == nil {
 		return nil, fmt.Errorf("snapshot service is not configured")
 	}
 	return s.Snapshot.List(ctx, req)
 }
 
-func (s *Service) RemoveSnapshotRequest(ctx context.Context, req snapshotSvc.RemoveRequest) error {
+func (s *Service) RemoveSnapshot(ctx context.Context, req snapshotSvc.RemoveRequest) error {
 	if s == nil || s.Snapshot == nil {
 		return fmt.Errorf("snapshot service is not configured")
 	}

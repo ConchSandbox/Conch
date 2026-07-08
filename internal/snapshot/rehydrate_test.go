@@ -17,12 +17,12 @@ func TestRehydrateRuntimeStateSkipsAliasesForUnrestoredViews(t *testing.T) {
 	mountPoint := "/"
 	unmountedMountPoint := t.TempDir()
 
-	srv := &server{
+	srv := &Server{
 		snt: fakeSnapshotter{
 			mounts: []mount.Mount{{Type: "bind", Source: "/"}},
 		},
-		activeSnapshots:  make(map[string]map[string]*snapshots.Info),
-		activeRootfsPmem: make(map[string]map[string][]string),
+		activeSnapshots:  make(map[runtimeSnapshotKey]*snapshots.Info),
+		activeRootfsPmem: make(map[runtimeSnapshotKey][]string),
 		viewMgr: &viewManager{
 			viewMounts:  make(map[string]map[string]*viewMountRef),
 			viewAliases: make(map[string]map[string]string),
@@ -85,7 +85,7 @@ func TestGetOrCreateViewMountRecreatesStaleRestoredRef(t *testing.T) {
 	}
 	vm.restoreViewMount("default", "parent", "view-parent", mountPoint, 1, []mount.Mount{{Type: "bind", Source: "/"}}, "")
 
-	_, _, err := vm.getOrCreateViewMount(fakeSnapshotter{viewErr: staleErr}, nil, ctx, "default", "parent", "view-parent", mountPoint)
+	_, err := vm.getOrCreateViewMount(fakeSnapshotter{viewErr: staleErr}, nil, ctx, "default", "parent", "view-parent", mountPoint)
 	if !errors.Is(err, staleErr) {
 		t.Fatalf("getOrCreateViewMount() error = %v, want %v", err, staleErr)
 	}
@@ -114,7 +114,7 @@ func TestGetOrCreateViewMountRechecksAfterStaleDeactivate(t *testing.T) {
 	firstViewStarted := make(chan struct{}, 1)
 	firstErrCh := make(chan error, 1)
 	go func() {
-		_, _, err := vm.getOrCreateViewMount(fakeSnapshotter{
+		_, err := vm.getOrCreateViewMount(fakeSnapshotter{
 			viewErr:     errors.New("first view should not run"),
 			viewStarted: firstViewStarted,
 		}, mountMgr, ctx, "default", "parent", "view-parent", mountPoint)
@@ -132,7 +132,7 @@ func TestGetOrCreateViewMountRechecksAfterStaleDeactivate(t *testing.T) {
 	secondErr := errors.New("second view failed")
 	secondErrCh := make(chan error, 1)
 	go func() {
-		_, _, err := vm.getOrCreateViewMount(fakeSnapshotter{
+		_, err := vm.getOrCreateViewMount(fakeSnapshotter{
 			viewErr:     secondErr,
 			viewStarted: secondViewStarted,
 			unblockView: unblockSecondView,

@@ -42,8 +42,8 @@ func calculateChainID(parentChainID, diffID string) string {
 }
 
 // prepareSnapshotFiles creates the snapshot directory structure.
-func prepareSnapshotFiles(conf *SnapshotConfig) error {
-	return os.MkdirAll(conf.SnapDir(), common.DirMode)
+func prepareSnapshotFiles(layout *BootLayout) error {
+	return os.MkdirAll(layout.SnapDir(), common.DirMode)
 }
 
 // listRootfsLayerErofs scans rootfs mount point for layer files in pattern "layer<N>.erofs".
@@ -110,7 +110,7 @@ func listRootfsLayerErofs(rootfsMount string) ([]string, error) {
 }
 
 // prepareSparseMemfile creates a sparse memory file of the specified size.
-func prepareSparseMemfile(conf *SnapshotConfig, targetDir string) error {
+func prepareSparseMemfile(layout *BootLayout, targetDir string) error {
 	memFile := filepath.Join(targetDir, common.MemFileName)
 	if err := os.MkdirAll(filepath.Dir(memFile), common.DirMode); err != nil {
 		return err
@@ -122,7 +122,7 @@ func prepareSparseMemfile(conf *SnapshotConfig, targetDir string) error {
 	}
 	defer f.Close()
 
-	if err := f.Truncate(conf.MemSize * common.MemMB); err != nil {
+	if err := f.Truncate(layout.MemorySizeMB * common.MemMB); err != nil {
 		return fmt.Errorf("truncate memfile: %w", err)
 	}
 
@@ -130,7 +130,7 @@ func prepareSparseMemfile(conf *SnapshotConfig, targetDir string) error {
 }
 
 // ensureMemFile checks for mem.img existence; creates a sparse file if createIfMissing is true.
-func ensureMemFile(conf *SnapshotConfig, memDir string, createIfMissing bool) error {
+func ensureMemFile(layout *BootLayout, memDir string, createIfMissing bool) error {
 	memFile := filepath.Join(memDir, common.MemFileName)
 	if _, err := os.Stat(memFile); err == nil {
 		return nil
@@ -138,60 +138,23 @@ func ensureMemFile(conf *SnapshotConfig, memDir string, createIfMissing bool) er
 	if !createIfMissing {
 		return fmt.Errorf("mem.img not found at %s", memFile)
 	}
-	return prepareSparseMemfile(conf, memDir)
-}
-
-func getSnapshotBasePath(workDir, namespace string) string {
-	return filepath.Join(workDir, "snapshot", namespace)
-}
-
-func snapshotPathName(snapshotID string) string {
-	return strings.ReplaceAll(snapshotID, ":", "")
-}
-
-func getActiveMountPath(workDir, namespace, sandboxID, mountKind string) string {
-	return filepath.Join(getSnapshotBasePath(workDir, namespace), sandboxID, mountKind)
-}
-
-func getSharedMountPath(workDir, namespace, snapshotID string) string {
-	return filepath.Join(getSnapshotBasePath(workDir, namespace), common.SnapshotSharedDir, snapshotPathName(snapshotID))
-}
-
-// getMemKeyFromRootfs derives the mem snapshot key from rootfs key.
-func getMemKeyFromRootfs(rootfsKey string) string {
-	return rootfsKey + common.MemKeySuffix
+	return prepareSparseMemfile(layout, memDir)
 }
 
 func MemKeyFromRootfs(rootfsKey string) string {
 	return getMemKeyFromRootfs(rootfsKey)
 }
 
-func getRootfsViewAliasKey(sandboxID string) string {
-	return fmt.Sprintf("view-%s-%s", common.SnapshotMountRootfs, sandboxID)
-}
-
 func RootfsViewAliasKey(sandboxID string) string {
 	return getRootfsViewAliasKey(sandboxID)
-}
-
-func getMemViewAliasKey(sandboxID string) string {
-	return fmt.Sprintf("view-%s-%s", common.SnapshotMountMem, sandboxID)
 }
 
 func MemViewAliasKey(sandboxID string) string {
 	return getMemViewAliasKey(sandboxID)
 }
 
-func getVMViewAliasKey(sandboxID string) string {
-	return fmt.Sprintf("view-%s-%s", common.SnapshotMountVM, sandboxID)
-}
-
 func VMViewAliasKey(sandboxID string) string {
 	return getVMViewAliasKey(sandboxID)
-}
-
-func getSharedViewSnapshotKey(mountKind, snapshotID string) string {
-	return fmt.Sprintf("shared-%s-%s", mountKind, snapshotPathName(snapshotID))
 }
 
 func SharedViewSnapshotKey(mountKind, snapshotID string) string {
@@ -229,21 +192,34 @@ func cleanupEmptySnapshotParents(mountPoint string) error {
 	}
 }
 
-// mergeLabels merges snapshot info labels into config.
-func mergeLabels(info *snapshots.Info, conf *SnapshotConfig) {
+func bootLayoutLabels(layout *BootLayout, labels map[string]string) map[string]string {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[common.SnapshotLabel] = "true"
+	labels[common.SnapshotLabelMemSize] = fmt.Sprintf("%d", layout.MemorySizeMB)
+	labels[common.SnapshotLabelRootfs] = layout.RootfsMount
+	labels[common.SnapshotLabelSnapshotDir] = layout.SnapshotDir
+	return labels
+}
+
+// mergeLabels merges snapshot info labels into layout and returns non-structural labels.
+func mergeLabels(info *snapshots.Info, layout *BootLayout) map[string]string {
+	labels := make(map[string]string)
 	for k, v := range info.Labels {
 		switch k {
 		case common.SnapshotLabelMemSize:
 			mSize, err := strconv.ParseInt(v, 10, 64)
 			if err == nil {
-				conf.MemSize = mSize
+				layout.MemorySizeMB = mSize
 			}
 		case common.SnapshotLabelRootfs:
-			conf.Rootfs = v
+			layout.RootfsMount = v
 		case common.SnapshotLabelSnapshotDir:
-			conf.RootDir = v
+			layout.SnapshotDir = v
 		default:
-			conf.Labels[k] = v
+			labels[k] = v
 		}
 	}
+	return labels
 }

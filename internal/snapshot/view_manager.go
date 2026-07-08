@@ -84,19 +84,6 @@ func (vm *viewManager) getViewAlias(namespace, key string) (string, bool) {
 	return "", false
 }
 
-// removeViewAlias removes a view alias for a specific key.
-func (vm *viewManager) removeViewAlias(namespace, key string) {
-	vm.viewLock.Lock()
-	defer vm.viewLock.Unlock()
-
-	if nsMap, ok := vm.viewAliases[namespace]; ok {
-		delete(nsMap, key)
-		if len(nsMap) == 0 {
-			delete(vm.viewAliases, namespace)
-		}
-	}
-}
-
 // releaseViewAliases removes view aliases and releases their associated mounts.
 // Returns (count of released aliases, error) where error contains any cleanup failures.
 func (vm *viewManager) releaseViewAliases(snt snapshotter.Snapshotter, mountMgr mount.Manager, namespace string, keys ...string) (int, error) {
@@ -124,18 +111,17 @@ func (vm *viewManager) releaseViewAliases(snt snapshotter.Snapshotter, mountMgr 
 	return len(parents), errors.Join(errs...)
 }
 
-// acquireViewMount acquires or creates a shared view mount.
-// Returns (cleaner, shared bool, error). Shared is true if reusing an existing mount.
+// acquireViewMount acquires or creates a shared view mount and registers an alias.
 func (vm *viewManager) acquireViewMount(
 	snt snapshotter.Snapshotter,
 	mountMgr mount.Manager,
 	ctx context.Context,
 	namespace, parentSnapshotID, viewAliasKey, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
-) (_ *snapshotCleaner, mounts []mount.Mount, shared bool, err error) {
-	ref, created, err := vm.getOrCreateViewMount(snt, mountMgr, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+) (mounts []mount.Mount, err error) {
+	ref, err := vm.getOrCreateViewMount(snt, mountMgr, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, err
 	}
 
 	vm.viewLock.Lock()
@@ -144,17 +130,7 @@ func (vm *viewManager) acquireViewMount(
 	mounts = append([]mount.Mount(nil), ref.mounts...)
 	vm.viewLock.Unlock()
 
-	return &snapshotCleaner{
-		ctx:              ctx,
-		viewMgr:          vm,
-		snt:              snt,
-		mountMgr:         mountMgr,
-		namespace:        namespace,
-		key:              viewAliasKey,
-		mountPoint:       mountPoint,
-		viewed:           true,
-		parentSnapshotID: parentSnapshotID,
-	}, mounts, !created, nil
+	return mounts, nil
 }
 
 // ensureViewMount pre-creates a shared view mount with refCount=0.
@@ -165,7 +141,7 @@ func (vm *viewManager) ensureViewMount(
 	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) error {
-	_, _, err := vm.getOrCreateViewMount(snt, mountMgr, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
+	_, err := vm.getOrCreateViewMount(snt, mountMgr, ctx, namespace, parentSnapshotID, viewSnapshotKey, mountPoint, opts...)
 	return err
 }
 
@@ -177,7 +153,7 @@ func (vm *viewManager) getOrCreateViewMount(
 	ctx context.Context,
 	namespace, parentSnapshotID, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
-) (_ *viewMountRef, created bool, err error) {
+) (_ *viewMountRef, err error) {
 	for {
 		vm.viewLock.Lock()
 		if nsMap, ok := vm.viewMounts[namespace]; ok {
@@ -188,7 +164,7 @@ func (vm *viewManager) getOrCreateViewMount(
 					select {
 					case <-readyCh:
 					case <-ctx.Done():
-						return nil, false, ctx.Err()
+						return nil, ctx.Err()
 					}
 					vm.viewLock.Lock()
 					nsMap, ok = vm.viewMounts[namespace]
@@ -198,14 +174,14 @@ func (vm *viewManager) getOrCreateViewMount(
 					if !ok || ref.initErr != nil {
 						vm.viewLock.Unlock()
 						if !ok {
-							return nil, false, fmt.Errorf("view mount for %s/%s was removed during init", namespace, parentSnapshotID)
+							return nil, fmt.Errorf("view mount for %s/%s was removed during init", namespace, parentSnapshotID)
 						}
-						return nil, false, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
+						return nil, fmt.Errorf("view mount for %s/%s init failed: %v", namespace, parentSnapshotID, ref.initErr)
 					}
 				}
 				if ref.mountPoint != mountPoint {
 					vm.viewLock.Unlock()
-					return nil, false, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
+					return nil, fmt.Errorf("view mount path mismatch for %s/%s: %s vs %s", namespace, parentSnapshotID, ref.mountPoint, mountPoint)
 				}
 				if !IsMountPoint(ref.mountPoint) {
 					delete(nsMap, parentSnapshotID)
@@ -222,7 +198,7 @@ func (vm *viewManager) getOrCreateViewMount(
 					continue
 				}
 				vm.viewLock.Unlock()
-				return ref, false, nil
+				return ref, nil
 			}
 		}
 
@@ -244,18 +220,18 @@ func (vm *viewManager) getOrCreateViewMount(
 		mounts, err := snt.View(ctx, namespace, viewSnapshotKey, parentSnapshotID, opts...)
 		if err != nil {
 			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
-			return nil, false, err
+			return nil, err
 		}
 		if err = os.MkdirAll(mountPoint, common.DirMode); err != nil {
 			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, err)
-			return nil, false, err
+			return nil, err
 		}
 		activationKey := mountActivationKey("view", namespace, viewSnapshotKey)
 		activatedKey, err := activateAndMount(ctx, mountMgr, namespace, activationKey, mounts, mountPoint)
 		if err != nil {
 			mountErr := fmt.Errorf("mount snapshot %v failed: %v", viewSnapshotKey, err)
 			vm.removePlaceholder(namespace, parentSnapshotID, readyCh, mountErr)
-			return nil, false, mountErr
+			return nil, mountErr
 		}
 
 		vm.viewLock.Lock()
@@ -265,7 +241,7 @@ func (vm *viewManager) getOrCreateViewMount(
 		vm.viewLock.Unlock()
 		close(readyCh)
 
-		return placeholder, true, nil
+		return placeholder, nil
 	}
 }
 
@@ -319,16 +295,8 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, mountMgr mo
 
 	// Perform cleanup operations and collect errors
 	var cleanupErrs []error
-	if unmountErr := mount.UnmountAll(mountPoint, unix.MNT_FORCE); unmountErr != nil {
-		cleanupErrs = append(cleanupErrs, fmt.Errorf("unmount %s: %w", mountPoint, unmountErr))
-	}
-	if activationKey != "" && mountMgr != nil {
-		ctx := namespaces.WithNamespace(context.Background(), namespace)
-		if deactivateErr := mountMgr.Deactivate(ctx, activationKey); deactivateErr != nil {
-			if !errdefs.IsNotFound(deactivateErr) {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("deactivate mount %s: %w", activationKey, deactivateErr))
-			}
-		}
+	if err := unmountAndDeactivate(context.Background(), mountMgr, namespace, activationKey, mountPoint); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
 	}
 	if removeDirErr := os.RemoveAll(mountPoint); removeDirErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove dir %s: %w", mountPoint, removeDirErr))

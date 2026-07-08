@@ -41,15 +41,58 @@ type Execution struct {
 	Logs string `json:"logs"`
 }
 
+type VMStartSpec struct {
+	MemorySizeMB int64
+
+	MemoryPath   string
+	KernelPath   string
+	InitrdPath   string
+	SnapfilePath string
+	PmemPaths    []string
+}
+
+func vmStartSpecFromBootLayout(layout *snapshot.BootLayout) VMStartSpec {
+	if layout == nil {
+		return VMStartSpec{}
+	}
+	return VMStartSpec{
+		MemorySizeMB: layout.MemorySizeMB,
+		MemoryPath:   layout.SnapshotMemFile(),
+		KernelPath:   layout.KernelFile(),
+		InitrdPath:   layout.InitrdFile(),
+		SnapfilePath: layout.SnapDir(),
+		PmemPaths:    layout.PmemFiles(),
+	}
+}
+
+func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
+	snapshotDir := rec.SnapshotRootDir
+	if snapshotDir == "" {
+		snapshotDir = "/conch/snapshot"
+	}
+	memorySizeMB := rec.RamMB
+	if memorySizeMB <= 0 {
+		memorySizeMB = 256
+	}
+	layout := &snapshot.BootLayout{
+		RootfsMount:  rec.RootfsMount,
+		MemMount:     rec.MemMount,
+		VMMount:      rec.VMMount,
+		SnapshotDir:  snapshotDir,
+		MemorySizeMB: memorySizeMB,
+	}
+	return vmStartSpecFromBootLayout(layout)
+}
+
 type Sandbox struct {
-	cleanup      *Cleanup
-	process      *vmm.Process
-	snapshotConf *snapshot.SnapshotConfig
-	namespace    string
-	sandboxID    string
-	leaseID      string
-	slot         *netstack.Slot
-	vsockConn    net.Conn
+	cleanup     *Cleanup
+	process     *vmm.Process
+	vmStartSpec VMStartSpec
+	namespace   string
+	sandboxID   string
+	leaseID     string
+	slot        *netstack.Slot
+	vsockConn   net.Conn
 }
 
 func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*Sandbox, error) {
@@ -74,30 +117,16 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 	if err != nil {
 		return nil, err
 	}
-	rootDir := rec.SnapshotRootDir
-	if rootDir == "" {
-		rootDir = "/conch/snapshot"
-	}
-	memSize := rec.RamMB
-	if memSize <= 0 {
-		memSize = 256
-	}
-	conf := &snapshot.SnapshotConfig{
-		Rootfs:  rec.RootfsMount,
-		MemDir:  rec.MemMount,
-		VmDir:   rec.VMMount,
-		RootDir: rootDir,
-		MemSize: memSize,
-	}
+	vmStartSpec := vmStartSpecFromRecord(rec)
 	cleanup := NewCleanup()
 	sb := &Sandbox{
-		cleanup:      cleanup,
-		process:      process,
-		snapshotConf: conf,
-		namespace:    rec.Namespace,
-		sandboxID:    rec.ConchSandboxID,
-		leaseID:      rec.LeaseID,
-		slot:         slot,
+		cleanup:     cleanup,
+		process:     process,
+		vmStartSpec: vmStartSpec,
+		namespace:   rec.Namespace,
+		sandboxID:   rec.ConchSandboxID,
+		leaseID:     rec.LeaseID,
+		slot:        slot,
 	}
 	cleanup.Add(func(ctx context.Context) error {
 		if pool == nil || slot == nil {
@@ -119,7 +148,7 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 
 func ResumeSandbox(
 	ctx context.Context,
-	snapshotConf *snapshot.SnapshotConfig,
+	vmStartSpec VMStartSpec,
 	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
@@ -148,19 +177,17 @@ func ResumeSandbox(
 		return nil
 	})
 
-	snapfilePath := snapshotConf.SnapDir()
-
 	vmmResourceArgs := &vmm.ResourceArgs{
 		CPUBoot:         vcpuNum,
 		CPUMax:          vcpuMax,
-		MemorySize:      snapshotConf.MemSize,
-		MemoryPath:      snapshotConf.SnapshotMemFile(),
+		MemorySize:      vmStartSpec.MemorySizeMB,
+		MemoryPath:      vmStartSpec.MemoryPath,
 		NamespaceID:     slot.NamespaceID(),
 		TapName:         slot.TapName(),
-		KernelPath:      snapshotConf.KernelFile(),
-		SnapfilePath:    snapfilePath,
-		InitrdPath:      snapshotConf.InitrdFile(),
-		PmemPaths:       snapshotConf.PmemFiles(),
+		KernelPath:      vmStartSpec.KernelPath,
+		SnapfilePath:    vmStartSpec.SnapfilePath,
+		InitrdPath:      vmStartSpec.InitrdPath,
+		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
 	}
@@ -172,18 +199,18 @@ func ResumeSandbox(
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
-	err = vmmHandle.Resume(ctx, snapfilePath)
+	err = vmmHandle.Resume(ctx, vmStartSpec.SnapfilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VMM: %w", err)
 	}
 
 	sbx := &Sandbox{
-		snapshotConf: snapshotConf,
-		process:      vmmHandle,
-		cleanup:      cleanup,
-		namespace:    namespace,
-		sandboxID:    sandboxId,
-		slot:         slot,
+		vmStartSpec: vmStartSpec,
+		process:     vmmHandle,
+		cleanup:     cleanup,
+		namespace:   namespace,
+		sandboxID:   sandboxId,
+		slot:        slot,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -204,7 +231,7 @@ func ResumeSandbox(
 
 func CreateSandbox(
 	ctx context.Context,
-	snapshotConf *snapshot.SnapshotConfig,
+	vmStartSpec VMStartSpec,
 	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
@@ -237,13 +264,13 @@ func CreateSandbox(
 	vmmResourceArgs := &vmm.ResourceArgs{
 		CPUBoot:         vcpuNum,
 		CPUMax:          vcpuMax,
-		MemorySize:      snapshotConf.MemSize,
-		MemoryPath:      snapshotConf.SnapshotMemFile(),
+		MemorySize:      vmStartSpec.MemorySizeMB,
+		MemoryPath:      vmStartSpec.MemoryPath,
 		NamespaceID:     slot.NamespaceID(),
 		TapName:         slot.TapName(),
-		KernelPath:      snapshotConf.KernelFile(),
-		InitrdPath:      snapshotConf.InitrdFile(),
-		PmemPaths:       snapshotConf.PmemFiles(),
+		KernelPath:      vmStartSpec.KernelPath,
+		InitrdPath:      vmStartSpec.InitrdPath,
+		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
 		SandboxId:       sandboxId,
@@ -262,12 +289,12 @@ func CreateSandbox(
 	}
 
 	sbx := &Sandbox{
-		snapshotConf: snapshotConf,
-		process:      vmmHandle,
-		cleanup:      cleanup,
-		namespace:    namespace,
-		sandboxID:    sandboxId,
-		slot:         slot,
+		vmStartSpec: vmStartSpec,
+		process:     vmmHandle,
+		cleanup:     cleanup,
+		namespace:   namespace,
+		sandboxID:   sandboxId,
+		slot:        slot,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -329,7 +356,7 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 	if err := s.Stop(ctx); err != nil {
 		return fmt.Errorf("failed to stop VM after snapshot: %w", err)
 	}
-	if err := replaceDirWithRetry(stagingDir, s.snapshotConf.SnapDir(), time.Second, 20*time.Millisecond); err != nil {
+	if err := replaceDirWithRetry(stagingDir, s.vmStartSpec.SnapfilePath, time.Second, 20*time.Millisecond); err != nil {
 		return fmt.Errorf("stage snapshot into mem snapshot: %w", err)
 	}
 

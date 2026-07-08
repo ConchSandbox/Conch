@@ -203,12 +203,15 @@ func TestPrintPullHelpIncludesExample(t *testing.T) {
 		"config file path",
 		"--plain-http",
 		"--user string",
-		"--kernel-plain-http",
-		"--kernel-user string",
 		"hub.oepkgs.net/conch/sandbox-snapshot:latest",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("pull help output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"--kernel-plain-http", "--kernel-user"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("pull help output should not expose %q:\n%s", unwanted, got)
 		}
 	}
 }
@@ -388,6 +391,7 @@ func TestPrintSnapshotHelpIncludesExportListAndRemove(t *testing.T) {
 		"rm      Remove an EROFS snapshot",
 		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
 		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
+		"conch snapshot rm --cascade <rootfs-snapshot-key>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("snapshot help output missing %q:\n%s", want, got)

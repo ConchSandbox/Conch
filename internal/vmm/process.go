@@ -10,14 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
-
-const waitInterval = 10 * time.Millisecond
 
 const SocketDirPerm = 0755
 const unixSocketPathMax = 107
@@ -56,16 +54,27 @@ type Process struct {
 	attached        bool
 	VmmSocketPath   string
 	VsockSocketPath string
-	rootfsPaths     []string
-	kernelPath      string
-	initrdPath      string
+	apiReadyMu      sync.Mutex
+	apiReady        bool
 	// Exit *utils.SetOnce[struct{}]
-	client     vmmClient
+	adapter    vmmAdapter
 	exitSignal chan error
 }
 
 func SandboxVmmSocketPath(sandboxId string) (string, error) {
 	return SandboxSocketPath("v", sandboxId)
+}
+
+func (p *Process) markAPIReady() {
+	p.apiReadyMu.Lock()
+	defer p.apiReadyMu.Unlock()
+	p.apiReady = true
+}
+
+func (p *Process) isAPIReady() bool {
+	p.apiReadyMu.Lock()
+	defer p.apiReadyMu.Unlock()
+	return p.apiReady
 }
 
 func NewProcess(
@@ -80,116 +89,71 @@ func NewProcess(
 		return nil, err
 	}
 
-	vmmType, exists := GetVmmType(vmmName)
-	if !exists {
-		logger.Error("Invalid VMM type", ulog.F("vmm_name", vmmName))
-		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
+	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
+	if err != nil {
+		logger.Error("Failed to create VMM adapter", ulog.F("error", err))
+		return nil, err
 	}
 
-	client, err := newVmmClient(vmmType, vmmSocketPath)
-	if err != nil {
-		logger.Error("Failed to create VMM client",
-			ulog.F("error", err),
-		)
+	if err := adapter.PrepareLaunch(vmmResourceArgs); err != nil {
+		logger.Error("Failed to prepare VMM launch", ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, err
 	}
 
 	p := Process{
-		VmmSocketPath:   vmmSocketPath,
 		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
-		rootfsPaths:     vmmResourceArgs.PmemPaths,
-		kernelPath:      vmmResourceArgs.KernelPath,
-		initrdPath:      vmmResourceArgs.InitrdPath,
-		client:          client,
+		VmmSocketPath:   vmmSocketPath,
+		adapter:         adapter,
 		exitSignal:      make(chan error, 1),
 	}
 
-	startScript, err := client.BuildStartCmd(vmmResourceArgs, isResume)
+	startScript, err := adapter.BuildStartCmd(vmmResourceArgs, isResume)
 	if err != nil {
-		logger.Error("Failed to build start command",
-			ulog.F("error", err),
-		)
+		logger.Error("Failed to build start command", ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, fmt.Errorf("failed to Build Start Cmd: %w", err)
 	}
 
-	_, err = os.Stat(p.kernelPath)
+	_, err = os.Stat(vmmResourceArgs.KernelPath)
 	if err != nil {
-		logger.Error("Error stating kernel file",
-			ulog.F("path", p.kernelPath),
-			ulog.F("error", err),
-		)
+		logger.Error("Error stating kernel file", ulog.F("path", vmmResourceArgs.KernelPath), ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, fmt.Errorf("error stating kernel file: %w", err)
 	}
 
-	_, err = os.Stat(p.initrdPath)
+	_, err = os.Stat(vmmResourceArgs.InitrdPath)
 	if err != nil {
-		logger.Error("Error stating disk file",
-			ulog.F("path", p.initrdPath),
-			ulog.F("error", err),
-		)
+		logger.Error("Error stating disk file", ulog.F("path", vmmResourceArgs.InitrdPath), ulog.F("error", err))
+		adapter.Cleanup()
 		return nil, fmt.Errorf("error stating disk file: %w", err)
 	}
 
 	cmd := exec.Command(
-		"unshare",
-		"-m",
-		"--",
 		"bash",
 		"-c",
 		startScript,
 	)
-	// case Operation not permitted
-	// cmd.SysProcAttr = &syscall.SysProcAttr{
-	// 	Setsid: true, // Create a new session
-	// }
 	p.cmd = cmd
 
 	return &p, nil
 }
 
 func NewAttachedProcess(vmmName, vmmSocketPath, vsockSocketPath string, pid int) (*Process, error) {
-	vmmType, exists := GetVmmType(vmmName)
-	if !exists {
-		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
-	}
-	client, err := newVmmClient(vmmType, vmmSocketPath)
+	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
 	if err != nil {
 		return nil, err
 	}
+	// Rehydrated processes are already ready; startup-only event-monitor fds cannot be restored.
 	return &Process{
 		pid:             pid,
 		attached:        true,
 		VmmSocketPath:   vmmSocketPath,
 		VsockSocketPath: vsockSocketPath,
-		client:          client,
+		apiReady:        true,
+		adapter:         adapter,
 		exitSignal:      make(chan error, 1),
 	}, nil
-}
-
-// waitFile waits for the given file to exist.
-func waitFile(ctx context.Context, socketPath string) error {
-	logger := ulog.GetLogger()
-	logger.Debug("Waiting for VMM socket", ulog.F("socket", socketPath))
-
-	ticker := time.NewTicker(waitInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Warn("Cancelled while waiting for VMM socket",
-				ulog.F("socket", socketPath),
-				ulog.F("error", ctx.Err()),
-			)
-			return fmt.Errorf("cancelled wait for socket '%s': %w", socketPath, ctx.Err())
-		case <-ticker.C:
-			if _, err := os.Stat(socketPath); err != nil {
-				continue
-			}
-			logger.Debug("VMM socket ready", ulog.F("socket", socketPath))
-			return nil
-		}
-	}
 }
 
 func (p *Process) startCmd(
@@ -207,11 +171,11 @@ func (p *Process) startCmd(
 		logger.Error("Error starting VMM process",
 			ulog.F("error", err),
 		)
+		p.adapter.Cleanup()
 		return fmt.Errorf("error starting vmm process: %w", err)
 	}
 
-	startCtx, cancelStart := context.WithCancelCause(ctx)
-	defer cancelStart(fmt.Errorf("vmm finished starting"))
+	p.adapter.AfterProcessStart()
 
 	go func() {
 		// TODO: close fd after redirecting stderr/stdout
@@ -231,8 +195,7 @@ func (p *Process) startCmd(
 			logger.Warn("VMM process error",
 				ulog.F("error", errMsg),
 			)
-			cancelStart(errMsg)
-			p.exitSignal <- nil
+			p.exitSignal <- errMsg
 			close(p.exitSignal)
 			return
 		}
@@ -241,19 +204,11 @@ func (p *Process) startCmd(
 		close(p.exitSignal)
 	}()
 
-	logger.Info("Waiting for VMM socket")
-	// Wait for the VMM process to start
-	err = waitFile(startCtx, p.VmmSocketPath)
-	if err != nil {
-		errMsg := fmt.Errorf("error waiting for vmm socket: %w", err)
-		logger.Error("Error waiting for VMM socket",
-			ulog.F("error", err),
-		)
-		vmmStopErr := p.Stop()
-		return errors.Join(errMsg, vmmStopErr)
-	}
-
 	return nil
+}
+
+func (p *Process) waitForAgentAlive(ctx context.Context) error {
+	return p.adapter.CheckAgentAlive(ctx, p.exitSignal)
 }
 
 func (p *Process) Create(ctx context.Context) error {
@@ -266,11 +221,17 @@ func (p *Process) Create(ctx context.Context) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
-	// check conchd alive
-	err = p.client.CheckDaemonAlive()
+	if err := p.adapter.WaitForCreateReady(ctx, p.exitSignal); err != nil {
+		vmmStopErr := p.Stop()
+		return errors.Join(fmt.Errorf("error waiting for vmm create readiness: %w", err), vmmStopErr)
+	}
+	p.markAPIReady()
+
+	// check conch-agent alive
+	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil
@@ -289,24 +250,30 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
+	if err := p.adapter.WaitForResumeReady(ctx, p.exitSignal); err != nil {
+		vmmStopErr := p.Stop()
+		return errors.Join(fmt.Errorf("error waiting for vmm resume readiness: %w", err), vmmStopErr)
+	}
+
 	// preferVNC=false: to achieve fast startup, load memory on demand.
-	err = p.client.LoadSnapshot(snapfilePath, false)
+	err = p.adapter.LoadSnapshot(snapfilePath, false)
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error loading snapshot: %w", err), vmmStopErr)
 	}
+	p.markAPIReady()
 
-	err = p.client.ResumeVM()
+	err = p.adapter.ResumeVM()
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
 	}
 
-	// check conchd alive
-	err = p.client.CheckDaemonAlive()
+	// check conch-agent alive
+	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil
@@ -323,24 +290,18 @@ func getProcessState(pid int) (string, error) {
 }
 
 func (p *Process) Stop() error {
-	var errs []error
-	if _, err := os.Stat(p.VmmSocketPath); err == nil {
-		if deleteErr := p.client.DeleteVM(); deleteErr != nil {
-			errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
-		}
-	}
-
-	select {
-	case <-p.exitSignal:
-		// Already exited
-		return errors.Join(errs...)
-	default:
-	}
-
 	logger := ulog.GetLogger()
+	var errs []error
 
 	if p.cmd == nil || p.cmd.Process == nil {
 		if p.attached {
+			if p.isAPIReady() {
+				if _, err := os.Stat(p.VmmSocketPath); err == nil {
+					if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
+						errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
+					}
+				}
+			}
 			if p.pid > 0 {
 				if err := syscall.Kill(p.pid, syscall.SIGTERM); err != nil {
 					if !errors.Is(err, syscall.ESRCH) {
@@ -350,8 +311,25 @@ func (p *Process) Stop() error {
 			}
 			return errors.Join(errs...)
 		}
+		p.adapter.Cleanup()
 		logger.Warn("VMM process not started")
 		return fmt.Errorf("vmm process not started")
+	}
+
+	select {
+	case <-p.exitSignal:
+		// Already exited
+		p.adapter.Cleanup()
+		return errors.Join(errs...)
+	default:
+	}
+
+	if p.isAPIReady() {
+		if _, err := os.Stat(p.VmmSocketPath); err == nil {
+			if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
+				errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
+			}
+		}
 	}
 
 	state, err := getProcessState(p.cmd.Process.Pid)
@@ -379,6 +357,7 @@ func (p *Process) Stop() error {
 	)
 
 	<-p.exitSignal
+	p.adapter.Cleanup()
 	return errors.Join(errs...)
 }
 
@@ -395,7 +374,7 @@ func (p *Process) Pid() int {
 }
 
 func (p *Process) Pause(ctx context.Context) error {
-	return p.client.PauseVM()
+	return p.adapter.PauseVM()
 }
 
 func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error {
@@ -403,7 +382,7 @@ func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error
 	logger.Info("Creating snapshot",
 		ulog.F("path", snapfilePath),
 	)
-	return p.client.CreateSnapshot(snapfilePath)
+	return p.adapter.CreateSnapshot(snapfilePath)
 }
 
 func (p *Process) Wait() error {
@@ -415,24 +394,15 @@ func (p *Process) Wait() error {
 	if !ok {
 		// Channel closed, process already reaped.
 		logger.Debug("Process already reaped")
+		p.adapter.Cleanup()
 		return nil
 	}
+	p.adapter.Cleanup()
 	if err != nil {
 		logger.Error("VMM process wait error",
 			ulog.F("error", err),
 		)
 		return err
 	}
-
-	ticker := time.NewTicker(waitInterval)
-	defer ticker.Stop()
-	for {
-		if _, statErr := os.Stat(p.VmmSocketPath); statErr != nil {
-			if os.IsNotExist(statErr) {
-				return nil
-			}
-			return fmt.Errorf("stat vmm socket: %w", statErr)
-		}
-		<-ticker.C
-	}
+	return nil
 }

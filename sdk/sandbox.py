@@ -20,6 +20,7 @@ IMAGE_NAME_KEY = "image_name"
 USE_SNAPSHOT_KEY = "use_snapshot"
 VMM_NAME_KEY = "vmm_name"
 VCPU_NUM_KEY = "vcpu_num"
+VCPU_MAX_KEY = "vcpu_max"
 RAM_MB_KEY = "ram_mb"
 STATUS_KEY = "status"
 ERROR_KEY = "error"
@@ -89,6 +90,7 @@ class Sandbox:
             namespace: Optional[str] = None,
             snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
+            vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
             config_path: Optional[str] = None,
             use_snapshot: Optional[bool] = None,
@@ -116,6 +118,7 @@ class Sandbox:
         self.agent_token = None
         self.client = None
         self.vcpu_num = vcpu_num
+        self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
 
 
@@ -141,6 +144,10 @@ class Sandbox:
             return self._config[CFG_SNAPSHOT_SECTION]
         return self._config[CFG_IMAGE_SECTION]
 
+    def _get_vmm_name(self) -> str:
+        config = self._startup_config()
+        return config.get(VMM_NAME_KEY, "")
+
     def _build_create_payload(self) -> Dict[str, Any]:
         if not self.snapshot_id and not self.image_name:
             raise ValueError("image_name is required when snapshot_id is empty")
@@ -152,9 +159,10 @@ class Sandbox:
             SNAPSHOT_ID_KEY: self.snapshot_id or "",
             IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
             USE_SNAPSHOT_KEY: use_snapshot_image,
-            VMM_NAME_KEY: config[VMM_NAME_KEY],
+            VMM_NAME_KEY: self._get_vmm_name(),
             SANDBOX_ID_KEY: self.sandbox_id,
             VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
+            VCPU_MAX_KEY: self.vcpu_max or config[VCPU_MAX_KEY],
             RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
 

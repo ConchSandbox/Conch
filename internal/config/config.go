@@ -70,10 +70,16 @@ type ContainerdConfig struct {
 
 // ImageConfig holds image workflow defaults.
 type ImageConfig struct {
-	DefaultKernelImage string `yaml:"default_kernel_image"`
+	DefaultKernelImage            string `yaml:"default_kernel_image"`
+	DefaultKernelPlainHTTP        bool   `yaml:"default_kernel_plain_http"`
+	DefaultKernelRegistryUsername string `yaml:"default_kernel_registry_username"`
+	DefaultKernelRegistryPassword string `yaml:"default_kernel_registry_password"`
 }
 
-const DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
+const (
+	DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
+	DefaultVMMName     = "stratovirt"
+)
 
 type SandboxConfig struct {
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
@@ -134,14 +140,17 @@ func DefaultConfig() *Config {
 			DefaultNamespace: "default",
 		},
 		Image: ImageConfig{
-			DefaultKernelImage: DefaultKernelImage,
+			DefaultKernelImage:            DefaultKernelImage,
+			DefaultKernelPlainHTTP:        false,
+			DefaultKernelRegistryUsername: "",
+			DefaultKernelRegistryPassword: "",
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
 			DefaultImage:       "hub.oepkgs.net/conch/openeuler:odd-x86",
-			DefaultVMMName:     "cloud-hypervisor",
+			DefaultVMMName:     DefaultVMMName,
 			DefaultVCPUNum:     2,
 			DefaultVCPUMax:     2,
 			DefaultRAMMB:       4096,
