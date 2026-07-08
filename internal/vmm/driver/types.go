@@ -42,7 +42,7 @@ type Adapter interface {
 	AfterProcessStart()
 	WaitForCreateReady(ctx context.Context, processExited <-chan error) error
 	WaitForResumeReady(ctx context.Context, processExited <-chan error) error
-	CheckDaemonAlive(ctx context.Context, processExited <-chan error) error
+	CheckAgentAlive(ctx context.Context, processExited <-chan error) error
 	PauseVM() error
 	ResumeVM() error
 	DeleteVM() error

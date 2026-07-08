@@ -54,15 +54,15 @@ type blockingDaemonClient struct {
 }
 
 func (c *blockingDaemonClient) BuildStartCmd(*ResourceArgs, bool) (string, error) { return "", nil }
-func (c *blockingDaemonClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
+func (c *blockingDaemonClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
 	select {
 	case <-c.release:
 		return nil
 	case waitErr, ok := <-processExited:
 		if !ok || waitErr == nil {
-			return errors.New("vmm process exited before daemon became ready")
+			return errors.New("vmm process exited before conch-agent became ready")
 		}
-		return errors.Join(errors.New("vmm process exited before daemon became ready"), waitErr)
+		return errors.Join(errors.New("vmm process exited before conch-agent became ready"), waitErr)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -84,7 +84,7 @@ func (c *blockingDaemonClient) WaitForResumeReady(context.Context, <-chan error)
 }
 func (c *blockingDaemonClient) Cleanup() {}
 
-func TestWaitForDaemonAliveReturnsProcessExitError(t *testing.T) {
+func TestWaitForAgentAliveReturnsProcessExitError(t *testing.T) {
 	processErr := errors.New("stratovirt exited after creating qmp socket")
 	client := &blockingDaemonClient{release: make(chan struct{})}
 	process := &Process{
@@ -98,11 +98,11 @@ func TestWaitForDaemonAliveReturnsProcessExitError(t *testing.T) {
 	close(process.exitSignal)
 	t.Cleanup(func() { close(client.release) })
 
-	err := process.waitForDaemonAlive(ctx)
+	err := process.waitForAgentAlive(ctx)
 	if !errors.Is(err, processErr) {
-		t.Fatalf("waitForDaemonAlive() error = %v, want %v", err, processErr)
+		t.Fatalf("waitForAgentAlive() error = %v, want %v", err, processErr)
 	}
-	if !strings.Contains(err.Error(), "exited before daemon became ready") {
-		t.Fatalf("waitForDaemonAlive() error = %q, want early exit context", err.Error())
+	if !strings.Contains(err.Error(), "exited before conch-agent became ready") {
+		t.Fatalf("waitForAgentAlive() error = %q, want early exit context", err.Error())
 	}
 }

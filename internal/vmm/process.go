@@ -207,8 +207,8 @@ func (p *Process) startCmd(
 	return nil
 }
 
-func (p *Process) waitForDaemonAlive(ctx context.Context) error {
-	return p.adapter.CheckDaemonAlive(ctx, p.exitSignal)
+func (p *Process) waitForAgentAlive(ctx context.Context) error {
+	return p.adapter.CheckAgentAlive(ctx, p.exitSignal)
 }
 
 func (p *Process) Create(ctx context.Context) error {
@@ -227,11 +227,11 @@ func (p *Process) Create(ctx context.Context) error {
 	}
 	p.markAPIReady()
 
-	// check conchd alive
-	err = p.waitForDaemonAlive(ctx)
+	// check conch-agent alive
+	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil
@@ -269,11 +269,11 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
 	}
 
-	// check conchd alive
-	err = p.waitForDaemonAlive(ctx)
+	// check conch-agent alive
+	err = p.waitForAgentAlive(ctx)
 	if err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error starting daemon in vmm: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error starting conch-agent in vmm: %w", err), vmmStopErr)
 	}
 
 	return nil

@@ -149,7 +149,7 @@ func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
 	vmmFds.conchEventFd = fds[0]
 	vmmFds.clhEventFd = fds[1]
 
-	// Set conchd fd to close-on-exec (cloud-hypervisor fd should NOT be close-on-exec).
+	// Set the Conch-side fd to close-on-exec (cloud-hypervisor fd should NOT be close-on-exec).
 	unix.CloseOnExec(vmmFds.conchEventFd)
 
 	vmmFds.apiSocketFd, err = unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
@@ -519,8 +519,8 @@ func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
 	return nil
 }
 
-func (c *CLHClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
-	// TODO: call conchd GetHealth
+func (c *CLHClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
+	// TODO: call conch-agent GetHealth
 	return nil
 }
 

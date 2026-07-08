@@ -366,16 +366,16 @@ func (s *StratovirtClient) executeQMPCommandWithResponse(command string, argumen
 	return response, nil
 }
 
-func waitForDaemonRetry(ctx context.Context, processExited <-chan error, delay time.Duration) error {
+func waitForAgentRetry(ctx context.Context, processExited <-chan error, delay time.Duration) error {
 	if delay <= 0 {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
+			return fmt.Errorf("cancelled waiting for conch-agent ready: %w", ctx.Err())
 		case waitErr, ok := <-processExited:
 			if !ok || waitErr == nil {
-				return fmt.Errorf("vmm process exited before daemon became ready")
+				return fmt.Errorf("vmm process exited before conch-agent became ready")
 			}
-			return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
+			return fmt.Errorf("vmm process exited before conch-agent became ready: %w", waitErr)
 		default:
 			return nil
 		}
@@ -386,28 +386,28 @@ func waitForDaemonRetry(ctx context.Context, processExited <-chan error, delay t
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
+		return fmt.Errorf("cancelled waiting for conch-agent ready: %w", ctx.Err())
 	case waitErr, ok := <-processExited:
 		if !ok || waitErr == nil {
-			return fmt.Errorf("vmm process exited before daemon became ready")
+			return fmt.Errorf("vmm process exited before conch-agent became ready")
 		}
-		return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
+		return fmt.Errorf("vmm process exited before conch-agent became ready: %w", waitErr)
 	case <-timer.C:
 		return nil
 	}
 }
 
-func (s *StratovirtClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
+func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
 	logger := ulog.GetLogger()
 
 	for i := 0; i < 60; i++ {
-		if err := waitForDaemonRetry(ctx, processExited, 0); err != nil {
+		if err := waitForAgentRetry(ctx, processExited, 0); err != nil {
 			return err
 		}
 
 		response, err := s.executeQMPCommandWithResponse("query-status", nil)
 		if err != nil {
-			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+			if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 				return err
 			}
 			continue
@@ -415,14 +415,14 @@ func (s *StratovirtClient) CheckDaemonAlive(ctx context.Context, processExited <
 
 		returnVal, ok := response["return"]
 		if !ok {
-			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+			if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 				return err
 			}
 			continue
 		}
 		returnMap, ok := returnVal.(map[string]any)
 		if !ok {
-			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+			if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 				return err
 			}
 			continue
@@ -438,12 +438,12 @@ func (s *StratovirtClient) CheckDaemonAlive(ctx context.Context, processExited <
 			logger.Info("VM is paused, sending cont command")
 			if err := s.executeQMPCommand("cont", nil); err != nil {
 				logger.Warn("Failed to send cont command", ulog.F("error", err))
-				if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+				if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := waitForDaemonRetry(ctx, processExited, 200*time.Millisecond); err != nil {
+			if err := waitForAgentRetry(ctx, processExited, 200*time.Millisecond); err != nil {
 				return err
 			}
 			continue
@@ -454,7 +454,7 @@ func (s *StratovirtClient) CheckDaemonAlive(ctx context.Context, processExited <
 			return nil
 		}
 
-		if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+		if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 			return err
 		}
 	}
@@ -491,7 +491,7 @@ func (s *StratovirtClient) PauseVM() error {
 }
 
 // StratoVirt resume is driven by "-incoming file:<path>" at process launch.
-// CheckDaemonAlive sends "cont" if the restored VM is paused.
+// CheckAgentAlive sends "cont" if the restored VM is paused.
 func (s *StratovirtClient) ResumeVM() error {
 	return nil
 }
