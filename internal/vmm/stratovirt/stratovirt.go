@@ -366,24 +366,65 @@ func (s *StratovirtClient) executeQMPCommandWithResponse(command string, argumen
 	return response, nil
 }
 
-func (s *StratovirtClient) CheckDaemonAlive() error {
+func waitForDaemonRetry(ctx context.Context, processExited <-chan error, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
+		case waitErr, ok := <-processExited:
+			if !ok || waitErr == nil {
+				return fmt.Errorf("vmm process exited before daemon became ready")
+			}
+			return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
+		default:
+			return nil
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
+	case waitErr, ok := <-processExited:
+		if !ok || waitErr == nil {
+			return fmt.Errorf("vmm process exited before daemon became ready")
+		}
+		return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s *StratovirtClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
 	logger := ulog.GetLogger()
 
 	for i := 0; i < 60; i++ {
+		if err := waitForDaemonRetry(ctx, processExited, 0); err != nil {
+			return err
+		}
+
 		response, err := s.executeQMPCommandWithResponse("query-status", nil)
 		if err != nil {
-			time.Sleep(100 * time.Millisecond)
+			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
 		returnVal, ok := response["return"]
 		if !ok {
-			time.Sleep(100 * time.Millisecond)
+			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 		returnMap, ok := returnVal.(map[string]any)
 		if !ok {
-			time.Sleep(100 * time.Millisecond)
+			if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -397,10 +438,14 @@ func (s *StratovirtClient) CheckDaemonAlive() error {
 			logger.Info("VM is paused, sending cont command")
 			if err := s.executeQMPCommand("cont", nil); err != nil {
 				logger.Warn("Failed to send cont command", ulog.F("error", err))
-				time.Sleep(100 * time.Millisecond)
+				if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+					return err
+				}
 				continue
 			}
-			time.Sleep(200 * time.Millisecond)
+			if err := waitForDaemonRetry(ctx, processExited, 200*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -409,7 +454,9 @@ func (s *StratovirtClient) CheckDaemonAlive() error {
 			return nil
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		if err := waitForDaemonRetry(ctx, processExited, 100*time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	return fmt.Errorf("timeout waiting for VM to enter running state")

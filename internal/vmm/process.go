@@ -208,22 +208,7 @@ func (p *Process) startCmd(
 }
 
 func (p *Process) waitForDaemonAlive(ctx context.Context) error {
-	checkDone := make(chan error, 1)
-	go func() {
-		checkDone <- p.adapter.CheckDaemonAlive()
-	}()
-
-	select {
-	case err := <-checkDone:
-		return err
-	case waitErr, ok := <-p.exitSignal:
-		if !ok || waitErr == nil {
-			return fmt.Errorf("vmm process exited before daemon became ready")
-		}
-		return fmt.Errorf("vmm process exited before daemon became ready: %w", waitErr)
-	case <-ctx.Done():
-		return fmt.Errorf("cancelled waiting for daemon ready: %w", ctx.Err())
-	}
+	return p.adapter.CheckDaemonAlive(ctx, p.exitSignal)
 }
 
 func (p *Process) Create(ctx context.Context) error {

@@ -519,7 +519,7 @@ func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
 	return nil
 }
 
-func (c *CLHClient) CheckDaemonAlive() error {
+func (c *CLHClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
 	// TODO: call conchd GetHealth
 	return nil
 }

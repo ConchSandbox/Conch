@@ -54,9 +54,18 @@ type blockingDaemonClient struct {
 }
 
 func (c *blockingDaemonClient) BuildStartCmd(*ResourceArgs, bool) (string, error) { return "", nil }
-func (c *blockingDaemonClient) CheckDaemonAlive() error {
-	<-c.release
-	return nil
+func (c *blockingDaemonClient) CheckDaemonAlive(ctx context.Context, processExited <-chan error) error {
+	select {
+	case <-c.release:
+		return nil
+	case waitErr, ok := <-processExited:
+		if !ok || waitErr == nil {
+			return errors.New("vmm process exited before daemon became ready")
+		}
+		return errors.Join(errors.New("vmm process exited before daemon became ready"), waitErr)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 func (c *blockingDaemonClient) PauseVM() error                  { return nil }
 func (c *blockingDaemonClient) ResumeVM() error                 { return nil }
