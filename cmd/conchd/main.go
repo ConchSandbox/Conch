@@ -8,13 +8,21 @@ import (
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/util"
+	"github.com/openeuler/Conch/internal/version"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 func main() {
 	// Parse command line flags
 	configPath := flag.String("config", config.FindConfigFile(), "Path to config file")
+	showVersionShort := flag.Bool("v", false, "Print version information")
+	showVersion := flag.Bool("version", false, "Print version information")
 	flag.Parse()
+
+	if *showVersionShort || *showVersion {
+		fmt.Println(version.String())
+		return
+	}
 
 	cfgPath := *configPath
 	if cfgPath == "" {

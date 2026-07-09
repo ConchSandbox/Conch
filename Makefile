@@ -13,6 +13,10 @@ GOMOD := $(GOCMD) mod
 
 # binary output directory
 BIN_DIR := bin
+VERSION_PKG := github.com/openeuler/Conch/internal/version
+VERSION_TAG ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo unknown)
+GIT_COMMIT ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+VERSION_LDFLAGS := -X $(VERSION_PKG).Version=$(VERSION_TAG) -X $(VERSION_PKG).Commit=$(GIT_COMMIT)
 
 CONCH_AGENT_PROTO_DIR := ./api
 CONCH_AGENT_GEN_DIR := ./api/go_proto
@@ -85,14 +89,14 @@ build-offline: gen-proto
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
 		echo "building cmd/$$cmd..."; \
-			$(GOBUILD) -mod=readonly -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
+			$(GOBUILD) -mod=readonly -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
 	done
 	@git checkout go.mod go.sum 2>/dev/null || true
 
 build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $(BIN_DIR)/$* ./cmd/$*
+	$(GOBUILD) -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/$* ./cmd/$*
 
 build-agent-initramfs: gen-proto-go ## Build Alpine initramfs that runs conch-agent as PID 1
 	@echo "building static conch-agent for initramfs..."
