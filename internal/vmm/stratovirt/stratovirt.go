@@ -490,10 +490,8 @@ func (s *StratovirtClient) PauseVM() error {
 	return nil
 }
 
-// StratoVirt resume is driven by "-incoming file:<path>" at process launch.
-// CheckAgentAlive sends "cont" if the restored VM is paused.
 func (s *StratovirtClient) ResumeVM() error {
-	return nil
+	return s.executeQMPCommand("cont", nil)
 }
 
 func (s *StratovirtClient) DeleteVM() error {

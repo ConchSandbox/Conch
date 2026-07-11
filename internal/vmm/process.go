@@ -377,6 +377,13 @@ func (p *Process) Pause(ctx context.Context) error {
 	return p.adapter.PauseVM()
 }
 
+func (p *Process) ResumeVM(ctx context.Context) error {
+	if err := p.adapter.ResumeVM(); err != nil {
+		return err
+	}
+	return p.waitForAgentAlive(ctx)
+}
+
 func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error {
 	logger := ulog.GetLogger()
 	logger.Info("Creating snapshot",
