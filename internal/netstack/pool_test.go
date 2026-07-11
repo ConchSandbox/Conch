@@ -243,7 +243,7 @@ func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
 	}
 	slot.setNetNSPath(t.TempDir() + "/ns-2")
 
-	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2")
+	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2", nil)
 	if err == nil || !strings.Contains(err.Error(), "namespace missing") {
 		t.Fatalf("RestoreInUse() error = %v, want namespace missing", err)
 	}
@@ -339,7 +339,7 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 	}
 	p.newSlots <- slot
 
-	got, err := p.Get(context.Background(), "sandbox-a")
+	got, err := p.Get(context.Background(), "sandbox-a", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to record assigned network slot") {
 		t.Fatalf("Get() error = %v, want assignment record failure", err)
 	}

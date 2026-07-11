@@ -94,6 +94,10 @@ func (s *Service) Pause(req conchsandbox.SandboxPauseRequest) (string, error) {
 	return s.manager.Pause(req)
 }
 
+func (s *Service) UpdateNetwork(req conchsandbox.SandboxNetworkUpdateRequest) error {
+	return s.manager.UpdateNetwork(req)
+}
+
 func (s *Service) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
 	if s == nil || s.manager == nil {
 		return 0, nil, nil

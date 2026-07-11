@@ -259,3 +259,7 @@ func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) 
 	}
 	return "paused-rootfs-id", nil
 }
+
+func (f *fakeSandboxOps) UpdateNetwork(sandbox.SandboxNetworkUpdateRequest) error {
+	return nil
+}

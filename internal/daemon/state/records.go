@@ -1,5 +1,7 @@
 package state
 
+import "encoding/json"
+
 const (
 	SandboxReady    = "READY"
 	SandboxNotReady = "NOTREADY"
@@ -34,6 +36,7 @@ type SandboxRecord struct {
 	LeaseID         string            `json:"lease_id,omitempty"`
 	ImageName       string            `json:"image_name,omitempty"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
+	Network         json.RawMessage   `json:"network,omitempty"`
 	IP              string            `json:"ip,omitempty"`
 	VMMName         string            `json:"vmm_name,omitempty"`
 	VCPUNum         int64             `json:"vcpu_num,omitempty"`

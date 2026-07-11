@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -80,17 +81,18 @@ func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, snapsho
 }
 
 type SandboxCreateRequest struct {
-	Namespace   string `json:"namespace"`
-	SnapshotId  string `json:"snapshot_id"`
-	ImageName   string `json:"image_name"`
-	UseSnapshot bool   `json:"use_snapshot"`
-	VmmName     string `json:"vmm_name"`
-	SandboxId   string `json:"sandbox_id"`
-	LeaseID     string `json:"lease_id,omitempty"`
-	VcpuNum     int64  `json:"vcpu_num"`
-	VcpuMax     int64  `json:"vcpu_max"`
-	RamMB       int64  `json:"ram_mb"`
-	AgentToken  string `json:"-"`
+	Namespace   string          `json:"namespace"`
+	SnapshotId  string          `json:"snapshot_id"`
+	ImageName   string          `json:"image_name"`
+	UseSnapshot bool            `json:"use_snapshot"`
+	VmmName     string          `json:"vmm_name"`
+	SandboxId   string          `json:"sandbox_id"`
+	LeaseID     string          `json:"lease_id,omitempty"`
+	VcpuNum     int64           `json:"vcpu_num"`
+	VcpuMax     int64           `json:"vcpu_max"`
+	RamMB       int64           `json:"ram_mb"`
+	AgentToken  string          `json:"-"`
+	Network     json.RawMessage `json:"network,omitempty"`
 }
 
 type SandboxDeleteRequest struct {
@@ -101,6 +103,12 @@ type SandboxDeleteRequest struct {
 type SandboxPauseRequest struct {
 	Namespace string `json:"namespace"`
 	SandboxId string `json:"sandbox_id"`
+}
+
+type SandboxNetworkUpdateRequest struct {
+	Namespace string          `json:"namespace"`
+	SandboxId string          `json:"sandbox_id"`
+	Network   json.RawMessage `json:"network,omitempty"`
 }
 
 type SandboxCreateResult struct {
@@ -178,15 +186,15 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string, networkPolicy *netstack.SandboxNetworkConfig) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
 	var sbx *Sandbox
 	var createErr error
 	if resume {
-		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, networkPolicy)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, networkPolicy)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -365,6 +373,10 @@ func (m *Manager) prepareBootLayout(ctx context.Context, namespace string, req S
 }
 
 func (m *Manager) startSandbox(ctx context.Context, namespace string, req SandboxCreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
+	networkPolicy, err := decodeSandboxNetworkConfig(req.Network)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sandbox network config: %w", err)
+	}
 	return createSandboxWithVsockSend(
 		ctx,
 		vmStartSpec,
@@ -380,7 +392,19 @@ func (m *Manager) startSandbox(ctx context.Context, namespace string, req Sandbo
 		resume,
 		runtimeIDs.vsockCID,
 		runtimeIDs.vsockSocketPath,
+		networkPolicy,
 	)
+}
+
+func decodeSandboxNetworkConfig(raw json.RawMessage) (*netstack.SandboxNetworkConfig, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var cfg netstack.SandboxNetworkConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
@@ -475,7 +499,15 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 			cidReserved = true
 		}
 		if sb.slot != nil && m.pool != nil {
-			if err := m.pool.RestoreInUse(sb.slot, rec.ConchSandboxID, rec.IP); err != nil {
+			networkPolicy, decodeErr := decodeSandboxNetworkConfig(rec.Network)
+			if decodeErr != nil {
+				if cidReserved {
+					_ = m.ReleaseCID(rec.ConchSandboxID)
+				}
+				errs = append(errs, fmt.Errorf("decode network policy for %s: %w", rec.ConchSandboxID, decodeErr))
+				continue
+			}
+			if err := m.pool.RestoreInUse(sb.slot, rec.ConchSandboxID, rec.IP, networkPolicy); err != nil {
 				if cidReserved {
 					_ = m.ReleaseCID(rec.ConchSandboxID)
 				}
@@ -711,6 +743,35 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	}
 
 	return snapshotId, nil
+}
+
+func (m *Manager) UpdateNetwork(req SandboxNetworkUpdateRequest) error {
+	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	defer cancel()
+
+	namespace := m.resolveNamespace(req.Namespace)
+	mapKey := sandboxMapKey(namespace, req.SandboxId)
+	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
+	if err != nil {
+		return err
+	}
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return fmt.Errorf("sandbox %s not found", req.SandboxId)
+	}
+	if entry.state != sandboxReady {
+		return fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
+	}
+	if entry.sbx == nil || entry.sbx.slot == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: network slot is nil", req.SandboxId)
+	}
+	networkPolicy, err := decodeSandboxNetworkConfig(req.Network)
+	if err != nil {
+		return fmt.Errorf("invalid sandbox network config: %w", err)
+	}
+	return m.pool.UpdateSandboxNetworkPolicy(ctx, entry.sbx.slot, req.SandboxId, networkPolicy)
 }
 
 func (m *Manager) CleanupPool() error {

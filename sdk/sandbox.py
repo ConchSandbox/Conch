@@ -22,6 +22,7 @@ VMM_NAME_KEY = "vmm_name"
 VCPU_NUM_KEY = "vcpu_num"
 VCPU_MAX_KEY = "vcpu_max"
 RAM_MB_KEY = "ram_mb"
+NETWORK_KEY = "network"
 STATUS_KEY = "status"
 ERROR_KEY = "error"
 MESSAGE_KEY = "message"
@@ -92,6 +93,7 @@ class Sandbox:
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
+            network: Optional[Dict[str, Any]] = None,
             config_path: Optional[str] = None,
             use_snapshot: Optional[bool] = None,
     ):
@@ -120,6 +122,7 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
+        self.network = network
 
 
     def _build_control_plane_url(self, path: str) -> str:
@@ -154,7 +157,7 @@ class Sandbox:
 
         config = self._startup_config()
         use_snapshot_image = bool(self.use_snapshot and not self.snapshot_id)
-        return {
+        payload = {
             NAMESPACE_KEY: self.namespace,
             SNAPSHOT_ID_KEY: self.snapshot_id or "",
             IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
@@ -165,6 +168,9 @@ class Sandbox:
             VCPU_MAX_KEY: self.vcpu_max or config[VCPU_MAX_KEY],
             RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
+        if self.network is not None:
+            payload[NETWORK_KEY] = self.network
+        return payload
 
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result

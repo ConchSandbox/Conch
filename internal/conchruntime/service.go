@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
@@ -28,6 +30,7 @@ type SandboxOps interface {
 	Create(sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error)
 	Delete(sandbox.SandboxDeleteRequest) error
 	Pause(sandbox.SandboxPauseRequest) (string, error)
+	UpdateNetwork(sandbox.SandboxNetworkUpdateRequest) error
 }
 
 type ImageOps interface {
@@ -119,6 +122,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VcpuMax:     opts.VCPUMax,
 		RamMB:       opts.RamMB,
 		AgentToken:  agentToken,
+		Network:     marshalSandboxNetworkConfig(opts.Network),
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -139,6 +143,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		LeaseID:         opts.LeaseID,
 		ImageName:       opts.ImageName,
 		SnapshotID:      opts.SnapshotID,
+		Network:         marshalSandboxNetworkConfig(opts.Network),
 		IP:              createResult.IP,
 		VMMName:         opts.VMMName,
 		VCPUNum:         opts.VCPUNum,
@@ -160,6 +165,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		SnapshotRootDir: createResult.RootDir,
 	}
 	if err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			return SandboxCreateResult{}, err
+		}
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
 		_ = s.upsertSandbox(ctx, rec)
@@ -200,6 +208,97 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 	if opts.RamMB == 0 {
 		opts.RamMB = defaults.RamMB
 	}
+}
+
+func marshalSandboxNetworkConfig(cfg *runtimeapi.SandboxNetworkConfig) json.RawMessage {
+	if cfg == nil {
+		return nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func marshalSandboxNetworkUpdateConfig(existing json.RawMessage, update *runtimeapi.SandboxNetworkUpdateConfig) (json.RawMessage, error) {
+	var cfg runtimeapi.SandboxNetworkConfig
+	if len(existing) != 0 {
+		if err := json.Unmarshal(existing, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	if update != nil {
+		if update.AllowOut != nil {
+			cfg.AllowOut = *update.AllowOut
+		}
+		if update.DenyOut != nil {
+			cfg.DenyOut = *update.DenyOut
+		}
+		cfg.EgressProxy = update.EgressProxy
+		cfg.Rules = update.Rules
+		cfg.AllowInternetAccess = update.AllowInternetAccess
+	}
+	data, err := json.Marshal(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	if opts.PodSandboxID == "" {
+		opts.PodSandboxID = opts.SandboxID
+	}
+	if opts.PodSandboxID == "" {
+		return fmt.Errorf("sandbox id is required")
+	}
+
+	rec, err := s.getSandbox(ctx, opts.PodSandboxID)
+	if err != nil {
+		return fmt.Errorf("get sandbox state: %w", err)
+	}
+	if rec.State != state.SandboxReady {
+		return fmt.Errorf("sandbox %s is %s", opts.PodSandboxID, rec.State)
+	}
+	sandboxID := opts.SandboxID
+	if sandboxID == "" {
+		sandboxID = rec.ConchSandboxID
+	}
+	if sandboxID == "" {
+		sandboxID = opts.PodSandboxID
+	}
+	namespace := opts.Namespace
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
+	namespace = s.normalizeNamespace(namespace)
+
+	network, err := marshalSandboxNetworkUpdateConfig(rec.Network, opts.Network)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox network update: %w", err)
+	}
+	oldNetwork := append(json.RawMessage(nil), rec.Network...)
+	rec.Network = network
+	rec.LastError = ""
+	if err := s.upsertSandbox(ctx, rec); err != nil {
+		return err
+	}
+	if err := s.Sandbox.UpdateNetwork(sandbox.SandboxNetworkUpdateRequest{
+		Namespace: namespace,
+		SandboxId: sandboxID,
+		Network:   network,
+	}); err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			rec.Network = oldNetwork
+		}
+		rec.LastError = err.Error()
+		return errors.Join(err, s.upsertSandbox(ctx, rec))
+	}
+	return nil
 }
 
 func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID string) error {

@@ -150,7 +150,7 @@ func ResumeSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
 	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string,
+	vsockCID uint32, vsockSocketPath string, networkPolicy *netstack.SandboxNetworkConfig,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
 		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
@@ -164,7 +164,7 @@ func ResumeSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx, sandboxId)
+	slot, err := pool.Get(ctx, sandboxId, networkPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -233,7 +233,7 @@ func CreateSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
 	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string,
+	vsockCID uint32, vsockSocketPath string, networkPolicy *netstack.SandboxNetworkConfig,
 ) (s *Sandbox, e error) {
 
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -248,7 +248,7 @@ func CreateSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx, sandboxId)
+	slot, err := pool.Get(ctx, sandboxId, networkPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}

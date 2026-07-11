@@ -508,7 +508,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
+func (p *Pool) Get(ctx context.Context, sandboxID string, policy *SandboxNetworkConfig) (*Slot, error) {
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandboxID is required")
 	}
@@ -521,16 +521,31 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		}
 		if s != nil {
 			s.assignSandbox(sandboxID)
+			if err := ApplySandboxNetworkPolicy(ctx, s, policy); err != nil {
+				s.clearSandboxAssignment()
+				clearErr := ClearSandboxNetworkPolicy(context.Background(), s)
+				if enqueueErr := p.requeueWarmSlot(s); enqueueErr != nil {
+					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, clearErr, enqueueErr))
+					return nil, errors.Join(
+						fmt.Errorf("failed to apply sandbox network policy: %w", err),
+						fmt.Errorf("failed to requeue network slot after policy failure: %w", enqueueErr),
+						clearErr,
+					)
+				}
+				return nil, errors.Join(fmt.Errorf("failed to apply sandbox network policy: %w", err), clearErr)
+			}
 			if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
 				s.clearSandboxAssignment()
+				clearErr := ClearSandboxNetworkPolicy(context.Background(), s)
 				if enqueueErr := p.requeueWarmSlot(s); enqueueErr != nil {
-					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, enqueueErr))
+					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, clearErr, enqueueErr))
 					return nil, errors.Join(
 						fmt.Errorf("failed to record assigned network slot: %w", err),
 						fmt.Errorf("failed to requeue unassigned network slot: %w", enqueueErr),
+						clearErr,
 					)
 				}
-				return nil, fmt.Errorf("failed to record assigned network slot: %w", err)
+				return nil, errors.Join(fmt.Errorf("failed to record assigned network slot: %w", err), clearErr)
 			}
 			p.trackInUse(s)
 		}
@@ -546,6 +561,35 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		)
 		return nil, fmt.Errorf("no available network slot in the pool, pool_size=%d", cap(p.newSlots))
 	}
+}
+
+func (p *Pool) UpdateSandboxNetworkPolicy(ctx context.Context, slot *Slot, sandboxID string, policy *SandboxNetworkConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("pool is nil")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if strings.TrimSpace(sandboxID) == "" {
+		return fmt.Errorf("sandboxID is required")
+	}
+	if slot.SandboxID() != sandboxID {
+		return fmt.Errorf("slot %s is assigned to sandbox %q, want %q", slot.Key, slot.SandboxID(), sandboxID)
+	}
+	if err := ValidateSandboxNetworkPolicy(ctx, policy); err != nil {
+		return err
+	}
+	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+		return fmt.Errorf("failed to record assigned network slot before policy update: %w", err)
+	}
+	if err := ReplaceSandboxNetworkPolicy(ctx, slot, policy); err != nil {
+		p.markSlotCleaning(context.Background(), slot, sandboxID, err)
+		return fmt.Errorf("failed to apply sandbox network policy: %w", err)
+	}
+	return nil
 }
 
 func (p *Pool) isPrefillReady() bool {
@@ -643,6 +687,11 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 			slot.clearSandboxAssignment()
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {
+				if err := ClearSandboxNetworkPolicy(ctx, slot); err != nil {
+					slot.assignSandbox(sandboxID)
+					p.trackInUse(slot)
+					return fmt.Errorf("failed to clear sandbox network policy: %w", err)
+				}
 				if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
 					slot.assignSandbox(sandboxID)
 					p.trackInUse(slot)
@@ -933,7 +982,7 @@ func (p *Pool) trackInUse(slot *Slot) {
 	p.inUse[slot.Key] = slot
 }
 
-func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
+func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string, policy *SandboxNetworkConfig) error {
 	if p == nil {
 		return fmt.Errorf("pool is nil")
 	}
@@ -971,6 +1020,10 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 	}
 	if err := p.validateHostLocalAllocationOwned(cniID, ip); err != nil {
 		return fail(fmt.Errorf("rehydrated network slot has invalid ipam state: %w", err))
+	}
+	if err := ApplySandboxNetworkPolicy(context.Background(), slot, policy); err != nil {
+		clearErr := ClearSandboxNetworkPolicy(context.Background(), slot)
+		return fail(errors.Join(fmt.Errorf("apply rehydrated sandbox network policy: %w", err), clearErr))
 	}
 	slot.assignSandbox(sandboxID)
 	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {

@@ -2,6 +2,34 @@ package runtimeapi
 
 import "time"
 
+type SandboxNetworkAddress string
+type SandboxNetworkRule map[string]any
+
+type SandboxNetworkConfig struct {
+	AllowPublicTraffic  *bool                   `json:"allowPublicTraffic,omitempty"`
+	AllowOut            []SandboxNetworkAddress `json:"allowOut,omitempty"`
+	DenyOut             []SandboxNetworkAddress `json:"denyOut,omitempty"`
+	EgressProxy         *string                 `json:"egressProxy,omitempty"`
+	MaskRequestHost     *bool                   `json:"maskRequestHost,omitempty"`
+	Rules               []SandboxNetworkRule    `json:"rules,omitempty"`
+	AllowInternetAccess *bool                   `json:"allow_internet_access,omitempty"`
+}
+
+type SandboxNetworkUpdateConfig struct {
+	AllowOut            *[]SandboxNetworkAddress `json:"allowOut,omitempty"`
+	DenyOut             *[]SandboxNetworkAddress `json:"denyOut,omitempty"`
+	EgressProxy         *string                  `json:"egressProxy,omitempty"`
+	Rules               []SandboxNetworkRule     `json:"rules,omitempty"`
+	AllowInternetAccess *bool                    `json:"allow_internet_access,omitempty"`
+}
+
+type SandboxNetworkUpdateOptions struct {
+	Namespace    string
+	PodSandboxID string
+	SandboxID    string
+	Network      *SandboxNetworkUpdateConfig
+}
+
 type SandboxCreateOptions struct {
 	Namespace      string
 	PodNamespace   string
@@ -21,6 +49,7 @@ type SandboxCreateOptions struct {
 	VCPUNum        int64
 	VCPUMax        int64
 	RamMB          int64
+	Network        *SandboxNetworkConfig
 }
 
 type SandboxDefaults struct {

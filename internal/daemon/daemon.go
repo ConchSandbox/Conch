@@ -29,6 +29,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -364,6 +365,12 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	network, err := decodeSandboxNetworkConfig(req.Network)
+	if err != nil {
+		logger.Warn("Invalid network config", ulog.F("error", err))
+		http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		Namespace:    req.Namespace,
@@ -377,8 +384,17 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUNum:      req.VcpuNum,
 		VCPUMax:      req.VcpuMax,
 		RamMB:        req.RamMB,
+		Network:      network,
 	})
 	if err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			logger.Warn("Invalid network config",
+				ulog.F("sandbox_id", req.SandboxId),
+				ulog.F("error", err),
+			)
+			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		logger.Error("Failed to create sandbox",
 			ulog.F("sandbox_id", req.SandboxId),
 			ulog.F("error", err),
@@ -399,6 +415,17 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		"ip":          result.IP,
 		"agent_token": result.AgentToken,
 	})
+}
+
+func decodeSandboxNetworkConfig(raw json.RawMessage) (*runtimeapi.SandboxNetworkConfig, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var cfg runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
