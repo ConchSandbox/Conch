@@ -71,3 +71,37 @@ func TestUpdateSnapshotConfigPreservesPmemDevices(t *testing.T) {
 		t.Fatalf("pmem pci_segment = %d, want 1", got)
 	}
 }
+
+func TestUpdateSnapshotPmemPathsPreservesDeviceOptions(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "pmem": [
+    {
+      "file": "/old/rootfs",
+      "discard_writes": false,
+      "pci_segment": 1
+    }
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if err := (&configUpdater{}).updateSnapshotPmemPaths(configPath, []string{"/new/rootfs"}); err != nil {
+		t.Fatalf("updateSnapshotPmemPaths() error = %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	device := config["pmem"].([]interface{})[0].(map[string]interface{})
+	if got := device["file"].(string); got != "/new/rootfs" {
+		t.Fatalf("pmem file = %q, want /new/rootfs", got)
+	}
+	if got := int(device["pci_segment"].(float64)); got != 1 {
+		t.Fatalf("pci_segment = %d, want 1", got)
+	}
+}

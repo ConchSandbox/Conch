@@ -35,6 +35,40 @@ func (cu *configUpdater) updateSnapshotConfig(configFilePath, kernelPath, initrd
 	return nil
 }
 
+func (cu *configUpdater) updateSnapshotPmemPaths(configFilePath string, pmemPaths []string) error {
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return fmt.Errorf("error open snapshot config file %s : %w", configFilePath, err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("error unmarshal snapshot config file %s : %w", configFilePath, err)
+	}
+	pmem, ok := config["pmem"].([]interface{})
+	if !ok || len(pmem) == 0 {
+		return nil
+	}
+	if len(pmemPaths) != len(pmem) {
+		return fmt.Errorf("snapshot pmem path count %d does not match device count %d", len(pmemPaths), len(pmem))
+	}
+	for i, path := range pmemPaths {
+		device, ok := pmem[i].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("snapshot pmem device %d is invalid", i)
+		}
+		device["file"] = path
+	}
+	updatedData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error marshal config: %w", err)
+	}
+	if err := os.WriteFile(configFilePath, updatedData, 0600); err != nil {
+		return fmt.Errorf("error write snapshot config file %s : %w", configFilePath, err)
+	}
+	return nil
+}
+
 func readSnapshotPmemDeviceCount(configFilePath string) (int, error) {
 	data, err := os.ReadFile(configFilePath)
 	if err != nil {
