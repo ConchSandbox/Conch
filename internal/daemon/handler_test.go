@@ -11,7 +11,6 @@ import (
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type fakeImageService struct {
@@ -56,11 +55,13 @@ type fakeSnapshotService struct {
 }
 
 type fakeSandboxOps struct {
-	createReq  sandbox.SandboxCreateRequest
-	pauseReq   sandbox.SandboxPauseRequest
-	deleteReqs []sandbox.SandboxDeleteRequest
-	createErr  error
-	pauseErr   error
+	createReq     sandbox.SandboxCreateRequest
+	checkpointReq sandbox.SandboxCheckpointRequest
+	suspendReq    sandbox.SandboxLifecycleRequest
+	resumeReq     sandbox.SandboxLifecycleRequest
+	deleteReqs    []sandbox.SandboxDeleteRequest
+	createErr     error
+	checkpointErr error
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
@@ -124,7 +125,8 @@ func (f *fakeImageService) PublishBootImage(_ context.Context, req conchimage.Pu
 	}
 	return conchimage.PublishBootImageResult{
 		BootIndexDigest: "sha256:boot",
-		SnapshotKey:     "rootfs-id",
+		RootfsKey:       "rootfs-id",
+		VMKey:           "vm-id",
 		ImageName:       req.BootIndexTag,
 	}, nil
 }
@@ -214,13 +216,8 @@ func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoReques
 		return snapshotSvc.Meta{}, f.infoErr
 	}
 	return snapshotSvc.Meta{
-		Key:    req.Key,
-		Parent: "parent-id",
-		Labels: map[string]string{
-			common.SnapshotLabelGroupMemRef: "mem-id",
-			common.SnapshotLabelGroupVMRef:  "vm-id",
-			common.SnapshotLabelRootfsImage: "rootfs-image:latest",
-		},
+		Key:         req.Key,
+		Parent:      "parent-id",
 		StoragePath: "/snap/rootfs",
 	}, nil
 }
@@ -252,10 +249,20 @@ func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) {
-	f.pauseReq = req
-	if f.pauseErr != nil {
-		return "", f.pauseErr
+func (f *fakeSandboxOps) Suspend(req sandbox.SandboxLifecycleRequest) error {
+	f.suspendReq = req
+	return nil
+}
+
+func (f *fakeSandboxOps) Resume(req sandbox.SandboxLifecycleRequest) error {
+	f.resumeReq = req
+	return nil
+}
+
+func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
+	f.checkpointReq = req
+	if f.checkpointErr != nil {
+		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
 	}
-	return "paused-rootfs-id", nil
+	return sandbox.SandboxCheckpointResult{RootfsKey: "paused-rootfs-id", MemKey: "mem-id", VMKey: "vm-id"}, nil
 }

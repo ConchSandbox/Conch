@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,10 +27,8 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
-	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -53,10 +50,6 @@ type Daemon struct {
 
 	// TODO: need ListCachedBuilds()
 }
-
-var (
-	buildBootIndexArchive = conchimage.BuildBootIndexArchive
-)
 
 func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Daemon) {
 	go func() {
@@ -115,6 +108,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		RootDir:          cfg.Containerd.RootDir,
 		StateDir:         cfg.Containerd.StateDir,
 		DefaultNamespace: cfg.Containerd.DefaultNamespace,
+		TemplateStore:    store,
 		Image: containerdhost.ImageConfig{
 			DefaultKernelImage:            cfg.Image.DefaultKernelImage,
 			DefaultKernelPlainHTTP:        cfg.Image.DefaultKernelPlainHTTP,
@@ -149,19 +143,19 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
 	s.runtimeService.Snapshot = host.SnapshotService()
+	s.runtimeService.Templates = host.TemplateService()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
-		ImageName: cfg.Sandbox.DefaultImage,
-		VMMName:   cfg.Sandbox.DefaultVMMName,
-		VCPUNum:   cfg.Sandbox.DefaultVCPUNum,
-		VCPUMax:   cfg.Sandbox.DefaultVCPUMax,
-		RamMB:     cfg.Sandbox.DefaultRAMMB,
+		TemplateID: cfg.Sandbox.DefaultTemplateID,
+		VMMName:    cfg.Sandbox.DefaultVMMName,
+		VCPUNum:    cfg.Sandbox.DefaultVCPUNum,
+		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
+		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
 	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
-		Store:              store,
-		LeaseClient:        daemonClient,
-		SandboxRehydrator:  host.SandboxService(),
-		SnapshotRehydrator: host.SnapshotService(),
-		DefaultNamespace:   cfg.Containerd.DefaultNamespace,
+		Store:             store,
+		LeaseClient:       daemonClient,
+		SandboxRehydrator: host.SandboxService(),
+		DefaultNamespace:  cfg.Containerd.DefaultNamespace,
 	})
 	if err != nil {
 		cancel()
@@ -174,15 +168,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
 		ulog.F("containers_checked", recoveryResult.ContainersChecked),
 		ulog.F("containers_downgraded", recoveryResult.ContainersDowngraded),
-		ulog.F("snapshot_runtimes_checked", recoveryResult.SnapshotRuntimesChecked),
-		ulog.F("snapshot_runtimes_marked", recoveryResult.SnapshotRuntimesMarked),
-		ulog.F("view_snapshots_checked", recoveryResult.ViewSnapshotsChecked),
-		ulog.F("view_snapshots_marked", recoveryResult.ViewSnapshotsMarked),
 		ulog.F("runtime_leases_checked", recoveryResult.RuntimeLeasesChecked),
 		ulog.F("lease_errors", recoveryResult.LeaseErrors),
-		ulog.F("snapshot_caches_restored", recoveryResult.SnapshotCachesRestored),
-		ulog.F("view_mounts_restored", recoveryResult.ViewMountsRestored),
-		ulog.F("view_aliases_restored", recoveryResult.ViewAliasesRestored),
 		ulog.F("sandboxes_rehydrated", recoveryResult.SandboxesRehydrated),
 		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
 		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
@@ -211,7 +198,14 @@ func (s *Daemon) routes() {
 	// sandbox
 	s.router.HandleFunc("/api/sandbox/create", s.handleCreateSandbox)
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
-	s.router.HandleFunc("/api/sandbox/pause", s.handlePauseSandbox)
+	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
+	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
+	s.router.HandleFunc("/api/sandbox/stop", s.handleStopSandbox)
+	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
+	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
+	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
+	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
+	s.router.HandleFunc("/api/template/remove", s.handleRemoveTemplate)
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 	s.router.HandleFunc("/api/snapshot/remove", s.handleRemoveSnapshot)
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
@@ -220,8 +214,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
-	s.router.HandleFunc("/api/image/convert", s.handleConvertImage)
-	s.router.HandleFunc("/api/snapshot/export", s.handleSnapshotExport)
 	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
 	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
@@ -370,9 +362,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		PodSandboxID: req.SandboxId,
 		SandboxID:    req.SandboxId,
 		LeaseID:      req.LeaseID,
-		ImageName:    req.ImageName,
-		SnapshotID:   req.SnapshotId,
-		UseSnapshot:  req.UseSnapshot,
+		TemplateID:   req.TemplateID,
 		VMMName:      req.VmmName,
 		VCPUNum:      req.VcpuNum,
 		VCPUMax:      req.VcpuMax,
@@ -433,42 +423,197 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Daemon) handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
+func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 	logger := ulog.GetLogger()
-	logger.Debug("Handling pause sandbox request")
+	logger.Debug("Handling suspend sandbox request")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req sandbox.SandboxPauseRequest
+	var req sandboxLifecycleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	snapshotId, err := s.runtimeService.PauseSandbox(r.Context(), req.Namespace, req.SandboxId)
+	err := s.runtimeService.SuspendSandbox(r.Context(), req.Namespace, req.SandboxID)
 	if err != nil {
-		logger.Error("Failed to pause sandbox",
-			ulog.F("sandbox_id", req.SandboxId),
+		logger.Error("Failed to suspend sandbox",
+			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
-		http.Error(w, "Failed to pause sandbox: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to suspend sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info("Sandbox paused successfully",
-		ulog.F("sandbox_id", req.SandboxId),
-		ulog.F("snapshot_id", snapshotId),
-	)
+	logger.Info("Sandbox suspended successfully", ulog.F("sandbox_id", req.SandboxID))
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":     "ok",
-		"snapshotId": snapshotId,
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req sandboxLifecycleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.runtimeService.ResumeSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
+		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Daemon) handleStopSandbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req sandboxLifecycleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.runtimeService.StopSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
+		http.Error(w, "Failed to stop sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req sandboxCheckpointRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
+		Namespace:    req.Namespace,
+		PodSandboxID: req.SandboxID,
+		Labels:       req.Labels,
 	})
+	if err != nil {
+		http.Error(w, "Failed to checkpoint sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":      "ok",
+		"template_id": result.TemplateID,
+	})
+}
+
+func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "Invalid multipart body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var req templateCreateRequest
+	if err := json.Unmarshal([]byte(r.FormValue("metadata")), &req); err != nil {
+		http.Error(w, "Invalid metadata: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	tmpDir, err := os.MkdirTemp("", "conch-template-api-*")
+	if err != nil {
+		http.Error(w, "Failed to create temp workspace: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+	kernelPath, err := saveMultipartFile(r, "kernel", tmpDir, "kernel")
+	if err != nil {
+		http.Error(w, "Invalid kernel file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	initrdPath, err := saveMultipartFile(r, "initrd", tmpDir, "initrd")
+	if err != nil {
+		http.Error(w, "Invalid initrd file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.createTemplate(r.Context(), req, kernelPath, initrdPath)
+	if err != nil {
+		http.Error(w, "Failed to create template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{
+		"status":            "ok",
+		"template_id":       result.TemplateID,
+		"boot_index_digest": result.BootIndexDigest,
+		"boot_index_tag":    result.BootIndexTag,
+	})
+}
+
+func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
+	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
+		Namespace:    req.Namespace,
+		Source:       req.Source,
+		KernelPath:   kernelPath,
+		InitrdPath:   initrdPath,
+		BootIndexTag: req.BootIndexTag,
+		PlainHTTP:    req.PlainHTTP,
+		Username:     req.Username,
+		Password:     req.Password,
+		Labels:       req.Labels,
+	})
+}
+
+func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templateListRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	items, err := s.runtimeService.ListTemplates(r.Context(), runtimeapi.TemplateListOptions{
+		Namespace: req.Namespace,
+		Origin:    req.Origin,
+		BootMode:  req.BootMode,
+	})
+	if err != nil {
+		http.Error(w, "Failed to list templates: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, templateListResponse{Items: items})
+}
+
+func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templateIDRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	item, err := s.runtimeService.GetTemplate(r.Context(), req.ID)
+	if err != nil {
+		http.Error(w, "Failed to inspect template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, item)
+}
+
+func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templateIDRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	if err := s.runtimeService.RemoveTemplate(r.Context(), req.ID); err != nil {
+		http.Error(w, "Failed to remove template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
@@ -491,11 +636,12 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.PullImageOptions{
-		ImageName: req.ImageName,
-		Namespace: req.Namespace,
-		PlainHTTP: req.PlainHTTP,
-		Username:  req.Username,
-		Password:  req.Password,
+		ImageName:  req.ImageName,
+		Namespace:  req.Namespace,
+		PlainHTTP:  req.PlainHTTP,
+		Username:   req.Username,
+		Password:   req.Password,
+		SkipUnpack: req.SkipUnpack,
 	}
 
 	result, err := s.runtimeService.PullImage(r.Context(), opts)
@@ -699,337 +845,6 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(importImageArchiveHTTPResponse(resp))
 }
 
-func (s *Daemon) handleConvertImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
-	logger.Debug("Handling convert image request")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Image or snapshot service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, "Invalid multipart body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	var req convertImageRequest
-	if err := json.Unmarshal([]byte(r.FormValue("metadata")), &req); err != nil {
-		http.Error(w, "Invalid metadata: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Snapshot && s.runtimeService.Sandbox == nil {
-		http.Error(w, "Sandbox service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	tmpDir, err := os.MkdirTemp("", "conch-convert-api-*")
-	if err != nil {
-		http.Error(w, "Failed to create temp workspace: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer os.RemoveAll(tmpDir)
-	kernelPath, err := saveMultipartFile(r, "kernel", tmpDir, "kernel")
-	if err != nil {
-		http.Error(w, "Invalid kernel file: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	initrdPath, err := saveMultipartFile(r, "initrd", tmpDir, "initrd")
-	if err != nil {
-		http.Error(w, "Invalid initrd file: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	resp, err := s.convertImage(r.Context(), req, kernelPath, initrdPath)
-	if err != nil {
-		logger.Error("Failed to convert image",
-			ulog.F("source", req.Source),
-			ulog.F("tag", req.BootIndexTag),
-			ulog.F("error", err),
-		)
-		writeImageError(w, "Failed to convert image", err)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Daemon) handleSnapshotExport(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
-	logger.Debug("Handling snapshot export request")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Image or snapshot service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	var req snapshotExportRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.SandboxID != "" && s.runtimeService.Sandbox == nil {
-		http.Error(w, "Sandbox service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	resp, err := s.exportSnapshotImage(r.Context(), req)
-	if err != nil {
-		logger.Error("Failed to export snapshot image",
-			ulog.F("snapshot_id", req.RootfsSnapshotID),
-			ulog.F("sandbox_id", req.SandboxID),
-			ulog.F("tag", req.BootIndexTag),
-			ulog.F("error", err),
-		)
-		writeImageError(w, "Failed to export snapshot image", err)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Daemon) convertImage(ctx context.Context, req convertImageRequest, kernelPath, initrdPath string) (convertImageResponse, error) {
-	source := strings.TrimSpace(req.Source)
-	bootIndexTag := strings.TrimSpace(req.BootIndexTag)
-	if source == "" {
-		return convertImageResponse{}, fmt.Errorf("%w: source is required", conchimage.ErrInvalidRequest)
-	}
-	if bootIndexTag == "" {
-		return convertImageResponse{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
-	}
-	namespace := s.resolveNamespace(req.Namespace)
-
-	prepared, err := s.runtimeService.PrepareRootfsSource(ctx, conchimage.PrepareRootfsSourceOptions{
-		Source:    source,
-		Namespace: namespace,
-		PlainHTTP: req.PlainHTTP,
-		Username:  req.Username,
-		Password:  req.Password,
-	})
-	if err != nil {
-		return convertImageResponse{}, fmt.Errorf("prepare rootfs source: %w", err)
-	}
-
-	convertTarget := fmt.Sprintf("conch-erofs-rootfs:convert-%d", time.Now().UnixNano())
-	convertResp, err := s.runtimeService.ConvertRootfsToErofs(ctx, erofsconvert.ConvertRootfsRequest{
-		Namespace:   namespace,
-		SourceImage: prepared.ImageName,
-		TargetImage: convertTarget,
-		MkfsOptions: []string{erofsconvert.DefaultMkfsOption},
-		AlignBytes:  erofsconvert.DefaultAlignBytes,
-	})
-	if err != nil {
-		return convertImageResponse{}, fmt.Errorf("convert rootfs to EROFS: %w", err)
-	}
-
-	publishTag := bootIndexTag
-	if req.Snapshot {
-		publishTag = fmt.Sprintf("conch-boot:convert-%d", time.Now().UnixNano())
-	}
-	bootResp, err := s.runtimeService.PublishBootImage(ctx, conchimage.PublishBootImageOptions{
-		Namespace:       namespace,
-		RootfsImageName: convertResp.ImageName,
-		KernelPath:      kernelPath,
-		InitrdPath:      initrdPath,
-		BootIndexTag:    publishTag,
-	})
-	if err != nil {
-		return convertImageResponse{}, fmt.Errorf("publish native boot image: %w", err)
-	}
-
-	if req.Snapshot {
-		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-			defer cancel()
-			if err := s.runtimeService.RemoveImage(cleanupCtx, runtimeapi.RemoveImageOptions{
-				Namespace: namespace,
-				ImageName: bootResp.ImageName,
-			}); err != nil {
-				ulog.GetLogger().Warn("failed to cleanup temporary boot image",
-					ulog.F("image", bootResp.ImageName),
-					ulog.F("error", err),
-				)
-			}
-		}()
-
-		sandboxID := fmt.Sprintf("conch-snap-%d", time.Now().UnixNano())
-		if _, err := s.runtimeService.CreateSandbox(ctx, runtimeapi.SandboxCreateOptions{
-			Namespace:    namespace,
-			PodSandboxID: sandboxID,
-			SandboxID:    sandboxID,
-			ImageName:    bootResp.ImageName,
-			VMMName:      "cloud-hypervisor",
-			VCPUNum:      1,
-			RamMB:        256,
-		}); err != nil {
-			return convertImageResponse{}, fmt.Errorf("create sandbox for snapshot conversion: %w", err)
-		}
-		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-			defer cancel()
-			if err := s.runtimeService.RemoveSandbox(cleanupCtx, namespace, sandboxID); err != nil {
-				ulog.GetLogger().Warn("failed to cleanup snapshot conversion sandbox",
-					ulog.F("sandbox_id", sandboxID),
-					ulog.F("error", err),
-				)
-			}
-		}()
-		rootfsSnapshotID, err := s.runtimeService.PauseSandbox(ctx, namespace, sandboxID)
-		if err != nil {
-			return convertImageResponse{}, fmt.Errorf("pause sandbox for snapshot conversion: %w", err)
-		}
-		snapshotResp, err := s.exportSnapshotImage(ctx, snapshotExportRequest{
-			Namespace:        namespace,
-			BootIndexTag:     bootIndexTag,
-			RootfsSnapshotID: rootfsSnapshotID,
-		})
-		if err != nil {
-			return convertImageResponse{}, err
-		}
-		return convertImageResponse{
-			BootIndexDigest: snapshotResp.BootIndexDigest,
-			BootIndexTag:    snapshotResp.BootIndexTag,
-			RootfsImageRef:  convertResp.ImageName,
-			SourceImageRef:  prepared.ImageName,
-		}, nil
-	}
-
-	return convertImageResponse{
-		BootIndexDigest: bootResp.BootIndexDigest,
-		BootIndexTag:    bootIndexTag,
-		RootfsImageRef:  convertResp.ImageName,
-		SourceImageRef:  prepared.ImageName,
-	}, nil
-}
-
-func (s *Daemon) exportSnapshotImage(ctx context.Context, req snapshotExportRequest) (snapshotExportResponse, error) {
-	if strings.TrimSpace(req.BootIndexTag) == "" {
-		return snapshotExportResponse{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
-	}
-	if (strings.TrimSpace(req.RootfsSnapshotID) == "") == (strings.TrimSpace(req.SandboxID) == "") {
-		return snapshotExportResponse{}, fmt.Errorf("%w: exactly one of snapshot_id or sandbox_id is required", conchimage.ErrInvalidRequest)
-	}
-	namespace := s.resolveNamespace(req.Namespace)
-	rootfsSnapshotID := strings.TrimSpace(req.RootfsSnapshotID)
-	if rootfsSnapshotID == "" {
-		snapshotID, err := s.runtimeService.PauseSandbox(ctx, namespace, req.SandboxID)
-		if err != nil {
-			return snapshotExportResponse{}, fmt.Errorf("pause sandbox: %w", err)
-		}
-		rootfsSnapshotID = snapshotID
-	}
-
-	rootfsInfo, err := s.runtimeService.SnapshotInfo(ctx, snapshotSvc.InfoRequest{Key: rootfsSnapshotID, Namespace: namespace})
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("resolve rootfs snapshot metadata: %w", err)
-	}
-	memName, vmName, err := resolveSnapshotComponentIDs(rootfsInfo)
-	if err != nil {
-		return snapshotExportResponse{}, err
-	}
-
-	memChain, err := s.runtimeService.SnapshotChain(ctx, snapshotSvc.InfoRequest{Key: memName, Namespace: namespace})
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("resolve mem snapshot chain: %w", err)
-	}
-	memChainPaths, err := validateSnapshotChainPaths(memChain.ChainPaths)
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("resolve mem snapshot chain: %w", err)
-	}
-	vmChain, err := s.runtimeService.SnapshotChain(ctx, snapshotSvc.InfoRequest{Key: vmName, Namespace: namespace})
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("resolve sandbox snapshot chain: %w", err)
-	}
-	vmChainPaths, err := validateSnapshotChainPaths(vmChain.ChainPaths)
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("resolve sandbox snapshot chain: %w", err)
-	}
-
-	tmpDir, err := os.MkdirTemp("", "conch-snapshot-export-api-*")
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("create snapshot export temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-	rootfsArchive, err := s.exportNativeRootfsArchive(ctx, tmpDir, &rootfsInfo, namespace)
-	if err != nil {
-		return snapshotExportResponse{}, err
-	}
-
-	bootArchive := filepath.Join(tmpDir, "boot-index.oci.tar")
-	bootDigest, err := buildBootIndexArchive(ctx, conchimage.BootIndexOptions{
-		RootfsArchivePath: rootfsArchive,
-		MemChainPaths:     memChainPaths,
-		SandboxChainPaths: vmChainPaths,
-		Tag:               req.BootIndexTag,
-		ArchivePath:       bootArchive,
-	})
-	if err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("build native boot index archive: %w", err)
-	}
-	if _, err := s.importImageArchiveFromPath(ctx, bootArchive, namespace, req.BootIndexTag); err != nil {
-		return snapshotExportResponse{}, fmt.Errorf("import native boot index archive: %w", err)
-	}
-	return snapshotExportResponse{BootIndexDigest: bootDigest.String(), BootIndexTag: req.BootIndexTag}, nil
-}
-
-func (s *Daemon) exportNativeRootfsArchive(ctx context.Context, tmpDir string, rootfsInfo *snapshotSvc.Meta, namespace string) (string, error) {
-	if rootfsInfo == nil {
-		return "", fmt.Errorf("rootfs snapshot metadata is required")
-	}
-	rootfsImage := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelRootfsImage])
-	if rootfsImage == "" {
-		return "", fmt.Errorf("rootfs snapshot %s does not record native EROFS image label %q", rootfsInfo.Key, common.SnapshotLabelRootfsImage)
-	}
-	archivePath := filepath.Join(tmpDir, "rootfs.oci.tar")
-	if err := s.exportImageArchiveToPath(ctx, archivePath, namespace, rootfsImage); err != nil {
-		return "", fmt.Errorf("export native rootfs image: %w", err)
-	}
-	return archivePath, nil
-}
-
-func (s *Daemon) importImageArchiveFromPath(ctx context.Context, archivePath, namespace, importedTag string) (runtimeapi.ImportImageArchiveResult, error) {
-	file, err := os.Open(archivePath)
-	if err != nil {
-		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("open archive: %w", err)
-	}
-	defer file.Close()
-	return s.runtimeService.ImportImageArchive(ctx, file, runtimeapi.ImportImageArchiveOptions{
-		Namespace:   namespace,
-		ImportedTag: importedTag,
-	})
-}
-
-func (s *Daemon) exportImageArchiveToPath(ctx context.Context, archivePath, namespace, imageName string) error {
-	file, err := os.Create(archivePath)
-	if err != nil {
-		return fmt.Errorf("create archive: %w", err)
-	}
-	defer file.Close()
-	return s.runtimeService.ExportImageArchive(ctx, file, runtimeapi.ExportImageArchiveOptions{
-		Namespace: namespace,
-		ImageName: imageName,
-	})
-}
-
-func (s *Daemon) resolveNamespace(namespace string) string {
-	if ns := strings.TrimSpace(namespace); ns != "" {
-		return ns
-	}
-	if s.daemonClient != nil {
-		if ns := strings.TrimSpace(s.daemonClient.DefaultNamespace()); ns != "" {
-			return ns
-		}
-	}
-	return "default"
-}
-
 func saveMultipartFile(r *http.Request, field, dir, name string) (string, error) {
 	file, _, err := r.FormFile(field)
 	if err != nil {
@@ -1055,28 +870,21 @@ func writeMultipartFile(path string, file multipart.File) error {
 	return nil
 }
 
-func validateSnapshotChainPaths(paths []string) ([]string, error) {
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("snapshot chain is empty")
+func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return false
 	}
-	for _, path := range paths {
-		if strings.TrimSpace(path) == "" {
-			return nil, fmt.Errorf("snapshot chain contains empty storage path")
-		}
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return false
 	}
-	return paths, nil
+	return true
 }
 
-func resolveSnapshotComponentIDs(rootfsInfo snapshotSvc.Meta) (string, string, error) {
-	memName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelGroupMemRef])
-	if memName == "" {
-		return "", "", fmt.Errorf("rootfs snapshot %s missing group mem ref label %q", rootfsInfo.Key, common.SnapshotLabelGroupMemRef)
-	}
-	vmName := strings.TrimSpace(rootfsInfo.Labels[common.SnapshotLabelGroupVMRef])
-	if vmName == "" {
-		return "", "", fmt.Errorf("rootfs snapshot %s missing group vm ref label %q", rootfsInfo.Key, common.SnapshotLabelGroupVMRef)
-	}
-	return memName, vmName, nil
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func writeImageResults(w http.ResponseWriter, results map[string]string) {

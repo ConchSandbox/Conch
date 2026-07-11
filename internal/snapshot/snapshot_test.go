@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,7 +41,6 @@ func TestCreateBootLayout(t *testing.T) {
 		t.Fatalf("init server with %s: %v", workDir, err)
 	}
 	defer server.Close()
-	defer server.CleanupAllViews()
 
 	ns := "default"
 	rootfsParent := "test-rootfs-parent"
@@ -90,13 +90,30 @@ func TestCreateBootLayout(t *testing.T) {
 	}()
 	t.Logf("create layout result: %v\n", layout)
 
+	firstCapture := t.TempDir()
+	if err := populateMemParent(firstCapture); err != nil {
+		t.Fatalf("populate first checkpoint capture: %v", err)
+	}
+	firstCapture = filepath.Join(firstCapture, "conch", "snapshot")
 	newKey := "hello-commit"
-	if _, err := server.CommitBootLayout(context.Background(), ns, newKey, key); err != nil {
+	if _, err := server.CommitBootLayout(context.Background(), ns, newKey, key, firstCapture, vmParent); err != nil {
 		t.Fatalf("commit layout failed: %v\n", err)
 	}
 	t.Logf("finish commit layout: %s\n", newKey)
 	if _, err := server.SnapshotInfo(context.Background(), ns, newKey); err != nil {
 		t.Fatalf("get committed snapshot info failed: %v\n", err)
+	}
+	secondCapture := t.TempDir()
+	if err := populateMemParent(secondCapture); err != nil {
+		t.Fatalf("populate second checkpoint capture: %v", err)
+	}
+	secondCapture = filepath.Join(secondCapture, "conch", "snapshot")
+	secondKey := "hello-commit-second"
+	if _, err := server.CommitBootLayout(context.Background(), ns, secondKey, key, secondCapture, vmParent); err != nil {
+		t.Fatalf("second commit from same active layout failed: %v\n", err)
+	}
+	if _, err := server.SnapshotInfo(context.Background(), ns, secondKey); err != nil {
+		t.Fatalf("get second committed snapshot info failed: %v\n", err)
 	}
 
 	t.Logf("run release active layout: %s\n", key)

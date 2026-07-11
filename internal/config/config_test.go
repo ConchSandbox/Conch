@@ -126,7 +126,7 @@ func TestLoadConfig(t *testing.T) {
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n  default_kernel_plain_http: true\n  default_kernel_registry_username: kernel-user\n  default_kernel_registry_password: kernel-pass\n" +
-			"sandbox:\n  default_image: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
+			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
@@ -215,8 +215,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Image.DefaultKernelRegistryPassword != "kernel-pass" {
 		t.Errorf("LoadConfig().Image.DefaultKernelRegistryPassword = %q, want %q", cfg.Image.DefaultKernelRegistryPassword, "kernel-pass")
 	}
-	if cfg.Sandbox.DefaultImage != "registry.example.invalid/conch/sandbox:latest" {
-		t.Errorf("LoadConfig().Sandbox.DefaultImage = %q, want %q", cfg.Sandbox.DefaultImage, "registry.example.invalid/conch/sandbox:latest")
+	if cfg.Sandbox.DefaultTemplateID != "registry.example.invalid/conch/sandbox:latest" {
+		t.Errorf("LoadConfig().Sandbox.DefaultTemplateID = %q, want %q", cfg.Sandbox.DefaultTemplateID, "registry.example.invalid/conch/sandbox:latest")
 	}
 	if cfg.Sandbox.DefaultVMMName != "test-vmm" {
 		t.Errorf("LoadConfig().Sandbox.DefaultVMMName = %q, want %q", cfg.Sandbox.DefaultVMMName, "test-vmm")
@@ -315,8 +315,8 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	if cfg.State.Path != "/var/lib/conch/state.db" {
 		t.Errorf("DefaultConfig().State.Path = %q, want %q", cfg.State.Path, "/var/lib/conch/state.db")
 	}
-	if cfg.Sandbox.DefaultImage != "hub.oepkgs.net/conch/openeuler:odd-x86" {
-		t.Errorf("DefaultConfig().Sandbox.DefaultImage = %q", cfg.Sandbox.DefaultImage)
+	if cfg.Sandbox.DefaultTemplateID != "" {
+		t.Errorf("DefaultConfig().Sandbox.DefaultTemplateID = %q", cfg.Sandbox.DefaultTemplateID)
 	}
 	if cfg.Sandbox.DefaultVMMName != DefaultVMMName {
 		t.Errorf("DefaultConfig().Sandbox.DefaultVMMName = %q, want %q", cfg.Sandbox.DefaultVMMName, DefaultVMMName)

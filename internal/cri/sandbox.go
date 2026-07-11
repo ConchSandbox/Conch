@@ -15,12 +15,11 @@ import (
 )
 
 const (
-	annotationSandboxImage = "conch.io/sandbox-image"
-	annotationUseSnapshot  = "conch.io/use-snapshot"
-	annotationVMMName      = "conch.io/vmm-name"
-	annotationVCPU         = "conch.io/vcpu"
-	annotationVCPUMax      = "conch.io/vcpu-max"
-	annotationRAMMB        = "conch.io/ram-mb"
+	annotationTemplateID = "conch.io/template-id"
+	annotationVMMName    = "conch.io/vmm-name"
+	annotationVCPU       = "conch.io/vcpu"
+	annotationVCPUMax    = "conch.io/vcpu-max"
+	annotationRAMMB      = "conch.io/ram-mb"
 )
 
 func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandboxRequest) (*runtimev1.RunPodSandboxResponse, error) {
@@ -32,8 +31,7 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 		return nil, err
 	}
 
-	imageName := annotations[annotationSandboxImage]
-	useSnapshot := parseBool(annotations[annotationUseSnapshot])
+	templateID := annotations[annotationTemplateID]
 	vmmName := annotations[annotationVMMName]
 	vcpu := parseInt64(annotations[annotationVCPU], 0)
 	vcpuMax := parseInt64(annotations[annotationVCPUMax], 0)
@@ -49,8 +47,7 @@ func (s *service) RunPodSandbox(ctx context.Context, req *runtimev1.RunPodSandbo
 		Labels:         cfg.GetLabels(),
 		Annotations:    annotations,
 		RuntimeHandler: req.GetRuntimeHandler(),
-		ImageName:      imageName,
-		UseSnapshot:    useSnapshot,
+		TemplateID:     templateID,
 		VMMName:        vmmName,
 		VCPUNum:        vcpu,
 		VCPUMax:        vcpuMax,

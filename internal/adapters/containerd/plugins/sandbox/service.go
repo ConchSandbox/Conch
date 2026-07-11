@@ -11,13 +11,11 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
-	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -40,9 +38,9 @@ type Service struct {
 	closed   bool
 }
 
-func New(ctx context.Context, client *containerdclient.Client, snapshotServer *conchsnapshot.Server, cfg Config) (*Service, error) {
-	if snapshotServer == nil {
-		return nil, fmt.Errorf("snapshot server is required")
+func New(ctx context.Context, client *containerdclient.Client, templateManager conchsandbox.TemplateManager, cfg Config) (*Service, error) {
+	if templateManager == nil {
+		return nil, fmt.Errorf("template is required")
 	}
 	vsockSignalRetry, err := parseDuration(cfg.VsockSignalRetry, 10*time.Millisecond)
 	if err != nil {
@@ -67,7 +65,7 @@ func New(ctx context.Context, client *containerdclient.Client, snapshotServer *c
 		}
 		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))
 	}
-	manager, err := conchsandbox.NewManager(pool, client, snapshotServer, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
+	manager, err := conchsandbox.NewManager(pool, client, templateManager, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +88,16 @@ func (s *Service) Delete(req conchsandbox.SandboxDeleteRequest) error {
 	return s.manager.Delete(req)
 }
 
-func (s *Service) Pause(req conchsandbox.SandboxPauseRequest) (string, error) {
-	return s.manager.Pause(req)
+func (s *Service) Suspend(req conchsandbox.SandboxLifecycleRequest) error {
+	return s.manager.Suspend(req)
+}
+
+func (s *Service) Resume(req conchsandbox.SandboxLifecycleRequest) error {
+	return s.manager.Resume(req)
+}
+
+func (s *Service) Checkpoint(req conchsandbox.SandboxCheckpointRequest) (conchsandbox.SandboxCheckpointResult, error) {
+	return s.manager.Checkpoint(req)
 }
 
 func (s *Service) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
@@ -172,7 +178,7 @@ func init() {
 		Config: &Config{},
 		Requires: []plugin.Type{
 			conchplugins.HostPluginType,
-			conchplugins.SnapshotServicePluginType,
+			conchplugins.TemplateServicePluginType,
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
 			cfg := ic.Config.(*Config)
@@ -184,15 +190,15 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("%s does not provide daemon client", conchplugins.HostPluginURI)
 			}
-			snapshotInst, err := ic.GetByID(conchplugins.SnapshotServicePluginType, conchplugins.SnapshotServiceID)
+			templateInst, err := ic.GetByID(conchplugins.TemplateServicePluginType, conchplugins.TemplateServiceID)
 			if err != nil {
 				return nil, err
 			}
-			snapshotProvider, ok := snapshotInst.(snapshotSvc.ServerProvider)
+			templateManager, ok := templateInst.(conchsandbox.TemplateManager)
 			if !ok {
-				return nil, fmt.Errorf("%s does not provide snapshot server", conchplugins.SnapshotServiceURI)
+				return nil, fmt.Errorf("%s does not provide template", conchplugins.TemplateServiceURI)
 			}
-			svc, err := New(ic.Context, provider.DaemonClient(), snapshotProvider.SnapshotServer(), *cfg)
+			svc, err := New(ic.Context, provider.DaemonClient(), templateManager, *cfg)
 			if err != nil {
 				return nil, err
 			}

@@ -20,15 +20,8 @@ type Store interface {
 	ListContainers(context.Context) ([]ContainerRecord, error)
 	DeleteContainer(context.Context, string) error
 
-	UpsertSnapshotRuntime(context.Context, SnapshotRuntimeRecord) error
-	ListSnapshotRuntimes(context.Context) ([]SnapshotRuntimeRecord, error)
-	DeleteSnapshotRuntime(context.Context, string, string) error
-
-	UpsertViewSnapshot(context.Context, ViewSnapshotRecord) error
-	ListViewSnapshots(context.Context) ([]ViewSnapshotRecord, error)
-	DeleteViewSnapshot(context.Context, string, string) error
-
-	UpsertViewAlias(context.Context, ViewAliasRecord) error
-	ListViewAliases(context.Context) ([]ViewAliasRecord, error)
-	DeleteViewAlias(context.Context, string, string) error
+	UpsertTemplate(context.Context, TemplateRecord) error
+	GetTemplate(context.Context, string) (TemplateRecord, error)
+	ListTemplates(context.Context) ([]TemplateRecord, error)
+	DeleteTemplate(context.Context, string) error
 }

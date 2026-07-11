@@ -13,18 +13,18 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-func TestCommitMemSnapshotLabelsComponentKind(t *testing.T) {
+func TestCommitMemSnapshotDoesNotWriteRelationshipLabels(t *testing.T) {
 	snapshotter := &recordingServerSnapshotter{}
 	srv := &Server{snt: snapshotter}
 
-	if err := srv.commitMemSnapshot(context.Background(), "default", "mem-active", "mem-committed", "rootfs-id"); err != nil {
+	if err := srv.commitMemSnapshot(context.Background(), "default", "mem-active", "mem-committed"); err != nil {
 		t.Fatalf("commitMemSnapshot() error = %v", err)
 	}
-	if snapshotter.committedInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
-		t.Fatalf("group id label = %q, want rootfs-id", snapshotter.committedInfo.Labels[common.SnapshotLabelGroupID])
+	if snapshotter.committedInfo.Name != "mem-committed" {
+		t.Fatalf("committed snapshot = %q, want mem-committed", snapshotter.committedInfo.Name)
 	}
-	if snapshotter.committedInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindMem {
-		t.Fatalf("component kind = %q, want %q", snapshotter.committedInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindMem)
+	if len(snapshotter.committedInfo.Labels) != 0 {
+		t.Fatalf("committed labels = %#v, want none", snapshotter.committedInfo.Labels)
 	}
 }
 
@@ -103,6 +103,20 @@ func TestPrepareAndRegisterSnapshotRollsBackPreparedSnapshotOnMountError(t *test
 	}
 	if active := srv.getActiveSnapshot("default", "mem-active"); active != nil {
 		t.Fatalf("active snapshot registered after rollback: %#v", active)
+	}
+}
+
+func TestReleaseBootLayoutDoesNotRemoveCommittedSnapshotWithSandboxKey(t *testing.T) {
+	snapshotter := &recordingServerSnapshotter{
+		statInfo: snapshots.Info{Kind: snapshots.KindCommitted},
+	}
+	srv := &Server{snt: snapshotter, workDir: t.TempDir()}
+
+	if err := srv.ReleaseBootLayout(context.Background(), "default", "sandbox-1"); err != nil {
+		t.Fatalf("ReleaseBootLayout() error = %v", err)
+	}
+	if len(snapshotter.removedKeys) != 0 {
+		t.Fatalf("removed keys = %#v, want none", snapshotter.removedKeys)
 	}
 }
 

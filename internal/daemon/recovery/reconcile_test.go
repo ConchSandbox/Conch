@@ -109,7 +109,7 @@ func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 	}
 }
 
-func TestReconcileMarksMissingViewSnapshotUnknown(t *testing.T) {
+func TestReconcileDowngradesSandboxWithMissingMount(t *testing.T) {
 	ctx := context.Background()
 	store, err := state.OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {
@@ -117,14 +117,18 @@ func TestReconcileMarksMissingViewSnapshotUnknown(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.UpsertViewSnapshot(ctx, state.ViewSnapshotRecord{
-		Namespace:        "default",
-		ParentSnapshotID: "parent-1",
-		ViewSnapshotKey:  "view-1",
-		MountPoint:       t.TempDir() + "/missing",
-		State:            state.SandboxReady,
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:    "pod-1",
+		ConchSandboxID:  "sandbox-1",
+		Namespace:       "default",
+		State:           state.SandboxReady,
+		VMMSocketPath:   t.TempDir() + "/vmm.sock",
+		RootfsMount:     t.TempDir() + "/missing-rootfs",
+		MemMount:        t.TempDir() + "/missing-mem",
+		VMMount:         t.TempDir() + "/missing-vm",
+		VsockSocketPath: t.TempDir() + "/vsock.sock",
 	}); err != nil {
-		t.Fatalf("UpsertViewSnapshot() error = %v", err)
+		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
 	result, err := Reconcile(ctx, Config{
@@ -135,18 +139,18 @@ func TestReconcileMarksMissingViewSnapshotUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.ViewSnapshotsMarked != 1 {
-		t.Fatalf("ViewSnapshotsMarked = %d, want 1", result.ViewSnapshotsMarked)
+	if result.SandboxesDowngraded != 1 {
+		t.Fatalf("SandboxesDowngraded = %d, want 1", result.SandboxesDowngraded)
 	}
-	views, err := store.ListViewSnapshots(ctx)
+	rec, err := store.GetSandbox(ctx, "pod-1")
 	if err != nil {
-		t.Fatalf("ListViewSnapshots() error = %v", err)
+		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if len(views) != 1 {
-		t.Fatalf("len(views) = %d, want 1", len(views))
+	if rec.State != state.SandboxNotReady {
+		t.Fatalf("sandbox.State = %q, want %q", rec.State, state.SandboxNotReady)
 	}
-	if views[0].State != state.SandboxUnknown {
-		t.Fatalf("view.State = %q, want %q", views[0].State, state.SandboxUnknown)
+	if !strings.Contains(rec.LastError, "rootfs mount is missing") {
+		t.Fatalf("LastError = %q, want missing rootfs mount reason", rec.LastError)
 	}
 }
 

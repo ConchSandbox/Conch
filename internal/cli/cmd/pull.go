@@ -1,4 +1,4 @@
-package cli
+package cmd
 
 import (
 	"context"
@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/openeuler/Conch/internal/image/client"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-func printPullHelp(out io.Writer) {
+func PrintImagePullHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch pull [options] <image-name>")
+	fmt.Fprintln(out, "  conch image pull [options] <image-name>")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
 	fmt.Fprintln(out, "  Pull a Conch native image into containerd content store, then unpack")
@@ -33,24 +32,17 @@ func printPullHelp(out io.Writer) {
 	fmt.Fprintln(out, "        allow plain HTTP / disable TLS verification for source image pulls")
 	fmt.Fprintln(out, "  --user string")
 	fmt.Fprintln(out, "        registry credentials in username:password format for source image pulls")
+	fmt.Fprintln(out, "  --skip-unpack")
+	fmt.Fprintln(out, "        pull image content without creating local snapshots")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch pull -n default hub.oepkgs.net/conch/sandbox-snapshot:latest")
-	fmt.Fprintln(out, "  conch pull --plain-http --user example-user:example-password docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  conch image pull -n default hub.oepkgs.net/conch/sandbox-snapshot:latest")
+	fmt.Fprintln(out, "  conch image pull --skip-unpack docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  conch image pull --plain-http --user example-user:example-password docker.io/library/nginx:latest")
 }
 
-func runPull(ctx context.Context, args []string) error {
-	if err := initUnpackLogger(); err != nil {
-		return err
-	}
-	defer func() {
-		logger := ulog.GetLogger()
-		if closer, ok := logger.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}()
-
-	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+func RunImagePull(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("image pull", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	apiURL := fs.String("api-url", "", "conchd API base URL")
 	addr := fs.String("address", "", "deprecated alias for -api-url")
@@ -58,51 +50,57 @@ func runPull(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "", "config file path")
 	plainHTTP := fs.Bool("plain-http", false, "allow plain HTTP / disable TLS verification for source image pulls")
 	user := fs.String("user", "", "registry credentials in username:password format for source image pulls")
+	skipUnpack := fs.Bool("skip-unpack", false, "pull image content without creating local snapshots")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
-	fs.Usage = func() { printPullHelp(os.Stderr) }
+	fs.Usage = func() { PrintImagePullHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("conch pull: exactly one image name is required")
+		return fmt.Errorf("conch image pull: exactly one image name is required")
 	}
 	imageName := fs.Arg(0)
 
-	cfg, err := loadConchConfig(*configPath)
+	cfg, err := LoadConchConfig(*configPath)
 	if err != nil {
-		return fmt.Errorf("conch pull: load config: %w", err)
+		return fmt.Errorf("conch image pull: load config: %w", err)
 	}
-	ns := resolveConchNamespace(cfg, *namespace)
-	username, password, err := parseRegistryUser(*user)
+	ns := ResolveConchNamespace(cfg, *namespace)
+	username, password, err := ParseRegistryUser(*user)
 	if err != nil {
-		return fmt.Errorf("conch pull: %w", err)
+		return fmt.Errorf("conch image pull: %w", err)
+	}
+	if !*skipUnpack {
+		if err := InitUnpackLogger(); err != nil {
+			return err
+		}
+		defer func() {
+			logger := ulog.GetLogger()
+			if closer, ok := logger.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}()
 	}
 
-	conchClient := client.NewClientWithConfig(resolveConchAPIURL(*apiURL, *addr), *configPath)
+	conchClient := client.NewClientWithConfig(ResolveConchAPIURL(*apiURL, *addr), *configPath)
 	fmt.Println("------------------------------------------------------------")
 	fmt.Printf("Pulling image: %s\n", imageName)
 	results, err := conchClient.PullImage(ctx, client.PullImageRequest{
-		ImageName: imageName,
-		Namespace: ns,
-		PlainHTTP: *plainHTTP,
-		Username:  username,
-		Password:  password,
+		ImageName:  imageName,
+		Namespace:  ns,
+		PlainHTTP:  *plainHTTP,
+		Username:   username,
+		Password:   password,
+		SkipUnpack: *skipUnpack,
 	})
 	if err != nil {
-		return fmt.Errorf("conch pull: %w", err)
+		return fmt.Errorf("conch image pull: %w", err)
 	}
-	printUnpackSummary(results)
+	if *skipUnpack {
+		fmt.Printf("Pulled image without unpacking: %s\n", imageName)
+		return nil
+	}
+	PrintUnpackSummary(results)
 	return nil
-}
-
-func parseRegistryUser(user string) (string, string, error) {
-	if user == "" {
-		return "", "", nil
-	}
-	idx := strings.IndexByte(user, ':')
-	if idx <= 0 || idx == len(user)-1 {
-		return "", "", fmt.Errorf("invalid --user value %q, want username:password", user)
-	}
-	return user[:idx], user[idx+1:], nil
 }

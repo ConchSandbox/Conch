@@ -179,10 +179,10 @@ func TestValidateRequiredKindsAllowsOptionalMemSnapshot(t *testing.T) {
 	}
 }
 
-func TestLinkSnapshotLabelsLinksSandboxAndOptionalMem(t *testing.T) {
+func TestRecordRootfsSnapshotProvenance(t *testing.T) {
 	snapshotter := &recordingSnapshotter{}
 
-	err := linkSnapshotLabels(context.Background(), snapshotter, map[string]string{
+	err := recordRootfsSnapshotProvenance(context.Background(), snapshotter, map[string]string{
 		KindRootfs:      "rootfs-id",
 		KindSandbox:     "sandbox-id",
 		KindMemSnapshot: "mem-id",
@@ -194,54 +194,40 @@ func TestLinkSnapshotLabelsLinksSandboxAndOptionalMem(t *testing.T) {
 	if rootfsInfo.Name != "rootfs-id" {
 		t.Fatalf("updated rootfs snapshot: got %q want %q", rootfsInfo.Name, "rootfs-id")
 	}
-	if rootfsInfo.Labels[common.SnapshotLabelGroupVMRef] != "sandbox-id" {
-		t.Fatalf("sandbox label: got %q want %q", rootfsInfo.Labels[common.SnapshotLabelGroupVMRef], "sandbox-id")
-	}
-	if rootfsInfo.Labels[common.SnapshotLabelGroupMemRef] != "mem-id" {
-		t.Fatalf("mem label: got %q want %q", rootfsInfo.Labels[common.SnapshotLabelGroupMemRef], "mem-id")
-	}
 	if rootfsInfo.Labels[common.SnapshotLabelRootfsImage] != "localhost/conch/rootfs-component:abc" {
 		t.Fatalf("rootfs image label: got %q", rootfsInfo.Labels[common.SnapshotLabelRootfsImage])
 	}
-	sandboxInfo := snapshotter.updatedInfos["sandbox-id"]
-	if sandboxInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
-		t.Fatalf("sandbox group id label: got %q want rootfs-id", sandboxInfo.Labels[common.SnapshotLabelGroupID])
+	if _, ok := snapshotter.updatedInfos["sandbox-id"]; ok {
+		t.Fatal("sandbox snapshot should not receive relationship labels")
 	}
-	if sandboxInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindVM {
-		t.Fatalf("sandbox component kind = %q, want %q", sandboxInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindVM)
-	}
-	memInfo := snapshotter.updatedInfos["mem-id"]
-	if memInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
-		t.Fatalf("mem group id label: got %q want rootfs-id", memInfo.Labels[common.SnapshotLabelGroupID])
-	}
-	if memInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindMem {
-		t.Fatalf("mem component kind = %q, want %q", memInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindMem)
+	if _, ok := snapshotter.updatedInfos["mem-id"]; ok {
+		t.Fatal("mem snapshot should not receive relationship labels")
 	}
 }
 
-func TestLinkSnapshotLabelsRequiresRootfsAndSandbox(t *testing.T) {
-	err := linkSnapshotLabels(context.Background(), &recordingSnapshotter{}, map[string]string{
-		KindRootfs: "rootfs-id",
+func TestRecordRootfsSnapshotProvenanceRequiresRootfs(t *testing.T) {
+	err := recordRootfsSnapshotProvenance(context.Background(), &recordingSnapshotter{}, map[string]string{
+		KindSandbox: "sandbox-id",
 	}, "", "")
 	if err == nil {
-		t.Fatal("expected missing sandbox kind to fail")
+		t.Fatal("expected missing rootfs kind to fail")
 	}
-	if !strings.Contains(err.Error(), "sandbox") {
+	if !strings.Contains(err.Error(), "rootfs") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestLinkSnapshotLabelsWrapsUpdateError(t *testing.T) {
+func TestRecordRootfsSnapshotProvenanceWrapsUpdateError(t *testing.T) {
 	snapshotter := &recordingSnapshotter{updateErr: errors.New("boom")}
 
-	err := linkSnapshotLabels(context.Background(), snapshotter, map[string]string{
+	err := recordRootfsSnapshotProvenance(context.Background(), snapshotter, map[string]string{
 		KindRootfs:  "rootfs-id",
 		KindSandbox: "sandbox-id",
-	}, "", "")
+	}, "rootfs-image", "")
 	if err == nil {
 		t.Fatal("expected update error")
 	}
-	if !strings.Contains(err.Error(), "failed to link component SnapshotIDs to rootfs") {
+	if !strings.Contains(err.Error(), "failed to record rootfs snapshot provenance") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

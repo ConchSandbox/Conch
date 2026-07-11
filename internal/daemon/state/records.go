@@ -1,10 +1,11 @@
 package state
 
 const (
-	SandboxReady    = "READY"
-	SandboxNotReady = "NOTREADY"
-	SandboxStopped  = "STOPPED"
-	SandboxUnknown  = "UNKNOWN"
+	SandboxReady     = "READY"
+	SandboxNotReady  = "NOTREADY"
+	SandboxSuspended = "SUSPENDED"
+	SandboxStopped   = "STOPPED"
+	SandboxUnknown   = "UNKNOWN"
 
 	NetworkSlotCreating = "CREATING"
 	NetworkSlotWarmIdle = "WARM_IDLE"
@@ -15,6 +16,15 @@ const (
 	ContainerRunning = "RUNNING_PLACEHOLDER"
 	ContainerExited  = "EXITED"
 	ContainerUnknown = "UNKNOWN"
+
+	TemplateOriginImage      = "image"
+	TemplateOriginCheckpoint = "checkpoint"
+	TemplateBootModeCold     = "cold"
+	TemplateBootModeResume   = "resume"
+
+	TemplateCreating = "CREATING"
+	TemplateReady    = "READY"
+	TemplateFailed   = "FAILED"
 )
 
 type SandboxRecord struct {
@@ -32,6 +42,7 @@ type SandboxRecord struct {
 	Annotations     map[string]string `json:"annotations,omitempty"`
 	RuntimeHandler  string            `json:"runtime_handler,omitempty"`
 	LeaseID         string            `json:"lease_id,omitempty"`
+	TemplateID      string            `json:"template_id,omitempty"`
 	ImageName       string            `json:"image_name,omitempty"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
 	IP              string            `json:"ip,omitempty"`
@@ -89,39 +100,20 @@ type ContainerRecord struct {
 	LastError    string            `json:"last_error,omitempty"`
 }
 
-type SnapshotRuntimeRecord struct {
-	Namespace      string `json:"namespace"`
-	SandboxID      string `json:"sandbox_id"`
-	RootfsKey      string `json:"rootfs_key"`
-	MemKey         string `json:"mem_key"`
-	ParentRootfsID string `json:"parent_rootfs_id"`
-	ParentMemID    string `json:"parent_mem_id"`
-	ParentVMID     string `json:"parent_vm_id"`
-	LeaseID        string `json:"lease_id,omitempty"`
-	RootfsMount    string `json:"rootfs_mount"`
-	MemMount       string `json:"mem_mount"`
-	VMMount        string `json:"vm_mount"`
-	RootDir        string `json:"root_dir"`
-	MemSize        int64  `json:"mem_size"`
-	State          string `json:"state"`
-	LastError      string `json:"last_error,omitempty"`
-}
-
-type ViewSnapshotRecord struct {
-	Namespace        string `json:"namespace"`
-	ParentSnapshotID string `json:"parent_snapshot_id"`
-	ViewSnapshotKey  string `json:"view_snapshot_key"`
-	LeaseID          string `json:"lease_id,omitempty"`
-	MountPoint       string `json:"mount_point"`
-	RefCount         int    `json:"ref_count"`
-	State            string `json:"state"`
-	LastError        string `json:"last_error,omitempty"`
-}
-
-type ViewAliasRecord struct {
-	Namespace        string `json:"namespace"`
-	AliasKey         string `json:"alias_key"`
-	SandboxID        string `json:"sandbox_id"`
-	ParentSnapshotID string `json:"parent_snapshot_id"`
-	MountKind        string `json:"mount_kind"`
+type TemplateRecord struct {
+	ID               string            `json:"id"`
+	Origin           string            `json:"origin"`
+	Namespace        string            `json:"namespace"`
+	State            string            `json:"state"`
+	RootfsKey        string            `json:"rootfs_key,omitempty"`
+	MemKey           string            `json:"mem_key,omitempty"`
+	VMKey            string            `json:"vm_key,omitempty"`
+	ParentTemplateID string            `json:"parent_template_id,omitempty"`
+	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
+	ImageName        string            `json:"image_name,omitempty"`
+	BuildRef         string            `json:"build_ref,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	CreatedAt        int64             `json:"created_at"`
+	UpdatedAt        int64             `json:"updated_at"`
+	LastError        string            `json:"last_error,omitempty"`
 }

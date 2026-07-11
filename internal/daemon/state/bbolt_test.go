@@ -111,3 +111,52 @@ func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
 		t.Fatalf("GetNetworkSlot() after delete got nil error")
 	}
 }
+
+func TestBoltStoreTemplateCRUD(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	rec := TemplateRecord{
+		ID:        "tmpl_1",
+		Origin:    TemplateOriginImage,
+		Namespace: "default",
+		State:     TemplateCreating,
+		Labels:    map[string]string{"purpose": "test"},
+		CreatedAt: 1,
+		UpdatedAt: 1,
+	}
+	if err := store.UpsertTemplate(ctx, rec); err != nil {
+		t.Fatalf("UpsertTemplate() error = %v", err)
+	}
+	got, err := store.GetTemplate(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetTemplate() error = %v", err)
+	}
+	if got.Origin != rec.Origin || got.Labels["purpose"] != "test" {
+		t.Fatalf("GetTemplate() = %#v, want %#v", got, rec)
+	}
+
+	rec.State = TemplateReady
+	rec.RootfsKey = "rootfs"
+	rec.VMKey = "vm"
+	if err := store.UpsertTemplate(ctx, rec); err != nil {
+		t.Fatalf("UpsertTemplate(update) error = %v", err)
+	}
+	items, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(items) != 1 || items[0].State != TemplateReady {
+		t.Fatalf("ListTemplates() = %#v", items)
+	}
+	if err := store.DeleteTemplate(ctx, rec.ID); err != nil {
+		t.Fatalf("DeleteTemplate() error = %v", err)
+	}
+	if _, err := store.GetTemplate(ctx, rec.ID); err == nil {
+		t.Fatalf("GetTemplate() after delete got nil error")
+	}
+}

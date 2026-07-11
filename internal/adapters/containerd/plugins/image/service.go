@@ -100,6 +100,9 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
 	}
+	if req.SkipUnpack {
+		return runtimeapi.PullImageResult{}, nil
+	}
 
 	results, err := conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
 	if err == nil {
@@ -590,13 +593,19 @@ func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBo
 	if err != nil {
 		return conchimage.PublishBootImageResult{}, fmt.Errorf("unpack boot image %s: %w", req.BootIndexTag, err)
 	}
-	snapshotKey := snapshotMap[conchimage.KindRootfs]
-	if snapshotKey == "" {
+	rootfsKey := snapshotMap[conchimage.KindRootfs]
+	vmKey := snapshotMap[conchimage.KindSandbox]
+	if rootfsKey == "" {
 		return conchimage.PublishBootImageResult{}, fmt.Errorf("boot image %s unpack returned empty rootfs snapshot key", req.BootIndexTag)
+	}
+	if vmKey == "" {
+		return conchimage.PublishBootImageResult{}, fmt.Errorf("boot image %s unpack returned empty VM snapshot key", req.BootIndexTag)
 	}
 	return conchimage.PublishBootImageResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		SnapshotKey:     snapshotKey,
+		RootfsKey:       rootfsKey,
+		MemKey:          snapshotMap[conchimage.KindMemSnapshot],
+		VMKey:           vmKey,
 		ImageName:       req.BootIndexTag,
 	}, nil
 }

@@ -4,16 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
+	cmd "github.com/openeuler/Conch/internal/cli/cmd"
 	"github.com/openeuler/Conch/internal/image/client"
 )
 
-func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
+func TestPrintHelpListsSubcommands(t *testing.T) {
 	var buf bytes.Buffer
 	printHelp(&buf)
 
@@ -22,20 +25,28 @@ func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 		t.Fatalf("help output still references CONTAINERD_ADDRESS:\n%s", got)
 	}
 	for _, want := range []string{
-		"conch convert [options]",
-		"conch push [options] <local-image> <remote-image>",
-		"conch pull [options] <image-name>",
-		"conch unpack [options] <image-name>",
-		"conch snapshot export [options]",
-		"conch snapshot ls [options]",
-		"conch snapshot rm [options] <snapshot-key>",
-		"Subcommands:",
+		"conch <command> [options]",
+		"Commands:",
+		"  image ",
+		"  sandbox ",
+		"  template ",
+		"  debug ",
+		"conch <command> --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("help output missing %q:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"CONCH_API_TIMEOUT", "CONCH_REGISTRY_TIMEOUT"} {
+	for _, unwanted := range []string{
+		"CONCH_API_TIMEOUT",
+		"CONCH_REGISTRY_TIMEOUT",
+		"CONCH_API_URL",
+		"conch image push [options]",
+		"conch sandbox create",
+		"conch sandbox checkpoint",
+		"conch template create",
+		"conch debug snapshot",
+	} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("help output should not expose %q:\n%s", unwanted, got)
 		}
@@ -43,21 +54,68 @@ func TestPrintHelpIncludesConvertPushPullUnpackAndSnapshot(t *testing.T) {
 	if strings.Contains(got, "conch snapshots ls [options]") {
 		t.Fatalf("help output still contains deprecated snapshots command:\n%s", got)
 	}
+	if strings.Contains(got, "snapshot export") {
+		t.Fatalf("help should not expose removed snapshot export command:\n%s", got)
+	}
+	if strings.Contains(got, "conch convert") {
+		t.Fatalf("help output still contains removed convert command:\n%s", got)
+	}
 }
 
-func TestPrintPushHelpIncludesExample(t *testing.T) {
+func TestPrintHelpAlignsCommandDescriptions(t *testing.T) {
 	var buf bytes.Buffer
-	printPushHelp(&buf)
+	printHelp(&buf)
+
+	for _, want := range []string{
+		"  image     Pull, push, unpack, list, or remove images.",
+		"  sandbox   Create, checkpoint, or control sandboxes from Template IDs.",
+		"  template  Build, list, inspect, or remove templates.",
+		"  debug     Low-level inspection and repair commands.",
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("help output missing aligned command line %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestRunRejectsRemovedTopLevelCommands(t *testing.T) {
+	for _, command := range []string{"pull", "push", "unpack", "snapshot", "snapshots", "checkpoint", "convert"} {
+		t.Run(command, func(t *testing.T) {
+			oldStderr := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("pipe: %v", err)
+			}
+			os.Stderr = w
+			code := Run([]string{command, "--help"})
+			_ = w.Close()
+			os.Stderr = oldStderr
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			if code != 2 {
+				t.Fatalf("Run(%q --help) exit code = %d, want 2; stderr:\n%s", command, code, buf.String())
+			}
+			if !strings.Contains(buf.String(), "unknown command "+strconv.Quote(command)) {
+				t.Fatalf("Run(%q --help) stderr missing unknown command:\n%s", command, buf.String())
+			}
+		})
+	}
+}
+
+func TestPrintImagePushHelpIncludesExample(t *testing.T) {
+	var buf bytes.Buffer
+	cmd.PrintImagePushHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch push [options] <local-image> <remote-image>",
+		"conch image push [options] <local-image> <remote-image>",
 		"conchd/containerd",
 		"--plain-http",
 		"--username string",
 		"--timeout duration",
 		"timeout for this push operation",
-		"conch push --timeout 30m",
+		"conch image push --timeout 30m",
 		"containerd namespace",
 	} {
 		if !strings.Contains(got, want) {
@@ -66,7 +124,7 @@ func TestPrintPushHelpIncludesExample(t *testing.T) {
 	}
 }
 
-func TestParsePushArgs(t *testing.T) {
+func TestParseImagePushArgs(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
@@ -119,21 +177,21 @@ func TestParsePushArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parsePushArgs(tt.args)
+			got, err := cmd.ParseImagePushArgs(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parsePushArgs() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
-			if got.localImage != tt.wantLocal || got.remoteImage != tt.wantRemote || got.plainHTTP != tt.wantPlain || got.namespace != tt.wantNS || got.timeout != tt.wantTimeout {
+			if got.LocalImage != tt.wantLocal || got.RemoteImage != tt.wantRemote || got.PlainHTTP != tt.wantPlain || got.Namespace != tt.wantNS || got.Timeout != tt.wantTimeout {
 				t.Fatalf("parsePushArgs() = %#v", got)
 			}
 		})
 	}
 }
 
-func TestRunPushPassesResolvedNamespace(t *testing.T) {
+func TestRunImagePushPassesResolvedNamespace(t *testing.T) {
 	var got client.PushImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/image/push" {
@@ -156,7 +214,7 @@ containerd:
 		t.Fatalf("write config: %v", err)
 	}
 
-	err := runPush(context.Background(), []string{"--config", cfgPath, "localhost/demo:latest", "remote/demo:latest"})
+	err := cmd.RunImagePush(context.Background(), []string{"--config", cfgPath, "localhost/demo:latest", "remote/demo:latest"})
 	if err != nil {
 		t.Fatalf("runPush: %v", err)
 	}
@@ -171,7 +229,7 @@ containerd:
 	}
 }
 
-func TestRunPushPassesTimeout(t *testing.T) {
+func TestRunImagePushPassesTimeout(t *testing.T) {
 	var got client.PushImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
@@ -182,7 +240,7 @@ func TestRunPushPassesTimeout(t *testing.T) {
 	defer server.Close()
 	t.Setenv("CONCH_API_URL", server.URL)
 
-	err := runPush(context.Background(), []string{"--timeout", "30m", "localhost/demo:latest", "remote/demo:latest"})
+	err := cmd.RunImagePush(context.Background(), []string{"--timeout", "30m", "localhost/demo:latest", "remote/demo:latest"})
 	if err != nil {
 		t.Fatalf("runPush: %v", err)
 	}
@@ -191,18 +249,19 @@ func TestRunPushPassesTimeout(t *testing.T) {
 	}
 }
 
-func TestPrintPullHelpIncludesExample(t *testing.T) {
+func TestPrintImagePullHelpIncludesExample(t *testing.T) {
 	var buf bytes.Buffer
-	printPullHelp(&buf)
+	cmd.PrintImagePullHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch pull [options] <image-name>",
+		"conch image pull [options] <image-name>",
 		"containerd namespace",
 		"conchd API base URL",
 		"config file path",
 		"--plain-http",
 		"--user string",
+		"--skip-unpack",
 		"hub.oepkgs.net/conch/sandbox-snapshot:latest",
 	} {
 		if !strings.Contains(got, want) {
@@ -213,6 +272,29 @@ func TestPrintPullHelpIncludesExample(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("pull help output should not expose %q:\n%s", unwanted, got)
 		}
+	}
+}
+
+func TestRunImagePullPassesSkipUnpack(t *testing.T) {
+	var got client.PullImageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/image/pull" {
+			t.Fatalf("path = %q, want /api/image/pull", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode pull request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": map[string]string{}})
+	}))
+	defer server.Close()
+	t.Setenv("CONCH_API_URL", server.URL)
+
+	err := cmd.RunImagePull(context.Background(), []string{"--skip-unpack", "docker.io/library/nginx:latest"})
+	if err != nil {
+		t.Fatalf("RunImagePull() error = %v", err)
+	}
+	if got.ImageName != "docker.io/library/nginx:latest" || !got.SkipUnpack {
+		t.Fatalf("pull request = %#v", got)
 	}
 }
 
@@ -233,7 +315,7 @@ func TestParseRegistryUser(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			user, pass, err := parseRegistryUser(tt.input)
+			user, pass, err := cmd.ParseRegistryUser(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseRegistryUser() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -247,17 +329,17 @@ func TestParseRegistryUser(t *testing.T) {
 	}
 }
 
-func TestPrintUnpackHelpIncludesExample(t *testing.T) {
+func TestPrintImageUnpackHelpIncludesExample(t *testing.T) {
 	var buf bytes.Buffer
-	printUnpackHelp(&buf)
+	cmd.PrintImageUnpackHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch unpack [options] <image-name>",
+		"conch image unpack [options] <image-name>",
 		"containerd namespace",
 		"conchd API base URL",
 		"config file path",
-		"conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1",
+		"conch image unpack -n default hub.oepkgs.net/conch/conch-index:v0.1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unpack help output missing %q:\n%s", want, got)
@@ -277,249 +359,144 @@ containerd:
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := loadConchConfig(cfgPath)
+	cfg, err := cmd.LoadConchConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	ns := resolveConchNamespace(cfg, "")
+	ns := cmd.ResolveConchNamespace(cfg, "")
 	if ns != "team-a" {
 		t.Fatalf("namespace = %q, want %q", ns, "team-a")
 	}
 
-	ns = resolveConchNamespace(cfg, "override-ns")
+	ns = cmd.ResolveConchNamespace(cfg, "override-ns")
 	if ns != "override-ns" {
 		t.Fatalf("override namespace = %q, want %q", ns, "override-ns")
 	}
 
-	if got := resolveConchAPIURL("http://explicit", "http://alias"); got != "http://explicit" {
+	if got := cmd.ResolveConchAPIURL("http://explicit", "http://alias"); got != "http://explicit" {
 		t.Fatalf("api url = %q, want explicit", got)
 	}
-	if got := resolveConchAPIURL("", "http://alias"); got != "http://alias" {
+	if got := cmd.ResolveConchAPIURL("", "http://alias"); got != "http://alias" {
 		t.Fatalf("api url alias = %q, want alias", got)
 	}
 }
 
-func TestPrintConvertHelpIncludesUsageAndInputs(t *testing.T) {
+func TestPrintTemplateCreateHelpIncludesUsageAndInputs(t *testing.T) {
 	var buf bytes.Buffer
-	printConvertHelp(&buf)
+	cmd.PrintTemplateCreateHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch convert [options]",
+		"conch template create --source <image> --kernel <path> --initrd <path> [options]",
 		"--source string",
 		"--kernel string",
 		"--initrd string",
-		"--snapshot",
+		"--user string",
+		"--username string",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("convert help output missing %q:\n%s", want, got)
-		}
-	}
-	for _, unwanted := range []string{"--archive", "--source-tag", "--source-image"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("convert help output still contains %q:\n%s", unwanted, got)
+			t.Fatalf("template create help output missing %q:\n%s", want, got)
 		}
 	}
 }
 
-func TestParseConvertArgs(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		want    convertOptions
-		wantErr bool
-	}{
-		{
-			name: "registry source",
-			args: []string{"--source", "docker.io/library/nginx:latest", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/nginx:latest"},
-			want: convertOptions{source: "docker.io/library/nginx:latest", kernel: "./bzImage", initrd: "./conch.initrd", tag: "localhost/conch/nginx:latest"},
-		},
-		{
-			name:    "missing source",
-			args:    []string{"--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
-			wantErr: true,
-		},
-		{
-			name:    "source image unsupported",
-			args:    []string{"--source-image", "localhost/source:latest", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
-			wantErr: true,
-		},
-		{
-			name:    "archive source unsupported",
-			args:    []string{"--archive", "./rootfs.oci.tar", "--kernel", "./bzImage", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
-			wantErr: true,
-		},
-		{
-			name:    "missing kernel",
-			args:    []string{"--source", "nginx:latest", "--initrd", "./conch.initrd", "-t", "localhost/conch/demo:latest"},
-			wantErr: true,
-		},
-		{
-			name:    "missing initrd",
-			args:    []string{"--source", "nginx:latest", "--kernel", "./bzImage", "-t", "localhost/conch/demo:latest"},
-			wantErr: true,
-		},
+func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
+	dir := t.TempDir()
+	kernelPath := dir + "/vmlinuz"
+	initrdPath := dir + "/conch.initrd"
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(kernelPath, []byte("kernel-content"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(initrdPath, []byte("initrd-content"), 0o644); err != nil {
+		t.Fatalf("write initrd: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`
+containerd:
+  default_namespace: team-a
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseConvertArgs(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseConvertArgs() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if got.source != tt.want.source || got.kernel != tt.want.kernel || got.initrd != tt.want.initrd || got.tag != tt.want.tag || got.snapshot != tt.want.snapshot {
-				t.Fatalf("parseConvertArgs() = %#v, want %#v", got, tt.want)
-			}
+	var metadata client.TemplateCreateMetadata
+	var kernelBody string
+	var initrdBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/template/create" {
+			t.Fatalf("path = %q, want /api/template/create", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(4096); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("metadata")), &metadata); err != nil {
+			t.Fatalf("decode metadata: %v", err)
+		}
+		file, _, err := r.FormFile("kernel")
+		if err != nil {
+			t.Fatalf("kernel FormFile: %v", err)
+		}
+		raw, err := io.ReadAll(file)
+		_ = file.Close()
+		if err != nil {
+			t.Fatalf("ReadAll kernel: %v", err)
+		}
+		kernelBody = string(raw)
+		file, _, err = r.FormFile("initrd")
+		if err != nil {
+			t.Fatalf("initrd FormFile: %v", err)
+		}
+		raw, err = io.ReadAll(file)
+		_ = file.Close()
+		if err != nil {
+			t.Fatalf("ReadAll initrd: %v", err)
+		}
+		initrdBody = string(raw)
+		_ = json.NewEncoder(w).Encode(client.TemplateCreateResponse{
+			Status:          "ok",
+			TemplateID:      "tmpl_123",
+			BootIndexDigest: "sha256:template",
+			BootIndexTag:    "localhost/conch/busybox:latest",
 		})
+	}))
+	defer server.Close()
+
+	err := cmd.RunTemplateCreate(context.Background(), []string{
+		"--config", cfgPath,
+		"--api-url", server.URL,
+		"--source", "public.ecr.aws/docker/library/busybox:latest",
+		"--kernel", kernelPath,
+		"--initrd", initrdPath,
+		"-t", "localhost/conch/busybox:latest",
+	})
+	if err != nil {
+		t.Fatalf("runTemplateCreate: %v", err)
+	}
+	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" || metadata.Namespace != "team-a" || metadata.BootIndexTag != "localhost/conch/busybox:latest" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if kernelBody != "kernel-content" || initrdBody != "initrd-content" {
+		t.Fatalf("uploaded bodies kernel=%q initrd=%q", kernelBody, initrdBody)
 	}
 }
 
-func TestPrintSnapshotHelpIncludesExportListAndRemove(t *testing.T) {
+func TestPrintSnapshotHelpUsesDebugCommand(t *testing.T) {
 	var buf bytes.Buffer
-	printSnapshotHelp(&buf)
+	cmd.PrintSnapshotHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch snapshot export [options]",
-		"conch snapshot ls [options]",
-		"conch snapshot rm [options] <snapshot-key>",
-		"export  Export a sandbox-snapshot image",
+		"conch debug snapshot ls [options]",
+		"conch debug snapshot rm [options] <snapshot-key>",
 		"ls      List EROFS snapshots",
-		"rm      Remove an EROFS snapshot",
-		"conch snapshot export --snapshot-id <rootfs-snapshot-id> -t <sandbox-snapshot-image>",
-		"conch snapshot export --sandbox-id <sandbox-id> -t <sandbox-snapshot-image>",
-		"conch snapshot rm --cascade <rootfs-snapshot-key>",
+		"rm      Remove one EROFS snapshot",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("snapshot help output missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "conch snapshots ls") {
-		t.Fatalf("snapshot help output unexpectedly contains snapshots alias:\n%s", got)
-	}
-}
-
-func TestPrintSnapshotAliasesUseSnapshotHelp(t *testing.T) {
-	var buf bytes.Buffer
-	printSnapshotsHelp(&buf)
-
-	got := buf.String()
-	for _, want := range []string{
-		"conch snapshot ls [options]",
-		"conch snapshot rm [options] <snapshot-key>",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("snapshots alias help output missing %q:\n%s", want, got)
+	for _, removed := range []string{"conch snapshot ls", "conch snapshots ls"} {
+		if strings.Contains(got, removed) {
+			t.Fatalf("snapshot help output still contains removed top-level command %q:\n%s", removed, got)
 		}
-	}
-}
-
-func TestRunSnapshotsAliasUsesSnapshotHelp(t *testing.T) {
-	var buf bytes.Buffer
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stdout = w
-	err = runSnapshotsAlias(context.Background(), []string{"--help"})
-	_ = w.Close()
-	os.Stdout = oldStdout
-	_, _ = buf.ReadFrom(r)
-	if err != nil {
-		t.Fatalf("alias help error = %v", err)
-	}
-	if !strings.Contains(buf.String(), "conch snapshot export [options]") {
-		t.Fatalf("alias help output missing new snapshot command:\n%s", buf.String())
-	}
-}
-
-func TestPrintSnapshotExportHelpIncludesExamples(t *testing.T) {
-	var buf bytes.Buffer
-	fs, _ := newSnapshotExportFlagSet(&buf)
-	printSnapshotExportHelp(&buf, fs)
-
-	got := buf.String()
-	for _, want := range []string{
-		"-snapshot-id string",
-		"-sandbox-id string",
-		"-namespace string",
-		"-n string",
-		"-tag string",
-		"-t string",
-		"Either one of --snapshot-id or --sandbox-id is required.",
-		"conch snapshot export --snapshot-id sha256:abc -t localhost/conch/sandbox-snapshot:latest",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("snapshot export help output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-func TestParseSnapshotExportArgs(t *testing.T) {
-	tests := []struct {
-		name         string
-		args         []string
-		wantSnapshot string
-		wantSandbox  string
-		wantTag      string
-		wantConfig   string
-		wantNS       string
-		wantErrText  string
-		wantErr      bool
-	}{
-		{
-			name:         "snapshot id",
-			args:         []string{"--snapshot-id", "sha256:abc", "-t", "localhost/conch/sandbox-snapshot:latest"},
-			wantSnapshot: "sha256:abc",
-			wantTag:      "localhost/conch/sandbox-snapshot:latest",
-		},
-		{
-			name:        "sandbox id with config and namespace",
-			args:        []string{"--sandbox-id", "sandbox-123", "--tag", "localhost/conch/demo:latest", "--config", "/tmp/config.yaml", "-n", "team-a"},
-			wantSandbox: "sandbox-123",
-			wantTag:     "localhost/conch/demo:latest",
-			wantConfig:  "/tmp/config.yaml",
-			wantNS:      "team-a",
-		},
-		{
-			name:        "missing tag",
-			args:        []string{"--snapshot-id", "sha256:abc"},
-			wantErr:     true,
-			wantErrText: "output tag is required",
-		},
-		{
-			name:        "missing source",
-			args:        []string{"-t", "localhost/conch/demo:latest"},
-			wantErr:     true,
-			wantErrText: "exactly one of --snapshot-id or --sandbox-id is required",
-		},
-		{
-			name:        "both sources",
-			args:        []string{"--snapshot-id", "sha256:abc", "--sandbox-id", "sandbox-123", "-t", "localhost/conch/demo:latest"},
-			wantErr:     true,
-			wantErrText: "exactly one of --snapshot-id or --sandbox-id is required",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseSnapshotExportArgs(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseSnapshotExportArgs() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				if !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Fatalf("parseSnapshotExportArgs() error = %q, want substring %q", err.Error(), tt.wantErrText)
-				}
-				return
-			}
-			if got.snapshotID != tt.wantSnapshot || got.sandboxID != tt.wantSandbox || got.tag != tt.wantTag || got.configPath != tt.wantConfig || got.namespace != tt.wantNS {
-				t.Fatalf("parseSnapshotExportArgs() = %#v", got)
-			}
-		})
 	}
 }

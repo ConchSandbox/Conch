@@ -28,4 +28,5 @@ import (
 	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
 	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/template"
 )

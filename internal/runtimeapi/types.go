@@ -14,9 +14,7 @@ type SandboxCreateOptions struct {
 	Annotations    map[string]string
 	RuntimeHandler string
 	LeaseID        string
-	ImageName      string
-	SnapshotID     string
-	UseSnapshot    bool
+	TemplateID     string
 	VMMName        string
 	VCPUNum        int64
 	VCPUMax        int64
@@ -24,11 +22,11 @@ type SandboxCreateOptions struct {
 }
 
 type SandboxDefaults struct {
-	ImageName string
-	VMMName   string
-	VCPUNum   int64
-	VCPUMax   int64
-	RamMB     int64
+	TemplateID string
+	VMMName    string
+	VCPUNum    int64
+	VCPUMax    int64
+	RamMB      int64
 }
 
 type SandboxCreateResult struct {
@@ -37,6 +35,61 @@ type SandboxCreateResult struct {
 	Namespace    string
 	IP           string
 	AgentToken   string
+}
+
+type SandboxLifecycleOptions struct {
+	Namespace    string
+	PodSandboxID string
+}
+
+type SandboxCheckpointOptions struct {
+	Namespace    string
+	PodSandboxID string
+	Labels       map[string]string
+}
+
+type SandboxCheckpointResult struct {
+	TemplateID string
+}
+
+type TemplateCreateOptions struct {
+	Namespace    string
+	Source       string
+	KernelPath   string
+	InitrdPath   string
+	BootIndexTag string
+	PlainHTTP    bool
+	Username     string
+	Password     string
+	Labels       map[string]string
+}
+
+type TemplateCreateResult struct {
+	TemplateID      string
+	BootIndexDigest string
+	BootIndexTag    string
+}
+
+type TemplateListOptions struct {
+	Namespace string
+	Origin    string
+	BootMode  string
+}
+
+type TemplateRecord struct {
+	ID               string            `json:"id"`
+	Origin           string            `json:"origin"`
+	BootMode         string            `json:"boot_mode"`
+	Namespace        string            `json:"namespace"`
+	State            string            `json:"state"`
+	ParentTemplateID string            `json:"parent_template_id,omitempty"`
+	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
+	ImageName        string            `json:"image_name,omitempty"`
+	BuildRef         string            `json:"build_ref,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	CreatedAt        int64             `json:"created_at,omitempty"`
+	UpdatedAt        int64             `json:"updated_at,omitempty"`
+	LastError        string            `json:"last_error,omitempty"`
 }
 
 type ContainerCreateOptions struct {
@@ -57,11 +110,12 @@ type ContainerCreateResult struct {
 }
 
 type PullImageOptions struct {
-	ImageName string
-	Namespace string
-	PlainHTTP bool
-	Username  string
-	Password  string
+	ImageName  string
+	Namespace  string
+	PlainHTTP  bool
+	Username   string
+	Password   string
+	SkipUnpack bool
 }
 
 type PullImageResult struct {

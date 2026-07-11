@@ -13,7 +13,7 @@ def test_get_info(sandbox):
     assert info.sandbox_id is not None
     assert info.sandbox_id == sandbox.sandbox_id
     assert info.ip is not None
-    assert info.snapshot_id is None or info.snapshot_id == ""
+    assert info.template_id is not None
 
 
 def test_delete_sandbox_static():

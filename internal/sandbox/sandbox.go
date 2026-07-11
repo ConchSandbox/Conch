@@ -4,16 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
-	"time"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
-	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/vmm"
 )
 
@@ -51,37 +48,26 @@ type VMStartSpec struct {
 	PmemPaths    []string
 }
 
-func vmStartSpecFromBootLayout(layout *snapshot.BootLayout) VMStartSpec {
-	if layout == nil {
-		return VMStartSpec{}
-	}
+func vmStartSpecFromBootSpec(spec template.SandboxBootSpec) VMStartSpec {
 	return VMStartSpec{
-		MemorySizeMB: layout.MemorySizeMB,
-		MemoryPath:   layout.SnapshotMemFile(),
-		KernelPath:   layout.KernelFile(),
-		InitrdPath:   layout.InitrdFile(),
-		SnapfilePath: layout.SnapDir(),
-		PmemPaths:    layout.PmemFiles(),
+		MemorySizeMB: spec.MemorySizeMB,
+		MemoryPath:   spec.MemoryPath,
+		KernelPath:   spec.KernelPath,
+		InitrdPath:   spec.InitrdPath,
+		SnapfilePath: spec.SnapfilePath,
+		PmemPaths:    append([]string(nil), spec.PmemPaths...),
 	}
 }
 
 func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
-	snapshotDir := rec.SnapshotRootDir
-	if snapshotDir == "" {
-		snapshotDir = "/conch/snapshot"
-	}
-	memorySizeMB := rec.RamMB
-	if memorySizeMB <= 0 {
-		memorySizeMB = 256
-	}
-	layout := &snapshot.BootLayout{
-		RootfsMount:  rec.RootfsMount,
-		MemMount:     rec.MemMount,
-		VMMount:      rec.VMMount,
-		SnapshotDir:  snapshotDir,
-		MemorySizeMB: memorySizeMB,
-	}
-	return vmStartSpecFromBootLayout(layout)
+	spec := template.BootSpecFromRuntime(template.SandboxBootRuntime{
+		RootfsMount: rec.RootfsMount,
+		MemMount:    rec.MemMount,
+		VMMount:     rec.VMMount,
+		RootDir:     rec.SnapshotRootDir,
+		MemSize:     rec.RamMB,
+	})
+	return vmStartSpecFromBootSpec(spec)
 }
 
 type Sandbox struct {
@@ -340,99 +326,46 @@ func (s *Sandbox) Close(ctx context.Context) error {
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {
-	stagingDir, err := os.MkdirTemp("", "conch-vm-snapshot-*")
-	if err != nil {
-		return fmt.Errorf("create snapshot staging directory: %w", err)
-	}
-	defer os.RemoveAll(stagingDir)
+	return s.Suspend(ctx)
+}
 
+func (s *Sandbox) Suspend(ctx context.Context) error {
 	if err := s.process.Pause(ctx); err != nil {
 		return fmt.Errorf("failed to pause VM: %w", err)
 	}
-
-	if err := s.process.CreateSnapshot(ctx, stagingDir); err != nil {
-		return fmt.Errorf("error creating snapshot: %w", err)
-	}
-	if err := s.Stop(ctx); err != nil {
-		return fmt.Errorf("failed to stop VM after snapshot: %w", err)
-	}
-	if err := replaceDirWithRetry(stagingDir, s.vmStartSpec.SnapfilePath, time.Second, 20*time.Millisecond); err != nil {
-		return fmt.Errorf("stage snapshot into mem snapshot: %w", err)
-	}
-
 	return nil
 }
 
-func replaceDirWithRetry(src, dst string, timeout, interval time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		if err := replaceDir(src, dst); err != nil {
-			lastErr = err
-		} else {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return lastErr
-		}
-		time.Sleep(interval)
+func (s *Sandbox) Resume(ctx context.Context) error {
+	if err := s.process.ResumeVM(ctx); err != nil {
+		return fmt.Errorf("failed to resume VM: %w", err)
 	}
+	return nil
 }
 
-func replaceDir(src, dst string) error {
-	if err := os.RemoveAll(dst); err != nil {
-		return err
-	}
-	return copyDir(src, dst)
-}
-
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case entry.IsDir():
-			return os.MkdirAll(target, info.Mode().Perm())
-		case entry.Type()&os.ModeSymlink != 0:
-			linkTarget, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(linkTarget, target)
-		case entry.Type().IsRegular():
-			return copyFile(path, target, info.Mode().Perm())
-		default:
-			return nil
-		}
-	})
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
+// captureCheckpoint writes a self-contained VMM snapshot to a temporary
+// directory. If it pauses a running VM, the VM remains paused on success so
+// the caller can atomically commit the capture before resuming it.
+func (s *Sandbox) captureCheckpoint(ctx context.Context, pauseBefore bool) (string, error) {
+	stagingDir, err := os.MkdirTemp("", "conch-vm-snapshot-*")
 	if err != nil {
-		return err
+		return "", fmt.Errorf("create snapshot staging directory: %w", err)
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return err
+
+	if pauseBefore {
+		if err := s.process.Pause(ctx); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return "", fmt.Errorf("failed to pause VM: %w", err)
+		}
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
+
+	if err := s.process.CreateSnapshot(ctx, stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		if pauseBefore {
+			_ = s.process.ResumeVM(context.WithoutCancel(ctx))
+		}
+		return "", fmt.Errorf("error creating snapshot: %w", err)
 	}
-	return out.Close()
+
+	return stagingDir, nil
 }

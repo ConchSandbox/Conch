@@ -148,7 +148,7 @@ pull_function() {
     echo "--- Pulling Function Image via conch ---"
     echo "Note: conchd must be running before pull; conch talks to conchd over the configured API endpoint."
     if [ -x "./bin/conch" ]; then
-        ./bin/conch pull "$MAIN_IMG"
+        ./bin/conch image pull "$MAIN_IMG"
         echo "Function image pull completed successfully."
     else
         echo "Error: ./bin/conch executable not found."

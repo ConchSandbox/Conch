@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -19,9 +18,7 @@ var buckets = [][]byte{
 	[]byte("sandboxes"),
 	[]byte("network_slots"),
 	[]byte("containers"),
-	[]byte("snapshot_runtimes"),
-	[]byte("view_snapshots"),
-	[]byte("view_aliases"),
+	[]byte("templates"),
 }
 
 type BoltStore struct {
@@ -192,14 +189,20 @@ func (s *BoltStore) DeleteContainer(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("containers"), id)
 }
 
-func (s *BoltStore) UpsertSnapshotRuntime(ctx context.Context, rec SnapshotRuntimeRecord) error {
-	return s.upsert(ctx, []byte("snapshot_runtimes"), namespaceKey(rec.Namespace, rec.SandboxID), rec)
+func (s *BoltStore) UpsertTemplate(ctx context.Context, rec TemplateRecord) error {
+	return s.upsert(ctx, []byte("templates"), rec.ID, rec)
 }
 
-func (s *BoltStore) ListSnapshotRuntimes(ctx context.Context) ([]SnapshotRuntimeRecord, error) {
-	var out []SnapshotRuntimeRecord
-	err := s.list(ctx, []byte("snapshot_runtimes"), func(data []byte) error {
-		var rec SnapshotRuntimeRecord
+func (s *BoltStore) GetTemplate(ctx context.Context, id string) (TemplateRecord, error) {
+	var rec TemplateRecord
+	err := s.get(ctx, []byte("templates"), id, &rec)
+	return rec, err
+}
+
+func (s *BoltStore) ListTemplates(ctx context.Context) ([]TemplateRecord, error) {
+	var out []TemplateRecord
+	err := s.list(ctx, []byte("templates"), func(data []byte) error {
+		var rec TemplateRecord
 		if err := json.Unmarshal(data, &rec); err != nil {
 			return err
 		}
@@ -209,52 +212,6 @@ func (s *BoltStore) ListSnapshotRuntimes(ctx context.Context) ([]SnapshotRuntime
 	return out, err
 }
 
-func (s *BoltStore) DeleteSnapshotRuntime(ctx context.Context, namespace, sandboxID string) error {
-	return s.delete(ctx, []byte("snapshot_runtimes"), namespaceKey(namespace, sandboxID))
-}
-
-func (s *BoltStore) UpsertViewSnapshot(ctx context.Context, rec ViewSnapshotRecord) error {
-	return s.upsert(ctx, []byte("view_snapshots"), namespaceKey(rec.Namespace, rec.ParentSnapshotID), rec)
-}
-
-func (s *BoltStore) ListViewSnapshots(ctx context.Context) ([]ViewSnapshotRecord, error) {
-	var out []ViewSnapshotRecord
-	err := s.list(ctx, []byte("view_snapshots"), func(data []byte) error {
-		var rec ViewSnapshotRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
-func (s *BoltStore) DeleteViewSnapshot(ctx context.Context, namespace, parentSnapshotID string) error {
-	return s.delete(ctx, []byte("view_snapshots"), namespaceKey(namespace, parentSnapshotID))
-}
-
-func (s *BoltStore) UpsertViewAlias(ctx context.Context, rec ViewAliasRecord) error {
-	return s.upsert(ctx, []byte("view_aliases"), namespaceKey(rec.Namespace, rec.AliasKey), rec)
-}
-
-func (s *BoltStore) ListViewAliases(ctx context.Context) ([]ViewAliasRecord, error) {
-	var out []ViewAliasRecord
-	err := s.list(ctx, []byte("view_aliases"), func(data []byte) error {
-		var rec ViewAliasRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
-func (s *BoltStore) DeleteViewAlias(ctx context.Context, namespace, aliasKey string) error {
-	return s.delete(ctx, []byte("view_aliases"), namespaceKey(namespace, aliasKey))
-}
-
-func namespaceKey(namespace, key string) string {
-	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(key)
+func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
+	return s.delete(ctx, []byte("templates"), id)
 }

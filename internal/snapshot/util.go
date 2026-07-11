@@ -145,22 +145,6 @@ func MemKeyFromRootfs(rootfsKey string) string {
 	return getMemKeyFromRootfs(rootfsKey)
 }
 
-func RootfsViewAliasKey(sandboxID string) string {
-	return getRootfsViewAliasKey(sandboxID)
-}
-
-func MemViewAliasKey(sandboxID string) string {
-	return getMemViewAliasKey(sandboxID)
-}
-
-func VMViewAliasKey(sandboxID string) string {
-	return getVMViewAliasKey(sandboxID)
-}
-
-func SharedViewSnapshotKey(mountKind, snapshotID string) string {
-	return getSharedViewSnapshotKey(mountKind, snapshotID)
-}
-
 // cleanupEmptySnapshotParents removes empty parent directories after a mount point
 // directory has been deleted. It only prunes within the snapshot tree and stops
 // at the "snapshot" root directory.

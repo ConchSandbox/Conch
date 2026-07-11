@@ -161,7 +161,7 @@ func (idx *imageIndex) matchesView(view *imageView, ref string) bool {
 }
 
 func imageReady(record runtimeapi.ImageRecord) bool {
-	if isInternalConvertImage(record.Name) {
+	if isLegacyInternalBuildImage(record.Name) {
 		return false
 	}
 	kind := normalizeImageKind(record)
@@ -175,7 +175,7 @@ func imageReady(record runtimeapi.ImageRecord) bool {
 	}
 }
 
-func isInternalConvertImage(name string) bool {
+func isLegacyInternalBuildImage(name string) bool {
 	name = strings.TrimSpace(name)
 	return strings.HasPrefix(name, "conch-erofs-rootfs:convert-") ||
 		strings.HasPrefix(name, "conch-kernel:convert-")

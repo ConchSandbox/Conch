@@ -25,16 +25,21 @@ const (
 	DefaultRamMB       = 256
 	defaultRamMB       = DefaultRamMB
 	createSandbox      = "/api/sandbox/create"
-	pauseSandbox       = "/api/sandbox/pause"
+	suspendSandbox     = "/api/sandbox/suspend"
+	resumeSandbox      = "/api/sandbox/resume"
+	stopSandbox        = "/api/sandbox/stop"
+	checkpointSandbox  = "/api/sandbox/checkpoint"
+	createTemplate     = "/api/template/create"
+	listTemplates      = "/api/template/list"
+	inspectTemplate    = "/api/template/inspect"
+	removeTemplate     = "/api/template/remove"
 	pullImage          = "/api/image/pull"
 	pushImage          = "/api/image/push"
 	listImages         = "/api/image/list"
 	removeImage        = "/api/image/remove"
 	unpackImage        = "/api/image/unpack"
-	convertImage       = "/api/image/convert"
 	listSnapshots      = "/api/snapshot/list"
 	removeSnapshot     = "/api/snapshot/remove"
-	snapshotExport     = "/api/snapshot/export"
 	defaultHTTPTimeout = 120 * time.Second
 )
 
@@ -44,11 +49,10 @@ func ResolveBaseURL() string {
 	return baseURL
 }
 
-// CreateRequest matches Conch SandboxCreateRequest (image_name for image-based startup).
+// CreateRequest matches Conch SandboxCreateRequest.
 type CreateRequest struct {
 	Namespace  string `json:"namespace,omitempty"`
-	SnapshotId string `json:"snapshot_id,omitempty"`
-	ImageName  string `json:"image_name"`
+	TemplateID string `json:"template_id"`
 	VmmName    string `json:"vmm_name"`
 	SandboxId  string `json:"sandbox_id"`
 	VcpuNum    int64  `json:"vcpu_num"`
@@ -61,25 +65,60 @@ type CreateResponse struct {
 	IP     string `json:"ip"`
 }
 
-// PauseRequest matches Conch SandboxPauseRequest
-type PauseRequest struct {
+type SandboxLifecycleRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	SandboxId string `json:"sandbox_id"`
 }
 
-// PauseResponse is the JSON response from sandbox pause
-type PauseResponse struct {
+type SandboxCheckpointRequest struct {
+	Namespace string            `json:"namespace,omitempty"`
+	SandboxId string            `json:"sandbox_id"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+type SandboxCheckpointResponse struct {
 	Status     string `json:"status"`
-	SnapshotId string `json:"snapshotId"` // Conch returns camelCase key
+	TemplateID string `json:"template_id"`
+}
+
+type TemplateIDRequest struct {
+	ID string `json:"id"`
+}
+
+type TemplateListRequest struct {
+	Namespace string `json:"namespace,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	BootMode  string `json:"boot_mode,omitempty"`
+}
+
+type TemplateRecord struct {
+	ID               string            `json:"id"`
+	Origin           string            `json:"origin"`
+	BootMode         string            `json:"boot_mode"`
+	Namespace        string            `json:"namespace"`
+	State            string            `json:"state"`
+	ParentTemplateID string            `json:"parent_template_id,omitempty"`
+	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
+	ImageName        string            `json:"image_name,omitempty"`
+	BuildRef         string            `json:"build_ref,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	CreatedAt        int64             `json:"created_at,omitempty"`
+	UpdatedAt        int64             `json:"updated_at,omitempty"`
+	LastError        string            `json:"last_error,omitempty"`
+}
+
+type TemplateListResponse struct {
+	Items []TemplateRecord `json:"items"`
 }
 
 // PullImageRequest matches POST /api/image/pull.
 type PullImageRequest struct {
-	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
-	PlainHTTP bool   `json:"plain_http,omitempty"`
-	Username  string `json:"username,omitempty"`
-	Password  string `json:"password,omitempty"`
+	ImageName  string `json:"image_name"`
+	Namespace  string `json:"namespace,omitempty"`
+	PlainHTTP  bool   `json:"plain_http,omitempty"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+	SkipUnpack bool   `json:"skip_unpack,omitempty"`
 }
 
 // UnpackImageRequest matches POST /api/image/unpack.
@@ -118,7 +157,7 @@ type RemoveImageRequest struct {
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
-type ConvertImageRequest struct {
+type TemplateCreateRequest struct {
 	Source       string
 	KernelPath   string
 	InitrdPath   string
@@ -127,34 +166,22 @@ type ConvertImageRequest struct {
 	PlainHTTP    bool
 	Username     string
 	Password     string
-	Snapshot     bool
+	Labels       map[string]string
 }
 
-type ConvertImageMetadata struct {
-	Source       string `json:"source"`
-	Namespace    string `json:"namespace,omitempty"`
-	BootIndexTag string `json:"boot_index_tag"`
-	PlainHTTP    bool   `json:"plain_http,omitempty"`
-	Username     string `json:"username,omitempty"`
-	Password     string `json:"password,omitempty"`
-	Snapshot     bool   `json:"snapshot,omitempty"`
+type TemplateCreateMetadata struct {
+	Source       string            `json:"source"`
+	Namespace    string            `json:"namespace,omitempty"`
+	BootIndexTag string            `json:"boot_index_tag,omitempty"`
+	PlainHTTP    bool              `json:"plain_http,omitempty"`
+	Username     string            `json:"username,omitempty"`
+	Password     string            `json:"password,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
 }
 
-type ConvertImageResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
-	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
-	SourceImageRef  string `json:"source_image_ref,omitempty"`
-}
-
-type SnapshotExportRequest struct {
-	Namespace        string `json:"namespace,omitempty"`
-	BootIndexTag     string `json:"boot_index_tag"`
-	RootfsSnapshotID string `json:"snapshot_id,omitempty"`
-	SandboxID        string `json:"sandbox_id,omitempty"`
-}
-
-type SnapshotExportResponse struct {
+type TemplateCreateResponse struct {
+	Status          string `json:"status,omitempty"`
+	TemplateID      string `json:"template_id"`
 	BootIndexDigest string `json:"boot_index_digest"`
 	BootIndexTag    string `json:"boot_index_tag"`
 }
@@ -167,8 +194,6 @@ type ListSnapshotsRequest struct {
 type SnapshotRecord struct {
 	Key         string            `json:"key"`
 	Kind        string            `json:"kind,omitempty"`
-	ConchRole   string            `json:"conch_role,omitempty"`
-	GroupID     string            `json:"group_id,omitempty"`
 	Parent      string            `json:"parent,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	StoragePath string            `json:"storage_path,omitempty"`
@@ -183,7 +208,6 @@ type ListSnapshotsResponse struct {
 type RemoveSnapshotRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
-	Cascade   bool   `json:"cascade,omitempty"`
 }
 
 // Client communicates with Conch conchd HTTP API
@@ -291,18 +315,18 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 	}
 }
 
-// CreateSandbox calls POST /api/sandbox/create using image_name-based startup.
-func (c *Client) CreateSandbox(rootfsImageName, sandboxID, namespace string, ramMB int64) error {
+// CreateSandbox calls POST /api/sandbox/create using a template ID.
+func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB int64) error {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
 	}
 	req := CreateRequest{
-		Namespace: strings.TrimSpace(namespace),
-		ImageName: rootfsImageName,
-		SandboxId: sandboxID,
-		VmmName:   defaultVmmName,
-		VcpuNum:   1,
-		RamMB:     ramMB,
+		Namespace:  strings.TrimSpace(namespace),
+		TemplateID: templateID,
+		SandboxId:  sandboxID,
+		VmmName:    defaultVmmName,
+		VcpuNum:    1,
+		RamMB:      ramMB,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -327,36 +351,57 @@ func (c *Client) CreateSandbox(rootfsImageName, sandboxID, namespace string, ram
 	return nil
 }
 
-// PauseSandbox calls POST /api/sandbox/pause, returns the rootfs snapshot name (snapshotId)
-func (c *Client) PauseSandbox(sandboxID, namespace string) (string, error) {
-	req := PauseRequest{
-		Namespace: strings.TrimSpace(namespace),
-		SandboxId: sandboxID,
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return "", fmt.Errorf("marshaling pause request: %w", err)
-	}
-	resp, err := c.httpClient.Post(c.baseURL+pauseSandbox, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("POST %s: %w", pauseSandbox, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("pause sandbox returned status %d: %s", resp.StatusCode, string(body))
-	}
-	var pr PauseResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return "", fmt.Errorf("decoding pause response: %w", err)
-	}
-	if pr.Status != "ok" {
-		return "", fmt.Errorf("pause sandbox status: %s", pr.Status)
-	}
-	return pr.SnapshotId, nil
+func (c *Client) SuspendSandbox(ctx context.Context, sandboxID, namespace string) error {
+	var resp map[string]string
+	return c.postJSON(ctx, suspendSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
 }
 
-// PullImage calls POST /api/image/pull and returns snapshot IDs by component kind.
+func (c *Client) ResumeSandbox(ctx context.Context, sandboxID, namespace string) error {
+	var resp map[string]string
+	return c.postJSON(ctx, resumeSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
+}
+
+func (c *Client) StopSandbox(ctx context.Context, sandboxID, namespace string) error {
+	var resp map[string]string
+	return c.postJSON(ctx, stopSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
+}
+
+func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID, namespace string) (string, error) {
+	var resp SandboxCheckpointResponse
+	if err := c.postJSON(ctx, checkpointSandbox, SandboxCheckpointRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp); err != nil {
+		return "", err
+	}
+	if resp.Status != "ok" {
+		return "", fmt.Errorf("checkpoint status: %s", resp.Status)
+	}
+	return resp.TemplateID, nil
+}
+
+func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]TemplateRecord, error) {
+	var resp TemplateListResponse
+	req.Namespace = strings.TrimSpace(req.Namespace)
+	req.Origin = strings.TrimSpace(req.Origin)
+	req.BootMode = strings.TrimSpace(req.BootMode)
+	if err := c.postJSON(ctx, listTemplates, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+func (c *Client) InspectTemplate(ctx context.Context, id string) (TemplateRecord, error) {
+	var resp TemplateRecord
+	if err := c.postJSON(ctx, inspectTemplate, TemplateIDRequest{ID: id}, &resp); err != nil {
+		return TemplateRecord{}, err
+	}
+	return resp, nil
+}
+
+func (c *Client) RemoveTemplate(ctx context.Context, id string) error {
+	var resp map[string]string
+	return c.postJSON(ctx, removeTemplate, TemplateIDRequest{ID: id}, &resp)
+}
+
+// PullImage calls POST /api/image/pull and returns snapshot IDs by component kind unless unpacking is skipped.
 func (c *Client) PullImage(ctx context.Context, req PullImageRequest) (map[string]string, error) {
 	var resp ImageResponse
 	if err := c.postJSON(ctx, pullImage, req, &resp); err != nil {
@@ -392,36 +437,44 @@ func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[s
 	return resp.Results, nil
 }
 
-func (c *Client) ConvertImage(ctx context.Context, req ConvertImageRequest) (ConvertImageResponse, error) {
-	if req.KernelPath == "" {
-		return ConvertImageResponse{}, fmt.Errorf("kernel path is required")
-	}
-	if req.InitrdPath == "" {
-		return ConvertImageResponse{}, fmt.Errorf("initrd path is required")
-	}
-	kernel, err := os.Open(req.KernelPath)
-	if err != nil {
-		return ConvertImageResponse{}, fmt.Errorf("open kernel: %w", err)
-	}
-	defer kernel.Close()
-	initrd, err := os.Open(req.InitrdPath)
-	if err != nil {
-		return ConvertImageResponse{}, fmt.Errorf("open initrd: %w", err)
-	}
-	defer initrd.Close()
-
-	metadata, err := json.Marshal(ConvertImageMetadata{
+func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {
+	metadata, err := json.Marshal(TemplateCreateMetadata{
 		Source:       req.Source,
 		Namespace:    req.Namespace,
 		BootIndexTag: req.BootIndexTag,
 		PlainHTTP:    req.PlainHTTP,
 		Username:     req.Username,
 		Password:     req.Password,
-		Snapshot:     req.Snapshot,
+		Labels:       req.Labels,
 	})
 	if err != nil {
-		return ConvertImageResponse{}, fmt.Errorf("marshaling convert metadata: %w", err)
+		return TemplateCreateResponse{}, fmt.Errorf("marshaling template create metadata: %w", err)
 	}
+	var out TemplateCreateResponse
+	if err := c.postBootMultipart(ctx, createTemplate, req.KernelPath, req.InitrdPath, metadata, &out); err != nil {
+		return TemplateCreateResponse{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) postBootMultipart(ctx context.Context, path, kernelPath, initrdPath string, metadata []byte, out any) error {
+	if kernelPath == "" {
+		return fmt.Errorf("kernel path is required")
+	}
+	if initrdPath == "" {
+		return fmt.Errorf("initrd path is required")
+	}
+	kernel, err := os.Open(kernelPath)
+	if err != nil {
+		return fmt.Errorf("open kernel: %w", err)
+	}
+	defer kernel.Close()
+	initrd, err := os.Open(initrdPath)
+	if err != nil {
+		return fmt.Errorf("open initrd: %w", err)
+	}
+	defer initrd.Close()
+
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 	go func() {
@@ -437,14 +490,14 @@ func (c *Client) ConvertImage(ctx context.Context, req ConvertImageRequest) (Con
 			return
 		}
 		var part io.Writer
-		part, err = writer.CreateFormFile("kernel", filepath.Base(req.KernelPath))
+		part, err = writer.CreateFormFile("kernel", filepath.Base(kernelPath))
 		if err != nil {
 			return
 		}
 		if _, err = io.Copy(part, kernel); err != nil {
 			return
 		}
-		part, err = writer.CreateFormFile("initrd", filepath.Base(req.InitrdPath))
+		part, err = writer.CreateFormFile("initrd", filepath.Base(initrdPath))
 		if err != nil {
 			return
 		}
@@ -454,34 +507,25 @@ func (c *Client) ConvertImage(ctx context.Context, req ConvertImageRequest) (Con
 		err = writer.Close()
 	}()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+convertImage, pr)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, pr)
 	if err != nil {
 		_ = pr.Close()
-		return ConvertImageResponse{}, fmt.Errorf("create request %s: %w", convertImage, err)
+		return fmt.Errorf("create request %s: %w", path, err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return ConvertImageResponse{}, fmt.Errorf("POST %s: %w", convertImage, err)
+		return fmt.Errorf("POST %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return ConvertImageResponse{}, fmt.Errorf("%s returned status %d: %s", convertImage, resp.StatusCode, string(body))
+		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
 	}
-	var out ConvertImageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ConvertImageResponse{}, fmt.Errorf("decoding %s response: %w", convertImage, err)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
 	}
-	return out, nil
-}
-
-func (c *Client) ExportSnapshot(ctx context.Context, req SnapshotExportRequest) (SnapshotExportResponse, error) {
-	var out SnapshotExportResponse
-	if err := c.postJSON(ctx, snapshotExport, req, &out); err != nil {
-		return SnapshotExportResponse{}, err
-	}
-	return out, nil
+	return nil
 }
 
 func (c *Client) ListSnapshots(ctx context.Context, req ListSnapshotsRequest) ([]SnapshotRecord, error) {

@@ -31,6 +31,8 @@ type PublishBootImageOptions struct {
 
 type PublishBootImageResult struct {
 	BootIndexDigest string `json:"boot_index_digest"`
-	SnapshotKey     string `json:"snapshot_key"`
+	RootfsKey       string `json:"rootfs_key"`
+	MemKey          string `json:"mem_key,omitempty"`
+	VMKey           string `json:"vm_key"`
 	ImageName       string `json:"image_name"`
 }

@@ -20,14 +20,16 @@ import (
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/snapshot/common"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type SandboxOps interface {
 	Create(sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error)
 	Delete(sandbox.SandboxDeleteRequest) error
-	Pause(sandbox.SandboxPauseRequest) (string, error)
+	Suspend(sandbox.SandboxLifecycleRequest) error
+	Resume(sandbox.SandboxLifecycleRequest) error
+	Checkpoint(sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error)
 }
 
 type ImageOps interface {
@@ -55,6 +57,7 @@ type Service struct {
 	Image            ImageOps
 	Snapshot         SnapshotOps
 	Store            state.Store
+	Templates        conchtemplate.Store
 	DefaultNamespace string
 	SandboxDefaults  SandboxDefaults
 }
@@ -68,6 +71,7 @@ func New(sandboxOps SandboxOps, imageOps ImageOps, store state.Store, defaultNam
 		Sandbox:          sandboxOps,
 		Image:            imageOps,
 		Store:            store,
+		Templates:        conchtemplate.NewStore(store),
 		DefaultNamespace: namespace,
 	}
 }
@@ -108,17 +112,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	req := sandbox.SandboxCreateRequest{
-		Namespace:   namespace,
-		SnapshotId:  opts.SnapshotID,
-		ImageName:   opts.ImageName,
-		UseSnapshot: opts.UseSnapshot,
-		VmmName:     opts.VMMName,
-		SandboxId:   opts.SandboxID,
-		LeaseID:     opts.LeaseID,
-		VcpuNum:     opts.VCPUNum,
-		VcpuMax:     opts.VCPUMax,
-		RamMB:       opts.RamMB,
-		AgentToken:  agentToken,
+		Namespace:  namespace,
+		TemplateID: opts.TemplateID,
+		VmmName:    opts.VMMName,
+		SandboxId:  opts.SandboxID,
+		LeaseID:    opts.LeaseID,
+		VcpuNum:    opts.VCPUNum,
+		VcpuMax:    opts.VCPUMax,
+		RamMB:      opts.RamMB,
+		AgentToken: agentToken,
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -137,8 +139,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		Annotations:     copyMap(opts.Annotations),
 		RuntimeHandler:  opts.RuntimeHandler,
 		LeaseID:         opts.LeaseID,
-		ImageName:       opts.ImageName,
-		SnapshotID:      opts.SnapshotID,
+		TemplateID:      opts.TemplateID,
 		IP:              createResult.IP,
 		VMMName:         opts.VMMName,
 		VCPUNum:         opts.VCPUNum,
@@ -168,9 +169,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		return SandboxCreateResult{}, err
 	}
-	if err := s.upsertSandboxRuntimeState(ctx, rec, createResult); err != nil {
-		return SandboxCreateResult{}, err
-	}
 	return SandboxCreateResult{
 		PodSandboxID: opts.PodSandboxID,
 		SandboxID:    opts.SandboxID,
@@ -185,8 +183,8 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 		return
 	}
 	defaults := s.SandboxDefaults
-	if opts.ImageName == "" && opts.SnapshotID == "" {
-		opts.ImageName = defaults.ImageName
+	if opts.TemplateID == "" {
+		opts.TemplateID = defaults.TemplateID
 	}
 	if opts.VMMName == "" {
 		opts.VMMName = defaults.VMMName
@@ -227,9 +225,6 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 			err = terminateRecordedVMM(rec)
 		}
 	}
-	if err == nil {
-		_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
-	}
 	if !stateFound {
 		return err
 	}
@@ -256,9 +251,9 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 	return err
 }
 
-func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID string) (string, error) {
+func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID string) error {
 	if s == nil || s.Sandbox == nil {
-		return "", fmt.Errorf("sandbox service is not configured")
+		return fmt.Errorf("sandbox service is not configured")
 	}
 	rec, _ := s.getSandbox(ctx, podSandboxID)
 	sandboxID := rec.ConchSandboxID
@@ -269,20 +264,98 @@ func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID stri
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	snapshotID, err := s.Sandbox.Pause(sandbox.SandboxPauseRequest{Namespace: namespace, SandboxId: sandboxID})
+	err := s.Sandbox.Suspend(sandbox.SandboxLifecycleRequest{Namespace: namespace, SandboxId: sandboxID})
 	if rec.PodSandboxID != "" {
-		rec.SnapshotID = snapshotID
-		rec.StoppedAt = time.Now().UnixNano()
-		rec.State = state.SandboxStopped
+		rec.State = state.SandboxSuspended
+		if err != nil {
+			rec.State = state.SandboxUnknown
+			rec.LastError = err.Error()
+		}
+		_ = s.upsertSandbox(ctx, rec)
+	}
+	return err
+}
+
+func (s *Service) ResumeSandbox(ctx context.Context, namespace, podSandboxID string) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	rec, _ := s.getSandbox(ctx, podSandboxID)
+	sandboxID := rec.ConchSandboxID
+	if sandboxID == "" {
+		sandboxID = podSandboxID
+	}
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
+	namespace = s.normalizeNamespace(namespace)
+	err := s.Sandbox.Resume(sandbox.SandboxLifecycleRequest{Namespace: namespace, SandboxId: sandboxID})
+	if rec.PodSandboxID != "" {
+		rec.State = state.SandboxReady
 		if err != nil {
 			rec.State = state.SandboxUnknown
 			rec.LastError = err.Error()
 		} else {
-			_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+			rec.LastError = ""
 		}
 		_ = s.upsertSandbox(ctx, rec)
 	}
-	return snapshotID, err
+	return err
+}
+
+func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointOptions) (SandboxCheckpointResult, error) {
+	if s == nil || s.Sandbox == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox service is not configured")
+	}
+	if s.Templates == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
+	}
+	rec, _ := s.getSandbox(ctx, opts.PodSandboxID)
+	sandboxID := rec.ConchSandboxID
+	if sandboxID == "" {
+		sandboxID = opts.PodSandboxID
+	}
+	namespace := opts.Namespace
+	if namespace == "" {
+		namespace = rec.Namespace
+	}
+	namespace = s.normalizeNamespace(namespace)
+	parentVMID := strings.TrimSpace(rec.ParentVMID)
+	if parentVMID == "" {
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has no parent VM snapshot ref", sandboxID)
+	}
+
+	templateRecord, err := s.Templates.Create(ctx, conchtemplate.CreateRequest{
+		Origin:           state.TemplateOriginCheckpoint,
+		Namespace:        namespace,
+		ParentTemplateID: rec.TemplateID,
+		SourceSandboxID:  sandboxID,
+		Labels:           opts.Labels,
+	})
+	if err != nil {
+		return SandboxCheckpointResult{}, err
+	}
+
+	result, err := s.Sandbox.Checkpoint(sandbox.SandboxCheckpointRequest{
+		Namespace:  namespace,
+		SandboxId:  sandboxID,
+		TemplateID: templateRecord.ID,
+		ParentVMID: parentVMID,
+	})
+	if err != nil {
+		_ = s.Templates.MarkFailed(ctx, templateRecord.ID, err)
+		return SandboxCheckpointResult{}, err
+	}
+	refs := conchtemplate.Refs{
+		RootfsKey: result.RootfsKey,
+		MemKey:    result.MemKey,
+		VMKey:     result.VMKey,
+	}
+	if err := s.Templates.MarkReady(ctx, templateRecord.ID, refs); err != nil {
+		_ = s.Templates.MarkFailed(ctx, templateRecord.ID, err)
+		return SandboxCheckpointResult{}, err
+	}
+	return SandboxCheckpointResult{TemplateID: templateRecord.ID}, nil
 }
 
 func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullImageResult, error) {
@@ -436,6 +509,176 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.Con
 	return s.Image.ConvertRootfsToErofs(ctx, req)
 }
 
+func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions) (TemplateCreateResult, error) {
+	if s == nil || s.Image == nil {
+		return TemplateCreateResult{}, fmt.Errorf("image service is required")
+	}
+	if s.Templates == nil {
+		return TemplateCreateResult{}, fmt.Errorf("template store is not configured")
+	}
+	namespace := s.normalizeNamespace(opts.Namespace)
+	source := strings.TrimSpace(opts.Source)
+	if source == "" {
+		return TemplateCreateResult{}, fmt.Errorf("template source is required")
+	}
+	opts.Source = source
+	opts.BootIndexTag = strings.TrimSpace(opts.BootIndexTag)
+	templateRecord, err := s.Templates.Create(ctx, conchtemplate.CreateRequest{
+		Origin:    state.TemplateOriginImage,
+		Namespace: namespace,
+		ImageName: source,
+		BuildRef:  opts.BootIndexTag,
+		Labels:    opts.Labels,
+	})
+	if err != nil {
+		return TemplateCreateResult{}, err
+	}
+
+	result, err := s.createTemplateFromSource(ctx, namespace, templateRecord.ID, opts)
+	if err != nil {
+		_ = s.Templates.MarkFailed(ctx, templateRecord.ID, err)
+		return TemplateCreateResult{}, err
+	}
+	if err := s.Templates.MarkReady(ctx, templateRecord.ID, conchtemplate.Refs{
+		RootfsKey: result.rootfsKey,
+		MemKey:    result.memKey,
+		VMKey:     result.vmKey,
+	}); err != nil {
+		_ = s.Templates.MarkFailed(ctx, templateRecord.ID, err)
+		return TemplateCreateResult{}, err
+	}
+	return TemplateCreateResult{
+		TemplateID:      templateRecord.ID,
+		BootIndexDigest: result.bootIndexDigest,
+		BootIndexTag:    result.bootIndexTag,
+	}, nil
+}
+
+type templateBuildResult struct {
+	rootfsKey       string
+	memKey          string
+	vmKey           string
+	bootIndexDigest string
+	bootIndexTag    string
+}
+
+func (s *Service) createTemplateFromSource(ctx context.Context, namespace, templateID string, opts TemplateCreateOptions) (templateBuildResult, error) {
+	prepared, err := s.Image.PrepareRootfsSource(ctx, conchimage.PrepareRootfsSourceOptions{
+		Source:    opts.Source,
+		Namespace: namespace,
+		PlainHTTP: opts.PlainHTTP,
+		Username:  opts.Username,
+		Password:  opts.Password,
+	})
+	if err != nil {
+		return templateBuildResult{}, fmt.Errorf("prepare rootfs source: %w", err)
+	}
+
+	convertTarget := fmt.Sprintf("conch-erofs-rootfs:%s", templateID)
+	converted, err := s.Image.ConvertRootfsToErofs(ctx, erofsconvert.ConvertRootfsRequest{
+		Namespace:   namespace,
+		SourceImage: prepared.ImageName,
+		TargetImage: convertTarget,
+		MkfsOptions: []string{erofsconvert.DefaultMkfsOption},
+		AlignBytes:  erofsconvert.DefaultAlignBytes,
+	})
+	if err != nil {
+		return templateBuildResult{}, fmt.Errorf("convert rootfs to EROFS: %w", err)
+	}
+
+	bootIndexTag := strings.TrimSpace(opts.BootIndexTag)
+	if bootIndexTag == "" {
+		bootIndexTag = "localhost/conch/template:" + templateID
+	}
+	published, err := s.Image.PublishBootImage(ctx, conchimage.PublishBootImageOptions{
+		Namespace:       namespace,
+		RootfsImageName: converted.ImageName,
+		KernelPath:      opts.KernelPath,
+		InitrdPath:      opts.InitrdPath,
+		BootIndexTag:    bootIndexTag,
+	})
+	if err != nil {
+		return templateBuildResult{}, fmt.Errorf("publish boot image: %w", err)
+	}
+
+	// The converted image name is only a build-time handle. Once the boot index
+	// has been published and unpacked, the index and digest-named component image
+	// records are the authoritative references to its content.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.Image.Remove(cleanupCtx, runtimeapi.RemoveImageOptions{
+		Namespace: namespace,
+		ImageName: converted.ImageName,
+	}); err != nil {
+		ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",
+			ulog.F("image", converted.ImageName),
+			ulog.F("error", err))
+	}
+
+	return templateBuildResult{
+		rootfsKey:       published.RootfsKey,
+		memKey:          published.MemKey,
+		vmKey:           published.VMKey,
+		bootIndexDigest: published.BootIndexDigest,
+		bootIndexTag:    published.ImageName,
+	}, nil
+}
+
+func (s *Service) ListTemplates(ctx context.Context, opts runtimeapi.TemplateListOptions) ([]runtimeapi.TemplateRecord, error) {
+	if s == nil || s.Templates == nil {
+		return nil, fmt.Errorf("template store is not configured")
+	}
+	items, err := s.Templates.List(ctx, conchtemplate.Filter{
+		Namespace: strings.TrimSpace(opts.Namespace),
+		Origin:    strings.TrimSpace(opts.Origin),
+		BootMode:  strings.TrimSpace(opts.BootMode),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runtimeapi.TemplateRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, publicTemplateRecord(item))
+	}
+	return out, nil
+}
+
+func (s *Service) GetTemplate(ctx context.Context, id string) (runtimeapi.TemplateRecord, error) {
+	if s == nil || s.Templates == nil {
+		return runtimeapi.TemplateRecord{}, fmt.Errorf("template store is not configured")
+	}
+	rec, err := s.Templates.Get(ctx, id)
+	if err != nil {
+		return runtimeapi.TemplateRecord{}, err
+	}
+	return publicTemplateRecord(rec), nil
+}
+
+func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
+	if s == nil || s.Templates == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	return s.Templates.Delete(ctx, id)
+}
+
+func publicTemplateRecord(rec state.TemplateRecord) runtimeapi.TemplateRecord {
+	return runtimeapi.TemplateRecord{
+		ID:               rec.ID,
+		Origin:           rec.Origin,
+		BootMode:         conchtemplate.BootMode(rec),
+		Namespace:        rec.Namespace,
+		State:            rec.State,
+		ParentTemplateID: rec.ParentTemplateID,
+		SourceSandboxID:  rec.SourceSandboxID,
+		ImageName:        rec.ImageName,
+		BuildRef:         rec.BuildRef,
+		Labels:           copyMap(rec.Labels),
+		CreatedAt:        rec.CreatedAt,
+		UpdatedAt:        rec.UpdatedAt,
+		LastError:        rec.LastError,
+	}
+}
+
 func (s *Service) ListSnapshots(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
 	if s == nil || s.Snapshot == nil {
 		return nil, fmt.Errorf("snapshot service is not configured")
@@ -518,160 +761,6 @@ func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) er
 		return nil
 	}
 	return s.Store.UpsertSandbox(ctx, rec)
-}
-
-func (s *Service) upsertSandboxRuntimeState(ctx context.Context, rec state.SandboxRecord, createResult sandbox.SandboxCreateResult) error {
-	if s == nil || s.Store == nil {
-		return nil
-	}
-	if rec.RootfsKey != "" || rec.MemKey != "" {
-		if err := s.Store.UpsertSnapshotRuntime(ctx, state.SnapshotRuntimeRecord{
-			Namespace:      rec.Namespace,
-			SandboxID:      rec.ConchSandboxID,
-			RootfsKey:      rec.RootfsKey,
-			MemKey:         rec.MemKey,
-			ParentRootfsID: rec.ParentRootfsID,
-			ParentMemID:    rec.ParentMemID,
-			ParentVMID:     rec.ParentVMID,
-			LeaseID:        rec.LeaseID,
-			RootfsMount:    rec.RootfsMount,
-			MemMount:       rec.MemMount,
-			VMMount:        rec.VMMount,
-			RootDir:        createResult.RootDir,
-			MemSize:        createResult.MemSize,
-			State:          state.SandboxReady,
-		}); err != nil {
-			return err
-		}
-	}
-	if rec.ParentVMID != "" && rec.VMMount != "" {
-		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentVMID, common.SnapshotMountVM, rec.VMMount, rec.LeaseID); err != nil {
-			return err
-		}
-	}
-	if createResult.Resume && rec.ParentRootfsID != "" && rec.RootfsMount != "" {
-		if err := s.upsertViewRuntimeState(ctx, rec.Namespace, rec.ConchSandboxID, rec.ParentRootfsID, common.SnapshotMountRootfs, rec.RootfsMount, rec.LeaseID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Service) upsertViewRuntimeState(ctx context.Context, namespace, sandboxID, parentID, mountKind, mountPoint, leaseID string) error {
-	viewSnapshotKey := runtimeSnapshot.SharedViewSnapshotKey(mountKind, parentID)
-	var aliasKey string
-	switch mountKind {
-	case common.SnapshotMountRootfs:
-		aliasKey = runtimeSnapshot.RootfsViewAliasKey(sandboxID)
-	case common.SnapshotMountMem:
-		aliasKey = runtimeSnapshot.MemViewAliasKey(sandboxID)
-	case common.SnapshotMountVM:
-		aliasKey = runtimeSnapshot.VMViewAliasKey(sandboxID)
-	default:
-		return fmt.Errorf("unknown view mount kind %q", mountKind)
-	}
-	if err := s.Store.UpsertViewSnapshot(ctx, state.ViewSnapshotRecord{
-		Namespace:        namespace,
-		ParentSnapshotID: parentID,
-		ViewSnapshotKey:  viewSnapshotKey,
-		LeaseID:          leaseID,
-		MountPoint:       mountPoint,
-		RefCount:         1,
-		State:            state.SandboxReady,
-	}); err != nil {
-		return err
-	}
-	return s.Store.UpsertViewAlias(ctx, state.ViewAliasRecord{
-		Namespace:        namespace,
-		AliasKey:         aliasKey,
-		SandboxID:        sandboxID,
-		ParentSnapshotID: parentID,
-		MountKind:        mountKind,
-	})
-}
-
-func (s *Service) deleteSandboxRuntimeState(ctx context.Context, namespace, sandboxID string) error {
-	if s == nil || s.Store == nil || sandboxID == "" {
-		return nil
-	}
-	var errs []error
-	if err := s.Store.DeleteSnapshotRuntime(ctx, namespace, sandboxID); err != nil {
-		errs = append(errs, err)
-	}
-	aliasKeys := []string{
-		runtimeSnapshot.RootfsViewAliasKey(sandboxID),
-		runtimeSnapshot.MemViewAliasKey(sandboxID),
-		runtimeSnapshot.VMViewAliasKey(sandboxID),
-	}
-	parents := make(map[string]struct{})
-	aliases, err := s.Store.ListViewAliases(ctx)
-	if err != nil {
-		errs = append(errs, err)
-	} else {
-		targetAliases := make(map[string]struct{}, len(aliasKeys))
-		for _, aliasKey := range aliasKeys {
-			targetAliases[aliasKey] = struct{}{}
-		}
-		for _, rec := range aliases {
-			if rec.Namespace != namespace {
-				continue
-			}
-			if _, ok := targetAliases[rec.AliasKey]; ok && rec.ParentSnapshotID != "" {
-				parents[rec.ParentSnapshotID] = struct{}{}
-			}
-		}
-	}
-	for _, aliasKey := range aliasKeys {
-		if err := s.Store.DeleteViewAlias(ctx, namespace, aliasKey); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(parents) > 0 {
-		if err := s.reconcileViewSnapshotRefs(ctx, namespace, parents); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (s *Service) reconcileViewSnapshotRefs(ctx context.Context, namespace string, parents map[string]struct{}) error {
-	aliases, err := s.Store.ListViewAliases(ctx)
-	if err != nil {
-		return err
-	}
-	remainingRefs := make(map[string]int, len(parents))
-	for _, rec := range aliases {
-		if rec.Namespace != namespace {
-			continue
-		}
-		if _, ok := parents[rec.ParentSnapshotID]; ok {
-			remainingRefs[rec.ParentSnapshotID]++
-		}
-	}
-	views, err := s.Store.ListViewSnapshots(ctx)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, rec := range views {
-		if rec.Namespace != namespace {
-			continue
-		}
-		if _, ok := parents[rec.ParentSnapshotID]; !ok {
-			continue
-		}
-		if remainingRefs[rec.ParentSnapshotID] == 0 {
-			if err := s.Store.DeleteViewSnapshot(ctx, namespace, rec.ParentSnapshotID); err != nil {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		rec.RefCount = remainingRefs[rec.ParentSnapshotID]
-		if err := s.Store.UpsertViewSnapshot(ctx, rec); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }
 
 func terminateRecordedVMM(rec state.SandboxRecord) error {

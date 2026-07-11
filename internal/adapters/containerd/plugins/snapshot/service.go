@@ -18,9 +18,7 @@ import (
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 var ErrInvalidRequest = errors.New("invalid snapshot request")
@@ -42,14 +40,11 @@ type ListRequest struct {
 type RemoveRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
-	Cascade   bool   `json:"cascade,omitempty"`
 }
 
 type Meta struct {
 	Key         string            `json:"key"`
 	Kind        string            `json:"kind,omitempty"`
-	ConchRole   string            `json:"conch_role,omitempty"`
-	GroupID     string            `json:"group_id,omitempty"`
 	Parent      string            `json:"parent,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	StoragePath string            `json:"storage_path,omitempty"`
@@ -61,14 +56,6 @@ type Chain struct {
 	Info       Meta     `json:"info"`
 	ChainPaths []string `json:"chain_paths"`
 }
-
-const (
-	conchRoleStandalone = "standalone"
-	conchRoleRootfs     = "rootfs"
-	conchRoleMem        = "mem"
-	conchRoleVM         = "vm"
-	conchRoleUnknown    = "unknown"
-)
 
 type Service struct {
 	client *containerdclient.Client
@@ -108,13 +95,6 @@ func (s *Service) SnapshotServer() *conchsnapshot.Server {
 	return s.server
 }
 
-func (s *Service) RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (conchsnapshot.RehydrateResult, error) {
-	if s == nil || s.server == nil {
-		return conchsnapshot.RehydrateResult{}, fmt.Errorf("snapshot service has no server")
-	}
-	return s.server.RehydrateRuntimeState(ctx, runtimes, views, aliases)
-}
-
 func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("snapshot service has no containerd client")
@@ -149,64 +129,8 @@ func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
 	if err != nil {
 		return err
 	}
-	if req.Cascade {
-		return removeSnapshotCascade(snapshotCtx, snapshotter, req.Key)
-	}
-	if err := ensureSnapshotCanRemoveAlone(snapshotCtx, snapshotter, req.Key); err != nil {
-		return err
-	}
 	if err := removeSnapshotKey(snapshotCtx, snapshotter, req.Key); err != nil {
 		return fmt.Errorf("remove snapshot %s: %w", req.Key, err)
-	}
-	return nil
-}
-
-func removeSnapshotCascade(ctx context.Context, snapshotter snapshots.Snapshotter, key string) error {
-	info, err := snapshotter.Stat(ctx, key)
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("stat snapshot %s: %w", key, err)
-	}
-	if componentRootfs := snapshotComponentRootfs(info); componentRootfs != "" {
-		return fmt.Errorf("snapshot %s is a Conch snapshot component of rootfs %s; cascade remove requires the group rootfs snapshot key", key, componentRootfs)
-	}
-
-	group := snapshotGroup{Rootfs: key}
-	if labelsConchSnapshotGroup(info.Labels) {
-		group = groupFromRootfsInfo(info)
-	}
-
-	if err := removeSnapshotKey(ctx, snapshotter, group.Rootfs); err != nil {
-		return fmt.Errorf("remove snapshot %s: %w", group.Rootfs, err)
-	}
-	var removeErr error
-	for _, removeKey := range group.componentRemoveOrder() {
-		if err := removeSnapshotKey(ctx, snapshotter, removeKey); err != nil {
-			removeErr = errors.Join(removeErr, fmt.Errorf("remove snapshot %s: %w", removeKey, err))
-		}
-	}
-	if removeErr != nil {
-		return removeErr
-	}
-	return nil
-}
-
-func ensureSnapshotCanRemoveAlone(ctx context.Context, snapshotter snapshots.Snapshotter, key string) error {
-	info, err := snapshotter.Stat(ctx, key)
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("stat snapshot %s: %w", key, err)
-	}
-	componentRootfs := snapshotComponentRootfs(info)
-	if componentRootfs != "" {
-		return fmt.Errorf("snapshot %s is a Conch snapshot component of rootfs %s; use --cascade on the group rootfs snapshot", key, componentRootfs)
-	}
-	if labelsConchSnapshotGroup(info.Labels) {
-		return fmt.Errorf("snapshot %s is the rootfs anchor of a Conch snapshot group; use --cascade to remove the group", key)
 	}
 	return nil
 }
@@ -222,62 +146,6 @@ func removeSnapshotKey(ctx context.Context, snapshotter snapshots.Snapshotter, k
 		return err
 	}
 	return nil
-}
-
-type snapshotGroup struct {
-	Rootfs string
-	Mem    string
-	VM     string
-}
-
-func (g snapshotGroup) componentRemoveOrder() []string {
-	out := []string{}
-	for _, key := range []string{g.Mem, g.VM} {
-		if strings.TrimSpace(key) == "" || key == g.Rootfs {
-			continue
-		}
-		if !containsString(out, key) {
-			out = append(out, key)
-		}
-	}
-	return out
-}
-
-func groupFromRootfsInfo(info snapshots.Info) snapshotGroup {
-	rootfs := strings.TrimSpace(info.Labels[common.SnapshotLabelGroupID])
-	if rootfs == "" {
-		rootfs = info.Name
-	}
-	return snapshotGroup{
-		Rootfs: rootfs,
-		Mem:    strings.TrimSpace(info.Labels[common.SnapshotLabelGroupMemRef]),
-		VM:     strings.TrimSpace(info.Labels[common.SnapshotLabelGroupVMRef]),
-	}
-}
-
-func labelsConchSnapshotGroup(labels map[string]string) bool {
-	if len(labels) == 0 {
-		return false
-	}
-	return strings.TrimSpace(labels[common.SnapshotLabelGroupMemRef]) != "" ||
-		strings.TrimSpace(labels[common.SnapshotLabelGroupVMRef]) != ""
-}
-
-func snapshotComponentRootfs(info snapshots.Info) string {
-	rootfs := strings.TrimSpace(info.Labels[common.SnapshotLabelGroupID])
-	if rootfs == "" || rootfs == info.Name {
-		return ""
-	}
-	return rootfs
-}
-
-func containsString(values []string, value string) bool {
-	for _, existing := range values {
-		if existing == value {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) Info(ctx context.Context, req InfoRequest) (Meta, error) {
@@ -361,29 +229,7 @@ func snapshotMeta(info snapshots.Info) Meta {
 		CreatedAt: info.Created,
 		UpdatedAt: info.Updated,
 	}
-	if rootfs := snapshotComponentRootfs(info); rootfs != "" {
-		meta.ConchRole = snapshotComponentRole(info)
-		meta.GroupID = rootfs
-		return meta
-	}
-	if labelsConchSnapshotGroup(info.Labels) {
-		meta.ConchRole = conchRoleRootfs
-		meta.GroupID = info.Name
-		return meta
-	}
-	meta.ConchRole = conchRoleStandalone
 	return meta
-}
-
-func snapshotComponentRole(info snapshots.Info) string {
-	switch strings.TrimSpace(info.Labels[common.SnapshotLabelComponentKind]) {
-	case common.SnapshotComponentKindMem:
-		return conchRoleMem
-	case common.SnapshotComponentKindVM:
-		return conchRoleVM
-	default:
-		return conchRoleUnknown
-	}
 }
 
 func snapshotNamespaceContext(ctx context.Context, client *containerdclient.Client, namespace string) (context.Context, error) {

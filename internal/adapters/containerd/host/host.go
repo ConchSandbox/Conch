@@ -23,8 +23,10 @@ import (
 	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
 	sandboxSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
+	templateSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/template"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 )
 
@@ -43,6 +45,7 @@ type Config struct {
 	DefaultNamespace string
 	Image            ImageConfig
 	Snapshot         SnapshotConfig
+	TemplateStore    state.Store
 	Sandbox          *SandboxConfig
 }
 
@@ -75,6 +78,7 @@ type Host struct {
 	client          *containerdclient.Client
 	imageService    *imageSvc.Service
 	snapshotService *snapshotSvc.Service
+	templateService *templateSvc.Service
 	sandboxService  *sandboxSvc.Service
 	cancel          context.CancelFunc
 	once            sync.Once
@@ -90,6 +94,10 @@ func (h *Host) ImageService() *imageSvc.Service {
 
 func (h *Host) SnapshotService() *snapshotSvc.Service {
 	return h.snapshotService
+}
+
+func (h *Host) TemplateService() *templateSvc.Service {
+	return h.templateService
 }
 
 func (h *Host) SandboxService() *sandboxSvc.Service {
@@ -149,6 +157,9 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	if cfg.DefaultNamespace == "" {
 		cfg.DefaultNamespace = defaultNamespace
 	}
+	if cfg.Sandbox != nil && cfg.TemplateStore == nil {
+		return nil, errors.New("template store is required when sandbox service is enabled")
+	}
 	if err := os.MkdirAll(cfg.RootDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create containerd root dir: %w", err)
 	}
@@ -159,15 +170,22 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	ready := make(chan *bootstrapInstance, 1)
 	imageReady := make(chan *imageSvc.Service, 1)
 	snapshotReady := make(chan *snapshotSvc.Service, 1)
+	templateReady := make(chan *templateSvc.Service, 1)
 	sandboxReady := make(chan *sandboxSvc.Service, 1)
 	setBootstrapChannel(ready)
 	imageSvc.SetReadyChannel(imageReady)
 	snapshotSvc.SetReadyChannel(snapshotReady)
+	templateSvc.SetReadyChannel(templateReady)
 	sandboxSvc.SetReadyChannel(sandboxReady)
 	defer setBootstrapChannel(nil)
 	defer imageSvc.SetReadyChannel(nil)
 	defer snapshotSvc.SetReadyChannel(nil)
+	defer templateSvc.SetReadyChannel(nil)
 	defer sandboxSvc.SetReadyChannel(nil)
+	if cfg.TemplateStore != nil {
+		templateSvc.SetStateStore(cfg.TemplateStore)
+		defer templateSvc.SetStateStore(nil)
+	}
 	if cfg.Sandbox != nil {
 		sandboxSvc.SetNetworkSlotStore(cfg.Sandbox.NetworkSlotStore)
 		defer sandboxSvc.SetNetworkSlotStore(nil)
@@ -180,6 +198,11 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		conchplugins.SnapshotServiceURI,
 	}
 	var disabledPlugins []string
+	if cfg.TemplateStore != nil {
+		requiredPlugins = append(requiredPlugins, conchplugins.TemplateServiceURI)
+	} else {
+		disabledPlugins = append(disabledPlugins, conchplugins.TemplateServiceURI)
+	}
 	if cfg.Sandbox != nil {
 		requiredPlugins = append(requiredPlugins, conchplugins.SandboxServiceURI)
 	} else {
@@ -233,14 +256,16 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		inst     *bootstrapInstance
 		image    *imageSvc.Service
 		snapshot *snapshotSvc.Service
+		template *templateSvc.Service
 		sandbox  *sandboxSvc.Service
 		timeout  = time.After(startTimeout)
 	)
-	for inst == nil || image == nil || snapshot == nil || (cfg.Sandbox != nil && sandbox == nil) {
+	for inst == nil || image == nil || snapshot == nil || (cfg.TemplateStore != nil && template == nil) || (cfg.Sandbox != nil && sandbox == nil) {
 		select {
 		case inst = <-ready:
 		case image = <-imageReady:
 		case snapshot = <-snapshotReady:
+		case template = <-templateReady:
 		case sandbox = <-sandboxReady:
 		case <-ctx.Done():
 			cancel()
@@ -257,6 +282,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		client:          inst.client,
 		imageService:    image,
 		snapshotService: snapshot,
+		templateService: template,
 		sandboxService:  sandbox,
 		cancel:          cancel,
 	}, nil
