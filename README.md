@@ -58,22 +58,24 @@ git checkout demo
 
 ### 镜像管理
 
-Conch 提供统一的镜像管理命令，用于将已有 OCI rootfs 镜像转换为 Conch 原生 EROFS 镜像，并支持发布、拉取和解包：
+Conch 提供统一的镜像管理命令，用于将已有 OCI rootfs 镜像转换为可启动 Template，并支持发布、拉取和解包：
 
 ```bash
-conch convert --source docker.io/library/nginx:latest \
+conch template create --source docker.io/library/nginx:latest \
   --kernel ./bzImage \
   --initrd ./conch.initrd \
   -t localhost/conch/nginx:latest
 
-conch push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
-conch pull hub.oepkgs.net/conch/nginx:latest
+conch image push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
+conch image pull hub.oepkgs.net/conch/nginx:latest
+# 仅下载 OCI content，不生成 snapshot
+conch image pull --skip-unpack hub.oepkgs.net/conch/nginx:latest
 
 # 本地已有 Conch 镜像时可单独解包
-conch unpack hub.oepkgs.net/conch/conch-index:v0.1
+conch image unpack hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-其中 `conch convert` 会将标准 OCI rootfs 镜像转换为 native EROFS rootfs，并与 kernel/initrd 组件组装为 Conch boot index；`conch pull` 会在拉取后自动完成本地 unpack；`conch unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。
+其中 `conch template create` 会将标准 OCI rootfs 镜像转换为 native EROFS rootfs，并与 kernel/initrd 组件组装为 Conch boot index，同时注册为 Template；`conch image pull` 默认会在拉取后自动完成本地 unpack，`--skip-unpack` 可只下载 OCI content；`conch image unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。
 
 详细设计见 [Conch Image Workflow Design](docs/design/image-workflow.md)。
 
@@ -86,17 +88,9 @@ sandbox:
   unix_socket: "/var/run/conchd/conchd.sock"   # 优先使用 Unix Socket 连接
   api_url: "http://localhost:4063"              # unix_socket 为空时使用 HTTP 连接
   sandbox_id: ""                                # 留空则自动生成
-
-snapshot:
-  snapshot_id: ""                               # 快照 ID (可选：快照启动)
-  vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
-  vcpu_num: 1                                   # 虚拟 CPU 数量
-  ram_mb: 1024                                  # 内存大小（MB）
+  template_id: "tmpl_xxx"                         # Template ID
 
 image:
-  image_name: "hub.oepkgs.net/conch/openeuler:odd-x86"  # 镜像名称，可替换为所需镜像
-  # image_name: "hub.oepkgs.net/conch/openeuler:odd-aarch"  # aarch64 架构镜像
-  use_snapshot: false                           # 设为 true 时作为快照镜像启动
   vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
   vcpu_num: 1                                   # 虚拟 CPU 数量
   ram_mb: 1024                                  # 内存大小（MB）

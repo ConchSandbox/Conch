@@ -53,40 +53,32 @@ with Sandbox.create() as sbx:
 ### 创建沙箱
 
 ```python
-Sandbox.create(snapshot_id=None, **kwargs) -> Sandbox
+Sandbox.create(template_id=None, **kwargs) -> Sandbox
 ```
 
-基于镜像或快照创建沙箱。`**kwargs` 可透传所有构造函数参数（如 `image_name`、`vcpu_num`、`ram_mb`、`namespace`、`config_path` 等）。
+基于 Template 创建沙箱。`**kwargs` 可透传所有构造函数参数（如 `template_id`、`vcpu_num`、`ram_mb`、`namespace`、`config_path` 等）。
 
 **参数：**
-- `snapshot_id` (可选): 从指定快照创建
+- `template_id` (可选): `tmpl_xxx`
 - `**kwargs`: 透传至构造函数，参见 [Sandbox 构造函数](#sandbox-构造函数)
 
 **返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
 
 **示例：**
 ```python
-# 从config设置镜像创建
+# 从 config 设置的 template_id 创建
 sbx = Sandbox.create()
 sbx.execute(cmd='python3', content='print("Hello")')
 sbx.delete()
 
-# 从传入指定镜像创建
-sbx = Sandbox.create(image_name="hub.oepkgs.net/conch/conch-base:v0.1")
+# 从传入指定 Template 创建
+sbx = Sandbox.create(template_id="tmpl_123")
 sbx.execute(cmd='python3', content='print("Hello")')
 sbx.delete()
 
-# 从快照创建
-sbx = Sandbox.create(snapshot_id="snap_123")
+# 从 checkpoint 产生的可恢复 Template 创建
+sbx = Sandbox.create(template_id="tmpl_123")
 sbx.execute(cmd='python3', content='print("Restored")')
-sbx.delete()
-
-# 从快照镜像创建
-sbx = Sandbox.create(
-    image_name="hub.oepkgs.net/conch/conch-snapshot:v0.1",
-    use_snapshot=True,
-)
-sbx.execute(cmd='python3', content='print("Restored from snapshot image")')
 sbx.delete()
 
 # 指定自定义配置文件
@@ -137,38 +129,38 @@ result = sbx.execute(cmd='sh', args=['-c', 'echo $MY_VAR'],
 
 ---
 
-### 暂停沙箱
+### Checkpoint Sandbox
 
 ```python
-sandbox.pause() -> SnapshotInfo
+sandbox.checkpoint() -> TemplateInfo
 ```
 
-暂停沙箱并创建快照，用于后续快速恢复。**注意：pause 后原沙箱会被自动清理，无需再调用 delete()**。
+捕获沙箱当前状态并返回一个可恢复 Template。Checkpoint 是作用于 Sandbox 的动作，不是独立资源；该动作不会停止或删除原沙箱。
 
-**返回：** `SnapshotInfo` 对象（包含 `snapshot_id` 和 `sandbox_id`）
+**返回：** `TemplateInfo` 对象（包含 `template_id` 和 `sandbox_id`）
 
 **完整示例：快照生命周期**
 
 ```python
-# 步骤 1: 从镜像创建沙箱
+# 步骤 1: 从 Template 创建沙箱
 sbx = Sandbox.create()
 print(f"Created sandbox: {sbx.sandbox_id}")
 
-# 步骤 2: 暂停并创建快照（沙箱自动清理）
-snapshot = sbx.pause()
-print(f"Snapshot ID: {snapshot.snapshot_id}")
+# 步骤 2: checkpoint Sandbox，得到可恢复 Template
+template = sbx.checkpoint()
+print(f"Template ID: {template.template_id}")
 
-# 步骤 3: 从快照恢复，创建新沙箱
-sbx2 = Sandbox.create(snapshot.snapshot_id)
+# 步骤 3: 从可恢复 Template 创建新沙箱
+sbx2 = Sandbox.create(template_id=template.template_id)
 print(f"Restored sandbox: {sbx2.sandbox_id}")
 sbx2.delete()
 ```
 
 **说明：**
-- 快照保存沙箱的完整状态
-- pause() 后原沙箱会被服务端自动清理，无需调用 delete()
-- 从快照创建沙箱比从镜像启动更快（秒级启动）
-- 每个快照都有唯一的 `snapshot_id`
+- checkpoint 动作产生的 Template 保存沙箱的完整可恢复状态
+- `checkpoint()` 不改变沙箱运行态
+- 使用返回的 `template_id` 创建恢复后的沙箱
+- 所有 Template 都使用 `tmpl_xxx` ID；可通过 `origin=checkpoint` 和 `boot_mode=resume` 识别其来源与启动能力
 
 ---
 
@@ -334,7 +326,7 @@ sandbox.get_info() -> SandboxInfo
 **示例：**
 ```python
 info = sbx.get_info()
-print(f"ID: {info.sandbox_id}, IP: {info.ip}, Snapshot: {info.snapshot_id}")
+print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_id}")
 ```
 
 **返回值：** `SandboxInfo` 对象，参见 [数据类型](#sandboxinfo)。
@@ -344,9 +336,8 @@ print(f"ID: {info.sandbox_id}, IP: {info.ip}, Snapshot: {info.snapshot_id}")
 ## Sandbox 构造函数
 
 ```python
-Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
-        namespace=None, snapshot_id=None, vcpu_num=None,
-        ram_mb=None, config_path=None, use_snapshot=False)
+Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
+        namespace=None, vcpu_num=None, ram_mb=None, config_path=None)
 ```
 
 **主要参数：**
@@ -356,13 +347,11 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
 | `unix_socket` | str | Unix socket 路径，默认从配置文件读取 |
 | `api_url` | str | 服务地址，仅当 `unix_socket` 为空时使用 |
 | `sandbox_id` | str | 沙箱 ID，默认自动生成 |
-| `image_name` | str | 镜像名称 |
+| `template_id` | str | Template ID |
 | `namespace` | str | 命名空间 |
-| `snapshot_id` | str | 快照 ID |
 | `vcpu_num` | int | 虚拟 CPU 数量 |
 | `ram_mb` | int | 内存大小（MB） |
 | `config_path` | str | 配置文件路径，默认按优先级自动查找 |
-| `use_snapshot` | bool | 是否将 `image_name` 作为快照镜像处理 |
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法。
 
@@ -377,15 +366,15 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, image_name=None,
 class SandboxInfo:
     sandbox_id: str
     ip: str
-    snapshot_id: Optional[str]
+    template_id: Optional[str]
 ```
 
-### SnapshotInfo
+### TemplateInfo
 
 ```python
 @dataclass
-class SnapshotInfo:
-    snapshot_id: str
+class TemplateInfo:
+    template_id: str
     sandbox_id: str
 ```
 
@@ -476,18 +465,18 @@ with Sandbox.create() as sbx:
     print(f"Files: {files}")
 ```
 
-### 示例 3: 快照功能
+### 示例 3: Checkpoint 功能
 
 ```python
 from conch import Sandbox
 
-# 创建并暂停
+# 创建并 checkpoint
 sbx = Sandbox.create()
-snapshot = sbx.pause()
-print(f"Created snapshot: {snapshot.snapshot_id}")
+template = sbx.checkpoint()
+print(f"Created resumable template: {template.template_id}")
 
-# 从快照恢复
-sbx2 = Sandbox.create(snapshot.snapshot_id)
+# 从可恢复 Template 启动
+sbx2 = Sandbox.create(template_id=template.template_id)
 sbx2.execute(cmd='python3', content='print("Restored!")')
 sbx2.delete()
 ```
