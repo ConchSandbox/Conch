@@ -7,16 +7,17 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	CIDMapDir      = "/var/run/conch/maptable"
-	CIDMapFile     = "cidmap.json"
-	MinCID         = 3
-	MaxCID         = uint32(4294967294) // uint32 max - 1, 预留一个避免边界问题
-	CIDMapFilePerm = 0644
+	defaultCIDMapDir = "/var/run/conch/maptable"
+	CIDMapFile       = "cidmap.json"
+	MinCID           = 3
+	MaxCID           = uint32(4294967294) // uint32 max - 1, 预留一个避免边界问题
+	CIDMapFilePerm   = 0644
 )
 
 type CIDMap struct {
@@ -30,11 +31,19 @@ type CIDAllocator struct {
 }
 
 func NewCIDAllocator() *CIDAllocator {
-	if err := os.MkdirAll(CIDMapDir, 0755); err != nil {
+	cidMapDir := defaultCIDMapDir
+	if config.WorkDir != "" {
+		cidMapDir = filepath.Join(config.WorkDir, "maptable")
+	}
+	return NewCIDAllocatorInDir(cidMapDir)
+}
+
+func NewCIDAllocatorInDir(cidMapDir string) *CIDAllocator {
+	if err := os.MkdirAll(cidMapDir, 0755); err != nil {
 		ulog.Error("failed to create cidmap directory", ulog.F("error", err))
 	}
 
-	filePath := filepath.Join(CIDMapDir, CIDMapFile)
+	filePath := filepath.Join(cidMapDir, CIDMapFile)
 	allocator := &CIDAllocator{
 		filePath: filePath,
 	}
