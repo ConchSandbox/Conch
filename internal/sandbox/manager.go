@@ -125,6 +125,7 @@ type SandboxCreateResult struct {
 	VMMount         string
 	RootDir         string
 	MemSize         int64
+	PmemDeviceCount int
 	Resume          bool
 }
 
@@ -443,6 +444,7 @@ func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateReques
 		VMMount:         layout.VMMount,
 		RootDir:         layout.SnapshotDir,
 		MemSize:         layout.MemorySizeMB,
+		PmemDeviceCount: sbx.vmStartSpec.PmemDeviceCount,
 		Resume:          resume,
 	}
 }

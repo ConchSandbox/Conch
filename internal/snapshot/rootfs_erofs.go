@@ -53,9 +53,6 @@ func pmemFilesFromErofsMounts(mounts []mount.Mount) ([]string, error) {
 			return nil, err
 		}
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("erofs rootfs mounts contain no pmem files")
-	}
 	return files, nil
 }
 
@@ -79,11 +76,20 @@ func alignRootfsPmemFiles(files []string) error {
 }
 
 func selectSnapshotRestorePmemFiles(files []string, deviceCount int) ([]string, error) {
-	if deviceCount <= 0 || len(files) == deviceCount {
+	if deviceCount < 0 {
+		return nil, fmt.Errorf("invalid snapshot pmem device count %d", deviceCount)
+	}
+	if deviceCount == 0 {
+		return nil, nil
+	}
+	if len(files) == deviceCount {
 		return files, nil
 	}
 	if len(files) < deviceCount {
 		return nil, fmt.Errorf("rootfs pmem file count %d is less than snapshot device count %d", len(files), deviceCount)
 	}
+	// Restore must reproduce the PMEM devices present when the VM snapshot was
+	// created. EROFS snapshot views list the newly committed snapshot layer
+	// before the original image layers, so keep the tail of the chain.
 	return files[len(files)-deviceCount:], nil
 }

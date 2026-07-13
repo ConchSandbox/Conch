@@ -4,7 +4,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/daemon/state"
 )
+
+func TestVMStartSpecFromRecordPreservesPmemDeviceCount(t *testing.T) {
+	spec := vmStartSpecFromRecord(state.SandboxRecord{
+		PmemDeviceCount: 3,
+	})
+
+	if spec.PmemDeviceCount != 3 {
+		t.Fatalf("PmemDeviceCount = %d, want 3", spec.PmemDeviceCount)
+	}
+}
 
 func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 	m := &Manager{}

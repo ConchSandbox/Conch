@@ -11,6 +11,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestBuildPmemArgsEmptyPathsReturnsEmpty(t *testing.T) {
+	got := buildPmemArgs([]string{"", " "})
+	if got != "" {
+		t.Fatalf("buildPmemArgs() = %q, want empty string", got)
+	}
+}
+
 func TestBuildPmemArgsCloudHypervisorOption(t *testing.T) {
 	got := buildPmemArgs([]string{
 		"/var/lib/conch/rootfs/layer0.erofs",

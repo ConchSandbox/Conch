@@ -44,24 +44,27 @@ type Execution struct {
 type VMStartSpec struct {
 	MemorySizeMB int64
 
-	MemoryPath   string
-	KernelPath   string
-	InitrdPath   string
-	SnapfilePath string
-	PmemPaths    []string
+	MemoryPath      string
+	KernelPath      string
+	InitrdPath      string
+	SnapfilePath    string
+	PmemPaths       []string
+	PmemDeviceCount int
 }
 
 func vmStartSpecFromBootLayout(layout *snapshot.BootLayout) VMStartSpec {
 	if layout == nil {
 		return VMStartSpec{}
 	}
+	pmemPaths := layout.PmemFiles()
 	return VMStartSpec{
-		MemorySizeMB: layout.MemorySizeMB,
-		MemoryPath:   layout.SnapshotMemFile(),
-		KernelPath:   layout.KernelFile(),
-		InitrdPath:   layout.InitrdFile(),
-		SnapfilePath: layout.SnapDir(),
-		PmemPaths:    layout.PmemFiles(),
+		MemorySizeMB:    layout.MemorySizeMB,
+		MemoryPath:      layout.SnapshotMemFile(),
+		KernelPath:      layout.KernelFile(),
+		InitrdPath:      layout.InitrdFile(),
+		SnapfilePath:    layout.SnapDir(),
+		PmemPaths:       pmemPaths,
+		PmemDeviceCount: len(pmemPaths),
 	}
 }
 
@@ -81,7 +84,9 @@ func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
 		SnapshotDir:  snapshotDir,
 		MemorySizeMB: memorySizeMB,
 	}
-	return vmStartSpecFromBootLayout(layout)
+	spec := vmStartSpecFromBootLayout(layout)
+	spec.PmemDeviceCount = rec.PmemDeviceCount
+	return spec
 }
 
 type Sandbox struct {
@@ -352,6 +357,9 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 
 	if err := s.process.CreateSnapshot(ctx, stagingDir); err != nil {
 		return fmt.Errorf("error creating snapshot: %w", err)
+	}
+	if err := snapshot.RecordPmemDeviceCount(stagingDir, s.vmStartSpec.PmemDeviceCount); err != nil {
+		return fmt.Errorf("record snapshot pmem device count: %w", err)
 	}
 	if err := s.Stop(ctx); err != nil {
 		return fmt.Errorf("failed to stop VM after snapshot: %w", err)

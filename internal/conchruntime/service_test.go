@@ -13,17 +13,19 @@ import (
 )
 
 type fakeSandboxOps struct {
-	req       sandbox.SandboxCreateRequest
-	deleteErr error
+	req             sandbox.SandboxCreateRequest
+	pmemDeviceCount int
+	deleteErr       error
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
 	f.req = req
 	return sandbox.SandboxCreateResult{
-		Namespace:  req.Namespace,
-		SandboxID:  req.SandboxId,
-		IP:         "192.0.2.10",
-		AgentToken: req.AgentToken,
+		Namespace:       req.Namespace,
+		SandboxID:       req.SandboxId,
+		IP:              "192.0.2.10",
+		AgentToken:      req.AgentToken,
+		PmemDeviceCount: f.pmemDeviceCount,
 	}, nil
 }
 
@@ -33,6 +35,28 @@ func (f *fakeSandboxOps) Delete(sandbox.SandboxDeleteRequest) error {
 
 func (f *fakeSandboxOps) Pause(sandbox.SandboxPauseRequest) (string, error) {
 	return "", nil
+}
+
+func TestCreateSandboxPersistsPmemDeviceCount(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{pmemDeviceCount: 3}
+	svc := New(sandboxOps, nil, store, "default")
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+	}); err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if rec.PmemDeviceCount != 3 {
+		t.Fatalf("PmemDeviceCount = %d, want 3", rec.PmemDeviceCount)
+	}
 }
 
 func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {

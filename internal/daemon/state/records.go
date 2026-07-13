@@ -38,6 +38,7 @@ type SandboxRecord struct {
 	VMMName         string            `json:"vmm_name,omitempty"`
 	VCPUNum         int64             `json:"vcpu_num,omitempty"`
 	RamMB           int64             `json:"ram_mb,omitempty"`
+	PmemDeviceCount int               `json:"pmem_device_count"`
 	VMMPID          int               `json:"vmm_pid,omitempty"`
 	VMMSocketPath   string            `json:"vmm_socket_path,omitempty"`
 	VsockCID        uint32            `json:"vsock_cid,omitempty"`

@@ -166,6 +166,7 @@ func populateMemParent(mountPoint string) error {
       "discard_writes": false
     }
   ],
+  "pmem_device_count": 1,
   "vsock": {
     "cid": 3,
     "socket": "/old/vsock"

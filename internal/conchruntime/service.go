@@ -143,6 +143,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VMMName:         opts.VMMName,
 		VCPUNum:         opts.VCPUNum,
 		RamMB:           opts.RamMB,
+		PmemDeviceCount: createResult.PmemDeviceCount,
 		VMMPID:          createResult.VMMPID,
 		VMMSocketPath:   createResult.VMMSocketPath,
 		VsockCID:        createResult.VsockCID,

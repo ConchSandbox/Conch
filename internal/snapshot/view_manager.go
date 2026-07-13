@@ -303,7 +303,7 @@ func (vm *viewManager) releaseViewMount(snt snapshotter.Snapshotter, mountMgr mo
 	} else if pruneErr := cleanupEmptySnapshotParents(mountPoint); pruneErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("prune empty parent dirs for %s: %w", mountPoint, pruneErr))
 	}
-	if removeErr := snt.Remove(context.Background(), refNamespace, snapshotKey); removeErr != nil {
+	if removeErr := snt.Remove(context.Background(), refNamespace, snapshotKey); removeErr != nil && !errdefs.IsNotFound(removeErr) {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove snapshot %s: %w", snapshotKey, removeErr))
 	}
 

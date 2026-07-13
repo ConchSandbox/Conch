@@ -468,6 +468,7 @@ func (s *Server) RestoreBootLayout(
 		layout.KernelFile(),
 		layout.InitrdFile(),
 		layout.SnapshotMemFile(),
+		layout.PmemFiles(),
 		cid,
 		socketPath,
 	); err != nil {
@@ -547,7 +548,7 @@ func (s *Server) CommitBootLayout(ctx context.Context, namespace, snapshotID, ke
 
 	configUpdater := &configUpdater{}
 	configFilePath := filepath.Join(layout.SnapDir(), common.SnapshotConfigFileName)
-	if err := configUpdater.updateSnapshotConfig(configFilePath, viewLayout.KernelFile(), viewLayout.InitrdFile(), viewLayout.SnapshotMemFile(), 0, ""); err != nil {
+	if err := configUpdater.updateSnapshotConfig(configFilePath, viewLayout.KernelFile(), viewLayout.InitrdFile(), viewLayout.SnapshotMemFile(), nil, 0, ""); err != nil {
 		return "", fmt.Errorf("update snapshot config failed: %v", err)
 	}
 

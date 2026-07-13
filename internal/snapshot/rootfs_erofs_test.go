@@ -106,13 +106,13 @@ func TestPmemFilesFromErofsMountsRejectsFsmergeDeviceOptions(t *testing.T) {
 	}
 }
 
-func TestPmemFilesFromErofsMountsRejectsMissingPaths(t *testing.T) {
-	_, err := pmemFilesFromErofsMounts([]mount.Mount{{Type: "overlay", Source: "overlay"}})
-	if err == nil {
-		t.Fatal("expected missing erofs pmem files to fail")
+func TestPmemFilesFromErofsMountsAllowsNoPmemFiles(t *testing.T) {
+	got, err := pmemFilesFromErofsMounts([]mount.Mount{{Type: "overlay", Source: "overlay"}})
+	if err != nil {
+		t.Fatalf("pmemFilesFromErofsMounts() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "contain no pmem files") {
-		t.Fatalf("unexpected error: %v", err)
+	if len(got) != 0 {
+		t.Fatalf("files = %#v, want empty list", got)
 	}
 }
 
@@ -143,6 +143,16 @@ func TestSelectSnapshotRestorePmemFilesKeepsOriginalDeviceCount(t *testing.T) {
 	}
 }
 
+func TestSelectSnapshotRestorePmemFilesAllowsZeroDeviceCount(t *testing.T) {
+	got, err := selectSnapshotRestorePmemFiles([]string{"/layer/new.erofs", "/layer/base0.erofs"}, 0)
+	if err != nil {
+		t.Fatalf("selectSnapshotRestorePmemFiles: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("files = %#v, want empty list", got)
+	}
+}
+
 func TestSelectSnapshotRestorePmemFilesRejectsShortRootfsChain(t *testing.T) {
 	_, err := selectSnapshotRestorePmemFiles([]string{"/layer/base0.erofs"}, 2)
 	if err == nil {
@@ -150,6 +160,12 @@ func TestSelectSnapshotRestorePmemFilesRejectsShortRootfsChain(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "less than snapshot device count") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSelectSnapshotRestorePmemFilesRejectsInvalidDeviceCount(t *testing.T) {
+	if _, err := selectSnapshotRestorePmemFiles([]string{"/layer/base0.erofs"}, -1); err == nil {
+		t.Fatal("selectSnapshotRestorePmemFiles(deviceCount=-1) error = nil, want invalid count error")
 	}
 }
 

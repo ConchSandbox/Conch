@@ -445,6 +445,9 @@ func nonEmptyPathCount(paths []string) int {
 }
 
 func buildPmemArgs(paths []string) string {
+	if nonEmptyPathCount(paths) == 0 {
+		return ""
+	}
 	args := make([]string, 0, len(paths)+1)
 	args = append(args, "--pmem")
 	pmemIndex := 0
