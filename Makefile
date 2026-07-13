@@ -36,6 +36,17 @@ gen-proto-go: ## Generate Go protobuf code
 	@echo "installing proto tools (if not exist)..."
 	@which protoc-gen-go >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 	@which protoc-gen-go-grpc >/dev/null 2>&1 || GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	@gopath_bin="$$(go env GOPATH)/bin"; \
+	case ":$$PATH:" in \
+		*":$$gopath_bin:"*) ;; \
+		*) \
+			echo "GOPATH/bin is not in PATH; copying proto tools to /usr/bin..."; \
+			cp_cmd=cp; \
+			[ -w /usr/bin ] || cp_cmd="sudo cp"; \
+			[ -x "$$gopath_bin/protoc-gen-go" ] && $$cp_cmd "$$gopath_bin/protoc-gen-go" /usr/bin/protoc-gen-go; \
+			[ -x "$$gopath_bin/protoc-gen-go-grpc" ] && $$cp_cmd "$$gopath_bin/protoc-gen-go-grpc" /usr/bin/protoc-gen-go-grpc; \
+			;; \
+	esac
 
 	@echo "generating Go proto code..."
 	@mkdir -p $(CONCH_AGENT_GEN_DIR)
