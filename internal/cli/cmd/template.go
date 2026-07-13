@@ -185,14 +185,17 @@ func runTemplatePush(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template push: load config: %w", err)
 	}
-	if err := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout).PushTemplate(ctx, client.TemplatePushRequest{
-		TemplateID:      fs.Arg(0),
-		RemoteReference: fs.Arg(1),
-		Namespace:       ResolveConchNamespace(cfg, opts.namespace),
-		PlainHTTP:       opts.plainHTTP,
-		Username:        username,
-		Password:        password,
-		RegistryTimeout: opts.timeout,
+	conchClient := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout)
+	if err := pushWithRegistryAuth(ctx, fs.Arg(1), username, password, func(username, password string) error {
+		return conchClient.PushTemplate(ctx, client.TemplatePushRequest{
+			TemplateID:      fs.Arg(0),
+			RemoteReference: fs.Arg(1),
+			Namespace:       ResolveConchNamespace(cfg, opts.namespace),
+			PlainHTTP:       opts.plainHTTP,
+			Username:        username,
+			Password:        password,
+			RegistryTimeout: opts.timeout,
+		})
 	}); err != nil {
 		return fmt.Errorf("conch template push: %w", err)
 	}
@@ -209,7 +212,11 @@ func registerTemplateRegistryFlags(fs *flag.FlagSet, opts *templateRegistryOptio
 	fs.BoolVar(&opts.plainHTTP, "plain-http", false, "use plain HTTP for registry access")
 	fs.StringVar(&opts.user, "user", "", "registry credentials in username:password format")
 	fs.StringVar(&opts.username, "username", "", "registry username")
-	fs.StringVar(&opts.password, "password", "", "registry password")
+	passwordUsage := "registry password"
+	if push {
+		passwordUsage += " (omit to use an interactive no-echo prompt when authentication is required)"
+	}
+	fs.StringVar(&opts.password, "password", "", passwordUsage)
 	if push {
 		fs.StringVar(&opts.timeout, "timeout", "", "timeout for the registry push")
 	}

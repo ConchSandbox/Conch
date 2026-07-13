@@ -113,6 +113,7 @@ func TestPrintImagePushHelpIncludesExample(t *testing.T) {
 		"conchd/containerd",
 		"--plain-http",
 		"--username string",
+		"interactive no-echo prompt",
 		"--timeout duration",
 		"timeout for this push operation",
 		"conch image push --timeout 30m",
