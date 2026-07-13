@@ -116,6 +116,7 @@ install_clh() {
         chmod +x /usr/local/bin/cloud-hypervisor
         echo "cloud-hypervisor v${CLH_VER} installed successfully for ${ARCH}."
     fi
+    echo "Cloud-Hypervisor check completed successfully."
 }
 
 install_erofs() {
@@ -148,6 +149,7 @@ pull_function() {
     echo "Note: conchd must be running before pull; conch talks to conchd over the configured API endpoint."
     if [ -x "./bin/conch" ]; then
         ./bin/conch pull "$MAIN_IMG"
+        echo "Function image pull completed successfully."
     else
         echo "Error: ./bin/conch executable not found."
         return 1
@@ -165,6 +167,7 @@ run_build() {
         echo "building $name..."
         go build -o "bin/$name" "./cmd/$name"
     done
+    echo "Conch build completed successfully."
 }
 
 install_sdk() {
@@ -183,6 +186,7 @@ install_sdk() {
         else
             echo "Skipping config copy (/etc/conch/sdk-config.yaml already exists or source missing)"
         fi
+        echo "Python SDK install completed successfully."
     else
         echo "Error: ./sdk directory not found."
         return 1
