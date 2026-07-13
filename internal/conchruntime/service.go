@@ -57,6 +57,7 @@ type Service struct {
 	Store            state.Store
 	DefaultNamespace string
 	SandboxDefaults  SandboxDefaults
+	SandboxLogs      *SandboxLogBuffer
 }
 
 func New(sandboxOps SandboxOps, imageOps ImageOps, store state.Store, defaultNamespace ...string) *Service {
@@ -69,6 +70,7 @@ func New(sandboxOps SandboxOps, imageOps ImageOps, store state.Store, defaultNam
 		Image:            imageOps,
 		Store:            store,
 		DefaultNamespace: namespace,
+		SandboxLogs:      newSandboxLogBuffer(defaultSandboxLogLimit),
 	}
 }
 
@@ -106,6 +108,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
+	s.AliasSandboxLogs(opts.PodSandboxID, opts.SandboxID)
 
 	req := sandbox.SandboxCreateRequest{
 		Namespace:   namespace,
@@ -160,17 +163,24 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		SnapshotRootDir: createResult.RootDir,
 	}
 	if err != nil {
+		s.AppendSandboxLog(opts.SandboxID, "error", fmt.Sprintf("create failed: %v", err))
+		s.ExpireSandboxLogs(opts.SandboxID)
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
 		_ = s.upsertSandbox(ctx, rec)
 		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
+		s.AppendSandboxLog(opts.SandboxID, "error", fmt.Sprintf("create state persist failed: %v", err))
+		s.ExpireSandboxLogs(opts.SandboxID)
 		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandboxRuntimeState(ctx, rec, createResult); err != nil {
+		s.AppendSandboxLog(opts.SandboxID, "error", fmt.Sprintf("create runtime state persist failed: %v", err))
+		s.ExpireSandboxLogs(opts.SandboxID)
 		return SandboxCreateResult{}, err
 	}
+	s.AppendSandboxLog(opts.SandboxID, "info", fmt.Sprintf("created sandbox namespace=%s ip=%s", namespace, createResult.IP))
 	return SandboxCreateResult{
 		PodSandboxID: opts.PodSandboxID,
 		SandboxID:    opts.SandboxID,
@@ -231,6 +241,11 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 		_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
 	}
 	if !stateFound {
+		if err != nil {
+			s.AppendSandboxLog(sandboxID, "error", fmt.Sprintf("stop failed: %v", err))
+		} else {
+			s.AppendSandboxLog(sandboxID, "info", "stopped sandbox")
+		}
 		return err
 	}
 	if rec.PodSandboxID == "" {
@@ -243,15 +258,29 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 	if err != nil {
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
+		s.AppendSandboxLog(sandboxID, "error", fmt.Sprintf("stop failed: %v", err))
+	} else {
+		s.AppendSandboxLog(sandboxID, "info", "stopped sandbox")
 	}
 	_ = s.upsertSandbox(ctx, rec)
 	return err
 }
 
 func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID string) error {
+	sandboxID := podSandboxID
+	if rec, recErr := s.getSandbox(ctx, podSandboxID); recErr == nil && rec.ConchSandboxID != "" {
+		sandboxID = rec.ConchSandboxID
+	}
+	s.AliasSandboxLogs(podSandboxID, sandboxID)
 	err := s.StopSandbox(ctx, namespace, podSandboxID)
 	if err == nil && s != nil && s.Store != nil {
-		_ = s.Store.DeleteSandbox(ctx, podSandboxID)
+		err = s.Store.DeleteSandbox(ctx, podSandboxID)
+	}
+	if err != nil {
+		s.AppendSandboxLog(sandboxID, "error", fmt.Sprintf("delete failed: %v", err))
+	} else {
+		s.AppendSandboxLog(sandboxID, "info", "deleted sandbox")
+		s.ExpireSandboxLogs(sandboxID)
 	}
 	return err
 }
@@ -277,10 +306,18 @@ func (s *Service) PauseSandbox(ctx context.Context, namespace, podSandboxID stri
 		if err != nil {
 			rec.State = state.SandboxUnknown
 			rec.LastError = err.Error()
+			s.AppendSandboxLog(sandboxID, "error", fmt.Sprintf("pause failed: %v", err))
 		} else {
 			_ = s.deleteSandboxRuntimeState(ctx, namespace, sandboxID)
+			s.AppendSandboxLog(sandboxID, "info", fmt.Sprintf("paused sandbox snapshot=%s", snapshotID))
+			s.ExpireSandboxLogs(sandboxID)
 		}
 		_ = s.upsertSandbox(ctx, rec)
+	} else if err != nil {
+		s.AppendSandboxLog(sandboxID, "error", fmt.Sprintf("pause failed: %v", err))
+	} else {
+		s.AppendSandboxLog(sandboxID, "info", fmt.Sprintf("paused sandbox snapshot=%s", snapshotID))
+		s.ExpireSandboxLogs(sandboxID)
 	}
 	return snapshotID, err
 }
