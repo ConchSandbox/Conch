@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ var ErrNotFound = errors.New("state record not found")
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
+	[]byte("sandbox_audit_logs"),
 	[]byte("network_slots"),
 	[]byte("containers"),
 	[]byte("snapshot_runtimes"),
@@ -136,6 +138,49 @@ func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) 
 
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
+}
+
+func (s *BoltStore) AppendSandboxAuditLog(ctx context.Context, rec SandboxAuditLogRecord) error {
+	sandboxID := strings.TrimSpace(rec.SandboxID)
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox audit log sandbox_id is required")
+	}
+	if strings.TrimSpace(rec.ID) == "" {
+		return fmt.Errorf("sandbox audit log id is required")
+	}
+
+	key := fmt.Sprintf("%s/%020d/%s", sandboxID, rec.Timestamp, strings.TrimSpace(rec.ID))
+	return s.upsert(ctx, []byte("sandbox_audit_logs"), key, rec)
+}
+
+func (s *BoltStore) ListSandboxAuditLogs(ctx context.Context, sandboxID string) ([]SandboxAuditLogRecord, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, fmt.Errorf("sandbox id is required")
+	}
+
+	logs := make([]SandboxAuditLogRecord, 0)
+	prefix := []byte(sandboxID + "/")
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("sandbox_audit_logs"))
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+		for key, data := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, data = cursor.Next() {
+			var rec SandboxAuditLogRecord
+			if err := json.Unmarshal(data, &rec); err != nil {
+				return fmt.Errorf("unmarshal sandbox audit log: %w", err)
+			}
+			logs = append(logs, rec)
+		}
+
+		return nil
+	})
+
+	return logs, err
 }
 
 func (s *BoltStore) UpsertNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
