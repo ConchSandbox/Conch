@@ -106,6 +106,15 @@ type SnapshotRuntimeRecord struct {
 	State          string `json:"state"`
 	LastError      string `json:"last_error,omitempty"`
 }
+type SandboxAuditLogRecord struct {
+	ID        string `json:"id"`
+	SandboxID string `json:"sandbox_id"`
+	Namespace string `json:"namespace,omitempty"`
+	Timestamp int64  `json:"timestamp"`
+	Level     string `json:"level"`
+	Operation string `json:"operation"`
+	Message   string `json:"message,omitempty"`
+}
 
 type ViewSnapshotRecord struct {
 	Namespace        string `json:"namespace"`

@@ -64,6 +64,8 @@ Sandbox.create(snapshot_id=None, **kwargs) -> Sandbox
 
 **返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
 
+**Direct API：** `POST /api/v1/sandboxes`
+
 **示例：**
 ```python
 # 从config设置镜像创建
@@ -95,6 +97,82 @@ sbx = Sandbox.create(config_path="/path/to/sdk-config.yaml")
 # 使用上下文管理器
 with Sandbox.create() as sbx:
     sbx.execute(cmd='python3', content='print("Hello")')
+```
+
+---
+
+### 查询沙箱列表
+
+```python
+Sandbox.list(unix_socket=None, api_url=None, namespace=None,
+             config_path=None) -> list[dict]
+```
+
+查询指定 namespace 下的 sandbox 摘要列表。该接口主要用于管理端展示已有沙箱状态；后续如需对某个沙箱执行操作，可通过 `Sandbox.get()` 恢复为 sandbox 引用。
+
+**参数：**
+- `unix_socket` (str, 可选): conchd Unix socket 路径
+- `api_url` (str, 可选): conchd HTTP 服务地址
+- `namespace` (str, 可选): 命名空间，不指定时使用服务端默认 namespace
+- `config_path` (str, 可选): SDK 配置文件路径
+
+**返回：** `list[dict]`，每个元素为一个 sandbox 摘要信息。
+
+**Direct API：** `GET /api/v1/sandboxes`
+
+**示例：**
+```python
+sandboxes = Sandbox.list()
+for item in sandboxes:
+    print(item["sandbox_id"], item.get("state"), item.get("ip"))
+```
+
+返回值示例：
+
+```python
+[
+    {
+        "sandbox_id": "sandbox_a1b2c3d4e5f6",
+        "pod_sandbox_id": "sandbox_a1b2c3d4e5f6",
+        "namespace": "default",
+        "state": "READY",
+        "image_name": "hub.oepkgs.net/conch/conch-base:v0.1",
+        "ip": "172.18.0.2",
+        "vcpu_num": 2,
+        "ram_mb": 2048,
+        "created_at": 1713760800000000000
+    }
+]
+```
+
+---
+
+### 获取指定沙箱
+
+```python
+Sandbox.get(sandbox_id, unix_socket=None, api_url=None,
+            namespace=None, config_path=None) -> Sandbox
+```
+
+根据 `sandbox_id` 查询指定 sandbox 的摘要信息，并恢复为一个 `Sandbox` 对象。该对象可继续用于 `delete()`、`logs()`、`update_network()` 等实例级控制面操作。
+
+**参数：**
+- `sandbox_id` (str): 沙箱 ID
+- `unix_socket` (str, 可选): conchd Unix socket 路径
+- `api_url` (str, 可选): conchd HTTP 服务地址
+- `namespace` (str, 可选): 命名空间
+- `config_path` (str, 可选): SDK 配置文件路径
+
+**返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
+
+**Direct API：** `GET /api/v1/sandboxes/{sandbox_id}`
+
+**示例：**
+```python
+sbx = Sandbox.get("sandbox_a1b2c3d4e5f6")
+info = sbx.get_info()
+print(info.sandbox_id, info.ip)
+print(sbx.logs(limit=20))
 ```
 
 ---
@@ -185,6 +263,8 @@ sandbox.delete(sandbox_id=None) -> bool
 
 **返回：** 成功返回 `True`，失败抛出 `RuntimeError`
 
+**Direct API：** `DELETE /api/v1/sandboxes/{sandbox_id}`
+
 **静态方法：**
 ```python
 Sandbox.delete_sandbox(sandbox_id, unix_socket=None, api_url=None,
@@ -206,6 +286,111 @@ sbx.delete()
 
 # 直接删除指定沙箱
 Sandbox.delete_sandbox("sandbox_abc")
+```
+
+---
+
+### 更新沙箱网络策略
+
+```python
+sandbox.update_network(allow_out=None, deny_out=None,
+                       egress_proxy=None,
+                       allow_public_traffic=None) -> dict
+```
+
+更新指定 sandbox 的网络策略。该接口字段参考 E2B network 配置形式，但 Conch 不使用 E2B traffic/domain token 语义，具体执行语义以后端 netstack / policy 实现为准。
+
+**参数：**
+- `allow_out` (bool, 可选): 是否允许出站访问
+- `deny_out` (list[str], 可选): 出站拒绝规则列表
+- `egress_proxy` (str, 可选): 出站代理地址
+- `allow_public_traffic` (bool, 可选): 是否允许公网入站访问
+
+**返回：** `dict`，包含更新结果和网络策略摘要。
+
+**Direct API：** `PUT /api/v1/sandboxes/{sandbox_id}/network`
+
+**示例：**
+```python
+sbx = Sandbox.create()
+
+resp = sbx.update_network(
+    allow_out=True,
+    deny_out=["example.com", "10.0.0.0/8"],
+    egress_proxy="http://127.0.0.1:7890",
+    allow_public_traffic=False,
+)
+
+print(resp)
+sbx.delete()
+```
+
+返回值示例：
+
+```python
+{
+    "status": "ok",
+    "sandbox_id": "sandbox_a1b2c3d4e5f6",
+    "network": {
+        "sandbox_id": "sandbox_a1b2c3d4e5f6",
+        "allowOut": True,
+        "denyOut": ["example.com", "10.0.0.0/8"],
+        "egressProxy": "http://127.0.0.1:7890",
+        "allowPublicTraffic": False
+    }
+}
+```
+
+---
+
+### 查询沙箱审计日志
+
+```python
+sandbox.logs(cursor=None, limit=None, level=None, search=None) -> dict
+```
+
+查询指定 sandbox 的控制面审计日志。该日志用于记录 sandbox 生命周期和管理操作，例如 create、pause、delete、update_network 等。
+
+**注意：** 该接口不等同于命令执行日志，不返回 `execute()` 的 stdout/stderr；命令输出请从 `Execution.stdout`、`Execution.stderr` 或 `Execution.logs` 获取。
+
+**参数：**
+- `cursor` (str, 可选): 分页游标
+- `limit` (int, 可选): 返回条数限制
+- `level` (str, 可选): 日志级别过滤，例如 `info`、`warn`、`error`
+- `search` (str, 可选): 按操作名或消息内容搜索
+
+**返回：** `dict`，包含 `logs`、`next_cursor`、`has_more` 字段。
+
+**Direct API：** `GET /api/v1/sandboxes/{sandbox_id}/logs`
+
+**示例：**
+```python
+sbx = Sandbox.create()
+
+logs = sbx.logs(limit=20)
+for item in logs["logs"]:
+    print(item["timestamp"], item["level"], item["event"], item["message"])
+
+sbx.delete()
+```
+
+返回值示例：
+
+```python
+{
+    "logs": [
+        {
+            "id": "sandbox_a1b2c3d4e5f6-1713760800000000000-create",
+            "sandbox_id": "sandbox_a1b2c3d4e5f6",
+            "timestamp": 1713760800000000000,
+            "level": "info",
+            "event": "create",
+            "message": "sandbox created"
+        }
+    ],
+    "next_cursor": "",
+    "has_more": False
+}
 ```
 
 ---
@@ -301,6 +486,38 @@ files = sbx.list_files('/home/user')
 
 ## 健康检查
 
+### conchd 控制面健康检查
+
+```python
+Sandbox.service_health(unix_socket=None, api_url=None,
+                       config_path=None) -> bool
+```
+
+检查 conchd 控制面服务是否可用。该接口用于判断 SDK 是否能够连接到 conchd，不依赖某个具体 sandbox 实例。
+
+**参数：**
+- `unix_socket` (str, 可选): conchd Unix socket 路径
+- `api_url` (str, 可选): conchd HTTP 服务地址
+- `config_path` (str, 可选): SDK 配置文件路径
+
+**返回：** 服务可用返回 `True`，否则返回 `False`
+
+**Direct API：** `GET /health`
+
+**示例：**
+```python
+ok = Sandbox.service_health()
+print(ok)
+
+# 使用 TCP 地址显式检查
+ok = Sandbox.service_health(api_url="http://127.0.0.1:4063", unix_socket="")
+print(ok)
+```
+
+---
+
+### 沙箱内 Agent 健康检查
+
 ```python
 sandbox.health_check() -> dict
 ```
@@ -388,6 +605,19 @@ class SnapshotInfo:
     snapshot_id: str
     sandbox_id: str
 ```
+
+### Sandbox 审计日志条目
+
+`sandbox.logs()` 返回的 `logs` 字段是审计日志条目列表，每个条目通常包含：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | str | 日志 ID |
+| `sandbox_id` | str | 沙箱 ID |
+| `timestamp` | int | 日志时间戳 |
+| `level` | str | 日志级别 |
+| `event` | str | 操作事件，例如 `create`、`pause`、`delete`、`update_network` |
+| `message` | str | 日志描述 |
 
 ### Execution
 
@@ -506,6 +736,30 @@ except RuntimeError as e:
 finally:
     if sbx:
         sbx.delete()
+```
+
+### 示例 5: 控制面管理接口
+
+```python
+from conch import Sandbox
+
+# 检查 conchd 控制面服务
+print("service health:", Sandbox.service_health())
+
+# 查询 sandbox 摘要列表
+for item in Sandbox.list():
+    print(item["sandbox_id"], item.get("state"))
+
+# 获取指定 sandbox 引用并查询审计日志
+sbx = Sandbox.get("sandbox_a1b2c3d4e5f6")
+print(sbx.logs(limit=10))
+
+# 更新网络策略
+sbx.update_network(
+    allow_out=True,
+    deny_out=["example.com"],
+    allow_public_traffic=False,
+)
 ```
 
 ---
