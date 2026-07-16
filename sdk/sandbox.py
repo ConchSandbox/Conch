@@ -1,9 +1,10 @@
 import os
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote_plus
 import requests
 import requests_unixsocket
+import uuid
 import secrets
 
 # Try relative imports first (when imported as a package), fall back to absolute imports
@@ -37,24 +38,9 @@ CFG_API_URL_KEY = "api_url"
 CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
-SANDBOX_COLLECTION_PATH = "/api/v1/sandboxes"
-SANDBOX_INSTANCE_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}"
-
-SANDBOX_CREATE_PATH = SANDBOX_COLLECTION_PATH
-SANDBOX_LIST_PATH = SANDBOX_COLLECTION_PATH
-SANDBOX_GET_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
-SANDBOX_DELETE_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
-
-# TODO: migrate pause to a v1 direct API once its endpoint is finalized.
+SANDBOX_CREATE_PATH = "/api/sandbox/create"
+SANDBOX_DELETE_PATH = "/api/sandbox/delete"
 SANDBOX_PAUSE_PATH = "/api/sandbox/pause"
-
-SERVICE_HEALTH_PATH = "/health"
-HTTP_NO_CONTENT = 204
-SANDBOXES_KEY = "sandboxes"
-SANDBOX_KEY = "sandbox"
-SANDBOX_LOGS_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}/logs"
-LOGS_KEY = "logs"
-SANDBOX_NETWORK_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}/network"
 
 RANDOM_ID_HEX_BYTES = 12
 UNKNOWN_EXIT_CODE = -1
@@ -150,83 +136,6 @@ class Sandbox:
         response.raise_for_status()
         return response.json()
 
-    def _get_control_plane_response(self, path: str):
-        url = self._build_control_plane_url(path)
-        response = self._session.get(url)
-        response.raise_for_status()
-        return response
-    def _get_control_plane_requests(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        ) -> Dict[str, Any]:
-        url = self._build_control_plane_url(path)
-        response = self._session.get(url, params=params)
-        response.raise_for_status()
-
-        if response.status_code == 204:
-            return {}
-
-        return response.json()
-
-    def _put_control_plane_requests(
-        self,
-        path: str,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        url = self._build_control_plane_url(path)
-        response = self._session.put(url, json=payload or {})
-        response.raise_for_status()
-
-        if response.status_code == 204:
-            return {}
-
-        return response.json()
-
-    def _delete_control_plane_requests(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        url = self._build_control_plane_url(path)
-        response = self._session.delete(url, params=params)
-        response.raise_for_status()
-
-        if response.status_code == 204:
-            return {}
-
-        return response.json()
-
-    @staticmethod
-    def _extract_sandbox_record(result: Dict[str, Any]) -> Dict[str, Any]:
-        sandbox = result.get(SANDBOX_KEY)
-        if isinstance(sandbox, dict):
-            return sandbox
-        return result
-
-    def _apply_sandbox_record(self, record: Dict[str, Any]) -> None:
-        if not isinstance(record, dict):
-            return
-
-        self.sandbox_id = record.get(SANDBOX_ID_KEY) or self.sandbox_id
-        self.namespace = record.get(NAMESPACE_KEY) or self.namespace
-        self.ip = record.get(IP_KEY) or self.ip
-        self.snapshot_id = record.get(SNAPSHOT_ID_KEY) or self.snapshot_id
-        self.image_name = record.get(IMAGE_NAME_KEY) or self.image_name
-        self.vcpu_num = record.get(VCPU_NUM_KEY) or self.vcpu_num
-        self.vcpu_max = record.get(VCPU_MAX_KEY) or self.vcpu_max
-        self.ram_mb = record.get(RAM_MB_KEY) or self.ram_mb
-
-        agent_token = record.get(AGENT_TOKEN_KEY)
-        if self.ip and agent_token:
-            self.agent_token = agent_token
-            if self.client:
-                try:
-                    self.client.close()
-                except Exception:
-                    pass
-            self.client = AgentClient(host=self.ip, token=self.agent_token)
-
     def _use_snapshot_startup(self) -> bool:
         return bool(self.snapshot_id) or self.use_snapshot
 
@@ -293,117 +202,18 @@ class Sandbox:
 
     def delete(self, sandbox_id: Optional[str] = None) -> bool:
         target_id = sandbox_id if sandbox_id else self.sandbox_id
-        if not target_id:
-            raise RuntimeError("Cannot delete sandbox without sandbox_id")
-
-        params: Dict[str, Any] = {}
-        if self.namespace:
-            params[NAMESPACE_KEY] = self.namespace
-
-        path = SANDBOX_DELETE_PATH_TEMPLATE.format(
-            sandbox_id=quote(str(target_id), safe="")
-        )
+        payload = {
+            NAMESPACE_KEY: self.namespace,
+            SANDBOX_ID_KEY: target_id,
+        }
 
         try:
-            self._delete_control_plane_requests(
-                path,
-                params=params if params else None,
-            )
+            result = self._post_control_plane_requests(SANDBOX_DELETE_PATH, payload)
+            result[SANDBOX_ID_KEY] = target_id
             return True
 
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
-
-    @classmethod
-    def service_health(
-            cls,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
-            config_path: Optional[str] = None,
-    ) -> bool:
-        sbx = cls(
-            unix_socket=unix_socket,
-            api_url=api_url,
-            config_path=config_path,
-        )
-
-        try:
-            response = sbx._get_control_plane_response(SERVICE_HEALTH_PATH)
-            return response.status_code == HTTP_NO_CONTENT
-        except requests.exceptions.RequestException:
-            return False
-
-    @classmethod
-    def list(
-            cls,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
-            namespace: Optional[str] = None,
-            config_path: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        sbx = cls(
-            unix_socket=unix_socket,
-            api_url=api_url,
-            namespace=namespace,
-            config_path=config_path,
-        )
-
-        params: Dict[str, Any] = {}
-        if sbx.namespace:
-            params[NAMESPACE_KEY] = sbx.namespace
-
-        try:
-            result = sbx._get_control_plane_requests(
-                SANDBOX_LIST_PATH,
-                params=params if params else None,
-            )
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(_request_exception_message(e))
-
-        sandboxes = result.get(SANDBOXES_KEY, [])
-        if isinstance(sandboxes, list):
-            return sandboxes
-
-        return []
-
-    @classmethod
-    def get(
-            cls,
-            sandbox_id: str,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
-            namespace: Optional[str] = None,
-            config_path: Optional[str] = None,
-    ) -> "Sandbox":
-        if not sandbox_id:
-            raise RuntimeError("Cannot get sandbox without sandbox_id")
-
-        sbx = cls(
-            sandbox_id=sandbox_id,
-            unix_socket=unix_socket,
-            api_url=api_url,
-            namespace=namespace,
-            config_path=config_path,
-        )
-
-        params: Dict[str, Any] = {}
-        if sbx.namespace:
-            params[NAMESPACE_KEY] = sbx.namespace
-
-        path = SANDBOX_GET_PATH_TEMPLATE.format(
-            sandbox_id=quote(str(sandbox_id), safe="")
-        )
-
-        try:
-            result = sbx._get_control_plane_requests(
-                path,
-                params=params if params else None,
-            )
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(_request_exception_message(e))
-
-        sbx._apply_sandbox_record(sbx._extract_sandbox_record(result))
-        return sbx
 
     @staticmethod
     def delete_sandbox(
@@ -488,75 +298,6 @@ class Sandbox:
                 STATUS_KEY: "ERROR",
                 MESSAGE_KEY: f"Health check failed: {e}"
             }
-
-    def update_network(
-        self,
-        allow_out: Optional[bool] = None,
-        deny_out: Optional[List[str]] = None,
-        egress_proxy: Optional[str] = None,
-        allow_public_traffic: Optional[bool] = None,
-    ) -> Dict[str, Any]:
-        if not self.sandbox_id:
-            raise RuntimeError("Cannot update sandbox network without sandbox_id")
-
-        payload: Dict[str, Any] = {}
-
-        if allow_out is not None:
-            payload["allowOut"] = allow_out
-
-        if deny_out is not None:
-            payload["denyOut"] = deny_out
-
-        if egress_proxy is not None:
-            payload["egressProxy"] = egress_proxy
-
-        if allow_public_traffic is not None:
-            payload["allowPublicTraffic"] = allow_public_traffic
-
-        path = SANDBOX_NETWORK_PATH_TEMPLATE.format(
-            sandbox_id=quote(str(self.sandbox_id), safe="")
-        )
-
-        try:
-            return self._put_control_plane_requests(path, payload)
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(_request_exception_message(e))
-
-    def logs(
-        self,
-        cursor: Optional[str] = None,
-        limit: Optional[int] = None,
-        level: Optional[str] = None,
-        search: Optional[str] = None,
-) -> Dict[str, Any]:
-        if not self.sandbox_id:
-            raise RuntimeError("Cannot get sandbox logs without sandbox_id")
-
-        params: Dict[str, Any] = {}
-
-        if cursor is not None:
-            params["cursor"] = cursor
-
-        if limit is not None:
-            params["limit"] = limit
-
-        if level is not None:
-            params["level"] = level
-
-        if search is not None:
-            params["search"] = search
-
-        path = SANDBOX_LOGS_PATH_TEMPLATE.format(
-            sandbox_id=quote(str(self.sandbox_id), safe="")
-        )
-
-        try:
-            return self._get_control_plane_requests(
-                path,
-                params=params if params else None,
-            )
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(_request_exception_message(e))
 
     def upload(self, *args, **kwargs) -> Dict[str, Any]:
         # Upload files to sandbox

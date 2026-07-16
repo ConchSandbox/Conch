@@ -10,9 +10,6 @@ type Store interface {
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
-	AppendSandboxAuditLog(ctx context.Context, record SandboxAuditLogRecord) error
-	ListSandboxAuditLogs(ctx context.Context, sandboxID string) ([]SandboxAuditLogRecord, error)
-
 	UpsertNetworkSlot(context.Context, NetworkSlotRecord) error
 	GetNetworkSlot(context.Context, string) (NetworkSlotRecord, error)
 	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)

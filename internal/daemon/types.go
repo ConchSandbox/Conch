@@ -95,36 +95,6 @@ type snapshotInfoRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-type listSandboxRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type sandboxSummaryResponse struct {
-	SandboxID    string `json:"sandbox_id"`
-	PodSandboxID string `json:"pod_sandbox_id,omitempty"`
-	Namespace    string `json:"namespace,omitempty"`
-	State        string `json:"state,omitempty"`
-	Name         string `json:"name,omitempty"`
-	UID          string `json:"uid,omitempty"`
-	ImageName    string `json:"image_name,omitempty"`
-	SnapshotID   string `json:"snapshot_id,omitempty"`
-	IP           string `json:"ip,omitempty"`
-	VMMName      string `json:"vmm_name,omitempty"`
-	VCPUNum      int64  `json:"vcpu_num,omitempty"`
-	RamMB        int64  `json:"ram_mb,omitempty"`
-	CreatedAt    int64  `json:"created_at,omitempty"`
-	StoppedAt    int64  `json:"stopped_at,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
-}
-
-type listSandboxResponse struct {
-	Sandboxes []sandboxSummaryResponse `json:"sandboxes"`
-}
-
-type getSandboxResponse struct {
-	Sandbox sandboxSummaryResponse `json:"sandbox"`
-}
-
 func imageRecordResponses(records []runtimeapi.ImageRecord) []imageRecordResponse {
 	out := make([]imageRecordResponse, 0, len(records))
 	for _, record := range records {
@@ -143,21 +113,6 @@ func imageRecordResponses(records []runtimeapi.ImageRecord) []imageRecordRespons
 	return out
 }
 
-type sandboxLogEntryResponse struct {
-	ID        string `json:"id"`
-	SandboxID string `json:"sandbox_id"`
-	Timestamp int64  `json:"timestamp"`
-	Level     string `json:"level"`
-	Event     string `json:"event"`
-	Message   string `json:"message"`
-}
-
-type getSandboxLogsResponse struct {
-	Logs       []sandboxLogEntryResponse `json:"logs"`
-	NextCursor string                    `json:"next_cursor,omitempty"`
-	HasMore    bool                      `json:"has_more"`
-}
-
 func importImageArchiveHTTPResponse(result runtimeapi.ImportImageArchiveResult) importImageArchiveResponse {
 	return importImageArchiveResponse{
 		SnapshotKey: result.SnapshotKey,
@@ -174,25 +129,4 @@ func copyStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-type updateSandboxNetworkRequest struct {
-	AllowOut           *bool    `json:"allowOut,omitempty"`
-	DenyOut            []string `json:"denyOut,omitempty"`
-	EgressProxy        string   `json:"egressProxy,omitempty"`
-	AllowPublicTraffic *bool    `json:"allowPublicTraffic,omitempty"`
-}
-
-type sandboxNetworkPolicyResponse struct {
-	SandboxID          string   `json:"sandbox_id"`
-	AllowOut           *bool    `json:"allowOut,omitempty"`
-	DenyOut            []string `json:"denyOut,omitempty"`
-	EgressProxy        string   `json:"egressProxy,omitempty"`
-	AllowPublicTraffic *bool    `json:"allowPublicTraffic,omitempty"`
-}
-
-type updateSandboxNetworkResponse struct {
-	Status    string                       `json:"status"`
-	SandboxID string                       `json:"sandbox_id"`
-	Network   sandboxNetworkPolicyResponse `json:"network"`
 }
