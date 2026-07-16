@@ -29,7 +29,7 @@ curl --request GET \
 
 ## 接口列表
 
-| Interface | RPC Path | Description |
+| 接口名称 | RPC 路径 | 说明 |
 | --- | --- | --- |
 | `runCommand` | `/pb.ProcessService/StartProcess` | 执行同步命令或启动后台进程 |
 | `connectBackgroundProcess` | `/pb.ProcessService/Connect` | 连接后台进程并读取输出事件 |
@@ -40,7 +40,7 @@ curl --request GET \
 | `listFiles` | `/pb.FileService/ListFiles` | 列出文件和目录 |
 | `searchFiles` | `/pb.FileService/SearchFiles` | 按 glob 搜索文件 |
 
-## Run Command
+## 执行命令
 
 执行命令或脚本。`StartProcess` 是服务端流式 RPC，返回 `stream ProcessEvent`。使用 `background` 参数区分同步执行和后台进程。`content` 字段用于让 Agent 在 sandbox 内生成临时脚本并执行。
 
@@ -96,7 +96,7 @@ command = sandbox.commands.run(
 )
 ```
 
-### Direct Agent API
+### 直接调用 Agent API
 
 `StartProcess` 使用 Connect server-streaming 编码。下面展示请求 message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
 
@@ -147,24 +147,24 @@ command = sandbox.commands.run(
 }
 ```
 
-### Body Parameters
+### 请求参数
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `cmd` | string | required | 可执行命令，例如 `python3`、`sh` |
-| `args` | string[] | optional | 命令参数 |
-| `env` | object | optional | 本次执行追加环境变量 |
-| `cwd` | string | optional | 工作目录；为空时使用当前用户 home 目录 |
-| `content` | string | optional | 脚本文本内容。非空时 `args` 必须为空 |
-| `background` | boolean | optional | 是否后台启动 |
-| `tag` | string | optional | 后台进程标签 |
-| `pty` | object/null | optional | PTY 配置；省略或 `null` 时不启用 |
-| `pty.cols` | integer | optional | PTY 列数，未传或为 0 时使用默认值 |
-| `pty.rows` | integer | optional | PTY 行数，未传或为 0 时使用默认值 |
+| `cmd` | string | 必填 | 可执行命令，例如 `python3`、`sh` |
+| `args` | string[] | 可选 | 命令参数 |
+| `env` | object | 可选 | 本次执行追加环境变量 |
+| `cwd` | string | 可选 | 工作目录；为空时使用当前用户 home 目录 |
+| `content` | string | 可选 | 脚本文本内容。非空时 `args` 必须为空 |
+| `background` | boolean | 可选 | 是否后台启动 |
+| `tag` | string | 可选 | 后台进程标签 |
+| `pty` | object/null | 可选 | PTY 配置；省略或 `null` 时不启用 |
+| `pty.cols` | integer | 可选 | PTY 列数，未传或为 0 时使用默认值 |
+| `pty.rows` | integer | 可选 | PTY 行数，未传或为 0 时使用默认值 |
 
 `content` 不是 stdin。它用于执行一段脚本文本，例如 `cmd="python3"` 配合 `content="print('hello')"`。当前实现要求 `content` 和 `args` 互斥。
 
-### Response Stream
+### 响应流
 
 返回类型：
 
@@ -189,7 +189,7 @@ stream ProcessEvent
 
 参数错误、命令启动失败和执行错误通过 `end.error` 表达。非零退出码不是 RPC 错误，`end.error` 为空，`end.exitCode` 为实际退出码。
 
-## Connect Background Process
+## 连接后台进程
 
 连接正在运行的后台进程并读取后续输出。通过 `process.pid` 或 `process.tag` 连接。
 
@@ -209,7 +209,7 @@ for stdout, stderr, pty in command:
     print(stdout or stderr or pty or "", end="")
 ```
 
-### cURL / Direct Agent API
+### cURL / 直接调用 Agent API
 
 `Connect` 是服务端流式 RPC。下面展示单条 Connect JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
 
@@ -221,14 +221,14 @@ for stdout, stderr, pty in command:
 }
 ```
 
-### Request Message
+### 请求消息
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `process.pid` | integer | optional | 进程 PID；与 `process.tag` 二选一 |
-| `process.tag` | string | optional | 进程标签；与 `process.pid` 二选一 |
+| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
+| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
 
-### Response
+### 响应
 
 `stream ProcessEvent`
 
@@ -240,7 +240,7 @@ for stdout, stderr, pty in command:
 {"end":{"exitCode":0,"exited":true,"status":"exited","error":""}}
 ```
 
-## List Background Processes
+## 列出后台进程
 
 列出 sandbox 内由 Agent 当前管理的后台进程，返回进程配置、PID 和标签。命令输出通过 `Connect` 流读取。
 
@@ -267,11 +267,11 @@ curl --request POST \
   --data '{}'
 ```
 
-### Body Parameters
+### 请求参数
 
 无入参字段。
 
-### Response
+### 响应
 
 ```json
 {
@@ -295,7 +295,7 @@ curl --request POST \
 }
 ```
 
-## Kill Background Process
+## 发送进程信号
 
 向后台进程发送信号。可通过 `pid` 或 `tag` 指定目标进程。调用方必须传入非 0 `signal`。
 
@@ -329,15 +329,15 @@ curl --request POST \
   }'
 ```
 
-### Body Parameters
+### 请求参数
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `process.pid` | integer | optional | 进程 PID；与 `process.tag` 二选一 |
-| `process.tag` | string | optional | 进程标签；与 `process.pid` 二选一 |
-| `signal` | integer | required | 信号编号，必须非 0；`15` 为 SIGTERM，`9` 为 SIGKILL |
+| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
+| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
+| `signal` | integer | 必填 | 信号编号，必须非 0；`15` 为 SIGTERM，`9` 为 SIGKILL |
 
-### Response
+### 响应
 
 ```json
 {}
@@ -345,7 +345,7 @@ curl --request POST \
 
 错误通过 Connect status error 返回：缺少 selector 或 `signal=0` 返回 `InvalidArgument`，目标进程不存在返回 `NotFound`，目标进程已退出或信号发送时刚好结束返回 `FailedPrecondition`。
 
-## Upload File
+## 上传文件
 
 上传本地文件或写入内容到 sandbox。
 
@@ -372,7 +372,7 @@ entries = sandbox.files.write_files([
 entry = sandbox.files.upload("local.txt", "/workspace/remote.txt")
 ```
 
-### cURL / Direct Agent API
+### cURL / 直接调用 Agent API
 
 `PostFileStream` 是客户端流式 RPC。下面展示单条 `FileChunk` JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
 
@@ -383,14 +383,14 @@ entry = sandbox.files.upload("local.txt", "/workspace/remote.txt")
 }
 ```
 
-### Stream Message
+### 流式消息
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `filepath` | string | required on first chunk | sandbox 内目标路径；第一片必须传，后续分片可省略或传相同路径 |
-| `content` | bytes | optional | 文件分片内容；JSON 示例中按 base64 表示，单片最大 1 MiB |
+| `filepath` | string | 首个分片必填 | sandbox 内目标路径；第一片必须传，后续分片可省略或传相同路径 |
+| `content` | bytes | 可选 | 文件分片内容；JSON 示例中按 base64 表示，单片最大 1 MiB |
 
-### Response
+### 响应
 
 ```json
 {
@@ -407,7 +407,7 @@ entry = sandbox.files.upload("local.txt", "/workspace/remote.txt")
 
 上传使用临时文件落盘，完整流接收后再 rename 到目标路径。上传失败通过 Connect status error 返回。
 
-## Download File
+## 下载文件
 
 从 sandbox 下载文件或读取文件内容。
 
@@ -428,7 +428,7 @@ result = sandbox.files.download("/workspace/remote.txt", "remote.txt")
 
 `read()` 默认按 UTF-8 文本返回；二进制内容请显式使用 `format="bytes"`。
 
-### cURL / Direct Agent API
+### cURL / 直接调用 Agent API
 
 `GetFileStream` 是服务端流式 RPC。下面展示请求 JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
 
@@ -438,19 +438,19 @@ result = sandbox.files.download("/workspace/remote.txt", "remote.txt")
 }
 ```
 
-### Request Message
+### 请求消息
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `filepath` | string | required | sandbox 内源文件路径 |
+| `filepath` | string | 必填 | sandbox 内源文件路径 |
 
-### Response
+### 响应
 
 `stream FileChunk`
 
 响应为文件分片流，每片最大 1 MiB。第一片包含 `filepath`，后续分片通常只包含 `content`。Direct JSON 中 `content` 按 base64 表示。
 
-## List Files
+## 列出文件
 
 列出 sandbox 目录下的文件和目录。
 
@@ -482,14 +482,14 @@ curl --request POST \
   }'
 ```
 
-### Body Parameters
+### 请求参数
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `path` | string | required | 待列举路径 |
-| `depth` | integer | optional | 递归深度；`1` 表示当前目录；省略、`0` 或负数按 `1` 处理 |
+| `path` | string | 必填 | 待列举路径 |
+| `depth` | integer | 可选 | 递归深度；`1` 表示当前目录；省略、`0` 或负数按 `1` 处理 |
 
-### Response
+### 响应
 
 ```json
 {
@@ -508,7 +508,7 @@ curl --request POST \
 }
 ```
 
-## Search Files
+## 搜索文件
 
 按 glob 模式搜索文件。
 
@@ -545,15 +545,15 @@ curl --request POST \
   }'
 ```
 
-### Body Parameters
+### 请求参数
 
-| Field | Type | Required | Description |
+| 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `path` | string | required | 搜索根目录 |
-| `pattern` | string | required | glob 匹配模式 |
-| `excludePatterns` | string[] | optional | 排除模式 |
+| `path` | string | 必填 | 搜索根目录 |
+| `pattern` | string | 必填 | glob 匹配模式 |
+| `excludePatterns` | string[] | 可选 | 排除模式 |
 
-### Response
+### 响应
 
 ```json
 {

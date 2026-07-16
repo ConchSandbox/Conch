@@ -16,7 +16,7 @@ def test_create_with_template_id():
     sbx = Sandbox.create(template_id=template_id)
     try:
         assert sbx.sandbox_id is not None
-        result = sbx.execute(cmd="ls", args=["/"])
+        result = sbx.commands.run(cmd="ls", args=["/"])
         assert result.exit_code == 0
     finally:
         sbx.delete()
@@ -32,7 +32,7 @@ def test_create_with_checkpoint():
     sbx2 = Sandbox.create(template_id=template.template_id)
     try:
         assert sbx2.sandbox_id is not None
-        result = sbx2.execute(cmd="ls", args=["/"])
+        result = sbx2.commands.run(cmd="ls", args=["/"])
         assert result.exit_code == 0
     finally:
         sbx2.delete()
@@ -42,7 +42,7 @@ def test_context_manager():
     """Sandbox supports context manager protocol."""
     with Sandbox.create() as sbx:
         assert sbx.sandbox_id is not None
-        result = sbx.execute(cmd="echo", args=["hello"])
+        result = sbx.commands.run(cmd="echo", args=["hello"])
         assert result.exit_code == 0
 
 

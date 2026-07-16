@@ -53,7 +53,7 @@ template_id = get_config("CONCH_TEMPLATE_ID", "Enter Conch Template ID")
 
 def add_config(box):
     # 1. create .claude folder and settings.json
-    result = box.execute(
+    result = box.commands.run(
         "sh",
         args=[
             "-c",
@@ -62,7 +62,7 @@ def add_config(box):
     )
     
     # 2. Configure the SSH authorized_keys file
-    result = box.execute(
+    result = box.commands.run(
         "sh",
         args=[
             "-c",
@@ -83,7 +83,7 @@ def prepare_box(template_id):
     return box, ip
 
 def run_claude_once(box, ip):
-    result = box.execute(
+    result = box.commands.run(
         "claude",
         args=["-p", "What's the day today?",],
         env=env,

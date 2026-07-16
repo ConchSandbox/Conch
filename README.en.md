@@ -128,11 +128,11 @@ try:
     sandbox.get_info()
 
     # Execute a Python script
-    result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
+    result = sandbox.commands.run(cmd="python3", content="print('hello Conch!')")
     print(result)
 
     # Execute a system command with arguments
-    result = sandbox.execute(cmd="ls", args=["-l", "/root"])
+    result = sandbox.commands.run(cmd="ls", args=["-l", "/root"])
     print(result)
 except RuntimeError as e:
     print(f"Error: {e}")
@@ -140,7 +140,7 @@ finally:
     sandbox.delete()
 ```
 
-You must call `Sandbox.create()` successfully before `execute()`, and make sure `./bin/conchd` is already running; otherwise the `Sandbox` instance has not been bound to an available Agent client.
+You must call `Sandbox.create()` successfully before `commands.run()`, and make sure `./bin/conchd` is already running; otherwise the `Sandbox` instance has not been bound to an available Agent client.
 
 For more SDK usage, see [Python SDK API Documentation](docs/guide/python-api.md).
 

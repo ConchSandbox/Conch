@@ -1,61 +1,58 @@
-import grpc
-from typing import Dict, Any, Optional
 import os
 import sys
+from io import IOBase, TextIOBase
+from typing import Any, Dict, Iterator, List, Optional
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(PROJECT_ROOT)
-sys.path.insert(0, PROJECT_ROOT)
+import requests
+from connectrpc.code import Code
+from connectrpc.compat import google_protobuf_binary_codec
+from connectrpc.errors import ConnectError
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from api.py_proto import agent_connect
 from api.py_proto import agent_pb2
-from api.py_proto import agent_pb2_grpc
+from .errors import InvalidArgumentError, handle_rpc_error
+
 
 class AgentClient:
-    DEFAULT_GRPC_PORT = 4064
+    DEFAULT_AGENT_PORT = 4064
     STATUS_SUCCESS = 0
     STATUS_FAILED = -1
     FILE_CHUNK_SIZE = 1024 * 1024
-    DEFAULT_SCRIPT_NAMES = {
-        ("python", "python3", "python2"): "main.py",
-        ("node", "nodejs"): "main.js",
-        ("bash", "sh", "zsh"): "main.sh",
-        ("lua",): "main.lua",
-        ("ruby", "rb"): "main.rb",
-    }
-    FALLBACK_SCRIPT_NAME = "main.py"
 
-    def __init__(self, host: str, port: int = DEFAULT_GRPC_PORT, token: Optional[str] = None):
+    def __init__(self, host: str, port: int = DEFAULT_AGENT_PORT, token: Optional[str] = None):
         self.host = host
         self.port = port
         self.token = token
         self.address = f"{host}:{port}"
-        self.channel = None
-        self.stub = None
-        self._connect()
+        self.base_url = self._build_base_url(host, port)
+        self.session = requests.Session()
+        codec = google_protobuf_binary_codec()
+        self.process_client = agent_connect.ProcessServiceClientSync(self.base_url, codec=codec)
+        self.file_client = agent_connect.FileServiceClientSync(self.base_url, codec=codec)
 
-    def _metadata(self):
+    @staticmethod
+    def _build_base_url(host: str, port: int) -> str:
+        if host.startswith("http://") or host.startswith("https://"):
+            return host.rstrip("/")
+        return f"http://{host}:{port}"
+
+    def _headers(self) -> Dict[str, str]:
         if not self.token:
-            return None
-        return (("x-conch-agent-token", self.token),)
+            return {}
+        return {"conch-init-token": self.token}
 
-    def _connect(self):
-        # connect to agent grpc server
-        try:
-            self.channel = grpc.insecure_channel(self.address)
-            self.stub = agent_pb2_grpc.AgentServiceStub(self.channel)
-        except Exception as e:
-            raise ConnectionError(f"failed to connect Agent server {self.address}: {e}") from e
+    def _url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
 
     def health_check(self) -> Dict[str, Any]:
-        request = agent_pb2.Empty()
-        try:
-            response = self.stub.HealthCheck(request, metadata=self._metadata())
-            return {
-                "status": "OK",
-                "message": response.message,
-            }
-        except grpc.RpcError as e:
-            raise RuntimeError(f"healthcheck failed: [{e.code()}] {e.details()}") from e
+        response = self.session.get(self._url("/health"))
+        if response.status_code >= 400:
+            raise RuntimeError(self._http_error(response))
+        return response.json() if response.content else {"status": "OK", "message": "OK"}
 
     def start_process(
         self,
@@ -63,158 +60,126 @@ class AgentClient:
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         content: Optional[str] = None,
-        filename: Optional[str] = None,
         args: Optional[list] = None,
+        background: bool = False,
+        tag: Optional[str] = None,
+        pty: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        request_kwargs = {
-            "cmd": cmd,
-            "cwd": cwd,
-            "env": env or {},
-            "args": args or [],
+        if content is not None and args:
+            raise InvalidArgumentError("content cannot be used with args; write a file first and execute it via args")
+        request = agent_pb2.StartProcessRequest(
+            cmd=cmd,
+            args=args or [],
+            env=env or {},
+            cwd=cwd or "",
+            content=content or "",
+            background=background,
+            tag=tag or "",
+        )
+        if pty is not None:
+            request.pty.CopyFrom(agent_pb2.PTY(cols=pty.get("cols", 0), rows=pty.get("rows", 0)))
+
+        raw_events = self._rpc_call(self.process_client.start_process, request)
+        events = self._rpc_iter(raw_events)
+        if background:
+            return self._start_background_process_response(request, events)
+        return self._aggregate_process_response(events)
+
+    def connect_process(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
+        tag: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        selector = self._process_selector(process, pid=pid, tag=tag)
+        request = agent_pb2.ConnectProcessRequest(process=selector)
+        raw_events = self._rpc_call(self.process_client.connect, request)
+        for event in self._rpc_iter(raw_events):
+            yield self._process_event_to_dict(event)
+
+    def list_processes(self) -> List[Dict[str, Any]]:
+        response = self._rpc_call(self.process_client.list, agent_pb2.ListProcessesRequest())
+        return [self._process_info_to_dict(process) for process in response.processes]
+
+    def send_signal(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
+                    tag: Optional[str] = None, signal: int = 15) -> bool:
+        selector = self._process_selector(process, pid=pid, tag=tag)
+        request = agent_pb2.SendSignalRequest(process=selector, signal=signal)
+        try:
+            self.process_client.send_signal(request, headers=self._headers())
+        except ConnectError as exc:
+            if exc.code == Code.NOT_FOUND:
+                return False
+            raise handle_rpc_error(exc) from None
+        return True
+
+    def post_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        uploaded_count = 0
+        entries = []
+        for file_spec in files:
+            response = self._rpc_call(
+                self.file_client.post_file_stream,
+                self._iter_file_chunk_messages(file_spec),
+            )
+            uploaded_count += response.uploaded_count
+            entries.extend(self._write_info_to_dict(entry) for entry in getattr(response, "entries", []))
+        return {
+            "status": self.STATUS_SUCCESS,
+            "uploaded_count": uploaded_count,
+            "entries": entries,
+            "message": f"uploaded {uploaded_count} files",
         }
 
-        if content is not None:
-            request_kwargs["content"] = content
-            if args is None:
-                request_kwargs["args"] = []
-
-        request = agent_pb2.StartProcessRequest(**request_kwargs)
-
-        try:
-            response = self.stub.StartProcess(request, metadata=self._metadata())
-            status = self.STATUS_SUCCESS if response.exit_code == 0 and not response.error else self.STATUS_FAILED
-            return {
-                "status": status,
-                "message": response.error or "OK",
-                "stdout": response.stdout,
-                "stderr": response.stderr,
-                "exit_code": response.exit_code,
-                "error": response.error,
-            }
-        except grpc.RpcError as e:
-            raise RuntimeError(f"command execution failed: [{e.code()}] {e.details()}") from e
-
-    def post_files(self, *args, **kwargs) -> Dict[str, Any]:
-        # upload files to agent server
-        files = []
-
-        if 'files' in kwargs:
-            if args:
-                raise TypeError("cannot mix args and 'files' keyword")
-            file_specs = kwargs['files']
-            if not isinstance(file_specs, (list, tuple)):
-                raise TypeError("files must be a list or tuple")
-
-            for item in file_specs:
-                if not isinstance(item, dict):
-                    raise ValueError(f"invalid file spec: {item}")
-
-                if "content" in item and "filepath" in item:
-                    content = item["content"]
-                    filepath = item["filepath"]
-                    files.append({"filepath": filepath, "content": content})
-                elif all(k in item for k in ("local_path", "remote_path")):
-                    lp = item["local_path"]
-                    if not os.path.exists(lp):
-                        raise FileNotFoundError(f"local file not found: {lp}")
-                    filepath = item["remote_path"]
-                    files.append({"filepath": filepath, "local_path": lp})
-                else:
-                    raise ValueError(
-                        "invalid file spec, need 'content'+'filepath' or 'local_path'+'remote_path': "
-                        + str(item)
-                    )
-
-        elif len(args) == 2:
-            local_path, remote_path = args
-            if not os.path.exists(local_path):
-                raise FileNotFoundError(f"local file not found: {local_path}")
-            files.append({"filepath": remote_path, "local_path": local_path})
-
-        elif len(args) == 1 and isinstance(args[0], (list, tuple)):
-            for item in args[0]:
-                if "content" in item and "filepath" in item:
-                    content = item["content"]
-                    filepath = item["filepath"]
-                    files.append({"filepath": filepath, "content": content})
-                elif all(k in item for k in ("local_path", "remote_path")):
-                    lp = item["local_path"]
-                    if not os.path.exists(lp):
-                        raise FileNotFoundError(f"local file not found: {lp}")
-                    filepath = item["remote_path"]
-                    files.append({"filepath": filepath, "local_path": lp})
-                else:
-                    raise ValueError(
-                        "invalid file spec, need 'content'+'filepath' or 'local_path'+'remote_path': "
-                        + str(item)
-                    )
-        else:
-            raise TypeError("usage: post_files(local, remote) or post_files([spec, ...]) or post_files(files=[...])")
-
-        uploaded_count = 0
-        try:
-            for file in files:
-                response = self.stub.PostFileStream(self._iter_file_chunks(file), metadata=self._metadata())
-                if response.error:
-                    return {
-                        "status": self.STATUS_FAILED,
-                        "uploaded_count": uploaded_count,
-                        "message": response.error,
-                        "error": response.error,
-                    }
-                uploaded_count += response.uploaded_count
-            return {
-                "status": self.STATUS_SUCCESS,
-                "uploaded_count": uploaded_count,
-                "message": f"uploaded {uploaded_count} files",
-                "error": "",
-            }
-        except grpc.RpcError as e:
-            raise RuntimeError(f"gRPC failed: [{e.code()}] {e.details()}") from e
-
     def get_file(self, remote_path: str, local_path: str) -> Dict[str, Any]:
-        # download single file from agent server
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        size = 0
         request = agent_pb2.GetFileRequest(filepath=remote_path)
-        try:
-            os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-            size = 0
-            with open(local_path, "wb") as f:
-                for chunk in self.stub.GetFileStream(request, metadata=self._metadata()):
-                    f.write(chunk.content)
-                    size += len(chunk.content)
+        chunks = self._rpc_call(self.file_client.get_file_stream, request)
+        with open(local_path, "wb") as out:
+            for chunk in self._rpc_iter(chunks):
+                out.write(chunk.content)
+                size += len(chunk.content)
+        return {"status": self.STATUS_SUCCESS, "size": size, "message": "OK"}
 
-            return {
-                "status": self.STATUS_SUCCESS,
-                "size": size,
-                "message": "OK",
-            }
-        except grpc.RpcError as e:
-            raise RuntimeError(f"gRPC failed: [{e.code()}] {e.details()}") from e
+    def stream_file(self, remote_path: str) -> Iterator[bytes]:
+        request = agent_pb2.GetFileRequest(filepath=remote_path)
+        chunks = self._rpc_call(self.file_client.get_file_stream, request)
+        for chunk in self._rpc_iter(chunks):
+            yield chunk.content
 
-    def get_files(self, mappings: list[Dict[str, str]]) -> Dict[str, Any]:
-        # batch download files from agent server
+    def read_file(self, remote_path: str) -> bytes:
+        return b"".join(self.stream_file(remote_path))
+
+    def get_files(self, mappings: List[Dict[str, str]]) -> Dict[str, Any]:
         downloaded = 0
         failed = []
-
         for item in mappings:
+            if "remote" not in item or "local" not in item:
+                raise InvalidArgumentError("invalid file mapping, need 'remote' and 'local': " + str(item))
             try:
                 self.get_file(item["remote"], item["local"])
                 downloaded += 1
-            except Exception as e:
-                failed.append({"remote": item["remote"], "local": item["local"], "error": str(e)})
-
+            except OSError as exc:
+                failed.append({"remote": item["remote"], "local": item["local"], "error": str(exc)})
         status = self.STATUS_SUCCESS if not failed else self.STATUS_FAILED
         return {
             "status": status,
             "downloaded_count": downloaded,
             "failed": failed,
-            "message": f"Downloaded {downloaded}, failed {len(failed)}"
+            "message": f"Downloaded {downloaded}, failed {len(failed)}",
         }
 
+    def list_files(self, path: str, depth: int = 1) -> List[Dict[str, Any]]:
+        request = agent_pb2.ListFilesRequest(path=path, depth=depth)
+        response = self._rpc_call(self.file_client.list_files, request)
+        return [self._file_entry_to_dict(entry) for entry in response.entries]
+
+    def search_files(self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        request = agent_pb2.SearchFilesRequest(path=path, pattern=pattern)
+        request.exclude_patterns.extend(exclude_patterns or [])
+        response = self._rpc_call(self.file_client.search_files, request)
+        return [self._file_entry_to_dict(entry) for entry in response.entries]
+
     def close(self):
-        # close grpc channel
-        if self.channel:
-            self.channel.close()
+        self.session.close()
+        self.process_client.close()
+        self.file_client.close()
 
     def __enter__(self):
         return self
@@ -222,22 +187,130 @@ class AgentClient:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def _infer_script_name(self, cmd: str) -> str:
-        # Infer default script name by command
-        cmd = cmd.lower()
-        for cmd_set, script_name in self.DEFAULT_SCRIPT_NAMES.items():
-            if cmd in cmd_set:
-                return script_name
-        return self.FALLBACK_SCRIPT_NAME
+    @staticmethod
+    def _http_error(response: requests.Response) -> str:
+        body_text = response.text.strip()
+        return f"HTTP {response.status_code}: {body_text}" if body_text else f"HTTP {response.status_code}"
 
-    def _iter_file_chunks(self, file: Dict[str, Any]):
-        filepath = file["filepath"]
+    def _rpc_call(self, method, request):
+        try:
+            return method(request, headers=self._headers())
+        except ConnectError as exc:
+            raise handle_rpc_error(exc) from None
+
+    @staticmethod
+    def _rpc_iter(events: Iterator[Any]) -> Iterator[Any]:
+        try:
+            for event in events:
+                yield event
+        except ConnectError as exc:
+            raise handle_rpc_error(exc) from None
+
+    @staticmethod
+    def _process_selector(process: Optional[Dict[str, Any]], *, pid: Optional[int],
+                          tag: Optional[str]) -> agent_pb2.ProcessSelector:
+        if process:
+            return agent_pb2.ProcessSelector(pid=process.get("pid", 0), tag=process.get("tag", ""))
+        if pid is not None:
+            return agent_pb2.ProcessSelector(pid=pid)
+        if tag:
+            return agent_pb2.ProcessSelector(tag=tag)
+        raise InvalidArgumentError("process pid or tag is required")
+
+    def _start_background_process_response(
+        self,
+        request: agent_pb2.StartProcessRequest,
+        events: Iterator[agent_pb2.ProcessEvent],
+    ) -> Dict[str, Any]:
+        try:
+            first_event = next(events)
+        except StopIteration:
+            return {
+                "status": self.STATUS_FAILED,
+                "message": "failed to start background process: missing start event",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": -1,
+                "error": "failed to start background process: missing start event",
+                "process": None,
+            }
+
+        event = self._process_event_to_dict(first_event)
+        if "start" not in event:
+            response = self._aggregate_process_response(iter([first_event]))
+            response["process"] = None
+            return response
+
+        process = {
+            "pid": event["start"].get("pid", 0),
+            "tag": request.tag,
+            "running": True,
+            "startedAt": "",
+            "exitCode": -1,
+            "finishedAt": "",
+            "stdout": "",
+            "stderr": "",
+            "config": self._start_request_config_to_dict(request),
+        }
+        return {
+            "status": self.STATUS_SUCCESS,
+            "message": "OK",
+            "stdout": "",
+            "stderr": "",
+            "exit_code": -1,
+            "error": "",
+            "process": process,
+            "events": (self._process_event_to_dict(event) for event in events),
+        }
+
+    def _aggregate_process_response(self, events: Iterator[agent_pb2.ProcessEvent]) -> Dict[str, Any]:
+        stdout = ""
+        stderr = ""
+        exit_code = -1
+        error = "process ended without an end event"
+        for raw_event in events:
+            event = self._process_event_to_dict(raw_event)
+            data = event.get("data") or {}
+            stdout += data.get("stdout", "")
+            # Preserve the previous unary API behavior where PTY output was returned as stdout.
+            stdout += data.get("pty", "")
+            stderr += data.get("stderr", "")
+            end = event.get("end")
+            if end is not None:
+                exit_code = int(end.get("exitCode", -1))
+                error = end.get("error", "")
+                break
+
+        status = self.STATUS_SUCCESS if exit_code == 0 and not error else self.STATUS_FAILED
+        return {
+            "status": status,
+            "message": error or "OK",
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "error": error,
+            "process": None,
+        }
+
+    @classmethod
+    def _start_request_config_to_dict(cls, request: agent_pb2.StartProcessRequest) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "cmd": request.cmd,
+            "args": list(request.args),
+            "env": dict(request.env),
+            "cwd": request.cwd,
+        }
+        if request.HasField("pty"):
+            data["pty"] = cls._pty_to_dict(request.pty)
+        return data
+
+    def _iter_file_chunk_messages(self, file_spec: Dict[str, Any]) -> Iterator[agent_pb2.FileChunk]:
+        filepath = file_spec["filepath"]
         first = True
-
-        if "local_path" in file:
-            with open(file["local_path"], "rb") as f:
+        if "local_path" in file_spec:
+            with open(file_spec["local_path"], "rb") as src:
                 while True:
-                    content = f.read(self.FILE_CHUNK_SIZE)
+                    content = src.read(self.FILE_CHUNK_SIZE)
                     if not content:
                         break
                     yield agent_pb2.FileChunk(filepath=filepath if first else "", content=content)
@@ -246,14 +319,106 @@ class AgentClient:
                 yield agent_pb2.FileChunk(filepath=filepath, content=b"")
             return
 
-        content = file["content"]
+        content = file_spec["content"]
         if isinstance(content, str):
             content = content.encode()
-        for offset in range(0, len(content), self.FILE_CHUNK_SIZE):
-            yield agent_pb2.FileChunk(
-                filepath=filepath if first else "",
-                content=content[offset:offset + self.FILE_CHUNK_SIZE],
-            )
-            first = False
+        elif isinstance(content, TextIOBase):
+            content = content.read().encode()
+        if isinstance(content, IOBase):
+            while True:
+                chunk = content.read(self.FILE_CHUNK_SIZE)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                yield agent_pb2.FileChunk(filepath=filepath if first else "", content=chunk)
+                first = False
+        else:
+            for offset in range(0, len(content), self.FILE_CHUNK_SIZE):
+                yield agent_pb2.FileChunk(
+                    filepath=filepath if first else "",
+                    content=content[offset:offset + self.FILE_CHUNK_SIZE],
+                )
+                first = False
         if first:
             yield agent_pb2.FileChunk(filepath=filepath, content=b"")
+
+    @classmethod
+    def _process_info_to_dict(cls, info: agent_pb2.ProcessInfo) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "pid": info.pid,
+            "tag": info.tag,
+            "running": info.running,
+            "startedAt": info.started_at,
+            "exitCode": info.exit_code,
+            "finishedAt": info.finished_at,
+            "stdout": info.stdout,
+            "stderr": info.stderr,
+        }
+        if info.HasField("config"):
+            data["config"] = cls._process_config_to_dict(info.config)
+        return data
+
+    @staticmethod
+    def _process_config_to_dict(config: agent_pb2.ProcessConfig) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "cmd": config.cmd,
+            "args": list(config.args),
+            "env": dict(config.env),
+            "cwd": config.cwd,
+        }
+        if config.HasField("pty"):
+            data["pty"] = AgentClient._pty_to_dict(config.pty)
+        return data
+
+    @staticmethod
+    def _pty_to_dict(pty: agent_pb2.PTY) -> Dict[str, int]:
+        return {"cols": pty.cols, "rows": pty.rows}
+
+    @staticmethod
+    def _process_event_to_dict(event: agent_pb2.ProcessEvent) -> Dict[str, Any]:
+        which = event.WhichOneof("event")
+        if which == "start":
+            return {"start": {"pid": event.start.pid}}
+        if which == "data":
+            output = event.data.WhichOneof("output")
+            if output == "stdout":
+                return {"data": {"stdout": event.data.stdout}}
+            if output == "stderr":
+                return {"data": {"stderr": event.data.stderr}}
+            if output == "pty":
+                return {"data": {"pty": event.data.pty}}
+            return {"data": {}}
+        if which == "end":
+            return {
+                "end": {
+                    "exitCode": event.end.exit_code,
+                    "exited": event.end.exited,
+                    "status": event.end.status,
+                    "error": event.end.error,
+                }
+            }
+        if which == "keepalive":
+            return {"keepalive": {}}
+        return {}
+
+    @staticmethod
+    def _write_info_to_dict(entry: agent_pb2.WriteInfo) -> Dict[str, Any]:
+        return {
+            "name": entry.name,
+            "path": entry.path,
+            "type": entry.type,
+        }
+
+    @staticmethod
+    def _file_entry_to_dict(entry: agent_pb2.FileEntry) -> Dict[str, Any]:
+        return {
+            "name": entry.name,
+            "path": entry.path,
+            "type": entry.type,
+            "size": entry.size,
+            "permissions": entry.permissions,
+            "modifiedTime": entry.modified_time,
+            "metadata": dict(entry.metadata),
+            "isDirectory": entry.is_directory,
+        }
