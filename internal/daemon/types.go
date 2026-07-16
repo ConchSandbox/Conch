@@ -98,6 +98,25 @@ type templateCreateRequest struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 }
 
+type templatePullRequest struct {
+	Reference string            `json:"reference"`
+	Namespace string            `json:"namespace,omitempty"`
+	PlainHTTP bool              `json:"plain_http,omitempty"`
+	Username  string            `json:"username,omitempty"`
+	Password  string            `json:"password,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+type templatePushRequest struct {
+	TemplateID      string `json:"template_id"`
+	RemoteReference string `json:"remote_reference"`
+	Namespace       string `json:"namespace,omitempty"`
+	PlainHTTP       bool   `json:"plain_http,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Password        string `json:"password,omitempty"`
+	RegistryTimeout string `json:"registry_timeout,omitempty"`
+}
+
 type templateRecordResponse = runtimeapi.TemplateRecord
 
 type templateListResponse struct {

@@ -66,7 +66,7 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 			Name:         "localhost/conch/demo:latest",
 			TargetDigest: "sha256:demo",
 			Size:         42,
-			Kind:         "sandbox-base",
+			Kind:         "boot-index-cold",
 		}},
 	}
 	server := newImageHandlerServer(svc)
@@ -90,8 +90,8 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 	if listResp.Images[0].TargetDigest != "sha256:demo" {
 		t.Fatalf("list response target digest = %q, want sha256:demo", listResp.Images[0].TargetDigest)
 	}
-	if listResp.Images[0].Kind != "sandbox-base" {
-		t.Fatalf("list response kind = %q, want sandbox-base", listResp.Images[0].Kind)
+	if listResp.Images[0].Kind != "boot-index-cold" {
+		t.Fatalf("list response kind = %q, want boot-index-cold", listResp.Images[0].Kind)
 	}
 
 	rec = httptest.NewRecorder()
@@ -146,7 +146,7 @@ func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
 func TestConvertImageRouteRemoved(t *testing.T) {
 	imgSvc := &fakeImageService{}
 	snapSvc := &fakeSnapshotService{}
-	server := newConvertHandlerServer(imgSvc, snapSvc, nil)
+	server := newConvertHandlerServer(imgSvc, imgSvc, snapSvc, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/convert", bytes.NewBufferString("{}"))

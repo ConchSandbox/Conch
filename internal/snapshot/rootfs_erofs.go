@@ -1,7 +1,6 @@
 package snapshot
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,17 +8,6 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 )
-
-func (s *Server) resolveRootfsPmemFiles(ctx context.Context, namespace, rootfsKey string) ([]string, error) {
-	if s.snt == nil {
-		return nil, fmt.Errorf("rootfs erofs snapshotter is not configured")
-	}
-	mounts, err := s.snt.Mounts(ctx, namespace, rootfsKey)
-	if err != nil {
-		return nil, fmt.Errorf("resolve erofs rootfs mounts for %s: %w", rootfsKey, err)
-	}
-	return pmemFilesFromErofsMounts(mounts)
-}
 
 func pmemFilesFromErofsMounts(mounts []mount.Mount) ([]string, error) {
 	var files []string
@@ -76,14 +64,4 @@ func alignRootfsPmemFiles(files []string) error {
 		}
 	}
 	return nil
-}
-
-func selectSnapshotRestorePmemFiles(files []string, deviceCount int) ([]string, error) {
-	if deviceCount <= 0 || len(files) == deviceCount {
-		return files, nil
-	}
-	if len(files) < deviceCount {
-		return nil, fmt.Errorf("rootfs pmem file count %d is less than snapshot device count %d", len(files), deviceCount)
-	}
-	return files[len(files)-deviceCount:], nil
 }

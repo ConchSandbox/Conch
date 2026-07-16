@@ -69,23 +69,23 @@ func TestImageServiceListStatusAndRemove(t *testing.T) {
 				TargetDigest: "sha256:demo",
 				RepoDigests:  []string{"registry.example.invalid/conch/demo@sha256:demo"},
 				Size:         42,
-				Kind:         "sandbox-base",
-				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "sandbox-base"},
+				Kind:         "boot-index-cold",
+				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "boot-index-cold"},
 			},
 			{
 				Name:         "registry.example.invalid/conch/demo:v1",
 				TargetDigest: "sha256:demo",
 				RepoDigests:  []string{"registry.example.invalid/conch/demo@sha256:demo"},
 				Size:         42,
-				Kind:         "sandbox-base",
-				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "sandbox-base"},
+				Kind:         "boot-index-cold",
+				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "boot-index-cold"},
 			},
 			{
 				Name:         "localhost/conch/rootfs-component:component-rootfs",
 				TargetDigest: "sha256:component-rootfs",
 				RepoDigests:  []string{"localhost/conch/rootfs-component@sha256:component-rootfs"},
 				Size:         12,
-				Kind:         "rootfs",
+				Kind:         "boot-component-rootfs",
 				Labels:       map[string]string{"io.conch.kind": "rootfs"},
 			},
 			{
@@ -93,7 +93,7 @@ func TestImageServiceListStatusAndRemove(t *testing.T) {
 				TargetDigest: "sha256:component-sandbox",
 				RepoDigests:  []string{"localhost/conch/sandbox-component@sha256:component-sandbox"},
 				Size:         8,
-				Kind:         "sandbox",
+				Kind:         "boot-component-sandbox",
 				Labels:       map[string]string{"io.conch.kind": "sandbox"},
 			},
 			{
@@ -146,7 +146,7 @@ func TestImageServiceListStatusAndRemove(t *testing.T) {
 	if status.GetInfo()["conch"] == "" {
 		t.Fatalf("ImageStatus() verbose info = %#v", status.GetInfo())
 	}
-	if !strings.Contains(status.GetInfo()["conch"], `"kind":"sandbox-base"`) {
+	if !strings.Contains(status.GetInfo()["conch"], `"kind":"boot-index-cold"`) {
 		t.Fatalf("ImageStatus() verbose kind info = %q", status.GetInfo()["conch"])
 	}
 	if !strings.Contains(status.GetInfo()["conch"], `"components":["rootfs","sandbox"]`) {
@@ -257,23 +257,23 @@ func TestImageServiceGRPCListStatusAndRemove(t *testing.T) {
 				TargetDigest: "sha256:grpcdemo",
 				RepoDigests:  []string{"registry.example.invalid/conch/grpc-demo@sha256:grpcdemo"},
 				Size:         128,
-				Kind:         "sandbox-base",
-				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "sandbox-base"},
+				Kind:         "boot-index-cold",
+				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "boot-index-cold"},
 			},
 			{
 				Name:         "registry.example.invalid/conch/grpc-demo:v1",
 				TargetDigest: "sha256:grpcdemo",
 				RepoDigests:  []string{"registry.example.invalid/conch/grpc-demo@sha256:grpcdemo"},
 				Size:         128,
-				Kind:         "sandbox-base",
-				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "sandbox-base"},
+				Kind:         "boot-index-cold",
+				Labels:       map[string]string{"kind": "conch", "io.conch.kind": "boot-index-cold"},
 			},
 			{
 				Name:         "localhost/conch/rootfs-component:grpc-component-rootfs",
 				TargetDigest: "sha256:grpc-component-rootfs",
 				RepoDigests:  []string{"localhost/conch/rootfs-component@sha256:grpc-component-rootfs"},
 				Size:         24,
-				Kind:         "rootfs",
+				Kind:         "boot-component-rootfs",
 				Labels:       map[string]string{"io.conch.kind": "rootfs"},
 			},
 			{
@@ -281,7 +281,7 @@ func TestImageServiceGRPCListStatusAndRemove(t *testing.T) {
 				TargetDigest: "sha256:grpc-component-sandbox",
 				RepoDigests:  []string{"localhost/conch/sandbox-component@sha256:grpc-component-sandbox"},
 				Size:         16,
-				Kind:         "sandbox",
+				Kind:         "boot-component-sandbox",
 				Labels:       map[string]string{"io.conch.kind": "sandbox"},
 			},
 		},
@@ -332,7 +332,7 @@ func TestImageServiceGRPCListStatusAndRemove(t *testing.T) {
 	if status.GetInfo()["conch"] == "" {
 		t.Fatalf("ImageStatus() verbose info = %#v", status.GetInfo())
 	}
-	if !strings.Contains(status.GetInfo()["conch"], `"kind":"sandbox-base"`) {
+	if !strings.Contains(status.GetInfo()["conch"], `"kind":"boot-index-cold"`) {
 		t.Fatalf("ImageStatus() verbose kind info = %q", status.GetInfo()["conch"])
 	}
 	if !strings.Contains(status.GetInfo()["conch"], `"components":["rootfs","sandbox"]`) {
@@ -395,7 +395,7 @@ func TestPullImageResolvesToIndexedImageID(t *testing.T) {
 			Name:         "registry.example.invalid/conch/pull-demo:latest",
 			TargetDigest: "sha256:pulldemo",
 			RepoDigests:  []string{"registry.example.invalid/conch/pull-demo@sha256:pulldemo"},
-			Kind:         "sandbox-snapshot",
+			Kind:         "boot-index-resume",
 		}},
 	}
 	svc := &service{

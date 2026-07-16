@@ -38,7 +38,7 @@ func TestRunImageListPrintsKind(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = w.Write([]byte(`{"images":[{"name":"localhost/conch/demo:latest","target_digest":"sha256:demo","size":42,"kind":"sandbox-snapshot"}]}`))
+		_, _ = w.Write([]byte(`{"images":[{"name":"localhost/conch/demo:latest","target_digest":"sha256:demo","size":42,"kind":"boot-index-resume"}]}`))
 	}))
 	defer server.Close()
 
@@ -64,7 +64,7 @@ func TestRunImageListPrintsKind(t *testing.T) {
 	if !strings.HasPrefix(output, "NAME") {
 		t.Fatalf("output should put NAME first:\n%s", output)
 	}
-	if !strings.Contains(output, "sandbox-snapshot") {
+	if !strings.Contains(output, "boot-index-resume") {
 		t.Fatalf("output missing kind value:\n%s", output)
 	}
 }
@@ -72,11 +72,11 @@ func TestRunImageListPrintsKind(t *testing.T) {
 func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 	images := []client.ImageRecord{
 		{Name: "localhost:5000/busybox:latest", TargetDigest: "sha256:source"},
-		{Name: "localhost/conch/busybox:latest", TargetDigest: "sha256:index", Kind: "sandbox-base"},
+		{Name: "localhost/conch/busybox:latest", TargetDigest: "sha256:index", Kind: "boot-index-cold"},
 		{Name: "conch-erofs-rootfs:tmpl-1", TargetDigest: "sha256:rootfs"},
-		{Name: "localhost/conch/rootfs-component:rootfs", TargetDigest: "sha256:rootfs", Kind: "rootfs"},
-		{Name: "localhost/conch/sandbox-component:sandbox", TargetDigest: "sha256:sandbox", Kind: "sandbox"},
-		{Name: "localhost/conch/mem-snapshot-component:mem", TargetDigest: "sha256:mem", Kind: "mem-snapshot"},
+		{Name: "localhost/conch/rootfs-component:rootfs", TargetDigest: "sha256:rootfs", Kind: "boot-component-rootfs"},
+		{Name: "localhost/conch/sandbox-component:sandbox", TargetDigest: "sha256:sandbox", Kind: "boot-component-sandbox"},
+		{Name: "localhost/conch/mem-snapshot-component:mem", TargetDigest: "sha256:mem", Kind: "boot-component-memory"},
 	}
 
 	var visible bytes.Buffer
@@ -102,5 +102,11 @@ func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 		if !strings.Contains(all.String(), want) {
 			t.Fatalf("--all output missing %q:\n%s", want, all.String())
 		}
+	}
+}
+
+func TestDisplayImageKindDefaultsToOCIImage(t *testing.T) {
+	if got := displayImageKind(""); got != "oci-image" {
+		t.Fatalf("displayImageKind(empty) = %q, want oci-image", got)
 	}
 }

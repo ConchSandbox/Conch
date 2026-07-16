@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -214,4 +216,95 @@ func (s *BoltStore) ListTemplates(ctx context.Context) ([]TemplateRecord, error)
 
 func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("templates"), id)
+}
+
+// PublishCheckpoint atomically makes a checkpoint template READY and advances
+// the sandbox's checkpoint head. Content publication happens before this
+// transaction, so a failed transaction can only leave safe orphaned content.
+func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointPublication) error {
+	templateID := strings.TrimSpace(publication.TemplateID)
+	podSandboxID := strings.TrimSpace(publication.PodSandboxID)
+	rawDigest := strings.TrimSpace(publication.BootIndexDigest)
+	if templateID == "" {
+		return fmt.Errorf("template id is required")
+	}
+	if podSandboxID == "" {
+		return fmt.Errorf("pod sandbox id is required")
+	}
+	if rawDigest == "" {
+		return fmt.Errorf("boot index digest is required")
+	}
+	parsedDigest, err := digest.Parse(rawDigest)
+	if err != nil {
+		return fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
+	}
+	if publication.BootMode != TemplateBootModeResume {
+		return fmt.Errorf("checkpoint template boot mode is %q, want %q", publication.BootMode, TemplateBootModeResume)
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		templates := tx.Bucket([]byte("templates"))
+		sandboxes := tx.Bucket([]byte("sandboxes"))
+		var templateRecord TemplateRecord
+		if data := templates.Get([]byte(templateID)); data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, templateID)
+		} else if err := json.Unmarshal(data, &templateRecord); err != nil {
+			return fmt.Errorf("unmarshal template record %s: %w", templateID, err)
+		}
+		if templateRecord.State != TemplateCreating {
+			return fmt.Errorf("template %s is %s, want %s", templateID, templateRecord.State, TemplateCreating)
+		}
+		if templateRecord.Origin != TemplateOriginCheckpoint {
+			return fmt.Errorf("template %s origin is %s, want %s", templateID, templateRecord.Origin, TemplateOriginCheckpoint)
+		}
+
+		var sandboxRecord SandboxRecord
+		if data := sandboxes.Get([]byte(podSandboxID)); data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, podSandboxID)
+		} else if err := json.Unmarshal(data, &sandboxRecord); err != nil {
+			return fmt.Errorf("unmarshal sandbox record %s: %w", podSandboxID, err)
+		}
+		currentHeadID := strings.TrimSpace(sandboxRecord.CheckpointHeadTemplateID)
+		if currentHeadID == "" {
+			currentHeadID = strings.TrimSpace(sandboxRecord.SourceTemplateID)
+		}
+		currentHeadDigest := strings.TrimSpace(sandboxRecord.CheckpointHeadBootIndexDigest)
+		if currentHeadDigest == "" {
+			currentHeadDigest = strings.TrimSpace(sandboxRecord.SourceBootIndexDigest)
+		}
+		if expected := strings.TrimSpace(publication.ExpectedHeadTemplateID); expected != "" && currentHeadID != expected {
+			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", podSandboxID, expected, currentHeadID)
+		}
+		if expected := strings.TrimSpace(publication.ExpectedHeadBootIndexDigest); expected != "" && currentHeadDigest != expected {
+			return fmt.Errorf("sandbox %s checkpoint head digest changed from %s to %s", podSandboxID, expected, currentHeadDigest)
+		}
+		if parentID := strings.TrimSpace(templateRecord.ParentTemplateID); parentID != currentHeadID {
+			return fmt.Errorf("template %s parent %s does not match sandbox %s checkpoint head %s", templateID, parentID, podSandboxID, currentHeadID)
+		}
+		if sourceID := strings.TrimSpace(templateRecord.SourceSandboxID); sourceID != "" && sourceID != strings.TrimSpace(sandboxRecord.ConchSandboxID) {
+			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.ConchSandboxID)
+		}
+
+		templateRecord.BootIndexDigest = parsedDigest.String()
+		templateRecord.BootMode = TemplateBootModeResume
+		templateRecord.BuildRef = strings.TrimSpace(publication.BuildRef)
+		templateRecord.State = TemplateReady
+		templateRecord.LastError = ""
+		templateRecord.UpdatedAt = time.Now().UnixNano()
+		templateData, err := json.Marshal(templateRecord)
+		if err != nil {
+			return fmt.Errorf("marshal template record: %w", err)
+		}
+
+		sandboxRecord.CheckpointHeadTemplateID = templateID
+		sandboxRecord.CheckpointHeadBootIndexDigest = parsedDigest.String()
+		sandboxData, err := json.Marshal(sandboxRecord)
+		if err != nil {
+			return fmt.Errorf("marshal sandbox record: %w", err)
+		}
+		if err := templates.Put([]byte(templateID), templateData); err != nil {
+			return err
+		}
+		return sandboxes.Put([]byte(podSandboxID), sandboxData)
+	})
 }

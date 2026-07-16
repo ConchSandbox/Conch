@@ -141,7 +141,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 
-	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
+	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
 	s.runtimeService.Snapshot = host.SnapshotService()
 	s.runtimeService.Templates = host.TemplateService()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
@@ -203,6 +203,8 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/sandbox/stop", s.handleStopSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
+	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
+	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
 	s.router.HandleFunc("/api/template/remove", s.handleRemoveTemplate)
@@ -512,8 +514,9 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":      "ok",
-		"template_id": result.TemplateID,
+		"status":            "ok",
+		"template_id":       result.TemplateID,
+		"boot_index_digest": result.BootIndexDigest,
 	})
 }
 
@@ -572,6 +575,51 @@ func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, 
 		Password:     req.Password,
 		Labels:       req.Labels,
 	})
+}
+
+func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templatePullRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	result, err := s.runtimeService.PullTemplate(r.Context(), runtimeapi.TemplatePullOptions{
+		Reference: req.Reference,
+		Namespace: req.Namespace,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
+		Labels:    req.Labels,
+	})
+	if err != nil {
+		http.Error(w, "Failed to pull template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{
+		"status":            "ok",
+		"template_id":       result.TemplateID,
+		"boot_index_digest": result.BootIndexDigest,
+		"build_ref":         result.BuildRef,
+	})
+}
+
+func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templatePushRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	if err := s.runtimeService.PushTemplate(r.Context(), runtimeapi.TemplatePushOptions{
+		TemplateID:      req.TemplateID,
+		RemoteReference: req.RemoteReference,
+		Namespace:       req.Namespace,
+		PlainHTTP:       req.PlainHTTP,
+		Username:        req.Username,
+		Password:        req.Password,
+		RegistryTimeout: req.RegistryTimeout,
+	}); err != nil {
+		http.Error(w, "Failed to push template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {

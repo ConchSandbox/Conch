@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/openeuler/Conch/internal/image/client"
 )
@@ -25,12 +28,26 @@ type templateCreateOptions struct {
 	user       string
 }
 
+type templateRegistryOptions struct {
+	namespace  string
+	configPath string
+	apiURL     string
+	address    string
+	plainHTTP  bool
+	username   string
+	password   string
+	user       string
+	timeout    string
+}
+
 func printTemplateHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  conch template <command> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  create   Build a template from an OCI image, kernel, and initrd.")
+	fmt.Fprintln(out, "  pull     Pull a registry Boot Index into a local Template.")
+	fmt.Fprintln(out, "  push     Push a Template Boot Index to a registry.")
 	fmt.Fprintln(out, "  ls       List templates.")
 	fmt.Fprintln(out, "  inspect  Inspect a template.")
 	fmt.Fprintln(out, "  rm       Remove a template.")
@@ -88,6 +105,10 @@ func RunTemplate(ctx context.Context, args []string) error {
 			return nil
 		}
 		return RunTemplateCreate(ctx, args[1:])
+	case "pull":
+		return runTemplatePull(ctx, args[1:])
+	case "push":
+		return runTemplatePush(ctx, args[1:])
 	case "ls":
 		return runTemplateList(ctx, args[1:])
 	case "inspect":
@@ -98,6 +119,104 @@ func RunTemplate(ctx context.Context, args []string) error {
 		printTemplateHelp(os.Stderr)
 		return fmt.Errorf("unknown template command %q", args[0])
 	}
+}
+
+func runTemplatePull(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("template pull", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var opts templateRegistryOptions
+	registerTemplateRegistryFlags(fs, &opts, false)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("conch template pull: exactly one registry reference is required")
+	}
+	username, password, err := templateRegistryCredentials(opts)
+	if err != nil {
+		return fmt.Errorf("conch template pull: %w", err)
+	}
+	cfg, err := LoadConchConfig(opts.configPath)
+	if err != nil {
+		return fmt.Errorf("conch template pull: load config: %w", err)
+	}
+	result, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath).PullTemplate(ctx, client.TemplatePullRequest{
+		Reference: fs.Arg(0),
+		Namespace: ResolveConchNamespace(cfg, opts.namespace),
+		PlainHTTP: opts.plainHTTP,
+		Username:  username,
+		Password:  password,
+	})
+	if err != nil {
+		return fmt.Errorf("conch template pull: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Template: %s\n", result.TemplateID)
+	fmt.Fprintf(os.Stdout, "Boot image: %s\n", result.BuildRef)
+	fmt.Fprintf(os.Stdout, "Image digest: %s\n", result.BootIndexDigest)
+	return nil
+}
+
+func runTemplatePush(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("template push", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var opts templateRegistryOptions
+	registerTemplateRegistryFlags(fs, &opts, true)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("conch template push: exactly two arguments are required: <template-id> <remote-reference>")
+	}
+	username, password, err := templateRegistryCredentials(opts)
+	if err != nil {
+		return fmt.Errorf("conch template push: %w", err)
+	}
+	var apiTimeout time.Duration
+	if opts.timeout != "" {
+		apiTimeout, err = time.ParseDuration(opts.timeout)
+		if err != nil || apiTimeout <= 0 {
+			return fmt.Errorf("conch template push: invalid --timeout %q", opts.timeout)
+		}
+	}
+	cfg, err := LoadConchConfig(opts.configPath)
+	if err != nil {
+		return fmt.Errorf("conch template push: load config: %w", err)
+	}
+	if err := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout).PushTemplate(ctx, client.TemplatePushRequest{
+		TemplateID:      fs.Arg(0),
+		RemoteReference: fs.Arg(1),
+		Namespace:       ResolveConchNamespace(cfg, opts.namespace),
+		PlainHTTP:       opts.plainHTTP,
+		Username:        username,
+		Password:        password,
+		RegistryTimeout: opts.timeout,
+	}); err != nil {
+		return fmt.Errorf("conch template push: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Pushed template: %s -> %s\n", fs.Arg(0), fs.Arg(1))
+	return nil
+}
+
+func registerTemplateRegistryFlags(fs *flag.FlagSet, opts *templateRegistryOptions, push bool) {
+	fs.StringVar(&opts.namespace, "namespace", "", "containerd namespace")
+	fs.StringVar(&opts.namespace, "n", "", "containerd namespace")
+	fs.StringVar(&opts.configPath, "config", "", "config file path")
+	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
+	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
+	fs.BoolVar(&opts.plainHTTP, "plain-http", false, "use plain HTTP for registry access")
+	fs.StringVar(&opts.user, "user", "", "registry credentials in username:password format")
+	fs.StringVar(&opts.username, "username", "", "registry username")
+	fs.StringVar(&opts.password, "password", "", "registry password")
+	if push {
+		fs.StringVar(&opts.timeout, "timeout", "", "timeout for the registry push")
+	}
+}
+
+func templateRegistryCredentials(opts templateRegistryOptions) (string, string, error) {
+	if opts.user == "" {
+		return opts.username, opts.password, nil
+	}
+	return ParseRegistryUser(opts.user)
 }
 
 func RunTemplateCreate(ctx context.Context, args []string) error {
@@ -206,7 +325,7 @@ func runTemplateList(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template ls: %w", err)
 	}
-	printTemplates(items)
+	printTemplates(os.Stdout, items)
 	return nil
 }
 
@@ -224,7 +343,7 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template inspect: %w", err)
 	}
-	printTemplates([]client.TemplateRecord{item})
+	printTemplates(os.Stdout, []client.TemplateRecord{item})
 	return nil
 }
 
@@ -246,16 +365,26 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 	return nil
 }
 
-func printTemplates(items []client.TemplateRecord) {
-	fmt.Fprintf(os.Stdout, "%-28s %-12s %-12s %-12s %-20s %-20s\n", "ID", "ORIGIN", "BOOT_MODE", "STATE", "SOURCE_SANDBOX", "BUILD_REF")
+func printTemplates(out io.Writer, items []client.TemplateRecord) {
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tORIGIN\tBOOT_MODE\tSTATE\tBOOT_INDEX_DIGEST\tSOURCE_SANDBOX\tBUILD_REF")
 	for _, item := range items {
-		fmt.Fprintf(os.Stdout, "%-28s %-12s %-12s %-12s %-20s %-20s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.ID,
-			item.Origin,
-			item.BootMode,
-			item.State,
-			item.SourceSandboxID,
-			item.BuildRef,
+			displayTemplateValue(item.Origin),
+			displayTemplateValue(item.BootMode),
+			displayTemplateValue(item.State),
+			displayTemplateValue(item.BootIndexDigest),
+			displayTemplateValue(item.SourceSandboxID),
+			displayTemplateValue(item.BuildRef),
 		)
 	}
+	_ = tw.Flush()
+}
+
+func displayTemplateValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -67,6 +66,10 @@ func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
 		RootDir:     rec.SnapshotRootDir,
 		MemSize:     rec.RamMB,
 	})
+	if rec.VMMName == vmm.StratovirtName {
+		spec.MemoryPath = ""
+	}
+	spec.PmemPaths = append([]string(nil), rec.RootfsPmemPaths...)
 	return vmStartSpecFromBootSpec(spec)
 }
 
@@ -74,6 +77,7 @@ type Sandbox struct {
 	cleanup     *Cleanup
 	process     *vmm.Process
 	vmStartSpec VMStartSpec
+	vmmName     string
 	namespace   string
 	sandboxID   string
 	leaseID     string
@@ -109,6 +113,7 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 		cleanup:     cleanup,
 		process:     process,
 		vmStartSpec: vmStartSpec,
+		vmmName:     rec.VMMName,
 		namespace:   rec.Namespace,
 		sandboxID:   rec.ConchSandboxID,
 		leaseID:     rec.LeaseID,
@@ -194,6 +199,7 @@ func ResumeSandbox(
 		vmStartSpec: vmStartSpec,
 		process:     vmmHandle,
 		cleanup:     cleanup,
+		vmmName:     vmmName,
 		namespace:   namespace,
 		sandboxID:   sandboxId,
 		slot:        slot,
@@ -278,6 +284,7 @@ func CreateSandbox(
 		vmStartSpec: vmStartSpec,
 		process:     vmmHandle,
 		cleanup:     cleanup,
+		vmmName:     vmmName,
 		namespace:   namespace,
 		sandboxID:   sandboxId,
 		slot:        slot,
@@ -343,29 +350,38 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	return nil
 }
 
-// captureCheckpoint writes a self-contained VMM snapshot to a temporary
-// directory. If it pauses a running VM, the VM remains paused on success so
-// the caller can atomically commit the capture before resuming it.
-func (s *Sandbox) captureCheckpoint(ctx context.Context, pauseBefore bool) (string, error) {
-	stagingDir, err := os.MkdirTemp("", "conch-vm-snapshot-*")
-	if err != nil {
-		return "", fmt.Errorf("create snapshot staging directory: %w", err)
+// CreateVMMState writes the VMM-specific capture into snapshotDir. The caller
+// is responsible for pausing and resuming the sandbox around this operation.
+func (s *Sandbox) CreateVMMState(ctx context.Context, snapshotDir string) error {
+	if s == nil || s.process == nil {
+		return fmt.Errorf("sandbox VMM process is not configured")
 	}
-
-	if pauseBefore {
-		if err := s.process.Pause(ctx); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return "", fmt.Errorf("failed to pause VM: %w", err)
-		}
+	if err := s.process.CreateSnapshot(ctx, snapshotDir); err != nil {
+		return fmt.Errorf("create VMM state: %w", err)
 	}
+	return nil
+}
 
-	if err := s.process.CreateSnapshot(ctx, stagingDir); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		if pauseBefore {
-			_ = s.process.ResumeVM(context.WithoutCancel(ctx))
-		}
-		return "", fmt.Errorf("error creating snapshot: %w", err)
+// MemoryBackingPath returns the external memory backing used by the VMM.
+func (s *Sandbox) MemoryBackingPath() string {
+	if s == nil {
+		return ""
 	}
+	return s.vmStartSpec.MemoryPath
+}
 
-	return stagingDir, nil
+// MemorySizeMB returns the immutable Guest RAM size used for this runtime.
+func (s *Sandbox) MemorySizeMB() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.vmStartSpec.MemorySizeMB
+}
+
+// VMMName returns the driver name needed to interpret the captured VMM state.
+func (s *Sandbox) VMMName() string {
+	if s == nil {
+		return ""
+	}
+	return s.vmmName
 }

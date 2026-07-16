@@ -126,33 +126,6 @@ func TestPmemFilesFromErofsMountsRejectsRelativePath(t *testing.T) {
 	}
 }
 
-func TestSelectSnapshotRestorePmemFilesKeepsOriginalDeviceCount(t *testing.T) {
-	files := []string{"/layer/new.erofs", "/layer/base0.erofs", "/layer/base1.erofs"}
-	got, err := selectSnapshotRestorePmemFiles(files, 2)
-	if err != nil {
-		t.Fatalf("selectSnapshotRestorePmemFiles: %v", err)
-	}
-	want := []string{"/layer/base0.erofs", "/layer/base1.erofs"}
-	if len(got) != len(want) {
-		t.Fatalf("files = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("files = %#v, want %#v", got, want)
-		}
-	}
-}
-
-func TestSelectSnapshotRestorePmemFilesRejectsShortRootfsChain(t *testing.T) {
-	_, err := selectSnapshotRestorePmemFiles([]string{"/layer/base0.erofs"}, 2)
-	if err == nil {
-		t.Fatal("expected short rootfs chain to fail")
-	}
-	if !strings.Contains(err.Error(), "less than snapshot device count") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 type statMissingSnapshotter struct{}
 
 func (statMissingSnapshotter) Prepare(context.Context, string, string, string, ...snapshots.Opt) ([]mount.Mount, error) {

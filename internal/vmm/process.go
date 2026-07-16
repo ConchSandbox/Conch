@@ -95,7 +95,7 @@ func NewProcess(
 		return nil, err
 	}
 
-	if err := adapter.PrepareLaunch(vmmResourceArgs); err != nil {
+	if err := adapter.PrepareLaunch(vmmResourceArgs, isResume); err != nil {
 		logger.Error("Failed to prepare VMM launch", ulog.F("error", err))
 		adapter.Cleanup()
 		return nil, err

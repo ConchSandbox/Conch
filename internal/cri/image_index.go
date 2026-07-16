@@ -166,9 +166,11 @@ func imageReady(record runtimeapi.ImageRecord) bool {
 	}
 	kind := normalizeImageKind(record)
 	switch kind {
-	case "sandbox-base", "sandbox-snapshot":
+	case runtimeapi.ImageKindBootIndexCold, runtimeapi.ImageKindBootIndexResume:
 		return true
-	case "rootfs", "sandbox", "mem-snapshot":
+	case runtimeapi.ImageKindBootComponentRootfs,
+		runtimeapi.ImageKindBootComponentSandbox,
+		runtimeapi.ImageKindBootComponentMemory:
 		return false
 	default:
 		return false
@@ -195,12 +197,16 @@ func normalizeImageKind(record runtimeapi.ImageRecord) string {
 
 func structureComponents(kind string) []string {
 	switch kind {
-	case "sandbox-base":
+	case runtimeapi.ImageKindBootIndexCold:
 		return []string{"rootfs", "sandbox"}
-	case "sandbox-snapshot":
+	case runtimeapi.ImageKindBootIndexResume:
 		return []string{"rootfs", "sandbox", "mem-snapshot"}
-	case "rootfs", "sandbox", "mem-snapshot":
-		return []string{kind}
+	case runtimeapi.ImageKindBootComponentRootfs:
+		return []string{"rootfs"}
+	case runtimeapi.ImageKindBootComponentSandbox:
+		return []string{"sandbox"}
+	case runtimeapi.ImageKindBootComponentMemory:
+		return []string{"mem-snapshot"}
 	default:
 		return nil
 	}

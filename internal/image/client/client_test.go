@@ -44,7 +44,7 @@ func TestImageAPIMethods(t *testing.T) {
 				Name:         "localhost/conch/demo:latest",
 				TargetDigest: "sha256:demo",
 				Size:         42,
-				Kind:         "sandbox-base",
+				Kind:         "boot-index-cold",
 			}}})
 		case removeImage:
 			if err := json.NewDecoder(r.Body).Decode(&removeReq); err != nil {
@@ -100,8 +100,8 @@ func TestImageAPIMethods(t *testing.T) {
 	if len(images) != 1 || images[0].Name != "localhost/conch/demo:latest" {
 		t.Fatalf("images = %#v", images)
 	}
-	if images[0].Kind != "sandbox-base" {
-		t.Fatalf("image kind = %q, want sandbox-base", images[0].Kind)
+	if images[0].Kind != "boot-index-cold" {
+		t.Fatalf("image kind = %q, want boot-index-cold", images[0].Kind)
 	}
 
 	if err := c.RemoveImage(context.Background(), RemoveImageRequest{
@@ -317,6 +317,83 @@ func TestCheckpointSandboxIncludesNamespace(t *testing.T) {
 	}
 	if got.Namespace != "team-a" {
 		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
+	}
+}
+
+func TestTemplateRecordIncludesBootIndexDigestInJSON(t *testing.T) {
+	const payload = `{"id":"tmpl_test","boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	var record TemplateRecord
+	if err := json.Unmarshal([]byte(payload), &record); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if record.BootIndexDigest != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("BootIndexDigest = %q", record.BootIndexDigest)
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`) {
+		t.Fatalf("TemplateRecord JSON = %s", raw)
+	}
+}
+
+func TestTemplateDistributionAPIMethods(t *testing.T) {
+	var pullReq TemplatePullRequest
+	var pushReq TemplatePushRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pullTemplate:
+			if err := json.NewDecoder(r.Body).Decode(&pullReq); err != nil {
+				t.Fatalf("decode pull request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(TemplatePullResponse{
+				Status:          "ok",
+				TemplateID:      "tmpl_pulled",
+				BootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				BuildRef:        pullReq.Reference,
+			})
+		case pushTemplate:
+			if err := json.NewDecoder(r.Body).Decode(&pushReq); err != nil {
+				t.Fatalf("decode push request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	c := NewClient(server.URL)
+
+	pulled, err := c.PullTemplate(context.Background(), TemplatePullRequest{
+		Reference: "registry.example.invalid/conch/template:latest",
+		Namespace: "team-a",
+		PlainHTTP: true,
+		Username:  "pull-user",
+		Password:  "pull-pass",
+		Labels:    map[string]string{"source": "registry"},
+	})
+	if err != nil {
+		t.Fatalf("PullTemplate() error = %v", err)
+	}
+	if pulled.TemplateID != "tmpl_pulled" || pulled.BuildRef != pullReq.Reference || !pullReq.PlainHTTP || pullReq.Namespace != "team-a" {
+		t.Fatalf("PullTemplate() response = %#v, request = %#v", pulled, pullReq)
+	}
+
+	if err := c.PushTemplate(context.Background(), TemplatePushRequest{
+		TemplateID:      pulled.TemplateID,
+		RemoteReference: "mirror.example.invalid/conch/template:copy",
+		Namespace:       "team-a",
+		PlainHTTP:       true,
+		Username:        "push-user",
+		Password:        "push-pass",
+		RegistryTimeout: "10m",
+	}); err != nil {
+		t.Fatalf("PushTemplate() error = %v", err)
+	}
+	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" ||
+		pushReq.Namespace != "team-a" || !pushReq.PlainHTTP || pushReq.RegistryTimeout != "10m" {
+		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 }
 

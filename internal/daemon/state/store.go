@@ -24,4 +24,5 @@ type Store interface {
 	GetTemplate(context.Context, string) (TemplateRecord, error)
 	ListTemplates(context.Context) ([]TemplateRecord, error)
 	DeleteTemplate(context.Context, string) error
+	PublishCheckpoint(context.Context, CheckpointPublication) error
 }

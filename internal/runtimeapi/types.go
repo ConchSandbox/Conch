@@ -2,6 +2,18 @@ package runtimeapi
 
 import "time"
 
+// ImageRecord.Kind values exposed by the image API. These classify the
+// user-visible image record, not the io.conch.kind annotation stored on Boot
+// Index component descriptors.
+const (
+	ImageKindOCIImage             = "oci-image"
+	ImageKindBootIndexCold        = "boot-index-cold"
+	ImageKindBootIndexResume      = "boot-index-resume"
+	ImageKindBootComponentRootfs  = "boot-component-rootfs"
+	ImageKindBootComponentSandbox = "boot-component-sandbox"
+	ImageKindBootComponentMemory  = "boot-component-memory"
+)
+
 type SandboxCreateOptions struct {
 	Namespace      string
 	PodNamespace   string
@@ -49,7 +61,8 @@ type SandboxCheckpointOptions struct {
 }
 
 type SandboxCheckpointResult struct {
-	TemplateID string
+	TemplateID      string
+	BootIndexDigest string
 }
 
 type TemplateCreateOptions struct {
@@ -70,6 +83,31 @@ type TemplateCreateResult struct {
 	BootIndexTag    string
 }
 
+type TemplatePullOptions struct {
+	Reference string
+	Namespace string
+	PlainHTTP bool
+	Username  string
+	Password  string
+	Labels    map[string]string
+}
+
+type TemplatePullResult struct {
+	TemplateID      string
+	BootIndexDigest string
+	BuildRef        string
+}
+
+type TemplatePushOptions struct {
+	TemplateID      string
+	RemoteReference string
+	Namespace       string
+	PlainHTTP       bool
+	Username        string
+	Password        string
+	RegistryTimeout string
+}
+
 type TemplateListOptions struct {
 	Namespace string
 	Origin    string
@@ -80,6 +118,7 @@ type TemplateRecord struct {
 	ID               string            `json:"id"`
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
+	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
 	Namespace        string            `json:"namespace"`
 	State            string            `json:"state"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`

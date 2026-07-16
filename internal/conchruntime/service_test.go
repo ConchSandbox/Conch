@@ -3,19 +3,26 @@ package conchruntime
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
 type fakeSandboxOps struct {
-	req           sandbox.SandboxCreateRequest
-	checkpointReq sandbox.SandboxCheckpointRequest
-	createResult  sandbox.SandboxCreateResult
-	deleteErr     error
+	req                sandbox.SandboxCreateRequest
+	checkpointRequests []sandbox.SandboxCheckpointRequest
+	checkpointResults  []sandbox.SandboxCheckpointResult
+	checkpointErr      error
+	createResult       sandbox.SandboxCreateResult
+	deleteErr          error
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
@@ -49,39 +56,219 @@ func (f *fakeSandboxOps) Resume(sandbox.SandboxLifecycleRequest) error {
 }
 
 func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
-	f.checkpointReq = req
-	return sandbox.SandboxCheckpointResult{RootfsKey: "rootfs", MemKey: "mem", VMKey: "vm"}, nil
+	call := len(f.checkpointRequests)
+	f.checkpointRequests = append(f.checkpointRequests, req)
+	if f.checkpointErr != nil {
+		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
+	}
+	if call < len(f.checkpointResults) {
+		return f.checkpointResults[call], nil
+	}
+	return sandbox.SandboxCheckpointResult{}, nil
 }
 
-func TestCheckpointSandboxPassesTemplateIDToSandbox(t *testing.T) {
+func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
 	ctx := context.Background()
-	sandboxOps := &fakeSandboxOps{}
+	t0Digest := digest.FromString("checkpoint-t0").String()
+	t1Digest := digest.FromString("checkpoint-t1").String()
+	memRoot := t.TempDir()
+	captured := sandbox.CapturedBootComponents{
+		MemRootPath:  memRoot,
+		VMMName:      "cloud-hypervisor",
+		MemorySizeMB: 512,
+	}
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{captured}}
+	imageOps := &templateBuildImageOps{checkpointResults: []conchimage.PublishCheckpointBootImageResult{{
+		BootIndexDigest: t1Digest,
+		ImageName:       "localhost/conch/checkpoints:t1",
+	}}}
 	store := newTestStore(t)
-	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:   "sandbox-a",
-		ConchSandboxID: "sandbox-a",
-		Namespace:      "team-a",
-		ParentVMID:     "vm-parent",
-	}); err != nil {
+	svc := New(sandboxOps, imageOps, imageOps, store, "default")
+	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
+
+	before := state.SandboxRecord{
+		PodSandboxID:                  "pod-a",
+		ConchSandboxID:                "sandbox-a",
+		Namespace:                     "team-a",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "t0",
+		SourceBootIndexDigest:         t0Digest,
+		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadBootIndexDigest: t0Digest,
+		VMMName:                       "cloud-hypervisor",
+		VMMPID:                        1234,
+		VMMSocketPath:                 "/run/conch/sandbox-a/vmm.sock",
+		VsockCID:                      17,
+		VsockSocketPath:               "/run/conch/sandbox-a/vsock.sock",
+		RootfsKey:                     "sandbox-a-rootfs",
+		MemKey:                        "sandbox-a-mem",
+		RootfsMount:                   "/run/conch/sandbox-a/rootfs",
+		RootfsPmemPaths:               []string{"/run/conch/sandbox-a/rootfs/base.erofs"},
+		MemMount:                      "/run/conch/sandbox-a/mem",
+		VMMount:                       "/run/conch/sandbox-a/vm",
+		SnapshotRootDir:               "conch/snapshot",
+	}
+	if err := store.UpsertSandbox(ctx, before); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
-	svc := New(sandboxOps, nil, store, "default")
 
 	result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
 		Namespace:    "team-a",
-		PodSandboxID: "sandbox-a",
+		PodSandboxID: "pod-a",
+		Labels:       map[string]string{"generation": "t1"},
 	})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox() error = %v", err)
 	}
-	if result.TemplateID == "" {
-		t.Fatal("CheckpointSandbox() returned an empty template id")
+	if result.TemplateID == "" || result.BootIndexDigest != t1Digest {
+		t.Fatalf("CheckpointSandbox() = %#v", result)
 	}
-	if sandboxOps.checkpointReq.TemplateID != result.TemplateID {
-		t.Fatalf("checkpoint template id = %q, want %q", sandboxOps.checkpointReq.TemplateID, result.TemplateID)
+	if len(sandboxOps.checkpointRequests) != 1 {
+		t.Fatalf("checkpoint requests = %#v, want one", sandboxOps.checkpointRequests)
 	}
-	if sandboxOps.checkpointReq.ParentVMID != "vm-parent" {
-		t.Fatalf("checkpoint parent VM id = %q, want vm-parent", sandboxOps.checkpointReq.ParentVMID)
+	// Generation identity and parent snapshot IDs are deliberately absent from
+	// the runtime capture seam; it receives only the sandbox identity.
+	if got, want := sandboxOps.checkpointRequests[0], (sandbox.SandboxCheckpointRequest{
+		Namespace: "team-a",
+		SandboxId: "sandbox-a",
+	}); got != want {
+		t.Fatalf("checkpoint request = %#v, want %#v", got, want)
+	}
+	if len(imageOps.checkpointCalls) != 1 {
+		t.Fatalf("checkpoint publish calls = %#v, want one", imageOps.checkpointCalls)
+	}
+	publish := imageOps.checkpointCalls[0]
+	if publish.Namespace != "team-a" || publish.SourceBootIndexDigest != t0Digest {
+		t.Fatalf("checkpoint publish source = %#v", publish)
+	}
+	if publish.BootIndexTag != "localhost/conch/template:"+result.TemplateID ||
+		publish.MemRoot != memRoot || publish.VMMName != "cloud-hypervisor" || publish.MemorySizeMB != 512 {
+		t.Fatalf("checkpoint publish capture = %#v, want %#v", publish, captured)
+	}
+	if _, err := os.Stat(memRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("captured memory root still exists after publication: %v", err)
+	}
+
+	t1, err := store.GetTemplate(ctx, result.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate(t1) error = %v", err)
+	}
+	if t1.State != state.TemplateReady ||
+		t1.BootIndexDigest != t1Digest || t1.BootMode != state.TemplateBootModeResume {
+		t.Fatalf("t1 readiness = %#v", t1)
+	}
+	if t1.ParentTemplateID != "t0" || t1.SourceSandboxID != "sandbox-a" ||
+		t1.BuildRef != "localhost/conch/checkpoints:t1" || t1.Labels["generation"] != "t1" {
+		t.Fatalf("t1 lineage = %#v", t1)
+	}
+
+	after, err := store.GetSandbox(ctx, "pod-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	wantAfter := before
+	wantAfter.CheckpointHeadTemplateID = result.TemplateID
+	wantAfter.CheckpointHeadBootIndexDigest = t1Digest
+	if !reflect.DeepEqual(after, wantAfter) {
+		t.Fatalf("sandbox record after checkpoint = %#v, want only checkpoint head changed from %#v", after, before)
+	}
+}
+
+func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
+	ctx := context.Background()
+	t0Digest := digest.FromString("lineage-t0").String()
+	t1Digest := digest.FromString("lineage-t1").String()
+	t2Digest := digest.FromString("lineage-t2").String()
+	memRoot1 := t.TempDir()
+	memRoot2 := t.TempDir()
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{
+		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256},
+		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256},
+	}}
+	imageOps := &templateBuildImageOps{checkpointResults: []conchimage.PublishCheckpointBootImageResult{
+		{BootIndexDigest: t1Digest, ImageName: "localhost/conch/checkpoints:t1"},
+		{BootIndexDigest: t2Digest, ImageName: "localhost/conch/checkpoints:t2"},
+	}}
+	store := newTestStore(t)
+	svc := New(sandboxOps, imageOps, imageOps, store, "default")
+	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:                  "pod-lineage",
+		ConchSandboxID:                "sandbox-lineage",
+		Namespace:                     "team-a",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "t0",
+		SourceBootIndexDigest:         t0Digest,
+		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadBootIndexDigest: t0Digest,
+		RootfsKey:                     "runtime-rootfs",
+		MemKey:                        "runtime-mem",
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+
+	t1Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", PodSandboxID: "pod-lineage"})
+	if err != nil {
+		t.Fatalf("CheckpointSandbox(t1) error = %v", err)
+	}
+	t2Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", PodSandboxID: "pod-lineage"})
+	if err != nil {
+		t.Fatalf("CheckpointSandbox(t2) error = %v", err)
+	}
+	if t1Result.TemplateID == "" || t2Result.TemplateID == "" || t1Result.TemplateID == t2Result.TemplateID {
+		t.Fatalf("checkpoint template ids = (%q, %q)", t1Result.TemplateID, t2Result.TemplateID)
+	}
+	if t1Result.BootIndexDigest != t1Digest || t2Result.BootIndexDigest != t2Digest {
+		t.Fatalf("checkpoint digests = (%q, %q)", t1Result.BootIndexDigest, t2Result.BootIndexDigest)
+	}
+
+	if len(imageOps.checkpointCalls) != 2 {
+		t.Fatalf("checkpoint publish calls = %#v, want two", imageOps.checkpointCalls)
+	}
+	if imageOps.checkpointCalls[0].SourceBootIndexDigest != t0Digest ||
+		imageOps.checkpointCalls[1].SourceBootIndexDigest != t1Digest {
+		t.Fatalf("checkpoint publish parents = (%q, %q), want (%q, %q)",
+			imageOps.checkpointCalls[0].SourceBootIndexDigest,
+			imageOps.checkpointCalls[1].SourceBootIndexDigest,
+			t0Digest, t1Digest)
+	}
+	if imageOps.checkpointCalls[0].BootIndexTag != "localhost/conch/template:"+t1Result.TemplateID ||
+		imageOps.checkpointCalls[1].BootIndexTag != "localhost/conch/template:"+t2Result.TemplateID {
+		t.Fatalf("checkpoint publish tags = (%q, %q)", imageOps.checkpointCalls[0].BootIndexTag, imageOps.checkpointCalls[1].BootIndexTag)
+	}
+	if imageOps.checkpointCalls[0].MemorySizeMB != 256 || imageOps.checkpointCalls[1].MemorySizeMB != 256 {
+		t.Fatalf("checkpoint memory sizes = (%d, %d)", imageOps.checkpointCalls[0].MemorySizeMB, imageOps.checkpointCalls[1].MemorySizeMB)
+	}
+
+	t1, err := store.GetTemplate(ctx, t1Result.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate(t1) error = %v", err)
+	}
+	t2, err := store.GetTemplate(ctx, t2Result.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate(t2) error = %v", err)
+	}
+	if t1.ParentTemplateID != "t0" || t2.ParentTemplateID != t1.ID {
+		t.Fatalf("template lineage: t1 parent = %q, t2 parent = %q", t1.ParentTemplateID, t2.ParentTemplateID)
+	}
+	if t1.State != state.TemplateReady || t2.State != state.TemplateReady ||
+		t1.BootIndexDigest != t1Digest || t2.BootIndexDigest != t2Digest {
+		t.Fatalf("checkpoint template states = (%#v, %#v)", t1, t2)
+	}
+
+	rec, err := store.GetSandbox(ctx, "pod-lineage")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if rec.SourceTemplateID != "t0" || rec.SourceBootIndexDigest != t0Digest {
+		t.Fatalf("sandbox immutable source changed: %#v", rec)
+	}
+	if rec.CheckpointHeadTemplateID != t2.ID || rec.CheckpointHeadBootIndexDigest != t2Digest {
+		t.Fatalf("sandbox checkpoint head = (%q, %q), want (%q, %q)",
+			rec.CheckpointHeadTemplateID, rec.CheckpointHeadBootIndexDigest, t2.ID, t2Digest)
+	}
+	if rec.RootfsKey != "runtime-rootfs" || rec.MemKey != "runtime-mem" {
+		t.Fatalf("sandbox runtime snapshot fields changed: %#v", rec)
 	}
 }
 
@@ -99,7 +286,7 @@ func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	}
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("cleanup failed")}
-	svc := New(sandboxOps, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store, "default")
 	if err := svc.RemoveSandbox(ctx, "default", "pod-1"); err == nil {
 		t.Fatalf("RemoveSandbox() error = nil, want cleanup error")
 	}
@@ -117,7 +304,7 @@ func TestStopSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
-	svc := New(sandboxOps, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store, "default")
 	if err := svc.StopSandbox(ctx, "default", "missing-pod"); err != nil {
 		t.Fatalf("StopSandbox() error = %v", err)
 	}
@@ -135,7 +322,8 @@ func TestStopSandboxTerminatesRecordedVMMWhenRuntimeMissing(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	sandboxID := "sandbox-orphan"
-	cmd := exec.Command("bash", "-c", "while true; do sleep 1; done", sandboxID)
+	cmd := exec.Command("sleep", "30")
+	cmd.Args[0] = sandboxID
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start test process: %v", err)
 	}
@@ -150,18 +338,34 @@ func TestStopSandboxTerminatesRecordedVMMWhenRuntimeMissing(t *testing.T) {
 		}
 	})
 
-	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+	rec := state.SandboxRecord{
 		PodSandboxID:   "pod-1",
 		ConchSandboxID: sandboxID,
 		Namespace:      "default",
 		State:          state.SandboxNotReady,
 		VMMPID:         cmd.Process.Pid,
-	}); err != nil {
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		matched, err := recordedVMMProcessMatches(rec)
+		if err != nil {
+			t.Fatalf("match test process: %v", err)
+		}
+		if matched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("test process pid %d never exposed sandbox marker", cmd.Process.Pid)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := store.UpsertSandbox(ctx, rec); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
-	svc := New(sandboxOps, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store, "default")
 	if err := svc.StopSandbox(ctx, "default", "pod-1"); err != nil {
 		t.Fatalf("StopSandbox() error = %v", err)
 	}
@@ -179,19 +383,16 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 
 	sandboxOps := &fakeSandboxOps{
 		createResult: sandbox.SandboxCreateResult{
-			RootfsKey:      "sandbox-1",
-			MemKey:         "sandbox-1-mem",
-			ParentRootfsID: "tmpl-rootfs",
-			ParentMemID:    "ckpt-mem",
-			ParentVMID:     "tmpl-vm",
-			RootfsMount:    "/run/conch/rootfs",
-			MemMount:       "/run/conch/mem",
-			VMMount:        "/run/conch/vm",
-			RootDir:        "conch/snapshot",
-			MemSize:        512,
+			RootfsKey:   "sandbox-1",
+			MemKey:      "sandbox-1-mem",
+			RootfsMount: "/run/conch/rootfs",
+			MemMount:    "/run/conch/mem",
+			VMMount:     "/run/conch/vm",
+			RootDir:     "conch/snapshot",
+			MemSize:     512,
 		},
 	}
-	svc := New(sandboxOps, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store, "default")
 
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		PodSandboxID: "pod-1",
@@ -208,9 +409,6 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	if rec.RootfsKey != "sandbox-1" || rec.MemKey != "sandbox-1-mem" {
 		t.Fatalf("runtime keys = (%q, %q), want sandbox keys", rec.RootfsKey, rec.MemKey)
 	}
-	if rec.ParentRootfsID != "tmpl-rootfs" || rec.ParentMemID != "ckpt-mem" || rec.ParentVMID != "tmpl-vm" {
-		t.Fatalf("parent refs = (%q, %q, %q)", rec.ParentRootfsID, rec.ParentMemID, rec.ParentVMID)
-	}
 	if rec.RootfsMount != "/run/conch/rootfs" || rec.MemMount != "/run/conch/mem" || rec.VMMount != "/run/conch/vm" {
 		t.Fatalf("mounts = (%q, %q, %q)", rec.RootfsMount, rec.MemMount, rec.VMMount)
 	}
@@ -221,7 +419,7 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 
 func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	svc := New(sandboxOps, nil, nil, "default")
+	svc := New(sandboxOps, nil, nil, nil, "default")
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: "tmpl_default",
 		VMMName:    "cloud-hypervisor",
@@ -254,7 +452,7 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 
 func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	svc := New(sandboxOps, nil, nil, "default")
+	svc := New(sandboxOps, nil, nil, nil, "default")
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: "tmpl_default",
 		VMMName:    "default-vmm",
@@ -321,6 +519,24 @@ func TestImageRepoDigests(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func seedReadyTemplate(t *testing.T, ctx context.Context, templates conchtemplate.Store, id, namespace, bootIndexDigest, bootMode string) {
+	t.Helper()
+	if _, err := templates.Create(ctx, conchtemplate.CreateRequest{
+		ID:        id,
+		Origin:    state.TemplateOriginImage,
+		Namespace: namespace,
+	}); err != nil {
+		t.Fatalf("CreateTemplate(%s) error = %v", id, err)
+	}
+	if err := templates.MarkReady(ctx, id, conchtemplate.ReadyState{
+		BootIndexDigest: bootIndexDigest,
+		BootMode:        bootMode,
+		BuildRef:        "localhost/conch/templates:" + id,
+	}); err != nil {
+		t.Fatalf("MarkReady(%s) error = %v", id, err)
 	}
 }
 

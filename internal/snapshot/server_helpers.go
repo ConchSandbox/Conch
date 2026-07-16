@@ -175,6 +175,14 @@ func (s *Server) activeSnapshotExists(ctx context.Context, namespace, key string
 	return err == nil && info.Kind == snapshots.KindActive
 }
 
+func (s *Server) snapshotKindExists(ctx context.Context, namespace, key string, kind snapshots.Kind) bool {
+	if s.snt == nil {
+		return false
+	}
+	info, err := s.snt.Stat(ctx, namespace, key)
+	return err == nil && info.Kind == kind
+}
+
 // prepareAndMountActiveSnapshot prepares and mounts an active snapshot, then records it in the runtime cache.
 // It returns the path callers should use to access the mounted snapshot.
 func (s *Server) prepareAndMountActiveSnapshot(
@@ -327,49 +335,6 @@ func (s *Server) loadCommittedBootLayoutMetadata(ctx context.Context, namespace 
 		layout.SnapshotDir = v
 	}
 	return memorySizeFromSnapshot, nil
-}
-
-// buildCommitConfigs prepares configuration objects for commit operation.
-func (s *Server) buildCommitConfigs(
-	ctx context.Context,
-	namespace, key, memKey, snapshotID, memSnapshotID, parentVMSnapshotID string,
-	si *snapshots.Info,
-) (*BootLayout, map[string]string, *BootLayout, error) {
-	layout := &BootLayout{
-		RootfsMount: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
-		MemMount:    getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
-		VMMount:     getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM),
-	}
-	layout.initDefaults()
-	labels := mergeLabels(si, layout)
-	labels = bootLayoutLabels(layout, labels)
-
-	var err error
-	layout.pmemFiles = s.getActiveRootfsPmem(namespace, key)
-	if len(layout.pmemFiles) == 0 {
-		layout.pmemFiles, err = s.resolveRootfsPmemFiles(ctx, namespace, key)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("resolve rootfs erofs pmem files failed: %v", err)
-		}
-	}
-
-	commitLayout := &BootLayout{
-		RootfsMount: layout.RootfsMount,
-		MemMount:    layout.MemMount,
-		VMMount:     layout.VMMount,
-		pmemFiles:   layout.pmemFiles,
-	}
-	commitLayout.initDefaults()
-
-	return layout, labels, commitLayout, nil
-}
-
-func (s *Server) commitMemSnapshot(ctx context.Context, namespace, memKey, memSnapshotID string) error {
-	err := s.snt.Commit(ctx, namespace, memKey, memSnapshotID)
-	if err != nil {
-		return fmt.Errorf("commit mem snapshot failed: %v", err)
-	}
-	return nil
 }
 
 // tryRemoveSnapshot attempts to remove a snapshot if it exists.

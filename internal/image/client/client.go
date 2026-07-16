@@ -30,6 +30,8 @@ const (
 	stopSandbox        = "/api/sandbox/stop"
 	checkpointSandbox  = "/api/sandbox/checkpoint"
 	createTemplate     = "/api/template/create"
+	pullTemplate       = "/api/template/pull"
+	pushTemplate       = "/api/template/push"
 	listTemplates      = "/api/template/list"
 	inspectTemplate    = "/api/template/inspect"
 	removeTemplate     = "/api/template/remove"
@@ -95,6 +97,7 @@ type TemplateRecord struct {
 	ID               string            `json:"id"`
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
+	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
 	Namespace        string            `json:"namespace"`
 	State            string            `json:"state"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
@@ -109,6 +112,32 @@ type TemplateRecord struct {
 
 type TemplateListResponse struct {
 	Items []TemplateRecord `json:"items"`
+}
+
+type TemplatePullRequest struct {
+	Reference string            `json:"reference"`
+	Namespace string            `json:"namespace,omitempty"`
+	PlainHTTP bool              `json:"plain_http,omitempty"`
+	Username  string            `json:"username,omitempty"`
+	Password  string            `json:"password,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+type TemplatePullResponse struct {
+	Status          string `json:"status"`
+	TemplateID      string `json:"template_id"`
+	BootIndexDigest string `json:"boot_index_digest"`
+	BuildRef        string `json:"build_ref"`
+}
+
+type TemplatePushRequest struct {
+	TemplateID      string `json:"template_id"`
+	RemoteReference string `json:"remote_reference"`
+	Namespace       string `json:"namespace,omitempty"`
+	PlainHTTP       bool   `json:"plain_http,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Password        string `json:"password,omitempty"`
+	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
 
 // PullImageRequest matches POST /api/image/pull.
@@ -399,6 +428,19 @@ func (c *Client) InspectTemplate(ctx context.Context, id string) (TemplateRecord
 func (c *Client) RemoveTemplate(ctx context.Context, id string) error {
 	var resp map[string]string
 	return c.postJSON(ctx, removeTemplate, TemplateIDRequest{ID: id}, &resp)
+}
+
+func (c *Client) PullTemplate(ctx context.Context, req TemplatePullRequest) (TemplatePullResponse, error) {
+	var resp TemplatePullResponse
+	if err := c.postJSON(ctx, pullTemplate, req, &resp); err != nil {
+		return TemplatePullResponse{}, err
+	}
+	return resp, nil
+}
+
+func (c *Client) PushTemplate(ctx context.Context, req TemplatePushRequest) error {
+	var resp map[string]string
+	return c.postJSON(ctx, pushTemplate, req, &resp)
 }
 
 // PullImage calls POST /api/image/pull and returns snapshot IDs by component kind unless unpacking is skipped.

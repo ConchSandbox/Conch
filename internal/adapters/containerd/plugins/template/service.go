@@ -19,17 +19,20 @@ type Service struct {
 	manager *core.Manager
 }
 
-func New(store core.StateStore, snapshots core.SnapshotBackend) (*Service, error) {
+func New(store core.StateStore, snapshots core.SnapshotBackend, bootIndexes core.BootIndexBackend) (*Service, error) {
 	if store == nil {
 		return nil, fmt.Errorf("template state store is required")
 	}
 	if snapshots == nil {
 		return nil, fmt.Errorf("snapshot backend is required")
 	}
+	if bootIndexes == nil {
+		return nil, fmt.Errorf("boot index backend is required")
+	}
 	persistent := core.NewStore(store)
 	return &Service{
 		store:   persistent,
-		manager: core.NewManager(persistent, snapshots),
+		manager: core.NewManager(persistent, snapshots, bootIndexes),
 	}, nil
 }
 
@@ -40,11 +43,18 @@ func (s *Service) Create(ctx context.Context, req core.CreateRequest) (state.Tem
 	return s.store.Create(ctx, req)
 }
 
-func (s *Service) MarkReady(ctx context.Context, id string, refs core.Refs) error {
+func (s *Service) MarkReady(ctx context.Context, id string, ready core.ReadyState) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("template service is not configured")
 	}
-	return s.store.MarkReady(ctx, id, refs)
+	return s.store.MarkReady(ctx, id, ready)
+}
+
+func (s *Service) PublishCheckpoint(ctx context.Context, publication state.CheckpointPublication) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("template service is not configured")
+	}
+	return s.store.PublishCheckpoint(ctx, publication)
 }
 
 func (s *Service) MarkFailed(ctx context.Context, id string, cause error) error {
@@ -87,13 +97,6 @@ func (s *Service) ReleaseSandboxBoot(ctx context.Context, req core.ReleaseSandbo
 		return fmt.Errorf("template boot manager is not configured")
 	}
 	return s.manager.ReleaseSandboxBoot(ctx, req)
-}
-
-func (s *Service) CommitSandboxBoot(ctx context.Context, req core.CommitSandboxBootRequest) (core.SandboxBootCommit, error) {
-	if s == nil || s.manager == nil {
-		return core.SandboxBootCommit{}, fmt.Errorf("template boot manager is not configured")
-	}
-	return s.manager.CommitSandboxBoot(ctx, req)
 }
 
 var (
@@ -140,6 +143,7 @@ func init() {
 		Config: &struct{}{},
 		Requires: []plugin.Type{
 			conchplugins.SnapshotServicePluginType,
+			conchplugins.ImageServicePluginType,
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
 			snapshotInst, err := ic.GetByID(conchplugins.SnapshotServicePluginType, conchplugins.SnapshotServiceID)
@@ -150,7 +154,15 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("%s does not provide snapshot server", conchplugins.SnapshotServiceURI)
 			}
-			svc, err := New(currentStateStore(), snapshotProvider.SnapshotServer())
+			imageInst, err := ic.GetByID(conchplugins.ImageServicePluginType, conchplugins.ImageServiceID)
+			if err != nil {
+				return nil, err
+			}
+			bootIndexes, ok := imageInst.(core.BootIndexBackend)
+			if !ok {
+				return nil, fmt.Errorf("%s does not provide boot index resolution", conchplugins.ImageServiceURI)
+			}
+			svc, err := New(currentStateStore(), snapshotProvider.SnapshotServer(), bootIndexes)
 			if err != nil {
 				return nil, err
 			}

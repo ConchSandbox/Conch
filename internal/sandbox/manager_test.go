@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -64,58 +66,113 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	}
 }
 
-func TestCommitCheckpointResumesOnlyAfterCommit(t *testing.T) {
-	var events []string
-	runtime := &recordingCheckpointRuntime{
-		capturePath: t.TempDir(),
-		events:      &events,
+func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialState    sandboxLifecycleState
+		wantPauseBefore bool
+	}{
+		{name: "running", initialState: sandboxReady, wantPauseBefore: true},
+		{name: "suspended", initialState: sandboxSuspended, wantPauseBefore: false},
 	}
-	templateAdapter := &recordingTemplate{events: &events}
-	m := &Manager{template: templateAdapter, requestTimeout: time.Second}
 
-	commit, resumeFailed, err := m.commitCheckpoint(
-		context.Background(),
-		context.Background(),
-		runtime,
-		true,
-		template.CommitSandboxBootRequest{
-			Namespace:  "ns",
-			SandboxID:  "sandbox-a",
-			TemplateID: "tmpl_a",
-		},
-	)
-	if err != nil {
-		t.Fatalf("commitCheckpoint() error = %v", err)
-	}
-	if resumeFailed {
-		t.Fatal("commitCheckpoint() reported resume failure")
-	}
-	if got, want := strings.Join(events, ","), "capture,commit,resume"; got != want {
-		t.Fatalf("checkpoint event order = %q, want %q", got, want)
-	}
-	if commit.RootfsKey != "rootfs" {
-		t.Fatalf("checkpoint commit = %#v", commit)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := CapturedBootComponents{
+				MemRootPath:  "/capture/mem",
+				VMMName:      "cloud-hypervisor",
+				MemorySizeMB: 512,
+			}
+			capture := &recordingCheckpointCapture{result: want}
+			m, entry, sbx := checkpointTestManager(tt.initialState, capture)
+
+			got, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+			if err != nil {
+				t.Fatalf("Checkpoint() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Checkpoint() result = %#v, want %#v", got, want)
+			}
+			if entry.state != tt.initialState {
+				t.Fatalf("entry state after checkpoint = %s, want %s", entry.state, tt.initialState)
+			}
+			if len(capture.requests) != 1 {
+				t.Fatalf("capture requests = %d, want 1", len(capture.requests))
+			}
+			if capture.requests[0].Source != sbx {
+				t.Fatalf("capture source = %T %p, want sandbox %p", capture.requests[0].Source, capture.requests[0].Source, sbx)
+			}
+			if capture.requests[0].PauseBefore != tt.wantPauseBefore {
+				t.Fatalf("PauseBefore = %v, want %v", capture.requests[0].PauseBefore, tt.wantPauseBefore)
+			}
+		})
 	}
 }
 
-type recordingCheckpointRuntime struct {
-	capturePath string
-	events      *[]string
+func TestCheckpointCaptureErrorRestoresPreviousLifecycleState(t *testing.T) {
+	errCapture := errors.New("capture failed")
+	tests := []struct {
+		name         string
+		initialState sandboxLifecycleState
+	}{
+		{name: "running", initialState: sandboxReady},
+		{name: "suspended", initialState: sandboxSuspended},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := &recordingCheckpointCapture{err: errCapture}
+			m, entry, _ := checkpointTestManager(tt.initialState, capture)
+
+			_, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+			if !errors.Is(err, errCapture) {
+				t.Fatalf("Checkpoint() error = %v, want errors.Is(capture error)", err)
+			}
+			if entry.state != tt.initialState {
+				t.Fatalf("entry state after capture error = %s, want %s", entry.state, tt.initialState)
+			}
+		})
+	}
 }
 
-func (r *recordingCheckpointRuntime) captureCheckpoint(context.Context, bool) (string, error) {
-	*r.events = append(*r.events, "capture")
-	return r.capturePath, nil
+func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
+	errResume := errors.New("resume failed")
+	capture := &recordingCheckpointCapture{err: errors.Join(ErrCheckpointResume, errResume)}
+	m, entry, _ := checkpointTestManager(sandboxReady, capture)
+
+	_, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+	if !errors.Is(err, ErrCheckpointResume) || !errors.Is(err, errResume) {
+		t.Fatalf("Checkpoint() error = %v, want joined resume failure", err)
+	}
+	if entry.state != sandboxSuspended {
+		t.Fatalf("entry state after resume failure = %s, want %s", entry.state, sandboxSuspended)
+	}
 }
 
-func (r *recordingCheckpointRuntime) Resume(context.Context) error {
-	*r.events = append(*r.events, "resume")
-	return nil
+type recordingCheckpointCapture struct {
+	requests []RuntimeCaptureRequest
+	result   CapturedBootComponents
+	err      error
+}
+
+func (r *recordingCheckpointCapture) Capture(_ context.Context, req RuntimeCaptureRequest) (CapturedBootComponents, error) {
+	r.requests = append(r.requests, req)
+	return r.result, r.err
+}
+
+func checkpointTestManager(initialState sandboxLifecycleState, capture CheckpointCapture) (*Manager, *sandboxEntry, *Sandbox) {
+	m := &Manager{checkpointCapture: capture, requestTimeout: time.Second}
+	sbx := &Sandbox{
+		namespace: "ns",
+		sandboxID: "sandbox-a",
+	}
+	entry := &sandboxEntry{state: initialState, sbx: sbx}
+	m.sandboxes.Store(sandboxMapKey("ns", "sandbox-a"), entry)
+	return m, entry, sbx
 }
 
 type recordingTemplate struct {
 	released []template.ReleaseSandboxBootRequest
-	events   *[]string
 }
 
 func (r *recordingTemplate) PrepareSandboxBoot(context.Context, template.PrepareSandboxBootRequest) (template.PreparedSandboxBoot, error) {
@@ -125,13 +182,6 @@ func (r *recordingTemplate) PrepareSandboxBoot(context.Context, template.Prepare
 func (r *recordingTemplate) ReleaseSandboxBoot(_ context.Context, req template.ReleaseSandboxBootRequest) error {
 	r.released = append(r.released, req)
 	return nil
-}
-
-func (r *recordingTemplate) CommitSandboxBoot(context.Context, template.CommitSandboxBootRequest) (template.SandboxBootCommit, error) {
-	if r.events != nil {
-		*r.events = append(*r.events, "commit")
-	}
-	return template.SandboxBootCommit{RootfsKey: "rootfs", MemKey: "mem", VMKey: "vm"}, nil
 }
 
 func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {

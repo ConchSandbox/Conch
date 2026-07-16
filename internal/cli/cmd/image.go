@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
 type stringSliceFlag []string
@@ -114,7 +115,9 @@ func printImageList(out io.Writer, images []client.ImageRecord, showAll bool) er
 
 func isInternalImageRecord(image client.ImageRecord) bool {
 	switch strings.TrimSpace(image.Kind) {
-	case "rootfs", "sandbox", "mem-snapshot":
+	case runtimeapi.ImageKindBootComponentRootfs,
+		runtimeapi.ImageKindBootComponentSandbox,
+		runtimeapi.ImageKindBootComponentMemory:
 		return true
 	}
 	name := strings.TrimSpace(image.Name)
@@ -124,7 +127,7 @@ func isInternalImageRecord(image client.ImageRecord) bool {
 
 func displayImageKind(kind string) string {
 	if strings.TrimSpace(kind) == "" {
-		return "-"
+		return runtimeapi.ImageKindOCIImage
 	}
 	return kind
 }

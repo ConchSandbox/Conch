@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -24,6 +23,7 @@ type Manager struct {
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
 	template           TemplateManager
+	checkpointCapture  CheckpointCapture
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
@@ -72,15 +72,9 @@ type sandboxEntry struct {
 	sbx   *Sandbox
 }
 
-type checkpointRuntime interface {
-	captureCheckpoint(context.Context, bool) (string, error)
-	Resume(context.Context) error
-}
-
 type TemplateManager interface {
 	PrepareSandboxBoot(context.Context, template.PrepareSandboxBootRequest) (template.PreparedSandboxBoot, error)
 	ReleaseSandboxBoot(context.Context, template.ReleaseSandboxBootRequest) error
-	CommitSandboxBoot(context.Context, template.CommitSandboxBootRequest) (template.SandboxBootCommit, error)
 }
 
 func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, templateManager TemplateManager, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
@@ -91,6 +85,7 @@ func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, templat
 		pool:               p,
 		daemonClient:       daemonClient,
 		template:           templateManager,
+		checkpointCapture:  NewFullCheckpointCapture(),
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
@@ -121,17 +116,11 @@ type SandboxLifecycleRequest struct {
 }
 
 type SandboxCheckpointRequest struct {
-	Namespace  string `json:"namespace"`
-	SandboxId  string `json:"sandbox_id"`
-	TemplateID string `json:"template_id"`
-	ParentVMID string `json:"parent_vm_id"`
+	Namespace string `json:"namespace"`
+	SandboxId string `json:"sandbox_id"`
 }
 
-type SandboxCheckpointResult struct {
-	RootfsKey string
-	MemKey    string
-	VMKey     string
-}
+type SandboxCheckpointResult = CapturedBootComponents
 
 type SandboxCreateResult struct {
 	IP              string
@@ -147,15 +136,14 @@ type SandboxCreateResult struct {
 	NetworkNS       string
 	RootfsKey       string
 	MemKey          string
-	ParentRootfsID  string
-	ParentMemID     string
-	ParentVMID      string
 	RootfsMount     string
 	MemMount        string
 	VMMount         string
 	RootDir         string
 	MemSize         int64
 	Resume          bool
+	BootIndexDigest string
+	RootfsPmemPaths []string
 }
 
 func GenerateAgentToken() (string, error) {
@@ -368,12 +356,11 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req 
 	logger := ulog.GetLogger()
 	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
 	return m.template.PrepareSandboxBoot(ctx, template.PrepareSandboxBootRequest{
-		Namespace:       namespace,
-		TemplateID:      req.TemplateID,
-		SandboxID:       runtimeIDs.key,
-		RamMB:           req.RamMB,
-		VsockCID:        runtimeIDs.vsockCID,
-		VsockSocketPath: runtimeIDs.vsockSocketPath,
+		Namespace:  namespace,
+		TemplateID: req.TemplateID,
+		SandboxID:  runtimeIDs.key,
+		VMMName:    req.VmmName,
+		RamMB:      req.RamMB,
 	})
 }
 
@@ -451,15 +438,14 @@ func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateReques
 		NetworkNS:       sbx.slot.NamespaceID(),
 		RootfsKey:       runtime.RootfsKey,
 		MemKey:          runtime.MemKey,
-		ParentRootfsID:  runtime.ParentRootfsID,
-		ParentMemID:     runtime.ParentMemID,
-		ParentVMID:      runtime.ParentVMID,
 		RootfsMount:     runtime.RootfsMount,
 		MemMount:        runtime.MemMount,
 		VMMount:         runtime.VMMount,
 		RootDir:         runtime.RootDir,
 		MemSize:         runtime.MemSize,
 		Resume:          runtime.Resume,
+		BootIndexDigest: runtime.BootIndexDigest,
+		RootfsPmemPaths: append([]string(nil), boot.Spec.PmemPaths...),
 	}
 }
 
@@ -705,24 +691,16 @@ func (m *Manager) Checkpoint(req SandboxCheckpointRequest) (SandboxCheckpointRes
 	previousState := entry.state
 	entry.state = sandboxCheckpointing
 
-	leaseCtx := ctx
-	if sbx.leaseID != "" && m.daemonClient != nil {
-		var leaseErr error
-		leaseCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, namespace, sbx.leaseID)
-		if leaseErr != nil {
-			entry.state = previousState
-			return SandboxCheckpointResult{}, fmt.Errorf("failed to restore runtime lease context: %w", leaseErr)
-		}
+	capture := m.checkpointCapture
+	if capture == nil {
+		capture = NewFullCheckpointCapture()
 	}
-
-	commit, resumeFailed, err := m.commitCheckpoint(ctx, leaseCtx, sbx, !wasSuspended, template.CommitSandboxBootRequest{
-		Namespace:  sbx.namespace,
-		SandboxID:  req.SandboxId,
-		TemplateID: req.TemplateID,
-		ParentVMID: req.ParentVMID,
+	captured, err := capture.Capture(ctx, RuntimeCaptureRequest{
+		Source:      sbx,
+		PauseBefore: !wasSuspended,
 	})
 	if err != nil {
-		if resumeFailed {
+		if errors.Is(err, ErrCheckpointResume) {
 			entry.state = sandboxSuspended
 		} else {
 			entry.state = previousState
@@ -731,38 +709,7 @@ func (m *Manager) Checkpoint(req SandboxCheckpointRequest) (SandboxCheckpointRes
 	}
 
 	entry.state = previousState
-	return SandboxCheckpointResult{
-		RootfsKey: commit.RootfsKey,
-		MemKey:    commit.MemKey,
-		VMKey:     commit.VMKey,
-	}, nil
-}
-
-func (m *Manager) commitCheckpoint(
-	ctx, leaseCtx context.Context,
-	runtime checkpointRuntime,
-	resumeAfter bool,
-	req template.CommitSandboxBootRequest,
-) (template.SandboxBootCommit, bool, error) {
-	capturePath, err := runtime.captureCheckpoint(ctx, resumeAfter)
-	if err != nil {
-		return template.SandboxBootCommit{}, false, err
-	}
-	defer os.RemoveAll(capturePath)
-	req.CapturePath = capturePath
-	commit, commitErr := m.template.CommitSandboxBoot(leaseCtx, req)
-
-	var resumeErr error
-	if resumeAfter {
-		resumeCtx := context.WithoutCancel(ctx)
-		if m.requestTimeout > 0 {
-			var resumeCancel context.CancelFunc
-			resumeCtx, resumeCancel = context.WithTimeout(resumeCtx, m.requestTimeout)
-			defer resumeCancel()
-		}
-		resumeErr = runtime.Resume(resumeCtx)
-	}
-	return commit, resumeErr != nil, errors.Join(commitErr, resumeErr)
+	return captured, nil
 }
 
 func (m *Manager) CleanupPool() error {

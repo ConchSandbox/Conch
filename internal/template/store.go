@@ -8,13 +8,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
+
 	"github.com/openeuler/Conch/internal/daemon/state"
 )
 
-type Refs struct {
-	RootfsKey string
-	MemKey    string
-	VMKey     string
+// ReadyState is the validated content capability published when a Template
+// transitions to READY. BootIndexDigest is the Template's immutable content
+// identity; BootMode is a cache derived while validating that Boot Index.
+type ReadyState struct {
+	BootIndexDigest string
+	BootMode        string
+	BuildRef        string
 }
 
 type CreateRequest struct {
@@ -37,7 +42,8 @@ type Filter struct {
 
 type Store interface {
 	Create(context.Context, CreateRequest) (state.TemplateRecord, error)
-	MarkReady(context.Context, string, Refs) error
+	MarkReady(context.Context, string, ReadyState) error
+	PublishCheckpoint(context.Context, state.CheckpointPublication) error
 	MarkFailed(context.Context, string, error) error
 	Get(context.Context, string) (state.TemplateRecord, error)
 	List(context.Context, Filter) ([]state.TemplateRecord, error)
@@ -49,6 +55,7 @@ type StateStore interface {
 	GetTemplate(context.Context, string) (state.TemplateRecord, error)
 	ListTemplates(context.Context) ([]state.TemplateRecord, error)
 	DeleteTemplate(context.Context, string) error
+	PublishCheckpoint(context.Context, state.CheckpointPublication) error
 }
 
 type PersistentStore struct {
@@ -99,9 +106,13 @@ func (s *PersistentStore) Create(ctx context.Context, req CreateRequest) (state.
 	return rec, nil
 }
 
-func (s *PersistentStore) MarkReady(ctx context.Context, id string, refs Refs) error {
+func (s *PersistentStore) MarkReady(ctx context.Context, id string, ready ReadyState) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("template store is not configured")
+	}
+	validated, err := validateReadyState(ready)
+	if err != nil {
+		return err
 	}
 	rec, err := s.store.GetTemplate(ctx, strings.TrimSpace(id))
 	if err != nil {
@@ -110,22 +121,33 @@ func (s *PersistentStore) MarkReady(ctx context.Context, id string, refs Refs) e
 	if rec.State != state.TemplateCreating {
 		return fmt.Errorf("template %s is %s, want %s", rec.ID, rec.State, state.TemplateCreating)
 	}
-	if strings.TrimSpace(refs.RootfsKey) == "" {
-		return fmt.Errorf("template rootfs key is required")
+	rec.BootIndexDigest = validated.BootIndexDigest
+	rec.BootMode = validated.BootMode
+	if buildRef := strings.TrimSpace(ready.BuildRef); buildRef != "" {
+		rec.BuildRef = buildRef
 	}
-	if strings.TrimSpace(refs.VMKey) == "" {
-		return fmt.Errorf("template vm key is required")
-	}
-	if rec.Origin == state.TemplateOriginCheckpoint && strings.TrimSpace(refs.MemKey) == "" {
-		return fmt.Errorf("checkpoint-created template mem key is required")
-	}
-	rec.RootfsKey = strings.TrimSpace(refs.RootfsKey)
-	rec.MemKey = strings.TrimSpace(refs.MemKey)
-	rec.VMKey = strings.TrimSpace(refs.VMKey)
 	rec.State = state.TemplateReady
 	rec.LastError = ""
 	rec.UpdatedAt = s.now().UnixNano()
 	return s.store.UpsertTemplate(ctx, rec)
+}
+
+// PublishCheckpoint delegates the atomic Template READY/checkpoint-head state
+// transition to the persistent state store.
+func (s *PersistentStore) PublishCheckpoint(ctx context.Context, publication state.CheckpointPublication) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	validated, err := validateReadyState(ReadyState{
+		BootIndexDigest: publication.BootIndexDigest,
+		BootMode:        publication.BootMode,
+	})
+	if err != nil {
+		return err
+	}
+	publication.BootIndexDigest = validated.BootIndexDigest
+	publication.BootMode = validated.BootMode
+	return s.store.PublishCheckpoint(ctx, publication)
 }
 
 func (s *PersistentStore) MarkFailed(ctx context.Context, id string, cause error) error {
@@ -219,13 +241,30 @@ func newID() (string, error) {
 }
 
 func BootMode(rec state.TemplateRecord) string {
-	if strings.TrimSpace(rec.RootfsKey) == "" || strings.TrimSpace(rec.VMKey) == "" {
+	switch mode := strings.TrimSpace(rec.BootMode); mode {
+	case state.TemplateBootModeCold, state.TemplateBootModeResume:
+		return mode
+	default:
 		return ""
 	}
-	if strings.TrimSpace(rec.MemKey) != "" {
-		return state.TemplateBootModeResume
+}
+
+func validateReadyState(ready ReadyState) (ReadyState, error) {
+	rawDigest := strings.TrimSpace(ready.BootIndexDigest)
+	parsed, err := digest.Parse(rawDigest)
+	if err != nil {
+		return ReadyState{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
 	}
-	return state.TemplateBootModeCold
+	mode := strings.TrimSpace(ready.BootMode)
+	switch mode {
+	case state.TemplateBootModeCold, state.TemplateBootModeResume:
+	default:
+		return ReadyState{}, fmt.Errorf("unknown template boot mode %q", mode)
+	}
+	return ReadyState{
+		BootIndexDigest: parsed.String(),
+		BootMode:        mode,
+	}, nil
 }
 
 func normalizeNamespace(namespace string) string {
