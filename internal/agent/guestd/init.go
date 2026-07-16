@@ -11,10 +11,7 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
 
-	pb "github.com/openeuler/Conch/api/go_proto"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -106,8 +103,8 @@ func runAsInit() {
 		ulog.GetLogger().Warn("Overlay rootfs not found", ulog.F("target", MergeTarget))
 	}
 
-	if err := startGRPCServerAsync(); err != nil {
-		ulog.GetLogger().Error("gRPC server failed to start, vsock will report NOT_READY",
+	if err := startAgentAPIServerAsync(); err != nil {
+		ulog.GetLogger().Error("agent API server failed to start, vsock will report NOT_READY",
 			ulog.F("error", err),
 		)
 	}
@@ -151,36 +148,26 @@ func waitForSignal() {
 	ulog.GetLogger().Info("Received shutdown signal")
 }
 
-// startGRPCServerAsync binds the gRPC listener synchronously, then serves in
+// startAgentAPIServerAsync binds the agent API listener synchronously, then serves in
 // the background. Returning after net.Listen succeeds makes vsock READY checks
 // deterministic without waiting on rootfs services.
-func startGRPCServerAsync() error {
+func startAgentAPIServerAsync() error {
 	logger := ulog.GetLogger()
 	listener, err := net.Listen("tcp", ServerPort)
 	if err != nil {
-		logger.Error("Failed to listen on gRPC port",
+		logger.Error("Failed to listen on agent API port",
 			ulog.F("port", ServerPort),
 			ulog.F("error", err),
 		)
 		return err
 	}
 
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(agentUnaryAuthInterceptor),
-		grpc.StreamInterceptor(agentStreamAuthInterceptor),
-	)
-	pb.RegisterAgentServiceServer(grpcServer, &AgentServer{Version: ServerVersion})
-	reflection.Register(grpcServer)
-
-	logger.Info("gRPC server listening", ulog.F("port", ServerPort))
-	markGRPCReady()
+	logger.Info("agent API server listening", ulog.F("port", ServerPort))
+	markAgentAPIReady()
 	go func() {
-		if err := grpcServer.Serve(listener); err != nil {
-			mu.Lock()
-			isSafe = false
-			mu.Unlock()
-			markGRPCNotReady()
-			ulog.GetLogger().Error("gRPC server error", ulog.F("error", err))
+		if err := serveAgentAPI(listener); err != nil {
+			markAgentAPINotReady()
+			ulog.GetLogger().Error("agent API server error", ulog.F("error", err))
 		}
 	}()
 	return nil
