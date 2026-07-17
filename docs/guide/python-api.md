@@ -2,28 +2,28 @@
 
 ## 快速开始
 
-在终端中输入 `python3` 进入交互环境，逐行输入以下命令：
+创建 Sandbox 前，需要先启动 `conchd`，并准备一个处于 `READY` 状态的 Template。可以使用 `conch template ls` 查看现有 Template；如果尚未创建，参见 [Conch Image Guide](image.md#1-conch-template-create)。
 
-```
+在终端中输入 `python3` 进入交互环境：
+
+```pycon
 >>> from conch import Sandbox
->>> sandbox = Sandbox.create()
+>>> sandbox = Sandbox.create(template_id="tmpl_xxx")
 >>> sandbox.sandbox_id
-'sandbox_a1b2c3d4e5f6'
->>> result = sandbox.execute(cmd="ls", args=["-l", "/root"])
->>> print(result)
-total 0
-drwxr-xr-x 2 root root 4096 Apr 22 10:00 .
-drwxr-xr-x 2 root root 4096 Apr 22 10:00 ..
+'sandbox_a1b2c3d4e5f6789012345678'
+>>> result = sandbox.execute(cmd="printf", args=["hello Conch\n"])
+>>> print(result.stdout, end="")
+hello Conch
 >>> sandbox.delete()
 True
 ```
 
 **说明：**
-- `Sandbox.create()` - 创建沙箱
+- `Sandbox.create(template_id=...)` - 创建沙箱
 - `execute()` - 执行命令
 - `delete()` - 清理资源
 
-生产代码建议使用 `with Sandbox.create() as sandbox:` 上下文管理器，自动调用 `delete()`。
+也可使用 `with Sandbox.create(template_id="tmpl_xxx") as sandbox:` 上下文管理器，自动调用 `delete()`。
 
 ---
 
@@ -34,17 +34,11 @@ Sandbox 支持 Python 上下文管理器协议，提供更简洁的资源管理�
 ```python
 from conch import Sandbox
 
-with Sandbox.create() as sbx:
+with Sandbox.create(template_id="tmpl_xxx") as sbx:
     result = sbx.execute(cmd='python3', content='print("Hello")')
     print(result)
 # 自动调用 delete()
 ```
-
-**优势：**
-- 代码更简洁
-- 自动资源管理
-- 即使异常也保证清理
-- 符合 Python 最佳实践
 
 ---
 
@@ -53,25 +47,22 @@ with Sandbox.create() as sbx:
 ### 创建沙箱
 
 ```python
-Sandbox.create(template_id=None, **kwargs) -> Sandbox
+Sandbox.create(template_id, **kwargs) -> Sandbox
 ```
 
-基于 Template 创建沙箱。`**kwargs` 可透传所有构造函数参数（如 `template_id`、`vcpu_num`、`ram_mb`、`namespace`、`config_path` 等）。
+基于 Template 创建沙箱。`**kwargs` 可透传其他构造函数参数（如 `vcpu_num`、`vcpu_max`、`ram_mb`、`namespace`、`config_path` 等）。
 
 **参数：**
-- `template_id` (可选): `tmpl_xxx`
+- `template_id` (str): 要启动的 `tmpl_xxx`
 - `**kwargs`: 透传至构造函数，参见 [Sandbox 构造函数](#sandbox-构造函数)
 
-**返回：** 成功返回 `Sandbox` 对象，失败抛出 `RuntimeError`
+**返回：** 成功返回 `Sandbox` 对象。
+
+**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效或缺少 `template_id` 时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
 
 **示例：**
 ```python
-# 从 config 设置的 template_id 创建
-sbx = Sandbox.create()
-sbx.execute(cmd='python3', content='print("Hello")')
-sbx.delete()
-
-# 从传入指定 Template 创建
+# 从指定 Template 创建
 sbx = Sandbox.create(template_id="tmpl_123")
 sbx.execute(cmd='python3', content='print("Hello")')
 sbx.delete()
@@ -82,10 +73,11 @@ sbx.execute(cmd='python3', content='print("Restored")')
 sbx.delete()
 
 # 指定自定义配置文件
-sbx = Sandbox.create(config_path="/path/to/sdk-config.yaml")
+sbx = Sandbox.create(template_id="tmpl_123",
+                     config_path="/path/to/sdk-config.yaml")
 
 # 使用上下文管理器
-with Sandbox.create() as sbx:
+with Sandbox.create(template_id="tmpl_123") as sbx:
     sbx.execute(cmd='python3', content='print("Hello")')
 ```
 
@@ -94,7 +86,7 @@ with Sandbox.create() as sbx:
 ### 执行命令
 
 ```python
-sandbox.execute(cmd, content=None, args=[], cwd=None, env={}) -> Execution
+sandbox.execute(cmd, content=None, cwd=None, **kwargs) -> Execution
 ```
 
 在沙箱中执行命令或脚本。
@@ -105,6 +97,8 @@ sandbox.execute(cmd, content=None, args=[], cwd=None, env={}) -> Execution
 - `args` (list, 可选): 命令参数列表
 - `cwd` (str, 可选): 执行目录，不指定时使用用户家目录
 - `env` (dict, 可选): 环境变量，会追加到沙箱默认环境变量中
+
+`args` 和 `env` 由当前实现通过 `**kwargs` 接收，调用时应使用关键字参数，不要将它们作为位置参数传入。未指定时，`args` 和 `env` 分别使用空列表和空字典。
 
 **返回：** `Execution` 对象
 
@@ -143,7 +137,7 @@ sandbox.checkpoint() -> TemplateInfo
 
 ```python
 # 步骤 1: 从 Template 创建沙箱
-sbx = Sandbox.create()
+sbx = Sandbox.create(template_id="tmpl_xxx")
 print(f"Created sandbox: {sbx.sandbox_id}")
 
 # 步骤 2: checkpoint Sandbox，得到可恢复 Template
@@ -154,6 +148,8 @@ print(f"Template ID: {template.template_id}")
 sbx2 = Sandbox.create(template_id=template.template_id)
 print(f"Restored sandbox: {sbx2.sandbox_id}")
 sbx2.delete()
+
+sbx.delete()
 ```
 
 **说明：**
@@ -161,6 +157,21 @@ sbx2.delete()
 - `checkpoint()` 不改变沙箱运行态
 - 使用返回的 `template_id` 创建恢复后的沙箱
 - 所有 Template 都使用 `tmpl_xxx` ID；可通过 `origin=checkpoint` 和 `boot_mode=resume` 识别其来源与启动能力
+---
+
+### 暂停、恢复和停止沙箱
+
+```python
+sandbox.suspend() -> bool
+sandbox.resume() -> bool
+sandbox.stop() -> bool
+```
+
+- `suspend()` 暂停运行中的沙箱。
+- `resume()` 恢复已暂停的沙箱。
+- `stop()` 停止沙箱运行时，但保留管理状态记录。如需完整删除记录并清理资源，请继续调用 `delete()`。
+
+三个方法成功时返回 `True`，请求 conchd 失败时抛出 `RuntimeError`。
 
 ---
 
@@ -188,12 +199,12 @@ Sandbox.delete_sandbox(sandbox_id, unix_socket=None, api_url=None,
 **示例：**
 ```python
 # 删除当前实例
-with Sandbox.create() as sbx:
+with Sandbox.create(template_id="tmpl_xxx") as sbx:
     pass
 # 自动删除（上下文管理器）
 
 # 手动删除
-sbx = Sandbox.create()
+sbx = Sandbox.create(template_id="tmpl_xxx")
 sbx.delete()
 
 # 直接删除指定沙箱
@@ -337,7 +348,8 @@ print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_id}")
 
 ```python
 Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
-        namespace=None, vcpu_num=None, ram_mb=None, config_path=None)
+        namespace=None, vcpu_num=None, vcpu_max=None, ram_mb=None,
+        config_path=None)
 ```
 
 **主要参数：**
@@ -350,6 +362,7 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
 | `template_id` | str | Template ID |
 | `namespace` | str | 命名空间 |
 | `vcpu_num` | int | 虚拟 CPU 数量 |
+| `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |
 | `config_path` | str | 配置文件路径，默认按优先级自动查找 |
 
@@ -402,6 +415,7 @@ class Execution:
 | `start_process()` | 启动进程 |
 | `post_files()` | 上传文件 |
 | `get_file()` | 下载文件 |
+| `get_files()` | 批量下载文件 |
 | `close()` | 关闭连接 |
 
 **注意：** 如需直接使用，通过 `sandbox.client` 属性访问。
@@ -417,7 +431,7 @@ from conch import Sandbox
 
 sbx = None
 try:
-    sbx = Sandbox.create()
+    sbx = Sandbox.create(template_id="tmpl_xxx")
     info = sbx.get_info()
     print(f"Created sandbox: {info.sandbox_id}, IP: {info.ip}")
 
@@ -434,7 +448,7 @@ try:
     # 列出文件
     files = sbx.list_files()
     print(f"Files: {files}")
-except RuntimeError as e:
+except (FileNotFoundError, ValueError, KeyError, RuntimeError) as e:
     print(f"Error: {e}")
 finally:
     if sbx:
@@ -446,7 +460,7 @@ finally:
 ```python
 from conch import Sandbox
 
-with Sandbox.create() as sbx:
+with Sandbox.create(template_id="tmpl_xxx") as sbx:
     info = sbx.get_info()
     print(f"Created sandbox: {info.sandbox_id}, IP: {info.ip}")
 
@@ -470,31 +484,17 @@ with Sandbox.create() as sbx:
 ```python
 from conch import Sandbox
 
-# 创建并 checkpoint
-sbx = Sandbox.create()
+# 创建 checkpoint Template
+sbx = Sandbox.create(template_id="tmpl_xxx")
 template = sbx.checkpoint()
 print(f"Created resumable template: {template.template_id}")
 
 # 从可恢复 Template 启动
 sbx2 = Sandbox.create(template_id=template.template_id)
 sbx2.execute(cmd='python3', content='print("Restored!")')
+
 sbx2.delete()
-```
-
-### 示例 4: 异常处理
-
-```python
-from conch import Sandbox
-
-sbx = None
-try:
-    sbx = Sandbox.create()
-    result = sbx.execute(cmd='invalid_command')
-except RuntimeError as e:
-    print(f"Error: {e}")
-finally:
-    if sbx:
-        sbx.delete()
+sbx.delete()
 ```
 
 ---

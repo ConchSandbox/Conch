@@ -88,7 +88,6 @@ sandbox:
   unix_socket: "/var/run/conchd/conchd.sock"   # 优先使用 Unix Socket 连接
   api_url: "http://localhost:4063"              # unix_socket 为空时使用 HTTP 连接
   sandbox_id: ""                                # 留空则自动生成
-  template_id: "tmpl_xxx"                         # Template ID
 
 image:
   vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
@@ -115,11 +114,24 @@ sudo conch-sdk-init-config -f     # 强制覆盖已有配置
 
 ### Python SDK 示例
 
+先将已就绪的 Template ID 写入环境变量：
+
+```bash
+export CONCH_TEMPLATE_ID="tmpl_xxx"
+```
+
 ```python
+import os
+
 from conch import Sandbox
 
+sandbox = None
 try:
-    sandbox = Sandbox.create()
+    template_id = os.environ.get("CONCH_TEMPLATE_ID")
+    if not template_id:
+        raise RuntimeError("CONCH_TEMPLATE_ID is required")
+
+    sandbox = Sandbox.create(template_id=template_id)
     print(f"Sandbox created: {sandbox.sandbox_id}")
 
     # 获取沙箱信息
@@ -135,7 +147,8 @@ try:
 except RuntimeError as e:
     print(f"Error: {e}")
 finally:
-    sandbox.delete()
+    if sandbox:
+        sandbox.delete()
 ```
 
 调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
