@@ -12,6 +12,7 @@ from conch import Sandbox
 #     export ANTHROPIC_API_KEY="your_key"
 #     export ANTHROPIC_BASE_URL="your_url"
 #     export CLAUDE_SSH_AUTHORIZED_KEYS="$(cat ~/.ssh/id_rsa.pub)"
+#     export CONCH_TEMPLATE_ID="tmpl_xxx"
 #   Option 2: Enter values interactively when prompted
 
 def get_config(name, prompt, default=None, required=True):
@@ -48,6 +49,7 @@ claude_settings = f'''{{
 }}'''
 
 rsa_pub = get_config("CLAUDE_SSH_AUTHORIZED_KEYS", "Enter SSH public key")
+template_id = get_config("CONCH_TEMPLATE_ID", "Enter Conch Template ID")
 
 def add_config(box):
     # 1. create .claude folder and settings.json
@@ -68,11 +70,15 @@ def add_config(box):
         ],
     )
 
-def prepare_box():
-    box = Sandbox.create()
+def prepare_box(template_id):
+    box = Sandbox.create(template_id=template_id)
     print(f'sandbox {box.sandbox_id} created')
     ip = box.ip
-    add_config(box)
+    try:
+        add_config(box)
+    except Exception:
+        box.delete()
+        raise
     print(f'sandbox prepared ok with ip={ip}')
     return box, ip
 
@@ -91,13 +97,15 @@ def run_claude_tui(box, ip):
 def main():
     if __name__ != '__main__':
         return
+    box = None
     try:
-        box, ip = prepare_box()
+        box, ip = prepare_box(template_id)
+        run_claude_once(box, ip)
+        run_claude_tui(box, ip)
     except Exception as e:
         print(e)
-        return
-    run_claude_once(box, ip)
-    run_claude_tui(box, ip)
-    box.delete()
+    finally:
+        if box:
+            box.delete()
 
 main()

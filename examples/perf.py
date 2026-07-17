@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import os
 import time
 
 from conch import Sandbox
 
 
-def perf_print_hello_by_template():
+def perf_print_hello_by_template(template_id):
     box = None
     t0 = time.perf_counter()
     try:
-        box = Sandbox.create()
+        box = Sandbox.create(template_id=template_id)
         t1 = time.perf_counter()
 
         ret = box.execute(cmd='python3', content='print("hello")')
@@ -82,9 +83,14 @@ def perf_print_hello_by_checkpoint(template_id):
                 print(f"Warning: Failed to delete sandbox: {e}")
 
 def main():
-    template_id = perf_print_hello_by_template()
-    if template_id:
-        perf_print_hello_by_checkpoint(template_id)
+    source_template_id = os.environ.get("CONCH_TEMPLATE_ID")
+    if not source_template_id:
+        print("CONCH_TEMPLATE_ID is required")
+        return
+
+    checkpoint_template_id = perf_print_hello_by_template(source_template_id)
+    if checkpoint_template_id:
+        perf_print_hello_by_checkpoint(checkpoint_template_id)
     else:
         print("Test terminated due to template flow error.")
 
