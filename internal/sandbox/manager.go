@@ -111,6 +111,7 @@ type CreateRequest struct {
 	VCPUMax      int64
 	RAMMB        int64
 	AgentToken   string
+	Env          map[string]string
 	VolumeMounts []volume.Mount
 }
 
@@ -206,7 +207,7 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 
 	var sbx *Sandbox
@@ -224,6 +225,7 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, na
 	conn, err := hostconn.WaitReady(ctx, hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
 		AgentToken:      agentToken,
+		Env:             env,
 		VMMName:         vmmName,
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
@@ -428,6 +430,7 @@ func (m *Manager) startSandbox(ctx context.Context, namespace string, req Create
 		req.VMMName,
 		req.SandboxID,
 		req.AgentToken,
+		req.Env,
 		req.VCPUNum,
 		runtimeIDs.vcpuMax,
 		m.pool,

@@ -172,6 +172,118 @@ sbx.delete()
 Sandbox.delete_sandbox("sandbox_abc")
 ```
 
+### conchd 服务进程确认
+
+```python
+Sandbox.service_health(unix_socket=None, api_url=None, config_path=None) -> bool
+```
+
+当 `conchd` 确认其依赖的模块（`bbolt`, `containerd`, `daemon Client` 等）均就绪时返回 `True`。
+
+### 获取沙箱（ `List` 和 `Get` ）
+
+```python
+Sandbox.list(namespace=None, state=None, limit=None, **connection_options) -> list[dict]
+Sandbox.get(sandbox_id, namespace=None, **connection_options) -> Sandbox
+```
+
+`list` 的 `state` 筛选项可接受  `running` 和 `paused`，而 `limit` 需为 1-100 的整数。
+
+**`Sandbox.list()` 参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `namespace` | str | 仅返回指定命名空间中的沙箱；未指定时使用 daemon 的默认命名空间 |
+| `state` | list[str] | 按状态筛选；支持 `running` 和 `paused`，其中 `SUSPENDED` 和 `STOPPED` 均表示 `paused` |
+| `limit` | int | 最多返回的沙箱数量，默认值为 `100`，取值范围为 `1` 至 `100` |
+| `unix_socket` | str | conchd Unix socket 路径 |
+| `api_url` | str | conchd HTTP API 地址；仅在未使用 Unix socket 时生效 |
+| `config_path` | str | 未显式指定连接地址时用于查找连接配置的配置文件路径 |
+
+**`Sandbox.get()` 参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sandbox_id` | str | 要获取的沙箱 ID |
+| `namespace` | str | 沙箱所属命名空间；未指定时使用 daemon 的默认命名空间 |
+| `unix_socket` | str | conchd Unix socket 路径 |
+| `api_url` | str | conchd HTTP API 地址；仅在未使用 Unix socket 时生效 |
+| `config_path` | str | 未显式指定连接地址时用于查找连接配置的配置文件路径 |
+
+`Sandbox.list()` 返回沙箱摘要字典列表；`Sandbox.get()` 返回已填充基础信息的 `Sandbox` 对象。沙箱响应可包含以下字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `templateID` | str | 创建沙箱所使用的 Template ID |
+| `imageName` | str | 关联镜像名称；后端无法提供时为空字符串 |
+| `snapshotID` | str | 关联快照 ID；后端无法提供时为空字符串 |
+| `sandboxID` | str | 对外使用的 Conch 沙箱 ID |
+| `namespace` | str | 沙箱所属命名空间 |
+| `startedAt` | str | 沙箱创建时间，使用 RFC 3339 格式 |
+| `endAt` | str | 沙箱停止时间；尚未停止时为空字符串 |
+| `cpuCount` | int | 虚拟 CPU 数量 |
+| `memoryMB` | int | 内存大小，单位为 MB |
+| `diskSizeMB` | int | 磁盘大小，单位为 MB；后端无法提供时为 `0` |
+| `conchInitVersion` | str | 沙箱 conch-init 版本；后端无法提供时为空字符串 |
+| `alias` | str | 沙箱别名或名称 |
+| `metadata` | dict | 沙箱元数据键值映射 |
+| `volumeMounts` | list[dict] | 卷挂载列表，每项包含 `name` 和 `path` |
+
+
+
+### 获取沙箱审计日志
+
+```python
+sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -> dict
+```
+
+**筛选参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `cursor` | int | 查询起始时间戳，单位为毫秒，必须大于或等于 `0` |
+| `limit` | int | 最多返回的日志数量，默认值为 `1000`，取值范围为 `0` 至 `1000` |
+| `direction` | str | 查询方向；`forward` 从 `cursor` 向后查询较新的日志，`backward` 向前查询较旧的日志 |
+| `level` | str | 最低日志级别，例如 `info`、`warn` 或 `error`；低于该级别的日志不会返回 |
+| `search` | str | 对日志消息进行区分大小写的子字符串匹配，最大长度为 `25` 个字符 |
+
+返回格式为 `{"logs": [...]}`。每条日志包含：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `timestamp` | str | 日志产生时间，使用 RFC 3339 格式 |
+| `message` | str | 日志正文 |
+| `level` | str | 日志严重级别，例如 `info`、`warn` 或 `error` |
+| `fields` | dict[str, str] | 日志附加上下文，例如沙箱 ID、命名空间或操作名称 |
+
+如果没有找到符合条件的日志，则返回 `{"logs": []}`。
+注：后端功能将在后续 PR 中实现。
+
+### 更新沙箱网络策略
+
+```python
+sandbox.update_network(
+    allow_out=None,
+    deny_out=None,
+    egress_proxy=None,
+    rules=None,
+    allow_internet_access=None,
+) -> dict
+```
+
+**参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `allow_out` | list[str] | 允许访问的出站目标列表，对应请求字段 `allowOut`；显式传入空列表表示清空该配置 |
+| `deny_out` | list[str] | 禁止访问的出站目标列表，对应请求字段 `denyOut`；显式传入空列表表示清空该配置 |
+| `egress_proxy` | dict | 出站代理配置，对应 `egressProxy`；可包含 `address`、`username` 和 `password` |
+| `rules` | dict | 自定义网络规则，对应请求字段 `rules` |
+| `allow_internet_access` | bool | 是否允许访问互联网；`True` 表示允许，`False` 表示禁止 |
+
+所有参数均为可选项；未传入的字段不会包含在更新请求中。更新成功时 daemon 返回 HTTP `204 No Content`，SDK 返回空字典 `{}`；请求无效或沙箱不存在时抛出 `RuntimeError`。
+注：后端功能将在后续 PR 中实现。
+
 ---
 
 ### 获取沙箱信息
@@ -458,7 +570,7 @@ print(result)
 ```python
 Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
         namespace=None, vcpu_num=None, vcpu_max=None, ram_mb=None,
-        config_path=None)
+        config_path=None, env=None, network=None)
 ```
 
 **主要参数：**
@@ -474,6 +586,8 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
 | `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |
 | `config_path` | str | 配置文件路径，默认按优先级自动查找 |
+| `env` | dict | 创建沙箱时传入的环境变量 |
+| `network` | dict | 创建沙箱时传入的网络配置 |
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法。
 

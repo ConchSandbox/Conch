@@ -66,6 +66,23 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 	}
 }
 
+func TestReadyPayloadIncludesEnvironment(t *testing.T) {
+	payload, err := readyPayload(ReadyOptions{
+		SandboxID:  "sandbox-1",
+		AgentToken: "token",
+		Env: map[string]string{
+			"SOME_RANDOM_KEY": "key123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("readyPayload() error = %v", err)
+	}
+	want := "I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:token\nENV_JSON:{\"SOME_RANDOM_KEY\":\"key123\"}\n"
+	if payload != want {
+		t.Fatalf("readyPayload() = %q, want %q", payload, want)
+	}
+}
+
 func TestValidateAgentReadyAcceptsVersionMismatch(t *testing.T) {
 	if err := validateAgentReady("READY:0.0.0", "sandbox-version", ulog.GetLogger(), ""); err != nil {
 		t.Fatalf("validateAgentReady() error = %v, want nil for version mismatch", err)

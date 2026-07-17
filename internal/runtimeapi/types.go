@@ -6,6 +6,20 @@ import (
 	"github.com/openeuler/Conch/internal/volume"
 )
 
+type SandboxEgressProxyConfig struct {
+	Address  string `json:"address,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+type SandboxNetworkConfig struct {
+	AllowOut            []string                  `json:"allowOut,omitempty"`
+	DenyOut             []string                  `json:"denyOut,omitempty"`
+	EgressProxy         *SandboxEgressProxyConfig `json:"egressProxy,omitempty"`
+	Rules               map[string]any            `json:"rules,omitempty"`
+	AllowInternetAccess *bool                     `json:"allow_internet_access,omitempty"`
+}
+
 // ImageRecord.Kind values exposed by the image API. These classify the
 // user-visible image record, not the io.conch.kind annotation stored on Boot
 // Index component descriptors.
@@ -36,6 +50,8 @@ type SandboxCreateOptions struct {
 	VCPUMax        int64
 	RamMB          int64
 	VolumeMounts   []volume.Mount
+	Env            map[string]string
+	Network        *SandboxNetworkConfig
 }
 
 type SandboxDefaults struct {
@@ -52,6 +68,10 @@ type SandboxCreateResult struct {
 	Namespace    string
 	IP           string
 	AgentToken   string
+	TemplateID   string
+	VCPUNum      int64
+	RamMB        int64
+	CreatedAt    int64
 }
 
 type SandboxLifecycleOptions struct {

@@ -428,7 +428,10 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 		RamMB:      4096,
 	})
 
-	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{SandboxID: "sandbox-1"})
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+		SandboxID: "sandbox-1",
+		Env:       map[string]string{"SOME_RANDOM_KEY": "key123"},
+	})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
@@ -444,6 +447,9 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 	if sandboxOps.req.AgentToken == "" {
 		t.Fatal("AgentToken is empty")
+	}
+	if got := sandboxOps.req.Env["SOME_RANDOM_KEY"]; got != "key123" {
+		t.Fatalf("Env[SOME_RANDOM_KEY] = %q, want key123", got)
 	}
 	if result.AgentToken != sandboxOps.req.AgentToken {
 		t.Fatalf("result.AgentToken = %q, want generated token", result.AgentToken)

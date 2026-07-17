@@ -24,7 +24,7 @@ const (
 	defaultVmmName     = "cloud-hypervisor"
 	DefaultRamMB       = 256
 	defaultRamMB       = DefaultRamMB
-	createSandbox      = "/api/sandbox/create"
+	createSandbox      = "/api/v1/sandboxes"
 	suspendSandbox     = "/api/sandbox/suspend"
 	resumeSandbox      = "/api/sandbox/resume"
 	checkpointSandbox  = "/api/sandbox/checkpoint"
@@ -69,8 +69,8 @@ type VolumeMount struct {
 
 // CreateResponse is the JSON response from sandbox create
 type CreateResponse struct {
-	Status string `json:"status"`
-	IP     string `json:"ip"`
+	SandboxID string `json:"sandboxID"`
+	Domain    string `json:"domain"`
 }
 
 type SandboxLifecycleRequest struct {
@@ -350,7 +350,7 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 	}
 }
 
-// CreateSandbox calls POST /api/sandbox/create using a template ID.
+// CreateSandbox calls POST /api/v1/sandboxes using a template ID.
 func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB int64) error {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
@@ -379,9 +379,6 @@ func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB in
 	var cr CreateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		return fmt.Errorf("decoding create response: %w", err)
-	}
-	if cr.Status != "ok" {
-		return fmt.Errorf("create sandbox status: %s", cr.Status)
 	}
 	return nil
 }

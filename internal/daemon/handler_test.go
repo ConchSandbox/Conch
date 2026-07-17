@@ -1,13 +1,23 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
+	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -290,7 +300,12 @@ func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult
 	if f.createErr != nil {
 		return sandbox.CreateResult{}, f.createErr
 	}
-	return sandbox.CreateResult{IP: "192.0.2.2", Namespace: req.Namespace, SandboxID: req.SandboxID}, nil
+	return sandbox.CreateResult{
+		IP:         "192.0.2.2",
+		AgentToken: req.AgentToken,
+		Namespace:  req.Namespace,
+		SandboxID:  req.SandboxID,
+	}, nil
 }
 
 func (f *fakeSandboxOps) Delete(req sandbox.DeleteRequest) error {
@@ -324,4 +339,170 @@ func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.Chec
 		MemRootPath: memRoot,
 		VMMName:     "cloud-hypervisor",
 	}, nil
+}
+
+func TestHandleHealth(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ready := &Daemon{
+		stateStore:     store,
+		containerdHost: &containerdhost.Host{},
+		daemonClient:   &containerdclient.Client{},
+		runtimeService: &conchruntime.Service{Sandbox: &fakeSandboxOps{}, Store: store},
+	}
+	for _, test := range []struct {
+		name   string
+		daemon *Daemon
+		want   int
+	}{
+		{name: "not ready", daemon: &Daemon{}, want: http.StatusServiceUnavailable},
+		{name: "ready", daemon: ready, want: http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			test.daemon.handleHealth(recorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+		})
+	}
+}
+
+func TestMatchesSandboxState(t *testing.T) {
+	for _, test := range []struct {
+		state  string
+		states map[string]bool
+		want   bool
+	}{
+		{state: state.SandboxReady, want: true},
+		{state: state.SandboxSuspended, want: true},
+		{state: state.SandboxStopped, want: true},
+		{state: state.SandboxUnknown, want: false},
+		{state: state.SandboxStopped, states: map[string]bool{"paused": true}, want: true},
+		{state: state.SandboxStopped, states: map[string]bool{"running": true}, want: false},
+	} {
+		if got := matchesSandboxState(state.SandboxRecord{State: test.state}, test.states); got != test.want {
+			t.Fatalf("matchesSandboxState(%q, %v) = %v, want %v", test.state, test.states, got, test.want)
+		}
+	}
+}
+
+func TestSandboxV1Handlers(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	sandboxOps := &fakeSandboxOps{}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil, store, "default")
+	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
+		TemplateID: "tmpl-default",
+		VCPUNum:    4,
+		VCPUMax:    4,
+		RamMB:      256,
+	})
+	server := &Daemon{
+		router:         http.NewServeMux(),
+		stateStore:     store,
+		runtimeService: runtimeService,
+	}
+	server.routes()
+
+	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+		PodSandboxID:     "pod-1",
+		ConchSandboxID:   "sandbox-1",
+		Namespace:        "default",
+		State:            state.SandboxReady,
+		SourceTemplateID: "tmpl-1",
+		VCPUNum:          2,
+		RamMB:            128,
+	}); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+
+	t.Run("list", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes?limit=1", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var records []sandboxResponse
+		if err := json.NewDecoder(response.Body).Decode(&records); err != nil {
+			t.Fatalf("decode list response: %v", err)
+		}
+		if len(records) != 1 || records[0].SandboxID != "sandbox-1" || records[0].TemplateID != "tmpl-1" {
+			t.Fatalf("list response = %#v", records)
+		}
+	})
+
+	t.Run("get", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var record sandboxResponse
+		if err := json.NewDecoder(response.Body).Decode(&record); err != nil {
+			t.Fatalf("decode get response: %v", err)
+		}
+		if record.SandboxID != "sandbox-1" || record.TemplateID != "tmpl-1" ||
+			record.ConchInitAccessToken == nil || record.AllowInternetAccess == nil || record.Domain == nil {
+			t.Fatalf("get response = %#v", record)
+		}
+	})
+
+	t.Run("create", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+			"sandbox_id":"sandbox-2","template_id":"tmpl-2","env":{"SOME_RANDOM_KEY":"key123"}
+		}`))
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var record createSandboxResponse
+		if err := json.NewDecoder(response.Body).Decode(&record); err != nil {
+			t.Fatalf("decode create response: %v", err)
+		}
+		if record.SandboxID != "sandbox-2" || record.TemplateID != "tmpl-2" ||
+			record.Domain != "192.0.2.2" || record.ConchInitAccessToken == "" {
+			t.Fatalf("create response = %#v", record)
+		}
+		if got := sandboxOps.createReq.Env["SOME_RANDOM_KEY"]; got != "key123" {
+			t.Fatalf("Env[SOME_RANDOM_KEY] = %q, want key123", got)
+		}
+	})
+
+	t.Run("logs", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs?limit=10", nil)
+		if response.Code != http.StatusOK || response.Body.String() != "{\"logs\":[]}\n" {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("network", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", bytes.NewBufferString(`{"allowOut":["192.0.2.1"]}`))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodDelete, "/api/v1/sandboxes/sandbox-1", nil)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0].SandboxId != "sandbox-1" {
+			t.Fatalf("delete requests = %#v", sandboxOps.deleteReqs)
+		}
+		if _, err := store.GetSandbox(context.Background(), "pod-1"); !errors.Is(err, state.ErrNotFound) {
+			t.Fatalf("deleted sandbox lookup error = %v", err)
+		}
+	})
+}
+
+func serveSandboxRequest(server *Daemon, method, path string, body io.Reader) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	server.router.ServeHTTP(recorder, httptest.NewRequest(method, path, body))
+	return recorder
 }

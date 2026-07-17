@@ -173,8 +173,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUMax:      opts.VCPUMax,
 		RAMMB:        opts.RamMB,
 		AgentToken:   agentToken,
+		Env:          copyMap(opts.Env),
 		VolumeMounts: opts.VolumeMounts,
 	}
+	// TODO: wire opts.Network into the network policy backend.
 
 	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
@@ -230,6 +232,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		Namespace:    namespace,
 		IP:           createResult.IP,
 		AgentToken:   createResult.AgentToken,
+		TemplateID:   opts.TemplateID,
+		VCPUNum:      opts.VCPUNum,
+		RamMB:        opts.RamMB,
+		CreatedAt:    createdAt,
 	}, nil
 }
 

@@ -69,21 +69,82 @@ type snapshotInfoRequest struct {
 }
 
 type sandboxCreateRequest struct {
-	Namespace    string         `json:"namespace"`
-	TemplateID   string         `json:"template_id"`
-	VMMName      string         `json:"vmm_name"`
-	SandboxID    string         `json:"sandbox_id"`
-	LeaseID      string         `json:"lease_id,omitempty"`
-	VCPUNum      int64          `json:"vcpu_num"`
-	VCPUMax      int64          `json:"vcpu_max"`
-	RAMMB        int64          `json:"ram_mb"`
-	VolumeMounts []volume.Mount `json:"volumeMounts,omitempty"`
+	Namespace    string                           `json:"namespace"`
+	TemplateID   string                           `json:"template_id"`
+	VMMName      string                           `json:"vmm_name"`
+	SandboxID    string                           `json:"sandbox_id"`
+	LeaseID      string                           `json:"lease_id,omitempty"`
+	VCPUNum      int64                            `json:"vcpu_num"`
+	VCPUMax      int64                            `json:"vcpu_max"`
+	RAMMB        int64                            `json:"ram_mb"`
+	VolumeMounts []volume.Mount                   `json:"volumeMounts,omitempty"`
+	Env          map[string]string                `json:"env,omitempty"`
+	Network      *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 }
 
-type sandboxDeleteRequest struct {
-	Namespace string `json:"namespace"`
-	SandboxID string `json:"sandbox_id"`
+type sandboxVolumeMountResponse struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
+
+type sandboxNetworkResponse struct {
+	AllowPublicTraffic bool                                `json:"allowPublicTraffic"`
+	AllowOut           []string                            `json:"allowOut"`
+	DenyOut            []string                            `json:"denyOut"`
+	EgressProxy        runtimeapi.SandboxEgressProxyConfig `json:"egressProxy"`
+	MaskRequestHost    string                              `json:"maskRequestHost"`
+	Rules              map[string]string                   `json:"rules"`
+}
+
+type sandboxLifecycleResponse struct {
+	AutoResume bool `json:"autoResume"`
+}
+
+type createSandboxResponse struct {
+	TemplateID           string `json:"templateID"`
+	SandboxID            string `json:"sandboxID"`
+	Namespace            string `json:"namespace"`
+	ConchInitVersion     string `json:"conchInitVersion"`
+	Alias                string `json:"alias"`
+	ConchInitAccessToken string `json:"conchInitAccessToken"`
+	TrafficAccessToken   string `json:"trafficAccessToken"`
+	Domain               string `json:"domain"`
+}
+
+type sandboxResponse struct {
+	TemplateID           string                       `json:"templateID"`
+	ImageName            string                       `json:"imageName"`
+	SnapshotID           string                       `json:"snapshotID"`
+	SandboxID            string                       `json:"sandboxID"`
+	Namespace            string                       `json:"namespace"`
+	StartedAt            string                       `json:"startedAt"`
+	EndAt                string                       `json:"endAt"`
+	CPUCount             int64                        `json:"cpuCount"`
+	MemoryMB             int64                        `json:"memoryMB"`
+	DiskSizeMB           int64                        `json:"diskSizeMB"`
+	ConchInitVersion     string                       `json:"conchInitVersion"`
+	Alias                string                       `json:"alias"`
+	ConchInitAccessToken *string                      `json:"conchInitAccessToken,omitempty"`
+	AllowInternetAccess  *bool                        `json:"allowInternetAccess,omitempty"`
+	Domain               *string                      `json:"domain,omitempty"`
+	Metadata             map[string]string            `json:"metadata"`
+	Network              *sandboxNetworkResponse      `json:"network,omitempty"`
+	Lifecycle            *sandboxLifecycleResponse    `json:"lifecycle,omitempty"`
+	VolumeMounts         []sandboxVolumeMountResponse `json:"volumeMounts"`
+}
+
+type sandboxLogEntryResponse struct {
+	Timestamp string            `json:"timestamp"`
+	Message   string            `json:"message"`
+	Level     string            `json:"level"`
+	Fields    map[string]string `json:"fields"`
+}
+
+type getSandboxLogsResponse struct {
+	Logs []sandboxLogEntryResponse `json:"logs"`
+}
+
+type updateSandboxNetworkRequest = runtimeapi.SandboxNetworkConfig
 
 type sandboxLifecycleRequest struct {
 	Namespace string `json:"namespace,omitempty"`
