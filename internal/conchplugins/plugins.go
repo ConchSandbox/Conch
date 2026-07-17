@@ -13,6 +13,9 @@ const (
 	SnapshotServicePluginType plugin.Type = "io.conch.snapshot.v1"
 	SnapshotServiceID                     = "snapshot"
 	SnapshotServiceURI                    = string(SnapshotServicePluginType) + "." + SnapshotServiceID
+	TemplateServicePluginType plugin.Type = "io.conch.template.v1"
+	TemplateServiceID                     = "template"
+	TemplateServiceURI                    = string(TemplateServicePluginType) + "." + TemplateServiceID
 	SandboxServicePluginType  plugin.Type = "io.conch.sandbox.v1"
 	SandboxServiceID                      = "sandbox"
 	SandboxServiceURI                     = string(SandboxServicePluginType) + "." + SandboxServiceID

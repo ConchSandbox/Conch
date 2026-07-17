@@ -40,7 +40,7 @@
 
 #### 2. pull 命令
 功能：拉取功能镜像并执行解包。
-逻辑：调用 `conch pull` 拉取并处理 `main_image`。该命令通过 conchd API 工作，执行前需要先启动 `./bin/conchd`。
+逻辑：调用 `conch image pull` 拉取并处理 `main_image`。该命令通过 conchd API 工作，执行前需要先启动 `./bin/conchd`。
 
 使用示例：
 ```bash
@@ -164,5 +164,5 @@ CONCH_API_TIMEOUT=10m ./scripts/conch-env-setup.sh pull --main_image=hub.oepkgs.
 
 解决方案：
 - 确认镜像仓库地址正确（自定义镜像时检查域名、仓库名、标签是否正确）
-- 确认 conchd 已启动；`conch pull` 通过 conchd API 操作进程内 containerd store
-- 如需跳过证书验证，请在 `conch pull` 参数中显式传入 `--plain-http` 或按镜像仓库要求配置认证信息
+- 确认 conchd 已启动；`conch image pull` 通过 conchd API 操作进程内 containerd store
+- 如需跳过证书验证，请在 `conch image pull` 参数中显式传入 `--plain-http` 或按镜像仓库要求配置认证信息

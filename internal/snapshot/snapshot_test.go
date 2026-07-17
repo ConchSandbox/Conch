@@ -40,7 +40,6 @@ func TestCreateBootLayout(t *testing.T) {
 		t.Fatalf("init server with %s: %v", workDir, err)
 	}
 	defer server.Close()
-	defer server.CleanupAllViews()
 
 	ns := "default"
 	rootfsParent := "test-rootfs-parent"
@@ -75,7 +74,10 @@ func TestCreateBootLayout(t *testing.T) {
 		Mem:    memParent,
 		VM:     vmParent,
 	}
-	layout, err := server.CreateBootLayout(context.Background(), ns, key, parents, 0)
+	layout, err := server.CreateBootLayout(context.Background(), ns, key, snapshot.BootLayoutRequest{
+		Parents:      parents,
+		MemoryLayout: snapshot.MemoryLayoutWritableFile,
+	})
 	if err != nil {
 		if isMountPermissionError(err) {
 			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
@@ -89,15 +91,6 @@ func TestCreateBootLayout(t *testing.T) {
 		}
 	}()
 	t.Logf("create layout result: %v\n", layout)
-
-	newKey := "hello-commit"
-	if _, err := server.CommitBootLayout(context.Background(), ns, newKey, key); err != nil {
-		t.Fatalf("commit layout failed: %v\n", err)
-	}
-	t.Logf("finish commit layout: %s\n", newKey)
-	if _, err := server.SnapshotInfo(context.Background(), ns, newKey); err != nil {
-		t.Fatalf("get committed snapshot info failed: %v\n", err)
-	}
 
 	t.Logf("run release active layout: %s\n", key)
 	if err := server.ReleaseBootLayout(context.Background(), ns, key); err != nil {
@@ -147,31 +140,7 @@ func populateMemParent(mountPoint string) error {
 	if err := os.WriteFile(mountPoint+"/"+common.MemFileName, []byte("mem"), 0o640); err != nil {
 		return err
 	}
-	config := []byte(`{
-  "payload": {
-    "kernel": "/old/kernel",
-    "initramfs": "/old/initrd"
-  },
-  "memory": {
-    "zones": [
-      {
-        "file": "/old/mem",
-        "shared": true
-      }
-    ]
-  },
-  "pmem": [
-    {
-      "file": "/old/rootfs",
-      "discard_writes": false
-    }
-  ],
-  "vsock": {
-    "cid": 3,
-    "socket": "/old/vsock"
-  }
-}`)
-	return os.WriteFile(snapshotDir+"/"+common.SnapshotConfigFileName, config, 0o640)
+	return os.WriteFile(snapshotDir+"/state", []byte("vmm-state"), 0o640)
 }
 
 func populateVMParent(mountPoint string) error {

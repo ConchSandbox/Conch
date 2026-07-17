@@ -67,7 +67,7 @@ state:
   path: /var/lib/conch/state.db
 
 sandbox:
-  default_image: hub.oepkgs.net/conch/openeuler:odd-x86
+  default_template_id: hub.oepkgs.net/conch/openeuler:odd-x86
   default_vmm_name: cloud-hypervisor
   default_vcpu_num: 2
   default_vcpu_max: 2
@@ -159,8 +159,7 @@ sudo crictl --runtime-endpoint unix:///var/run/conchd/conch-cri.sock info
     "app": "conch-cri-smoke"
   },
   "annotations": {
-    "conch.io/sandbox-image": "hub.oepkgs.net/conch/openeuler:odd-x86",
-    "conch.io/use-snapshot": "false",
+    "conch.io/template-id": "tmpl_xxx",
     "conch.io/vmm-name": "cloud-hypervisor",
     "conch.io/vcpu": "2",
     "conch.io/vcpu-max": "2",
@@ -188,19 +187,19 @@ sudo crictl --runtime-endpoint unix:///var/run/conchd/conch-cri.sock inspectp "$
 - `inspectp` 显示 sandbox metadata、labels、annotations 和 runtime 状态。
 - conchd 日志显示 sandbox 创建成功。
 
-### 5.3 PodSandbox 快照镜像启动
+### 5.3 PodSandbox 恢复启动
 
-如果 `conch.io/sandbox-image` 指向的是可恢复的 Conch 快照镜像，将 `/tmp/conch-pod.json` 中的 annotation 改为：
+先通过 `conch sandbox checkpoint <sandbox-id>` 产生一个 `boot_mode=resume` 的 Template，然后将 `/tmp/conch-pod.json` 中的 annotation 改为：
 
 ```json
-"conch.io/use-snapshot": "true"
+"conch.io/template-id": "tmpl_xxx"
 ```
 
 预期结果：
 
-- Conch 在当前节点通过 `sandbox-image` 解析 rootfs snapshot。
+- Conch 在当前节点通过 `template-id` 解析完整的 rootfs/mem/vm refs。
 - sandbox 创建走恢复启动路径。
-- 如果 rootfs snapshot 缺少 mem/vm snapshot 关联标签，创建失败并返回明确错误。
+- 如果 Template 缺少恢复所需的 refs，创建失败并返回明确错误。
 
 注意：CRI 不支持传本地 `snapshot-id`。snapshot ID 是 worker 节点本地 containerd 状态，不应写入 Pod 配置。
 
@@ -321,8 +320,7 @@ metadata:
   name: conch-cri-smoke
   namespace: default
   annotations:
-    conch.io/sandbox-image: hub.oepkgs.net/conch/openeuler:odd-x86
-    conch.io/use-snapshot: "false"
+    conch.io/template-id: tmpl_xxx
     conch.io/vmm-name: cloud-hypervisor
     conch.io/vcpu: "2"
     conch.io/vcpu-max: "2"
@@ -367,8 +365,8 @@ sudo journalctl -u kubelet -n 100 --no-pager
 
 PodSandbox 创建失败：
 
-- 检查 `conch.io/sandbox-image` 或 `sandbox.default_image` 是否存在并已完成 Conch image 处理。
-- `use-snapshot=true` 时，确认镜像解包后的 rootfs snapshot 带有 mem/vm snapshot 关联标签。
+- 检查 `conch.io/template-id` 或 `sandbox.default_template_id` 是否指向 READY Template。
+- 恢复启动时，确认 Template 的 `boot_mode=resume` 且持有完整 rootfs/mem/vm refs。
 - 检查 Cloud-Hypervisor、网络、snapshot mount 和 vsock 相关日志。
 
 资源残留：

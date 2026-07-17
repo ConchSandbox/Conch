@@ -1,8 +1,6 @@
 package snapshot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -12,34 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd/v2/core/snapshots"
-	"github.com/opencontainers/go-digest"
-
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
-
-const chainIDPrefix = "sha256:"
-
-// CalculateSnapshotID calculates a snapshot ID from namespace, key, and parent.
-// If parent is empty, returns a digest of namespace/key.
-// If parent is set, returns a chain ID computed from parent and current layer.
-func CalculateSnapshotID(namespace, key, parent string) (string, error) {
-	if parent == "" {
-		dgst := digest.FromString(fmt.Sprintf("%s/%s", namespace, key))
-		return dgst.String(), nil
-	}
-
-	diffID := digest.FromString(fmt.Sprintf("%s/%s", namespace, key))
-	chainID := calculateChainID(parent, diffID.String())
-	return chainID, nil
-}
-
-// calculateChainID computes the chain ID for layer stacking.
-func calculateChainID(parentChainID, diffID string) string {
-	data := parentChainID + " " + diffID
-	hash := sha256.Sum256([]byte(data))
-	return chainIDPrefix + hex.EncodeToString(hash[:])
-}
 
 // prepareSnapshotFiles creates the snapshot directory structure.
 func prepareSnapshotFiles(layout *BootLayout) error {
@@ -145,22 +117,6 @@ func MemKeyFromRootfs(rootfsKey string) string {
 	return getMemKeyFromRootfs(rootfsKey)
 }
 
-func RootfsViewAliasKey(sandboxID string) string {
-	return getRootfsViewAliasKey(sandboxID)
-}
-
-func MemViewAliasKey(sandboxID string) string {
-	return getMemViewAliasKey(sandboxID)
-}
-
-func VMViewAliasKey(sandboxID string) string {
-	return getVMViewAliasKey(sandboxID)
-}
-
-func SharedViewSnapshotKey(mountKind, snapshotID string) string {
-	return getSharedViewSnapshotKey(mountKind, snapshotID)
-}
-
 // cleanupEmptySnapshotParents removes empty parent directories after a mount point
 // directory has been deleted. It only prunes within the snapshot tree and stops
 // at the "snapshot" root directory.
@@ -200,26 +156,5 @@ func bootLayoutLabels(layout *BootLayout, labels map[string]string) map[string]s
 	labels[common.SnapshotLabelMemSize] = fmt.Sprintf("%d", layout.MemorySizeMB)
 	labels[common.SnapshotLabelRootfs] = layout.RootfsMount
 	labels[common.SnapshotLabelSnapshotDir] = layout.SnapshotDir
-	return labels
-}
-
-// mergeLabels merges snapshot info labels into layout and returns non-structural labels.
-func mergeLabels(info *snapshots.Info, layout *BootLayout) map[string]string {
-	labels := make(map[string]string)
-	for k, v := range info.Labels {
-		switch k {
-		case common.SnapshotLabelMemSize:
-			mSize, err := strconv.ParseInt(v, 10, 64)
-			if err == nil {
-				layout.MemorySizeMB = mSize
-			}
-		case common.SnapshotLabelRootfs:
-			layout.RootfsMount = v
-		case common.SnapshotLabelSnapshotDir:
-			layout.SnapshotDir = v
-		default:
-			labels[k] = v
-		}
-	}
 	return labels
 }

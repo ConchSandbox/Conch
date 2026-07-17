@@ -1,0 +1,139 @@
+package cmd
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/openeuler/Conch/internal/image/client"
+)
+
+func printSandboxHelp(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  conch sandbox <command> [options]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Commands:")
+	fmt.Fprintln(out, "  create      Create a sandbox from a Template ID.")
+	fmt.Fprintln(out, "  checkpoint  Checkpoint a sandbox into a resumable template.")
+	fmt.Fprintln(out, "  suspend     Suspend a running sandbox.")
+	fmt.Fprintln(out, "  resume      Resume a suspended sandbox.")
+	fmt.Fprintln(out, "  stop        Stop a sandbox.")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Run 'conch sandbox <command> --help' for command-specific usage.")
+}
+
+func RunSandbox(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printSandboxHelp(os.Stdout)
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		return runSandboxCreate(ctx, args[1:])
+	case "checkpoint":
+		return runSandboxCheckpoint(ctx, args[1:])
+	case "suspend":
+		return runSandboxLifecycle(ctx, args[1:], "suspend")
+	case "resume":
+		return runSandboxLifecycle(ctx, args[1:], "resume")
+	case "stop":
+		return runSandboxLifecycle(ctx, args[1:], "stop")
+	default:
+		printSandboxHelp(os.Stderr)
+		return fmt.Errorf("unknown sandbox command %q", args[0])
+	}
+}
+
+func runSandboxCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sandbox create", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	templateID := fs.String("template-id", "", "template ID")
+	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
+	namespace := fs.String("namespace", "", "containerd namespace")
+	configPath := fs.String("config", "", "config file path")
+	ramMB := fs.Int64("ram-mb", 0, "memory size in MB")
+	fs.StringVar(namespace, "n", "", "containerd namespace")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("conch sandbox create: unexpected positional arguments: %v", fs.Args())
+	}
+	if *templateID == "" {
+		return fmt.Errorf("conch sandbox create: --template-id is required")
+	}
+	cfg, err := LoadConchConfig(*configPath)
+	if err != nil {
+		return fmt.Errorf("conch sandbox create: load config: %w", err)
+	}
+	id := *sandboxID
+	if id == "" {
+		id = fmt.Sprintf("sandbox-%d", time.Now().UnixNano())
+	}
+	if err := client.NewClientWithConfig("", *configPath).CreateSandbox(*templateID, id, ResolveConchNamespace(cfg, *namespace), *ramMB); err != nil {
+		return fmt.Errorf("conch sandbox create: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Sandbox: %s\n", id)
+	return nil
+}
+
+func runSandboxCheckpoint(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sandbox checkpoint", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	namespace := fs.String("namespace", "", "containerd namespace")
+	configPath := fs.String("config", "", "config file path")
+	fs.StringVar(namespace, "n", "", "containerd namespace")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("conch sandbox checkpoint: exactly one sandbox ID is required")
+	}
+	cfg, err := LoadConchConfig(*configPath)
+	if err != nil {
+		return fmt.Errorf("conch sandbox checkpoint: load config: %w", err)
+	}
+	templateID, err := client.NewClientWithConfig("", *configPath).CheckpointSandbox(ctx, fs.Arg(0), ResolveConchNamespace(cfg, *namespace))
+	if err != nil {
+		return fmt.Errorf("conch sandbox checkpoint: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Template: %s\n", templateID)
+	return nil
+}
+
+func runSandboxLifecycle(ctx context.Context, args []string, op string) error {
+	fs := flag.NewFlagSet("sandbox "+op, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	namespace := fs.String("namespace", "", "containerd namespace")
+	configPath := fs.String("config", "", "config file path")
+	fs.StringVar(namespace, "n", "", "containerd namespace")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("conch sandbox %s: exactly one sandbox ID is required", op)
+	}
+	cfg, err := LoadConchConfig(*configPath)
+	if err != nil {
+		return fmt.Errorf("conch sandbox %s: load config: %w", op, err)
+	}
+	c := client.NewClientWithConfig("", *configPath)
+	ns := ResolveConchNamespace(cfg, *namespace)
+	id := fs.Arg(0)
+	switch op {
+	case "suspend":
+		err = c.SuspendSandbox(ctx, id, ns)
+	case "resume":
+		err = c.ResumeSandbox(ctx, id, ns)
+	case "stop":
+		err = c.StopSandbox(ctx, id, ns)
+	}
+	if err != nil {
+		return fmt.Errorf("conch sandbox %s: %w", op, err)
+	}
+	fmt.Fprintf(os.Stdout, "%s sandbox: %s\n", op, id)
+	return nil
+}

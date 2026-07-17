@@ -12,11 +12,14 @@ import (
 const (
 	CLHVmmType        = 0
 	StratovirtVmmType = 1
+
+	CloudHypervisorName = "cloud-hypervisor"
+	StratovirtName      = "stratovirt"
 )
 
 var vmmTypeMap = map[string]int{
-	"cloud-hypervisor": CLHVmmType,
-	"stratovirt":       StratovirtVmmType,
+	CloudHypervisorName: CLHVmmType,
+	StratovirtName:      StratovirtVmmType,
 }
 
 func GetVmmType(vmmName string) (int, bool) {

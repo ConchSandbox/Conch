@@ -11,7 +11,7 @@
 - 支持 `StopPodSandbox` / `RemovePodSandbox` 删除 sandbox。
 - 支持 container create/start/stop/remove 的占位状态流转。
 - 支持 `PullImage` / `ListImages` / `ImageStatus` / `RemoveImage` 基础链路，用于 kubelet image 语义和 Conch image 管理入口。
-- 支持通过 `sandbox-image + use-snapshot` 控制冷启动或快照恢复启动。
+- 支持通过 Template 创建 Sandbox；Template 自身的 `boot_mode` 决定冷启动或恢复启动。
 
 当前版本不实现完整 OCI container rootfs 语义。Kubernetes `containers[].image` 只用于 kubelet/CRI 的 image 和 container config 语义，不会变成 VM 内 rootfs，也不会在 VM 内启动真实业务进程。`ImageFsInfo` 当前仍为基础占位实现，暂不返回真实镜像文件系统用量。
 
@@ -29,7 +29,7 @@ Conch sandbox 默认参数放在 `sandbox` 配置域。HTTP API、SDK 和 CRI �
 
 ```yaml
 sandbox:
-  default_image: hub.oepkgs.net/conch/openeuler:odd-x86
+  default_template_id: tmpl_xxx
   default_vmm_name: cloud-hypervisor
   default_vcpu_num: 2
   default_vcpu_max: 2
@@ -74,16 +74,13 @@ CRI 入口通过 PodSandbox annotation 控制 Conch sandbox。支持字段如下
 
 | Annotation | 含义 | 默认值 |
 | --- | --- | --- |
-| `conch.io/sandbox-image` | Conch VM sandbox 镜像。 | `sandbox.default_image` |
-| `conch.io/use-snapshot` | 是否把 `sandbox-image` 解析出的 rootfs snapshot 当作可恢复快照启动。`"false"` 为冷启动路径，`"true"` 为快照恢复路径。 | `false` |
+| `conch.io/template-id` | 用于创建 Sandbox 的 Template ID。 | `sandbox.default_template_id` |
 | `conch.io/vmm-name` | VMM 名称。 | `sandbox.default_vmm_name` |
 | `conch.io/vcpu` | vCPU 数量。 | `sandbox.default_vcpu_num` |
 | `conch.io/vcpu-max` | 最大 vCPU 数量。 | `sandbox.default_vcpu_max` |
 | `conch.io/ram-mb` | 内存大小，单位 MB。 | `sandbox.default_ram_mb` |
 
-CRI annotation 不支持传本地 `snapshot-id`。snapshot ID 是单个 worker 节点上的 containerd 本地状态，写入 Pod 配置后无法跨节点调度。CRI 入口统一使用 `sandbox-image + use-snapshot`，由 Conch 在当前节点解析镜像对应的本地 snapshot。
-
-`use-snapshot=true` 要求 `sandbox-image` 解包后的 rootfs snapshot 已带有可恢复所需的 mem/vm snapshot 关联标签。否则 sandbox 创建会失败。
+CRI annotation 不直接接受底层 snapshot key。`template-id` 指向 Conch 管理的高层 Template；冷启动 Template 没有 mem snapshot，可恢复 Template 则包含完整的 rootfs/mem/vm refs。
 
 ## 5. crictl PodSandbox 示例
 
@@ -100,8 +97,7 @@ CRI annotation 不支持传本地 `snapshot-id`。snapshot ID 是单个 worker �
     "attempt": 1
   },
   "annotations": {
-    "conch.io/sandbox-image": "hub.oepkgs.net/conch/openeuler:odd-x86",
-    "conch.io/use-snapshot": "false",
+    "conch.io/template-id": "tmpl_xxx",
     "conch.io/vmm-name": "cloud-hypervisor",
     "conch.io/vcpu": "2",
     "conch.io/vcpu-max": "2",
@@ -141,8 +137,7 @@ metadata:
   name: conch-cri-smoke
   namespace: default
   annotations:
-    conch.io/sandbox-image: "hub.oepkgs.net/conch/openeuler:odd-x86"
-    conch.io/use-snapshot: "false"
+    conch.io/template-id: "tmpl_xxx"
     conch.io/vmm-name: "cloud-hypervisor"
     conch.io/vcpu: "2"
     conch.io/vcpu-max: "2"
@@ -158,7 +153,7 @@ spec:
 说明：
 
 - `containers[].image` 不是 Conch VM sandbox 镜像。
-- Conch VM sandbox 镜像由 `conch.io/sandbox-image` 或 `sandbox.default_image` 决定。
+- Conch Sandbox Template 由 `conch.io/template-id` 或 `sandbox.default_template_id` 决定。
 - 通过 kubelet 创建 Pod 只能作为 CRI 链路 smoke test，不能用于验证 VM 内业务容器执行。
 
 ## 7. 关闭与重启恢复

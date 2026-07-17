@@ -7,16 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"syscall"
 	"time"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
-	"github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
-	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -24,7 +22,8 @@ type Manager struct {
 	sandboxes          sync.Map // map[string]*sandboxEntry
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
-	snapshotServer     *snapshot.Server
+	template           TemplateManager
+	checkpointCapture  CheckpointCapture
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
@@ -36,7 +35,10 @@ type sandboxLifecycleState uint8
 const (
 	sandboxCreating sandboxLifecycleState = iota
 	sandboxReady
-	sandboxPausing
+	sandboxSuspending
+	sandboxSuspended
+	sandboxResuming
+	sandboxCheckpointing
 	sandboxDeleting
 	sandboxExited
 )
@@ -47,8 +49,14 @@ func (s sandboxLifecycleState) String() string {
 		return "creating"
 	case sandboxReady:
 		return "ready"
-	case sandboxPausing:
-		return "pausing"
+	case sandboxSuspending:
+		return "suspending"
+	case sandboxSuspended:
+		return "suspended"
+	case sandboxResuming:
+		return "resuming"
+	case sandboxCheckpointing:
+		return "checkpointing"
 	case sandboxDeleting:
 		return "deleting"
 	case sandboxExited:
@@ -64,14 +72,20 @@ type sandboxEntry struct {
 	sbx   *Sandbox
 }
 
-func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, snapshotServer *snapshot.Server, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
-	if snapshotServer == nil {
-		return nil, fmt.Errorf("snapshot server is required")
+type TemplateManager interface {
+	PrepareSandboxBoot(context.Context, template.PrepareSandboxBootRequest) (template.PreparedSandboxBoot, error)
+	ReleaseSandboxBoot(context.Context, template.ReleaseSandboxBootRequest) error
+}
+
+func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, templateManager TemplateManager, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
+	if templateManager == nil {
+		return nil, fmt.Errorf("template is required")
 	}
 	return &Manager{
 		pool:               p,
 		daemonClient:       daemonClient,
-		snapshotServer:     snapshotServer,
+		template:           templateManager,
+		checkpointCapture:  NewFullCheckpointCapture(),
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
@@ -80,17 +94,15 @@ func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, snapsho
 }
 
 type SandboxCreateRequest struct {
-	Namespace   string `json:"namespace"`
-	SnapshotId  string `json:"snapshot_id"`
-	ImageName   string `json:"image_name"`
-	UseSnapshot bool   `json:"use_snapshot"`
-	VmmName     string `json:"vmm_name"`
-	SandboxId   string `json:"sandbox_id"`
-	LeaseID     string `json:"lease_id,omitempty"`
-	VcpuNum     int64  `json:"vcpu_num"`
-	VcpuMax     int64  `json:"vcpu_max"`
-	RamMB       int64  `json:"ram_mb"`
-	AgentToken  string `json:"-"`
+	Namespace  string `json:"namespace"`
+	TemplateID string `json:"template_id"`
+	VmmName    string `json:"vmm_name"`
+	SandboxId  string `json:"sandbox_id"`
+	LeaseID    string `json:"lease_id,omitempty"`
+	VcpuNum    int64  `json:"vcpu_num"`
+	VcpuMax    int64  `json:"vcpu_max"`
+	RamMB      int64  `json:"ram_mb"`
+	AgentToken string `json:"-"`
 }
 
 type SandboxDeleteRequest struct {
@@ -98,10 +110,17 @@ type SandboxDeleteRequest struct {
 	SandboxId string `json:"sandbox_id"`
 }
 
-type SandboxPauseRequest struct {
+type SandboxLifecycleRequest struct {
 	Namespace string `json:"namespace"`
 	SandboxId string `json:"sandbox_id"`
 }
+
+type SandboxCheckpointRequest struct {
+	Namespace string `json:"namespace"`
+	SandboxId string `json:"sandbox_id"`
+}
+
+type SandboxCheckpointResult = CapturedBootComponents
 
 type SandboxCreateResult struct {
 	IP              string
@@ -117,15 +136,14 @@ type SandboxCreateResult struct {
 	NetworkNS       string
 	RootfsKey       string
 	MemKey          string
-	ParentRootfsID  string
-	ParentMemID     string
-	ParentVMID      string
 	RootfsMount     string
 	MemMount        string
 	VMMount         string
 	RootDir         string
 	MemSize         int64
 	Resume          bool
+	BootIndexDigest string
+	RootfsPmemPaths []string
 }
 
 func GenerateAgentToken() (string, error) {
@@ -245,11 +263,6 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 		return SandboxCreateResult{}, err
 	}
 
-	parentIDs, resume, err := m.prepareParentSnapshots(leaseCtx, namespace, req)
-	if err != nil {
-		return SandboxCreateResult{}, err
-	}
-
 	runtimeIDs, err := m.allocateCreateRuntimeIDs(req)
 	if err != nil {
 		return SandboxCreateResult{}, err
@@ -263,7 +276,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 		}
 	}()
 
-	layout, err := m.prepareBootLayout(leaseCtx, namespace, req, parentIDs, runtimeIDs, resume)
+	boot, err := m.prepareSandboxBoot(leaseCtx, namespace, req, runtimeIDs)
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
@@ -271,16 +284,19 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 		if err == nil {
 			return
 		}
-		rmErr := m.snapshotServer.ReleaseBootLayout(leaseCtx, namespace, runtimeIDs.key)
+		rmErr := m.template.ReleaseSandboxBoot(leaseCtx, template.ReleaseSandboxBootRequest{
+			Namespace: namespace,
+			SandboxID: runtimeIDs.key,
+		})
 		if rmErr != nil {
-			logger.Error("failed to release snapshot layout", ulog.F("key", runtimeIDs.key), ulog.F("error", rmErr))
+			logger.Error("failed to release sandbox boot layout", ulog.F("key", runtimeIDs.key), ulog.F("error", rmErr))
 			return
 		}
-		logger.Info("released snapshot layout due to error", ulog.F("key", runtimeIDs.key))
+		logger.Info("released sandbox boot layout due to error", ulog.F("key", runtimeIDs.key))
 	}()
 
-	vmStartSpec := vmStartSpecFromBootLayout(layout)
-	sbx, err := m.startSandbox(ctx, namespace, req, vmStartSpec, runtimeIDs, resume)
+	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
+	sbx, err := m.startSandbox(ctx, namespace, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
 	if err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxId)
 		return SandboxCreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
@@ -293,7 +309,7 @@ func (m *Manager) Create(req SandboxCreateRequest) (result SandboxCreateResult, 
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
-	return buildSandboxCreateResult(namespace, leaseID, req, sbx, layout, parentIDs, runtimeIDs, resume), nil
+	return buildSandboxCreateResult(namespace, leaseID, req, sbx, boot, runtimeIDs), nil
 }
 
 func (m *Manager) prepareRuntimeLease(ctx context.Context, namespace string, req SandboxCreateRequest) (context.Context, string, error) {
@@ -307,18 +323,6 @@ func (m *Manager) prepareRuntimeLease(ctx context.Context, namespace string, req
 		return nil, "", fmt.Errorf("failed to ensure runtime lease: %w", err)
 	}
 	return leaseCtx, leaseID, nil
-}
-
-func (m *Manager) prepareParentSnapshots(ctx context.Context, namespace string, req SandboxCreateRequest) (snapshot.ParentSnapshotIDs, bool, error) {
-	parentIDs, err := m.resolveParentSnapshotIDs(ctx, namespace, req)
-	if err != nil {
-		return snapshot.ParentSnapshotIDs{}, false, err
-	}
-	resume := req.SnapshotId != "" || req.UseSnapshot
-	if resume && parentIDs.Mem == "" {
-		return snapshot.ParentSnapshotIDs{}, false, fmt.Errorf("group mem ref label not found on rootfs snapshot %s", parentIDs.Rootfs)
-	}
-	return parentIDs, resume, nil
 }
 
 func (m *Manager) allocateCreateRuntimeIDs(req SandboxCreateRequest) (createRuntimeIDs, error) {
@@ -345,23 +349,19 @@ func (m *Manager) allocateCreateRuntimeIDs(req SandboxCreateRequest) (createRunt
 	}, nil
 }
 
-func (m *Manager) prepareBootLayout(ctx context.Context, namespace string, req SandboxCreateRequest, parentIDs snapshot.ParentSnapshotIDs, runtimeIDs createRuntimeIDs, resume bool) (*snapshot.BootLayout, error) {
+func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req SandboxCreateRequest, runtimeIDs createRuntimeIDs) (template.PreparedSandboxBoot, error) {
+	if m.template == nil {
+		return template.PreparedSandboxBoot{}, fmt.Errorf("template is not configured")
+	}
 	logger := ulog.GetLogger()
-	var (
-		layout *snapshot.BootLayout
-		err    error
-	)
-	if resume {
-		logger.Debug("creating sandbox by snapshotId")
-		layout, err = m.snapshotServer.RestoreBootLayout(ctx, namespace, runtimeIDs.key, parentIDs, runtimeIDs.vsockCID, runtimeIDs.vsockSocketPath)
-	} else {
-		logger.Debug("creating sandbox by image", ulog.F("imageName", req.ImageName))
-		layout, err = m.snapshotServer.CreateBootLayout(ctx, namespace, runtimeIDs.key, parentIDs, req.RamMB)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to create snapshot layout: %w", err)
-	}
-	return layout, nil
+	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
+	return m.template.PrepareSandboxBoot(ctx, template.PrepareSandboxBootRequest{
+		Namespace:  namespace,
+		TemplateID: req.TemplateID,
+		SandboxID:  runtimeIDs.key,
+		VMMName:    req.VmmName,
+		RamMB:      req.RamMB,
+	})
 }
 
 func (m *Manager) startSandbox(ctx context.Context, namespace string, req SandboxCreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
@@ -403,24 +403,27 @@ func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandbo
 			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
 		}
 
-		entry.mu.Lock()
-		defer entry.mu.Unlock()
-		if !m.isCurrentSandboxEntry(mapKey, entry) {
-			return
-		}
-		if entry.state != sandboxReady || entry.sbx != sbx {
-			return
-		}
-
-		entry.state = sandboxExited
-		if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
-			logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		}
-		m.sandboxes.CompareAndDelete(mapKey, entry)
+		m.handleSandboxExit(mapKey, entry, sandboxID, sbx)
 	}()
 }
 
-func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateRequest, sbx *Sandbox, layout *snapshot.BootLayout, parentIDs snapshot.ParentSnapshotIDs, runtimeIDs createRuntimeIDs, resume bool) SandboxCreateResult {
+func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
+	logger := ulog.GetLogger()
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) || entry.sbx != sbx {
+		return
+	}
+
+	entry.state = sandboxExited
+	if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
+		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+	}
+	m.sandboxes.CompareAndDelete(mapKey, entry)
+}
+
+func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateRequest, sbx *Sandbox, boot template.PreparedSandboxBoot, runtimeIDs createRuntimeIDs) SandboxCreateResult {
+	runtime := boot.Runtime
 	return SandboxCreateResult{
 		IP:              sbx.slot.VpeerIPString(),
 		AgentToken:      req.AgentToken,
@@ -433,17 +436,16 @@ func buildSandboxCreateResult(namespace, leaseID string, req SandboxCreateReques
 		VsockSocketPath: runtimeIDs.vsockSocketPath,
 		NetworkSlotKey:  sbx.slot.Key,
 		NetworkNS:       sbx.slot.NamespaceID(),
-		RootfsKey:       runtimeIDs.key,
-		MemKey:          snapshot.MemKeyFromRootfs(runtimeIDs.key),
-		ParentRootfsID:  parentIDs.Rootfs,
-		ParentMemID:     parentIDs.Mem,
-		ParentVMID:      parentIDs.VM,
-		RootfsMount:     layout.RootfsMount,
-		MemMount:        layout.MemMount,
-		VMMount:         layout.VMMount,
-		RootDir:         layout.SnapshotDir,
-		MemSize:         layout.MemorySizeMB,
-		Resume:          resume,
+		RootfsKey:       runtime.RootfsKey,
+		MemKey:          runtime.MemKey,
+		RootfsMount:     runtime.RootfsMount,
+		MemMount:        runtime.MemMount,
+		VMMount:         runtime.VMMount,
+		RootDir:         runtime.RootDir,
+		MemSize:         runtime.MemSize,
+		Resume:          runtime.Resume,
+		BootIndexDigest: runtime.BootIndexDigest,
+		RootfsPmemPaths: append([]string(nil), boot.Spec.PmemPaths...),
 	}
 }
 
@@ -500,44 +502,6 @@ func (m *Manager) CleanupAssignedWithoutReadySandbox(restoredSandboxIDs map[stri
 	return nil
 }
 
-func (m *Manager) resolveParentSnapshotIDs(
-	ctx context.Context,
-	namespace string,
-	req SandboxCreateRequest,
-) (snapshot.ParentSnapshotIDs, error) {
-	var rootfsSnapshotID string
-
-	if req.SnapshotId != "" {
-		rootfsSnapshotID = req.SnapshotId
-	} else {
-		if req.ImageName == "" {
-			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("imageName or snapshotID is required")
-		}
-
-		if parents, ok, err := image.ResolveBootParentSnapshotIDs(ctx, m.daemonClient, namespace, req.ImageName); err != nil {
-			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve boot image snapshots: %w", err)
-		} else if ok {
-			return snapshot.ParentSnapshotIDs{
-				Rootfs: parents.Rootfs,
-				Mem:    parents.Mem,
-				VM:     parents.VM,
-			}, nil
-		}
-
-		var err error
-		rootfsSnapshotID, err = image.GetSnapshotID(ctx, m.daemonClient, namespace, req.ImageName)
-		if err != nil {
-			return snapshot.ParentSnapshotIDs{}, fmt.Errorf("failed to resolve image snapshot: %w", err)
-		}
-	}
-
-	parents, err := m.snapshotServer.ResolveImageParentSnapshotIDs(namespace, rootfsSnapshotID)
-	if err != nil {
-		return snapshot.ParentSnapshotIDs{}, err
-	}
-	return parents, nil
-}
-
 func (m *Manager) resolveNamespace(namespace string) string {
 	if namespace != "" {
 		return namespace
@@ -568,11 +532,11 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 		errs = append(errs, err)
 	}
 
-	snapshotCtx := ctx
+	bootCtx := ctx
 	if sbx.leaseID != "" && m.daemonClient != nil {
 		var leaseErr error
 		finishLease := cleanupdiag.Start("sandbox.cleanup.restore_runtime_lease", fields...)
-		snapshotCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.namespace, sbx.leaseID)
+		bootCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.namespace, sbx.leaseID)
 		finishLease(leaseErr)
 		if leaseErr != nil {
 			logger.Warn("failed to restore runtime lease context for cleanup",
@@ -583,11 +547,14 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 			errs = append(errs, leaseErr)
 		}
 	}
-	finishSnapshot := cleanupdiag.Start("sandbox.snapshot.remove", fields...)
-	err = m.snapshotServer.ReleaseBootLayout(snapshotCtx, sbx.namespace, sandboxID)
-	finishSnapshot(err)
+	finishBootRelease := cleanupdiag.Start("sandbox.boot.release", fields...)
+	err = m.template.ReleaseSandboxBoot(bootCtx, template.ReleaseSandboxBootRequest{
+		Namespace: sbx.namespace,
+		SandboxID: sandboxID,
+	})
+	finishBootRelease(err)
 	if err != nil {
-		logger.Warn("failed to remove sandbox snapshot",
+		logger.Warn("failed to release sandbox boot layout",
 			ulog.F("sandbox_id", sandboxID),
 			ulog.F("namespace", sbx.namespace),
 			ulog.F("error", err),
@@ -619,7 +586,7 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 		return nil
 	}
 
-	if entry.state != sandboxReady {
+	if entry.state != sandboxReady && entry.state != sandboxSuspended {
 		return fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
 	}
 	sbx := entry.sbx
@@ -633,9 +600,7 @@ func (m *Manager) Delete(req SandboxDeleteRequest) error {
 	return err
 }
 
-func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
-	logger := ulog.GetLogger()
-
+func (m *Manager) Suspend(req SandboxLifecycleRequest) error {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
@@ -643,74 +608,108 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 	mapKey := sandboxMapKey(namespace, req.SandboxId)
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !m.isCurrentSandboxEntry(mapKey, entry) {
-		return "", fmt.Errorf("sandbox %s not found", req.SandboxId)
+		return fmt.Errorf("sandbox %s not found", req.SandboxId)
 	}
 	if entry.state != sandboxReady {
-		return "", fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
+		return fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
 	}
 	sbx := entry.sbx
 	if sbx == nil {
-		return "", fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
 	}
-	entry.state = sandboxPausing
-
-	leaseCtx := ctx
-	if sbx.leaseID != "" && m.daemonClient != nil {
-		var leaseErr error
-		leaseCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, namespace, sbx.leaseID)
-		if leaseErr != nil {
-			entry.state = sandboxReady
-			return "", fmt.Errorf("failed to restore runtime lease context: %w", leaseErr)
-		}
+	entry.state = sandboxSuspending
+	if err := sbx.Suspend(ctx); err != nil {
+		entry.state = sandboxReady
+		return fmt.Errorf("sandbox %s suspend failed: %w", req.SandboxId, err)
 	}
-	defer func() {
-		logger.Info("sandbox stop in pause", ulog.F("sandboxId", req.SandboxId))
-		if err := sbx.Stop(ctx); err != nil {
-			logger.Error("sandbox stop error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
-		}
-		if err := sbx.Close(ctx); err != nil {
-			logger.Error("sandbox close error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
-		}
-		if err := m.snapshotServer.ReleaseBootLayout(leaseCtx, sbx.namespace, req.SandboxId); err != nil {
-			logger.Error("sandbox remove error after pause", ulog.F("sandboxId", req.SandboxId), ulog.F("error", err))
-		}
-		if releaseErr := m.ReleaseCID(req.SandboxId); releaseErr != nil {
-			logger.Warn("failed to release CID after pause", ulog.F("sandbox_id", req.SandboxId), ulog.F("error", releaseErr))
-		}
-		m.sandboxes.CompareAndDelete(mapKey, entry)
-	}()
+	entry.state = sandboxSuspended
+	return nil
+}
 
-	if err := sbx.Pause(ctx); err != nil {
-		return "", fmt.Errorf("sandbox %s pause failed: %w", req.SandboxId, err)
-	}
+func (m *Manager) Resume(req SandboxLifecycleRequest) error {
+	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	defer cancel()
 
-	// TODO: system sync, too large
-	syscall.Sync()
-
-	var key = req.SandboxId
-
-	info, err := m.snapshotServer.SnapshotInfo(leaseCtx, sbx.namespace, key)
+	namespace := m.resolveNamespace(req.Namespace)
+	mapKey := sandboxMapKey(namespace, req.SandboxId)
+	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
 	if err != nil {
-		return "", fmt.Errorf("failed to get snapshot info %s: %w", key, err)
-	}
-	parent := info.Parent
-	snapshotId, err := snapshot.CalculateSnapshotID(sbx.namespace, key, parent)
-	if err != nil {
-		return "", fmt.Errorf("failed to calculate snapshot id: %w", err)
+		return err
 	}
 
-	snapshotId, err = m.snapshotServer.CommitBootLayout(leaseCtx, sbx.namespace, snapshotId, key)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return fmt.Errorf("sandbox %s not found", req.SandboxId)
+	}
+	if entry.state != sandboxSuspended {
+		return fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
+	}
+	sbx := entry.sbx
+	if sbx == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
+	}
+	entry.state = sandboxResuming
+	if err := sbx.Resume(ctx); err != nil {
+		entry.state = sandboxSuspended
+		return fmt.Errorf("sandbox %s resume failed: %w", req.SandboxId, err)
+	}
+	entry.state = sandboxReady
+	return nil
+}
+
+func (m *Manager) Checkpoint(req SandboxCheckpointRequest) (SandboxCheckpointResult, error) {
+	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	defer cancel()
+
+	namespace := m.resolveNamespace(req.Namespace)
+	mapKey := sandboxMapKey(namespace, req.SandboxId)
+	entry, err := m.loadSandboxEntry(mapKey, req.SandboxId)
 	if err != nil {
-		return "", fmt.Errorf("failed to commit snapshot layout %s: %v", req.SandboxId, err)
+		return SandboxCheckpointResult{}, err
 	}
 
-	return snapshotId, nil
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s not found", req.SandboxId)
+	}
+	wasSuspended := entry.state == sandboxSuspended
+	if entry.state != sandboxReady && !wasSuspended {
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s is %s", req.SandboxId, entry.state)
+	}
+	sbx := entry.sbx
+	if sbx == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
+	}
+	previousState := entry.state
+	entry.state = sandboxCheckpointing
+
+	capture := m.checkpointCapture
+	if capture == nil {
+		capture = NewFullCheckpointCapture()
+	}
+	captured, err := capture.Capture(ctx, RuntimeCaptureRequest{
+		Source:      sbx,
+		PauseBefore: !wasSuspended,
+	})
+	if err != nil {
+		if errors.Is(err, ErrCheckpointResume) {
+			entry.state = sandboxSuspended
+		} else {
+			entry.state = previousState
+		}
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s checkpoint failed: %w", req.SandboxId, err)
+	}
+
+	entry.state = previousState
+	return captured, nil
 }
 
 func (m *Manager) CleanupPool() error {

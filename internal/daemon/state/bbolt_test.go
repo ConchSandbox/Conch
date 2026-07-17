@@ -3,6 +3,8 @@ package state
 import (
 	"context"
 	"testing"
+
+	"github.com/opencontainers/go-digest"
 )
 
 func TestBoltStoreSandboxAndContainerCRUD(t *testing.T) {
@@ -109,5 +111,127 @@ func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
 	}
 	if _, err := store.GetNetworkSlot(ctx, slot.SlotKey); err == nil {
 		t.Fatalf("GetNetworkSlot() after delete got nil error")
+	}
+}
+
+func TestBoltStoreTemplateCRUD(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	rec := TemplateRecord{
+		ID:        "tmpl_1",
+		Origin:    TemplateOriginImage,
+		Namespace: "default",
+		State:     TemplateCreating,
+		Labels:    map[string]string{"purpose": "test"},
+		CreatedAt: 1,
+		UpdatedAt: 1,
+	}
+	if err := store.UpsertTemplate(ctx, rec); err != nil {
+		t.Fatalf("UpsertTemplate() error = %v", err)
+	}
+	got, err := store.GetTemplate(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetTemplate() error = %v", err)
+	}
+	if got.Origin != rec.Origin || got.Labels["purpose"] != "test" {
+		t.Fatalf("GetTemplate() = %#v, want %#v", got, rec)
+	}
+
+	rec.State = TemplateReady
+	if err := store.UpsertTemplate(ctx, rec); err != nil {
+		t.Fatalf("UpsertTemplate(update) error = %v", err)
+	}
+	items, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(items) != 1 || items[0].State != TemplateReady {
+		t.Fatalf("ListTemplates() = %#v", items)
+	}
+	if err := store.DeleteTemplate(ctx, rec.ID); err != nil {
+		t.Fatalf("DeleteTemplate() error = %v", err)
+	}
+	if _, err := store.GetTemplate(ctx, rec.ID); err == nil {
+		t.Fatalf("GetTemplate() after delete got nil error")
+	}
+}
+
+func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	checkpointDigest := digest.FromString("checkpoint").String()
+	if err := store.UpsertTemplate(ctx, TemplateRecord{
+		ID: "t1", Origin: TemplateOriginCheckpoint, Namespace: "default", State: TemplateCreating,
+		ParentTemplateID: "t0", SourceSandboxID: "sb-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSandbox(ctx, SandboxRecord{
+		PodSandboxID: "pod-1", ConchSandboxID: "sb-1",
+		SourceTemplateID: "t0", SourceBootIndexDigest: "sha256:source",
+		CheckpointHeadTemplateID: "t0", CheckpointHeadBootIndexDigest: "sha256:source",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
+		TemplateID: "t1", PodSandboxID: "pod-1", BootIndexDigest: checkpointDigest,
+		BootMode: TemplateBootModeResume, ExpectedHeadTemplateID: "t0",
+		ExpectedHeadBootIndexDigest: "sha256:source",
+	}); err != nil {
+		t.Fatalf("PublishCheckpoint() error = %v", err)
+	}
+	templateRecord, err := store.GetTemplate(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if templateRecord.State != TemplateReady || templateRecord.BootIndexDigest != checkpointDigest {
+		t.Fatalf("published template = %#v", templateRecord)
+	}
+	sandboxRecord, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sandboxRecord.CheckpointHeadTemplateID != "t1" || sandboxRecord.CheckpointHeadBootIndexDigest != checkpointDigest {
+		t.Fatalf("checkpoint head = %#v", sandboxRecord)
+	}
+}
+
+func TestBoltStorePublishCheckpointCASFailureLeavesBothRecordsUnchanged(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertTemplate(ctx, TemplateRecord{ID: "t1", Origin: TemplateOriginCheckpoint, State: TemplateCreating, ParentTemplateID: "old-head"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSandbox(ctx, SandboxRecord{PodSandboxID: "pod-1", CheckpointHeadTemplateID: "new-head"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
+		TemplateID: "t1", PodSandboxID: "pod-1", BootIndexDigest: digest.FromString("checkpoint").String(),
+		BootMode: TemplateBootModeResume, ExpectedHeadTemplateID: "old-head",
+	}); err == nil {
+		t.Fatal("PublishCheckpoint() error = nil, want CAS failure")
+	}
+	templateRecord, _ := store.GetTemplate(ctx, "t1")
+	sandboxRecord, _ := store.GetSandbox(ctx, "pod-1")
+	if templateRecord.State != TemplateCreating || templateRecord.BootIndexDigest != "" {
+		t.Fatalf("template changed after failed transaction: %#v", templateRecord)
+	}
+	if sandboxRecord.CheckpointHeadTemplateID != "new-head" {
+		t.Fatalf("sandbox changed after failed transaction: %#v", sandboxRecord)
 	}
 }

@@ -12,7 +12,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
-	runtimeSnapshot "github.com/openeuler/Conch/internal/snapshot"
 )
 
 const reconcilePrefix = "reconcile:"
@@ -26,35 +25,23 @@ type SandboxRehydrator interface {
 	CleanupAssignedWithoutReadySandbox(map[string]struct{}) error
 }
 
-type SnapshotRehydrator interface {
-	RehydrateRuntimeState(ctx context.Context, runtimes []state.SnapshotRuntimeRecord, views []state.ViewSnapshotRecord, aliases []state.ViewAliasRecord) (runtimeSnapshot.RehydrateResult, error)
-}
-
 type Config struct {
-	Store              state.Store
-	LeaseClient        LeaseClient
-	SandboxRehydrator  SandboxRehydrator
-	SnapshotRehydrator SnapshotRehydrator
-	DefaultNamespace   string
+	Store             state.Store
+	LeaseClient       LeaseClient
+	SandboxRehydrator SandboxRehydrator
+	DefaultNamespace  string
 }
 
 type Result struct {
-	SandboxesChecked        int
-	SandboxesDowngraded     int
-	ContainersChecked       int
-	ContainersDowngraded    int
-	SnapshotRuntimesChecked int
-	SnapshotRuntimesMarked  int
-	ViewSnapshotsChecked    int
-	ViewSnapshotsMarked     int
-	RuntimeLeasesChecked    int
-	LeaseErrors             int
-	SnapshotCachesRestored  int
-	ViewMountsRestored      int
-	ViewAliasesRestored     int
-	SandboxesRehydrated     int
-	RehydrateErrors         int
-	RehydrateError          string
+	SandboxesChecked     int
+	SandboxesDowngraded  int
+	ContainersChecked    int
+	ContainersDowngraded int
+	RuntimeLeasesChecked int
+	LeaseErrors          int
+	SandboxesRehydrated  int
+	RehydrateErrors      int
+	RehydrateError       string
 }
 
 func Reconcile(ctx context.Context, cfg Config) (Result, error) {
@@ -78,18 +65,6 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 	containers, err := r.cfg.Store.ListContainers(ctx)
 	if err != nil {
 		return result, fmt.Errorf("list container state: %w", err)
-	}
-	snapshotRuntimes, err := r.cfg.Store.ListSnapshotRuntimes(ctx)
-	if err != nil {
-		return result, fmt.Errorf("list snapshot runtime state: %w", err)
-	}
-	viewSnapshots, err := r.cfg.Store.ListViewSnapshots(ctx)
-	if err != nil {
-		return result, fmt.Errorf("list view snapshot state: %w", err)
-	}
-	viewAliases, err := r.cfg.Store.ListViewAliases(ctx)
-	if err != nil {
-		return result, fmt.Errorf("list view alias state: %w", err)
 	}
 
 	sandboxStates := make(map[string]string, len(sandboxes))
@@ -135,72 +110,6 @@ func (r reconciler) run(ctx context.Context) (Result, error) {
 		}
 	}
 
-	reconciledSnapshotRuntimes := make([]state.SnapshotRuntimeRecord, 0, len(snapshotRuntimes))
-	for _, rec := range snapshotRuntimes {
-		result.SnapshotRuntimesChecked++
-		rec.Namespace = r.normalizeNamespace(rec.Namespace)
-		if rec.LeaseID == "" {
-			rec.LeaseID = containerdclient.RuntimeLeaseID(rec.Namespace)
-		}
-		if ok := r.ensureLease(ctx, rec.Namespace, rec.LeaseID); ok {
-			result.RuntimeLeasesChecked++
-		} else {
-			result.LeaseErrors++
-			rec.State = state.SandboxUnknown
-			rec.LastError = joinReasons(rec.LastError, "runtime lease could not be ensured")
-		}
-		if reason := verifySnapshotRuntime(rec); reason != "" {
-			rec.State = state.SandboxUnknown
-			rec.LastError = joinReasons(rec.LastError, reason)
-			result.SnapshotRuntimesMarked++
-		}
-		if err := r.cfg.Store.UpsertSnapshotRuntime(ctx, rec); err != nil {
-			return result, fmt.Errorf("upsert reconciled snapshot runtime %s/%s: %w", rec.Namespace, rec.SandboxID, err)
-		}
-		reconciledSnapshotRuntimes = append(reconciledSnapshotRuntimes, rec)
-	}
-
-	reconciledViewSnapshots := make([]state.ViewSnapshotRecord, 0, len(viewSnapshots))
-	for _, rec := range viewSnapshots {
-		result.ViewSnapshotsChecked++
-		rec.Namespace = r.normalizeNamespace(rec.Namespace)
-		if rec.LeaseID == "" {
-			rec.LeaseID = containerdclient.RuntimeLeaseID(rec.Namespace)
-		}
-		if ok := r.ensureLease(ctx, rec.Namespace, rec.LeaseID); ok {
-			result.RuntimeLeasesChecked++
-		} else {
-			result.LeaseErrors++
-			rec.State = state.SandboxUnknown
-			rec.LastError = joinReasons(rec.LastError, "runtime lease could not be ensured")
-		}
-		if reason := verifyViewSnapshot(rec); reason != "" {
-			rec.State = state.SandboxUnknown
-			rec.LastError = joinReasons(rec.LastError, reason)
-			result.ViewSnapshotsMarked++
-		}
-		if err := r.cfg.Store.UpsertViewSnapshot(ctx, rec); err != nil {
-			return result, fmt.Errorf("upsert reconciled view snapshot %s/%s: %w", rec.Namespace, rec.ParentSnapshotID, err)
-		}
-		reconciledViewSnapshots = append(reconciledViewSnapshots, rec)
-	}
-
-	if len(reconciledSnapshotRuntimes) > 0 || len(reconciledViewSnapshots) > 0 || len(viewAliases) > 0 {
-		if r.cfg.SnapshotRehydrator == nil {
-			result.RehydrateErrors++
-			result.RehydrateError = joinReasons(result.RehydrateError, "snapshot rehydrator is not configured")
-		} else if snapshotResult, err := r.cfg.SnapshotRehydrator.RehydrateRuntimeState(ctx, reconciledSnapshotRuntimes, reconciledViewSnapshots, viewAliases); err != nil {
-			result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
-			result.ViewMountsRestored = snapshotResult.ViewMounts
-			result.ViewAliasesRestored = snapshotResult.ViewAliases
-			result.RehydrateErrors++
-			result.RehydrateError = joinReasons(result.RehydrateError, err.Error())
-		} else {
-			result.SnapshotCachesRestored = snapshotResult.ActiveSnapshots
-			result.ViewMountsRestored = snapshotResult.ViewMounts
-			result.ViewAliasesRestored = snapshotResult.ViewAliases
-		}
-	}
 	if r.cfg.SandboxRehydrator != nil {
 		count, restoredSandboxIDs, err := r.cfg.SandboxRehydrator.Rehydrate(reconciledSandboxes)
 		result.SandboxesRehydrated = count
@@ -274,43 +183,6 @@ func verifySandboxRuntime(rec state.SandboxRecord) string {
 		return ""
 	}
 	return strings.Join(reasons, "; ")
-}
-
-func verifySnapshotRuntime(rec state.SnapshotRuntimeRecord) string {
-	var reasons []string
-	for _, item := range []struct {
-		name string
-		path string
-	}{
-		{name: "rootfs mount", path: rec.RootfsMount},
-		{name: "mem mount", path: rec.MemMount},
-		{name: "vm mount", path: rec.VMMount},
-	} {
-		if strings.TrimSpace(item.path) == "" {
-			reasons = append(reasons, item.name+" is empty")
-			continue
-		}
-		if !pathExists(item.path) {
-			reasons = append(reasons, item.name+" is missing")
-		}
-	}
-	if len(reasons) == 0 {
-		return ""
-	}
-	return strings.Join(reasons, "; ")
-}
-
-func verifyViewSnapshot(rec state.ViewSnapshotRecord) string {
-	if strings.TrimSpace(rec.MountPoint) == "" {
-		return "view mount point is empty"
-	}
-	if !pathExists(rec.MountPoint) {
-		return "view mount point is missing"
-	}
-	if !runtimeSnapshot.IsMountPoint(rec.MountPoint) {
-		return "view mount point is not mounted"
-	}
-	return ""
 }
 
 func pathExists(path string) bool {

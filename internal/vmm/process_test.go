@@ -72,7 +72,7 @@ func (c *blockingDaemonClient) ResumeVM() error                 { return nil }
 func (c *blockingDaemonClient) DeleteVM() error                 { return nil }
 func (c *blockingDaemonClient) CreateSnapshot(string) error     { return nil }
 func (c *blockingDaemonClient) LoadSnapshot(string, bool) error { return nil }
-func (c *blockingDaemonClient) PrepareLaunch(*ResourceArgs) error {
+func (c *blockingDaemonClient) PrepareLaunch(*ResourceArgs, bool) error {
 	return nil
 }
 func (c *blockingDaemonClient) AfterProcessStart() {}

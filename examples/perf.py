@@ -5,9 +5,8 @@ import time
 from conch import Sandbox
 
 
-def perf_print_hello_by_image():
+def perf_print_hello_by_template():
     box = None
-    paused = False
     t0 = time.perf_counter()
     try:
         box = Sandbox.create()
@@ -24,21 +23,20 @@ def perf_print_hello_by_image():
         exec_s = t2 - t1
         total_s = t2 - t0
 
-        print(f"--- IMAGE (Cold Start) ---")
+        print("--- TEMPLATE (Cold Start) ---")
         print(f"Startup Cost:   {startup_s:.3f}s ({startup_s*1000:.2f}ms)")
         print(f"Execution Only: {exec_s:.3f}s ({exec_s*1000:.2f}ms)")
         print(f"Total Workflow: {total_s:.3f}s ({total_s*1000:.2f}ms)")
 
-        snapshot = box.pause()
-        paused = True
-        print(f"Snapshot {snapshot.snapshot_id} created\n")
-        return snapshot.snapshot_id
+        template = box.checkpoint()
+        print(f"Checkpoint template {template.template_id} created\n")
+        return template.template_id
 
     except Exception as e:
-        print(f"Image Error: {e}")
+        print(f"Template Error: {e}")
         return None
     finally:
-        if box and not paused:
+        if box:
             sid = box.sandbox_id
             try:
                 box.delete()
@@ -46,14 +44,14 @@ def perf_print_hello_by_image():
             except Exception as e:
                 print(f"Warning: Failed to delete sandbox: {e}")
 
-def perf_print_hello_by_snapshot(snapshot_id):
-    if not snapshot_id:
+def perf_print_hello_by_checkpoint(template_id):
+    if not template_id:
         return
 
     box = None
     t0 = time.perf_counter()
     try:
-        box = Sandbox.create(snapshot_id)
+        box = Sandbox.create(template_id=template_id)
         t1 = time.perf_counter()
 
         ret = box.execute(cmd='python3', content='print("hello")')
@@ -67,13 +65,13 @@ def perf_print_hello_by_snapshot(snapshot_id):
         exec_s = t2 - t1
         total_s = t2 - t0
 
-        print(f"--- SNAPSHOT (Hot Start) ---")
+        print("--- CHECKPOINT TEMPLATE (Resume) ---")
         print(f"Restore Cost:   {restore_s:.3f}s ({restore_s*1000:.2f}ms)")
         print(f"Execution Only: {exec_s:.3f}s ({exec_s*1000:.2f}ms)")
         print(f"Total Workflow: {total_s:.3f}s ({total_s*1000:.2f}ms)")
 
     except Exception as e:
-        print(f"Snapshot Error: {e}")
+        print(f"Checkpoint Template Error: {e}")
     finally:
         if box:
             sid = box.sandbox_id
@@ -84,11 +82,11 @@ def perf_print_hello_by_snapshot(snapshot_id):
                 print(f"Warning: Failed to delete sandbox: {e}")
 
 def main():
-    snapshot_id = perf_print_hello_by_image()
-    if snapshot_id:
-        perf_print_hello_by_snapshot(snapshot_id)
+    template_id = perf_print_hello_by_template()
+    if template_id:
+        perf_print_hello_by_checkpoint(template_id)
     else:
-        print("Test terminated due to Image Flow error.")
+        print("Test terminated due to template flow error.")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 
 	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
@@ -11,36 +12,45 @@ import (
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 type fakeImageService struct {
-	pullReq     runtimeapi.PullImageOptions
-	pushReq     runtimeapi.PushImageOptions
-	listReq     runtimeapi.ListImagesOptions
-	removeReq   runtimeapi.RemoveImageOptions
-	unpackReq   runtimeapi.UnpackImageOptions
-	prepareReq  conchimage.PrepareRootfsSourceOptions
-	convertReq  erofsconvert.ConvertRootfsRequest
-	publishReq  conchimage.PublishBootImageOptions
-	exportReq   runtimeapi.ExportImageArchiveOptions
-	pullErr     error
-	pushErr     error
-	listErr     error
-	removeErr   error
-	unpackErr   error
-	prepareErr  error
-	convertErr  error
-	publishErr  error
-	exportErr   error
-	results     map[string]string
-	importReqs  []runtimeapi.ImportImageArchiveOptions
-	importRaws  []string
-	exportRaw   string
-	prepareResp conchimage.PrepareRootfsSourceResult
-	convertResp erofsconvert.ConvertRootfsResult
-	images      []runtimeapi.ImageRecord
-	publishResp conchimage.PublishBootImageResult
+	pullReq               runtimeapi.PullImageOptions
+	pushReq               runtimeapi.PushImageOptions
+	listReq               runtimeapi.ListImagesOptions
+	removeReq             runtimeapi.RemoveImageOptions
+	unpackReq             runtimeapi.UnpackImageOptions
+	prepareReq            conchimage.PrepareRootfsSourceOptions
+	convertReq            erofsconvert.ConvertRootfsRequest
+	publishReq            conchimage.PublishBootImageOptions
+	inspectReq            bootIndexCall
+	inspectReferenceReq   bootIndexReferenceCall
+	pushBootIndexReq      conchimage.PushBootIndexOptions
+	checkpointPublishReq  conchimage.PublishCheckpointBootImageOptions
+	exportReq             runtimeapi.ExportImageArchiveOptions
+	pullErr               error
+	pushErr               error
+	listErr               error
+	removeErr             error
+	unpackErr             error
+	prepareErr            error
+	convertErr            error
+	publishErr            error
+	inspectErr            error
+	inspectReferenceErr   error
+	checkpointPublishErr  error
+	exportErr             error
+	results               map[string]string
+	importReqs            []runtimeapi.ImportImageArchiveOptions
+	importRaws            []string
+	exportRaw             string
+	prepareResp           conchimage.PrepareRootfsSourceResult
+	convertResp           erofsconvert.ConvertRootfsResult
+	images                []runtimeapi.ImageRecord
+	publishResp           conchimage.PublishBootImageResult
+	inspectResp           conchimage.BootIndexInfo
+	inspectReferenceResp  conchimage.BootIndexInfo
+	checkpointPublishResp conchimage.PublishCheckpointBootImageResult
 }
 
 type fakeSnapshotService struct {
@@ -56,11 +66,14 @@ type fakeSnapshotService struct {
 }
 
 type fakeSandboxOps struct {
-	createReq  sandbox.SandboxCreateRequest
-	pauseReq   sandbox.SandboxPauseRequest
-	deleteReqs []sandbox.SandboxDeleteRequest
-	createErr  error
-	pauseErr   error
+	createReq      sandbox.SandboxCreateRequest
+	checkpointReq  sandbox.SandboxCheckpointRequest
+	suspendReq     sandbox.SandboxLifecycleRequest
+	resumeReq      sandbox.SandboxLifecycleRequest
+	deleteReqs     []sandbox.SandboxDeleteRequest
+	createErr      error
+	checkpointErr  error
+	checkpointResp sandbox.SandboxCheckpointResult
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
@@ -73,6 +86,11 @@ func (f *fakeImageService) Pull(_ context.Context, req runtimeapi.PullImageOptio
 
 func (f *fakeImageService) Push(_ context.Context, req runtimeapi.PushImageOptions) error {
 	f.pushReq = req
+	return f.pushErr
+}
+
+func (f *fakeImageService) PushBootIndex(_ context.Context, req conchimage.PushBootIndexOptions) error {
+	f.pushBootIndexReq = req
 	return f.pushErr
 }
 
@@ -124,7 +142,40 @@ func (f *fakeImageService) PublishBootImage(_ context.Context, req conchimage.Pu
 	}
 	return conchimage.PublishBootImageResult{
 		BootIndexDigest: "sha256:boot",
-		SnapshotKey:     "rootfs-id",
+		ImageName:       req.BootIndexTag,
+	}, nil
+}
+
+type bootIndexCall struct {
+	Namespace       string
+	BootIndexDigest string
+}
+
+type bootIndexReferenceCall struct {
+	Namespace string
+	Reference string
+}
+
+func (f *fakeImageService) InspectBootIndex(_ context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+	f.inspectReq = bootIndexCall{Namespace: namespace, BootIndexDigest: bootIndexDigest}
+	return f.inspectResp, f.inspectErr
+}
+
+func (f *fakeImageService) InspectBootIndexReference(_ context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {
+	f.inspectReferenceReq = bootIndexReferenceCall{Namespace: namespace, Reference: reference}
+	return f.inspectReferenceResp, f.inspectReferenceErr
+}
+
+func (f *fakeImageService) PublishCheckpointBootImage(_ context.Context, req conchimage.PublishCheckpointBootImageOptions) (conchimage.PublishCheckpointBootImageResult, error) {
+	f.checkpointPublishReq = req
+	if f.checkpointPublishErr != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, f.checkpointPublishErr
+	}
+	if f.checkpointPublishResp.BootIndexDigest != "" {
+		return f.checkpointPublishResp, nil
+	}
+	return conchimage.PublishCheckpointBootImageResult{
+		BootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ImageName:       req.BootIndexTag,
 	}, nil
 }
@@ -162,8 +213,8 @@ func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req erofsconv
 	}, nil
 }
 
-func newRuntimeForTest(image conchruntime.ImageOps, snapshot conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *conchruntime.Service {
-	rt := conchruntime.New(sandboxOps, image, nil, "default")
+func newRuntimeForTest(image conchruntime.ImageOps, templateBootIndex conchruntime.TemplateBootIndexOps, snapshot conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *conchruntime.Service {
+	rt := conchruntime.New(sandboxOps, image, templateBootIndex, nil, "default")
 	rt.Snapshot = snapshot
 	return rt
 }
@@ -171,7 +222,7 @@ func newRuntimeForTest(image conchruntime.ImageOps, snapshot conchruntime.Snapsh
 func newImageHandlerServer(svc conchruntime.ImageOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
-		runtimeService: newRuntimeForTest(svc, nil, nil),
+		runtimeService: newRuntimeForTest(svc, nil, nil, nil),
 	}
 	s.routes()
 	return s
@@ -180,16 +231,16 @@ func newImageHandlerServer(svc conchruntime.ImageOps) *Daemon {
 func newSnapshotHandlerServer(svc conchruntime.SnapshotOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
-		runtimeService: newRuntimeForTest(nil, svc, nil),
+		runtimeService: newRuntimeForTest(nil, nil, svc, nil),
 	}
 	s.routes()
 	return s
 }
 
-func newConvertHandlerServer(imageSvc conchruntime.ImageOps, snapshotSvc conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *Daemon {
+func newConvertHandlerServer(imageSvc conchruntime.ImageOps, templateBootIndexSvc conchruntime.TemplateBootIndexOps, snapshotSvc conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *Daemon {
 	s := &Daemon{
 		router:         http.NewServeMux(),
-		runtimeService: newRuntimeForTest(imageSvc, snapshotSvc, sandboxOps),
+		runtimeService: newRuntimeForTest(imageSvc, templateBootIndexSvc, snapshotSvc, sandboxOps),
 	}
 	s.routes()
 	return s
@@ -214,13 +265,8 @@ func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoReques
 		return snapshotSvc.Meta{}, f.infoErr
 	}
 	return snapshotSvc.Meta{
-		Key:    req.Key,
-		Parent: "parent-id",
-		Labels: map[string]string{
-			common.SnapshotLabelGroupMemRef: "mem-id",
-			common.SnapshotLabelGroupVMRef:  "vm-id",
-			common.SnapshotLabelRootfsImage: "rootfs-image:latest",
-		},
+		Key:         req.Key,
+		Parent:      "parent-id",
 		StoragePath: "/snap/rootfs",
 	}, nil
 }
@@ -252,10 +298,30 @@ func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Pause(req sandbox.SandboxPauseRequest) (string, error) {
-	f.pauseReq = req
-	if f.pauseErr != nil {
-		return "", f.pauseErr
+func (f *fakeSandboxOps) Suspend(req sandbox.SandboxLifecycleRequest) error {
+	f.suspendReq = req
+	return nil
+}
+
+func (f *fakeSandboxOps) Resume(req sandbox.SandboxLifecycleRequest) error {
+	f.resumeReq = req
+	return nil
+}
+
+func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
+	f.checkpointReq = req
+	if f.checkpointErr != nil {
+		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
 	}
-	return "paused-rootfs-id", nil
+	if f.checkpointResp.MemRootPath != "" {
+		return f.checkpointResp, nil
+	}
+	memRoot, err := os.MkdirTemp("", "conch-daemon-checkpoint-test-*")
+	if err != nil {
+		return sandbox.SandboxCheckpointResult{}, err
+	}
+	return sandbox.SandboxCheckpointResult{
+		MemRootPath: memRoot,
+		VMMName:     "cloud-hypervisor",
+	}, nil
 }

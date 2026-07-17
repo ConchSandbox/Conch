@@ -1,4 +1,4 @@
-package cli
+package cmd
 
 import (
 	"context"
@@ -11,9 +11,9 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-func printUnpackHelp(out io.Writer) {
+func PrintImageUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch unpack [options] <image-name>")
+	fmt.Fprintln(out, "  conch image unpack [options] <image-name>")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -n, --namespace string")
@@ -26,11 +26,11 @@ func printUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch unpack -n default hub.oepkgs.net/conch/conch-index:v0.1")
+	fmt.Fprintln(out, "  conch image unpack -n default hub.oepkgs.net/conch/conch-index:v0.1")
 }
 
-func runUnpack(ctx context.Context, args []string) error {
-	if err := initUnpackLogger(); err != nil {
+func RunImageUnpack(ctx context.Context, args []string) error {
+	if err := InitUnpackLogger(); err != nil {
 		return err
 	}
 	defer func() {
@@ -40,38 +40,38 @@ func runUnpack(ctx context.Context, args []string) error {
 		}
 	}()
 
-	fs := flag.NewFlagSet("unpack", flag.ContinueOnError)
+	fs := flag.NewFlagSet("image unpack", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	apiURL := fs.String("api-url", "", "conchd API base URL")
 	addr := fs.String("address", "", "deprecated alias for -api-url")
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
-	fs.Usage = func() { printUnpackHelp(os.Stderr) }
+	fs.Usage = func() { PrintImageUnpackHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("conch unpack: exactly one image name is required")
+		return fmt.Errorf("conch image unpack: exactly one image name is required")
 	}
 	imageName := fs.Arg(0)
 
-	cfg, err := loadConchConfig(*configPath)
+	cfg, err := LoadConchConfig(*configPath)
 	if err != nil {
-		return fmt.Errorf("conch unpack: load config: %w", err)
+		return fmt.Errorf("conch image unpack: load config: %w", err)
 	}
-	ns := resolveConchNamespace(cfg, *namespace)
+	ns := ResolveConchNamespace(cfg, *namespace)
 
-	conchClient := client.NewClientWithConfig(resolveConchAPIURL(*apiURL, *addr), *configPath)
+	conchClient := client.NewClientWithConfig(ResolveConchAPIURL(*apiURL, *addr), *configPath)
 	fmt.Println("------------------------------------------------------------")
 	results, err := conchClient.UnpackImage(ctx, client.UnpackImageRequest{
 		ImageName: imageName,
 		Namespace: ns,
 	})
 	if err != nil {
-		return fmt.Errorf("conch unpack: %w", err)
+		return fmt.Errorf("conch image unpack: %w", err)
 	}
-	printUnpackSummary(results)
+	PrintUnpackSummary(results)
 	return nil
 }

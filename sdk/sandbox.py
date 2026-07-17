@@ -15,9 +15,7 @@ from .config_loader import load_config
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
 NAMESPACE_KEY = "namespace"
-SNAPSHOT_ID_KEY = "snapshot_id"
-IMAGE_NAME_KEY = "image_name"
-USE_SNAPSHOT_KEY = "use_snapshot"
+TEMPLATE_ID_KEY = "template_id"
 VMM_NAME_KEY = "vmm_name"
 VCPU_NUM_KEY = "vcpu_num"
 VCPU_MAX_KEY = "vcpu_max"
@@ -27,20 +25,21 @@ ERROR_KEY = "error"
 MESSAGE_KEY = "message"
 IP_KEY = "ip"
 AGENT_TOKEN_KEY = "agent_token"
-SNAPSHOT_ID_RESP_KEY = "snapshotId"
+TEMPLATE_ID_RESP_KEY = "template_id"
 
 # Config keys
 CFG_SANDBOX_SECTION = "sandbox"
-CFG_SNAPSHOT_SECTION = "snapshot"
 CFG_IMAGE_SECTION = "image"
 CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
-CFG_USE_SNAPSHOT_KEY = "use_snapshot"
 
 # API paths
 SANDBOX_CREATE_PATH = "/api/sandbox/create"
 SANDBOX_DELETE_PATH = "/api/sandbox/delete"
-SANDBOX_PAUSE_PATH = "/api/sandbox/pause"
+SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
+SANDBOX_RESUME_PATH = "/api/sandbox/resume"
+SANDBOX_STOP_PATH = "/api/sandbox/stop"
+SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
 
 RANDOM_ID_HEX_BYTES = 12
 UNKNOWN_EXIT_CODE = -1
@@ -56,8 +55,8 @@ def _request_exception_message(exc: requests.exceptions.RequestException) -> str
     return str(exc)
 
 @dataclass
-class SnapshotInfo:
-    snapshot_id: str
+class TemplateInfo:
+    template_id: str
     sandbox_id: str
 
 
@@ -66,7 +65,7 @@ class SandboxInfo:
     # TODO: Extend this with more sandbox metadata once the SDK surface is finalized.
     sandbox_id: str
     ip: str
-    snapshot_id: Optional[str]
+    template_id: Optional[str]
 
 
 class Execution:
@@ -86,14 +85,12 @@ class Sandbox:
             unix_socket: Optional[str] = None,
             api_url: Optional[str] = None,
             sandbox_id: Optional[str] = None,
-            image_name: Optional[str] = None,
+            template_id: Optional[str] = None,
             namespace: Optional[str] = None,
-            snapshot_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
             config_path: Optional[str] = None,
-            use_snapshot: Optional[bool] = None,
     ):
         self._config: Dict[str, Any] = load_config(config_path=config_path)
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
@@ -107,12 +104,7 @@ class Sandbox:
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
         self.namespace = namespace or ""
-        self.image_name = image_name or self._config[CFG_IMAGE_SECTION][IMAGE_NAME_KEY]
-
-        config_snapshot_id = self._config[CFG_SNAPSHOT_SECTION].get(SNAPSHOT_ID_KEY, "")
-        self.snapshot_id = snapshot_id or config_snapshot_id
-        config_use_snapshot = self._config[CFG_IMAGE_SECTION].get(CFG_USE_SNAPSHOT_KEY, False)
-        self.use_snapshot = bool(config_use_snapshot if use_snapshot is None else use_snapshot)
+        self.template_id = template_id or sandbox_cfg.get(TEMPLATE_ID_KEY, "")
 
         self.ip = None
         self.agent_token = None
@@ -136,29 +128,17 @@ class Sandbox:
         response.raise_for_status()
         return response.json()
 
-    def _use_snapshot_startup(self) -> bool:
-        return bool(self.snapshot_id) or self.use_snapshot
-
-    def _startup_config(self) -> Dict[str, Any]:
-        if self._use_snapshot_startup():
-            return self._config[CFG_SNAPSHOT_SECTION]
-        return self._config[CFG_IMAGE_SECTION]
-
     def _get_vmm_name(self) -> str:
-        config = self._startup_config()
-        return config.get(VMM_NAME_KEY, "")
+        return self._config[CFG_IMAGE_SECTION].get(VMM_NAME_KEY, "")
 
     def _build_create_payload(self) -> Dict[str, Any]:
-        if not self.snapshot_id and not self.image_name:
-            raise ValueError("image_name is required when snapshot_id is empty")
+        if not self.template_id:
+            raise ValueError("template_id is required")
 
-        config = self._startup_config()
-        use_snapshot_image = bool(self.use_snapshot and not self.snapshot_id)
+        config = self._config[CFG_IMAGE_SECTION]
         return {
             NAMESPACE_KEY: self.namespace,
-            SNAPSHOT_ID_KEY: self.snapshot_id or "",
-            IMAGE_NAME_KEY: self.image_name if not self.snapshot_id else "",
-            USE_SNAPSHOT_KEY: use_snapshot_image,
+            TEMPLATE_ID_KEY: self.template_id,
             VMM_NAME_KEY: self._get_vmm_name(),
             SANDBOX_ID_KEY: self.sandbox_id,
             VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
@@ -232,36 +212,54 @@ class Sandbox:
         )
         return sbx.delete(sandbox_id=sandbox_id)
 
-    def pause(self):
-        # Pause sandbox.
-        # TODO: Revisit the current pause lifecycle so snapshotting is not tightly coupled to sandbox deletion.
+    def checkpoint(self):
         payload = {
             NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: self.sandbox_id,
         }
 
         try:
-            result = self._post_control_plane_requests(SANDBOX_PAUSE_PATH, payload)
+            result = self._post_control_plane_requests(SANDBOX_CHECKPOINT_PATH, payload)
             result[SANDBOX_ID_KEY] = self.sandbox_id
-            self.snapshot_id = result.get(SNAPSHOT_ID_RESP_KEY)
-            return SnapshotInfo(
-                snapshot_id=self.snapshot_id,
+            template_id = result.get(TEMPLATE_ID_RESP_KEY)
+            return TemplateInfo(
+                template_id=template_id,
                 sandbox_id=self.sandbox_id
             )
 
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
 
+    def suspend(self) -> bool:
+        return self._lifecycle(SANDBOX_SUSPEND_PATH)
+
+    def resume(self) -> bool:
+        return self._lifecycle(SANDBOX_RESUME_PATH)
+
+    def stop(self) -> bool:
+        return self._lifecycle(SANDBOX_STOP_PATH)
+
+    def _lifecycle(self, path: str) -> bool:
+        payload = {
+            NAMESPACE_KEY: self.namespace,
+            SANDBOX_ID_KEY: self.sandbox_id,
+        }
+        try:
+            self._post_control_plane_requests(path, payload)
+            return True
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+
     @classmethod
-    def create(cls, snapshot_id: Optional[str] = None, **kwargs) -> "Sandbox":
-        sbx = cls(snapshot_id=snapshot_id, **kwargs)
+    def create(cls, template_id: Optional[str] = None, **kwargs) -> "Sandbox":
+        sbx = cls(template_id=template_id, **kwargs)
         return sbx._do_create()
     
     def get_info(self) -> SandboxInfo:
         return SandboxInfo(
             sandbox_id=self.sandbox_id,
             ip=self.ip if self.ip else "",
-            snapshot_id=self.snapshot_id,
+            template_id=self.template_id,
         )
     
     def execute(

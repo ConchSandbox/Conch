@@ -45,6 +45,7 @@ var (
 	ErrNetworkSlotStoreRead = errors.New("network slot store read failed")
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
 	errPoolCleanupRequested = errors.New("network pool cleanup requested")
+	errWarmPoolFull         = errors.New("warm network pool is already full")
 )
 
 func getLogger() ulog.Logger {
@@ -80,6 +81,7 @@ type Pool struct {
 	populateCtx        context.Context
 	populateCancel     context.CancelCauseFunc
 	populateDone       chan struct{}
+	slotHealthCheck    func(context.Context, *Slot) error
 }
 
 func normalizeAndValidatePoolSize(poolSize int) (int, error) {
@@ -630,6 +632,8 @@ func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
 		return ctx.Err()
 	case p.newSlots <- slot:
 		return nil
+	default:
+		return errWarmPoolFull
 	}
 }
 
@@ -641,7 +645,11 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		if slot != nil {
 			sandboxID := slot.SandboxID()
 			slot.clearSandboxAssignment()
-			slotHealthErr := p.slotHealth(ctx, slot)
+			slotHealth := p.slotHealth
+			if p.slotHealthCheck != nil {
+				slotHealth = p.slotHealthCheck
+			}
+			slotHealthErr := slotHealth(ctx, slot)
 			if slotHealthErr == nil {
 				if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
 					slot.assignSandbox(sandboxID)
@@ -650,6 +658,13 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 				}
 				p.untrackInUse(slot)
 				if err := p.enqueueReplacement(ctx, slot); err != nil {
+					if errors.Is(err, errWarmPoolFull) {
+						if discardErr := p.discardCreatedSlot(slot); discardErr != nil {
+							return fmt.Errorf("failed to discard excess released network slot: %w", discardErr)
+						}
+						getLogger().Info("discarded released slot because warm pool is full", ulog.F("slot_index", slot.Idx))
+						return nil
+					}
 					slot.assignSandbox(sandboxID)
 					p.trackInUse(slot)
 					_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, err)

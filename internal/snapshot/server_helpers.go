@@ -82,6 +82,107 @@ func unmountAndDeactivate(ctx context.Context, mgr mount.Manager, namespace, act
 	return errors.Join(errs...)
 }
 
+func (s *Server) viewSnapshotMount(
+	ctx context.Context,
+	namespace, parentID, viewSnapshotKey, mountPoint string,
+	opts ...snapshots.Opt,
+) (_ []mount.Mount, err error) {
+	if parentID == "" {
+		return nil, fmt.Errorf("view %s requires parent snapshot", viewSnapshotKey)
+	}
+	mounts, err := s.snt.View(ctx, namespace, viewSnapshotKey, parentID, opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err == nil || s.snt == nil {
+			return
+		}
+		if removeErr := s.snt.Remove(ctx, namespace, viewSnapshotKey); removeErr != nil && !errdefs.IsNotFound(removeErr) {
+			err = errors.Join(err, fmt.Errorf("remove view snapshot %s: %w", viewSnapshotKey, removeErr))
+		}
+	}()
+
+	if err = os.MkdirAll(mountPoint, common.DirMode); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if removeErr := os.RemoveAll(mountPoint); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove dir %s: %w", mountPoint, removeErr))
+		} else if pruneErr := cleanupEmptySnapshotParents(mountPoint); pruneErr != nil {
+			err = errors.Join(err, fmt.Errorf("prune empty parent dirs for %s: %w", mountPoint, pruneErr))
+		}
+	}()
+
+	activationKey := mountActivationKey("view", namespace, viewSnapshotKey)
+	activatedKey, err := activateAndMount(ctx, s.mountMgr, namespace, activationKey, mounts, mountPoint)
+	if err != nil {
+		return nil, fmt.Errorf("mount view snapshot %s failed: %w", viewSnapshotKey, err)
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if cleanupErr := unmountAndDeactivate(ctx, s.mountMgr, namespace, activatedKey, mountPoint); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+
+	return mounts, nil
+}
+
+func (s *Server) unmountAndDeactivateMount(ctx context.Context, namespace, activationPrefix, key, mountPoint string) error {
+	var errs []error
+	if mountPoint != "" {
+		if err := s.unmountPath(mountPoint); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.mountMgr != nil {
+		activationKey := mountActivationKey(activationPrefix, namespace, key)
+		if err := s.mountMgr.Deactivate(namespaces.WithNamespace(ctx, namespace), activationKey); err != nil && !errdefs.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("deactivate mount %s: %w", activationKey, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) releaseActiveSnapshot(ctx context.Context, namespace, key, mountPoint string) error {
+	if err := s.unmountAndDeactivateMount(ctx, namespace, "active", key, mountPoint); err != nil {
+		return fmt.Errorf("unmount active snapshot %s failed, skip snapshot remove: %w", key, err)
+	}
+	return s.tryRemoveSnapshotKind(ctx, namespace, key, snapshots.KindActive)
+}
+
+func (s *Server) releaseViewSnapshot(ctx context.Context, namespace, viewSnapshotKey, mountPoint string) error {
+	if err := s.unmountAndDeactivateMount(ctx, namespace, "view", viewSnapshotKey, mountPoint); err != nil {
+		return fmt.Errorf("unmount view snapshot %s failed, skip snapshot remove: %w", viewSnapshotKey, err)
+	}
+	return s.tryRemoveSnapshotKind(ctx, namespace, viewSnapshotKey, snapshots.KindView)
+}
+
+func (s *Server) activeSnapshotExists(ctx context.Context, namespace, key string) bool {
+	if s.getActiveSnapshot(namespace, key) != nil {
+		return true
+	}
+	if s.snt == nil {
+		return false
+	}
+	info, err := s.snt.Stat(ctx, namespace, key)
+	return err == nil && info.Kind == snapshots.KindActive
+}
+
+func (s *Server) snapshotKindExists(ctx context.Context, namespace, key string, kind snapshots.Kind) bool {
+	if s.snt == nil {
+		return false
+	}
+	info, err := s.snt.Stat(ctx, namespace, key)
+	return err == nil && info.Kind == kind
+}
+
 // prepareAndMountActiveSnapshot prepares and mounts an active snapshot, then records it in the runtime cache.
 // It returns the path callers should use to access the mounted snapshot.
 func (s *Server) prepareAndMountActiveSnapshot(
@@ -173,28 +274,18 @@ func (s *Server) prepareRootfsSnapshot(ctx context.Context, namespace, key, pare
 
 func (s *Server) viewRootfsSnapshot(
 	ctx context.Context,
-	namespace, parentID, viewAliasKey, viewSnapshotKey, mountPoint string,
+	namespace, parentID, viewSnapshotKey, mountPoint string,
 	opts ...snapshots.Opt,
 ) ([]string, error) {
 	if parentID == "" {
-		return nil, fmt.Errorf("view requires parent snapshot for %s/%s", namespace, viewAliasKey)
+		return nil, fmt.Errorf("view requires parent snapshot for %s/%s", namespace, viewSnapshotKey)
 	}
-	mounts, err := s.viewMgr.acquireViewMount(
-		s.snt,
-		s.mountMgr,
-		ctx,
-		namespace,
-		parentID,
-		viewAliasKey,
-		viewSnapshotKey,
-		mountPoint,
-		opts...,
-	)
+	mounts, err := s.viewSnapshotMount(ctx, namespace, parentID, viewSnapshotKey, mountPoint, opts...)
 	if err != nil {
 		return nil, err
 	}
 	releaseOnError := func(cause error) error {
-		_, releaseErr := s.viewMgr.releaseViewAliases(s.snt, s.mountMgr, namespace, viewAliasKey)
+		releaseErr := s.releaseViewSnapshot(ctx, namespace, viewSnapshotKey, mountPoint)
 		return errors.Join(cause, releaseErr)
 	}
 	pmemFiles, err := pmemFilesFromErofsMounts(mounts)
@@ -208,13 +299,13 @@ func (s *Server) viewRootfsSnapshot(
 }
 
 func (s *Server) alignCommittedRootfsSnapshot(ctx context.Context, namespace, rootfsSnapshotID string) error {
-	viewAliasKey := getRootfsViewAliasKey("align-" + snapshotPathName(rootfsSnapshotID))
-	viewSnapshotKey := getSharedViewSnapshotKey(common.SnapshotMountRootfs, rootfsSnapshotID)
-	mountPoint := getSharedMountPath(s.workDir, namespace, rootfsSnapshotID)
-	if _, err := s.viewRootfsSnapshot(ctx, namespace, rootfsSnapshotID, viewAliasKey, viewSnapshotKey, mountPoint); err != nil {
+	key := "align-" + snapshotPathName(rootfsSnapshotID)
+	viewSnapshotKey := getRootfsViewSnapshotKey(key)
+	mountPoint := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs)
+	if _, err := s.viewRootfsSnapshot(ctx, namespace, rootfsSnapshotID, viewSnapshotKey, mountPoint); err != nil {
 		return err
 	}
-	if _, err := s.viewMgr.releaseViewAliases(s.snt, s.mountMgr, namespace, viewAliasKey); err != nil {
+	if err := s.releaseViewSnapshot(ctx, namespace, viewSnapshotKey, mountPoint); err != nil {
 		return fmt.Errorf("release rootfs alignment view %s: %w", rootfsSnapshotID, err)
 	}
 	return nil
@@ -246,154 +337,36 @@ func (s *Server) loadCommittedBootLayoutMetadata(ctx context.Context, namespace 
 	return memorySizeFromSnapshot, nil
 }
 
-// buildCommitConfigs prepares configuration objects for commit operation.
-func (s *Server) buildCommitConfigs(
-	ctx context.Context,
-	namespace, key, memKey, snapshotID, memSnapshotID, parentVMSnapshotID string,
-	si *snapshots.Info,
-) (*BootLayout, map[string]string, *BootLayout, error) {
-	layout := &BootLayout{
-		RootfsMount: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
-		MemMount:    getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
-		VMMount:     getSharedMountPath(s.workDir, namespace, parentVMSnapshotID),
-	}
-	layout.initDefaults()
-	labels := mergeLabels(si, layout)
-	labels = bootLayoutLabels(layout, labels)
-
-	var err error
-	layout.pmemFiles = s.getActiveRootfsPmem(namespace, key)
-	if len(layout.pmemFiles) == 0 {
-		layout.pmemFiles, err = s.resolveRootfsPmemFiles(ctx, namespace, key)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("resolve rootfs erofs pmem files failed: %v", err)
-		}
-	}
-
-	viewLayout := &BootLayout{
-		RootfsMount: getSharedMountPath(s.workDir, namespace, snapshotID),
-		MemMount:    getSharedMountPath(s.workDir, namespace, memSnapshotID),
-		VMMount:     getSharedMountPath(s.workDir, namespace, parentVMSnapshotID),
-		pmemFiles:   layout.pmemFiles,
-	}
-	viewLayout.initDefaults()
-
-	return layout, labels, viewLayout, nil
-}
-
-// commitRootfsSnapshot commits the rootfs snapshot with appropriate labels.
-func (s *Server) commitRootfsSnapshot(ctx context.Context, namespace, key, rootfsSnapshotID string, labels map[string]string, memSnapshotID, parentVMSnapshotID string, activeInfo *snapshots.Info) (string, error) {
-	sourceLabels := make(map[string]string)
-	if activeInfo != nil && activeInfo.Parent != "" {
-		if parentInfo, statErr := s.snt.Stat(ctx, namespace, activeInfo.Parent); statErr == nil {
-			for _, label := range []string{common.SnapshotLabelRootfsImage, common.SnapshotLabelRootfsManifest} {
-				if v := parentInfo.Labels[label]; v != "" {
-					sourceLabels[label] = v
-				}
-			}
-		}
-	}
-
-	err := s.snt.Commit(ctx, namespace, key, rootfsSnapshotID, func(info *snapshots.Info) error {
-		if info.Labels == nil {
-			info.Labels = make(map[string]string)
-		}
-		for k, v := range sourceLabels {
-			info.Labels[k] = v
-		}
-		for k, v := range labels {
-			info.Labels[k] = v
-		}
-		info.Labels[common.SnapshotLabelGroupMemRef] = memSnapshotID
-		info.Labels[common.SnapshotLabelGroupVMRef] = parentVMSnapshotID
-		return nil
-	})
-	if err == nil {
-		if alignErr := s.alignCommittedRootfsSnapshot(ctx, namespace, rootfsSnapshotID); alignErr != nil {
-			return "", fmt.Errorf("align committed rootfs snapshot %s: %w", rootfsSnapshotID, alignErr)
-		}
-		return rootfsSnapshotID, nil
-	}
-	if activeInfo == nil || activeInfo.Parent == "" || !strings.Contains(err.Error(), "not found") {
-		return "", err
-	}
-
-	parentInfo, statErr := s.snt.Stat(ctx, namespace, activeInfo.Parent)
-	if statErr != nil {
-		return "", err
-	}
-	if parentInfo.Labels == nil {
-		parentInfo.Labels = make(map[string]string)
-	}
-	var fieldpaths []string
-	for k, v := range labels {
-		parentInfo.Labels[k] = v
-		fieldpaths = append(fieldpaths, "labels."+k)
-	}
-	parentInfo.Labels[common.SnapshotLabelGroupMemRef] = memSnapshotID
-	parentInfo.Labels[common.SnapshotLabelGroupVMRef] = parentVMSnapshotID
-	fieldpaths = append(fieldpaths,
-		"labels."+common.SnapshotLabelGroupMemRef,
-		"labels."+common.SnapshotLabelGroupVMRef,
-	)
-	if _, updateErr := s.snt.Update(ctx, namespace, parentInfo, fieldpaths...); updateErr != nil {
-		return "", fmt.Errorf("update native rootfs snapshot labels %s: %w", activeInfo.Parent, updateErr)
-	}
-	s.removeActiveSnapshot(namespace, key)
-	return activeInfo.Parent, nil
-}
-
-// commitMemSnapshot commits the mem snapshot with back-reference to rootfs.
-func (s *Server) commitMemSnapshot(ctx context.Context, namespace, memKey, memSnapshotID, rootfsSnapshotID string) error {
-	err := s.snt.Commit(ctx, namespace, memKey, memSnapshotID, func(info *snapshots.Info) error {
-		if info.Labels == nil {
-			info.Labels = make(map[string]string)
-		}
-		info.Labels[common.SnapshotLabelGroupID] = rootfsSnapshotID
-		info.Labels[common.SnapshotLabelComponentKind] = common.SnapshotComponentKindMem
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("commit mem snapshot failed: %v", err)
-	}
-	return nil
-}
-
-// prewarmViewMounts pre-creates shared rootfs/vm view mounts for fast restore.
-// Prewarmed mounts are kept with refCount=0 and promoted on first real use.
-func (s *Server) prewarmViewMounts(ctx context.Context, namespace, rootfsSnapshotID, parentVMSnapshotID string, viewLayout *BootLayout) error {
-	prewarmItems := []struct {
-		mountKind  string
-		parentID   string
-		mountPoint string
-	}{
-		{common.SnapshotMountVM, parentVMSnapshotID, viewLayout.VMMount},
-	}
-
-	for _, item := range prewarmItems {
-		viewSnapshotKey := getSharedViewSnapshotKey(item.mountKind, item.parentID)
-		viewErr := s.viewMgr.ensureViewMount(
-			s.snt,
-			s.mountMgr,
-			ctx,
-			namespace,
-			item.parentID,
-			viewSnapshotKey,
-			item.mountPoint,
-		)
-		if viewErr != nil {
-			return fmt.Errorf("prewarm view for %s failed: %w", item.parentID, viewErr)
-		}
-	}
-	return nil
-}
-
 // tryRemoveSnapshot attempts to remove a snapshot if it exists.
 func (s *Server) tryRemoveSnapshot(ctx context.Context, namespace, key string) error {
 	if _, err := s.snt.Stat(ctx, namespace, key); err == nil {
 		if err := s.snt.Remove(ctx, namespace, key); err != nil {
 			return fmt.Errorf("remove snapshot %s: %w", key, err)
 		}
+	}
+	s.removeActiveSnapshot(namespace, key)
+	return nil
+}
+
+func (s *Server) tryRemoveSnapshotKind(ctx context.Context, namespace, key string, allowed ...snapshots.Kind) error {
+	activeCached := s.getActiveSnapshot(namespace, key) != nil
+	info, err := s.snt.Stat(ctx, namespace, key)
+	if err != nil {
+		s.removeActiveSnapshot(namespace, key)
+		return nil
+	}
+	allowedKind := false
+	for _, kind := range allowed {
+		if info.Kind == kind || (kind == snapshots.KindActive && activeCached) {
+			allowedKind = true
+			break
+		}
+	}
+	if !allowedKind {
+		return nil
+	}
+	if err := s.snt.Remove(ctx, namespace, key); err != nil {
+		return fmt.Errorf("remove snapshot %s: %w", key, err)
 	}
 	s.removeActiveSnapshot(namespace, key)
 	return nil

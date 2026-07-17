@@ -4,16 +4,16 @@ from conch.sandbox import VMM_NAME_KEY
 
 
 def test_create_default(sandbox):
-    """Create sandbox from default image in config."""
+    """Create sandbox from default source in config."""
     assert sandbox.sandbox_id is not None
     assert sandbox.sandbox_id.startswith("sandbox_")
     assert sandbox.ip is not None
 
 
-def test_create_with_image_name():
-    """Create sandbox with specified image."""
-    image = load_config()["image"]["image_name"]
-    sbx = Sandbox.create(image_name=image)
+def test_create_with_template_id():
+    """Create sandbox with specified source."""
+    template_id = load_config()["sandbox"]["template_id"]
+    sbx = Sandbox.create(template_id=template_id)
     try:
         assert sbx.sandbox_id is not None
         result = sbx.execute(cmd="ls", args=["/"])
@@ -22,14 +22,14 @@ def test_create_with_image_name():
         sbx.delete()
 
 
-def test_create_with_snapshot():
-    """Create sandbox from snapshot: create -> pause -> restore."""
+def test_create_with_checkpoint():
+    """Create sandbox from checkpoint: create -> checkpoint -> restore."""
     sbx = Sandbox.create()
-    snapshot = sbx.pause()
-    assert snapshot.snapshot_id is not None
-    assert snapshot.sandbox_id == sbx.sandbox_id
+    template = sbx.checkpoint()
+    assert template.template_id is not None
+    assert template.sandbox_id == sbx.sandbox_id
 
-    sbx2 = Sandbox.create(snapshot_id=snapshot.snapshot_id)
+    sbx2 = Sandbox.create(template_id=template.template_id)
     try:
         assert sbx2.sandbox_id is not None
         result = sbx2.execute(cmd="ls", args=["/"])
@@ -49,10 +49,9 @@ def test_context_manager():
 def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
     config = load_config()
     config["image"].pop(VMM_NAME_KEY, None)
-    config["snapshot"].pop(VMM_NAME_KEY, None)
 
     monkeypatch.setattr("conch.sandbox.load_config", lambda config_path=None: config)
-    sbx = Sandbox(sandbox_id="sandbox-test", image_name=config["image"]["image_name"])
+    sbx = Sandbox(sandbox_id="sandbox-test", template_id="tmpl_test")
 
     payload = sbx._build_create_payload()
     assert payload[VMM_NAME_KEY] == ""

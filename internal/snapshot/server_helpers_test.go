@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,21 +13,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
-
-func TestCommitMemSnapshotLabelsComponentKind(t *testing.T) {
-	snapshotter := &recordingServerSnapshotter{}
-	srv := &Server{snt: snapshotter}
-
-	if err := srv.commitMemSnapshot(context.Background(), "default", "mem-active", "mem-committed", "rootfs-id"); err != nil {
-		t.Fatalf("commitMemSnapshot() error = %v", err)
-	}
-	if snapshotter.committedInfo.Labels[common.SnapshotLabelGroupID] != "rootfs-id" {
-		t.Fatalf("group id label = %q, want rootfs-id", snapshotter.committedInfo.Labels[common.SnapshotLabelGroupID])
-	}
-	if snapshotter.committedInfo.Labels[common.SnapshotLabelComponentKind] != common.SnapshotComponentKindMem {
-		t.Fatalf("component kind = %q, want %q", snapshotter.committedInfo.Labels[common.SnapshotLabelComponentKind], common.SnapshotComponentKindMem)
-	}
-}
 
 func TestLoadCommittedBootLayoutMetadataUsesRootfsLabels(t *testing.T) {
 	snapshotter := &recordingServerSnapshotter{
@@ -106,11 +92,72 @@ func TestPrepareAndRegisterSnapshotRollsBackPreparedSnapshotOnMountError(t *test
 	}
 }
 
+func TestReleaseBootLayoutDoesNotRemoveCommittedSnapshotWithSandboxKey(t *testing.T) {
+	snapshotter := &recordingServerSnapshotter{
+		statInfo: snapshots.Info{Kind: snapshots.KindCommitted},
+	}
+	srv := &Server{snt: snapshotter, workDir: t.TempDir()}
+
+	if err := srv.ReleaseBootLayout(context.Background(), "default", "sandbox-1"); err != nil {
+		t.Fatalf("ReleaseBootLayout() error = %v", err)
+	}
+	if len(snapshotter.removedKeys) != 0 {
+		t.Fatalf("removed keys = %#v, want none", snapshotter.removedKeys)
+	}
+}
+
+func TestBootLayoutMemoryPathsRespectStorageMode(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		mode           MemoryLayoutMode
+		wantMemoryPath bool
+		wantSnapPath   bool
+	}{
+		{name: "none", mode: MemoryLayoutNone},
+		{name: "writable file", mode: MemoryLayoutWritableFile, wantMemoryPath: true, wantSnapPath: true},
+		{name: "checkpoint view", mode: MemoryLayoutCheckpointView, wantSnapPath: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			layout := &BootLayout{
+				MemMount:     "/runtime/mem",
+				SnapshotDir:  "conch/snapshot",
+				MemoryLayout: tt.mode,
+			}
+			if got := layout.SnapshotMemFile() != ""; got != tt.wantMemoryPath {
+				t.Fatalf("SnapshotMemFile() = %q", layout.SnapshotMemFile())
+			}
+			if got := layout.SnapDir() != ""; got != tt.wantSnapPath {
+				t.Fatalf("SnapDir() = %q", layout.SnapDir())
+			}
+		})
+	}
+}
+
+func TestReleaseBootLayoutReleasesCheckpointMemoryView(t *testing.T) {
+	const key = "sandbox-view"
+	snapshotter := &recordingServerSnapshotter{statByKey: map[string]snapshots.Info{
+		getRootfsViewSnapshotKey(key): {Kind: snapshots.KindView},
+		getMemViewSnapshotKey(key):    {Kind: snapshots.KindView},
+		getVMViewSnapshotKey(key):     {Kind: snapshots.KindView},
+	}}
+	srv := &Server{snt: snapshotter, workDir: t.TempDir()}
+
+	if err := srv.ReleaseBootLayout(context.Background(), "default", key); err != nil {
+		t.Fatalf("ReleaseBootLayout() error = %v", err)
+	}
+	want := []string{getRootfsViewSnapshotKey(key), getMemViewSnapshotKey(key), getVMViewSnapshotKey(key)}
+	for _, viewKey := range want {
+		if !slices.Contains(snapshotter.removedKeys, viewKey) {
+			t.Fatalf("removed keys = %#v, missing %s", snapshotter.removedKeys, viewKey)
+		}
+	}
+}
+
 type recordingServerSnapshotter struct {
-	committedInfo snapshots.Info
 	prepareMounts []mount.Mount
 	prepareErr    error
 	statInfo      snapshots.Info
+	statByKey     map[string]snapshots.Info
 	statErr       error
 	removedKeys   []string
 }
@@ -130,14 +177,7 @@ func (r *recordingServerSnapshotter) Mounts(context.Context, string, string) ([]
 	return nil, nil
 }
 
-func (r *recordingServerSnapshotter) Commit(_ context.Context, _, _, snapshotID string, opts ...snapshots.Opt) error {
-	info := snapshots.Info{Name: snapshotID}
-	for _, opt := range opts {
-		if err := opt(&info); err != nil {
-			return err
-		}
-	}
-	r.committedInfo = info
+func (r *recordingServerSnapshotter) Commit(context.Context, string, string, string, ...snapshots.Opt) error {
 	return nil
 }
 
@@ -150,9 +190,16 @@ func (r *recordingServerSnapshotter) Remove(_ context.Context, _, key string) er
 	return nil
 }
 
-func (r *recordingServerSnapshotter) Stat(context.Context, string, string) (snapshots.Info, error) {
+func (r *recordingServerSnapshotter) Stat(_ context.Context, _, key string) (snapshots.Info, error) {
 	if r.statErr != nil {
 		return snapshots.Info{}, r.statErr
+	}
+	if r.statByKey != nil {
+		info, ok := r.statByKey[key]
+		if !ok {
+			return snapshots.Info{}, errors.New("snapshot not found")
+		}
+		return info, nil
 	}
 	return r.statInfo, nil
 }

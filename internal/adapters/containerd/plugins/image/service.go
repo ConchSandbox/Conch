@@ -100,6 +100,9 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
 	}
+	if req.SkipUnpack {
+		return runtimeapi.PullImageResult{}, nil
+	}
 
 	results, err := conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
 	if err == nil {
@@ -218,6 +221,48 @@ func (s *Service) Push(ctx context.Context, req runtimeapi.PushImageOptions) err
 	return nil
 }
 
+// PushBootIndex pushes the exact descriptor closure selected by an immutable
+// digest. Unlike Push, it deliberately does not resolve through a mutable
+// local image name.
+func (s *Service) PushBootIndex(ctx context.Context, req conchimage.PushBootIndexOptions) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("image service has no containerd client")
+	}
+	if strings.TrimSpace(req.BootIndexDigest) == "" {
+		return fmt.Errorf("%w: boot_index_digest is required", conchimage.ErrInvalidRequest)
+	}
+	req.RemoteReference = strings.TrimSpace(req.RemoteReference)
+	if req.RemoteReference == "" {
+		return fmt.Errorf("%w: remote_reference is required", conchimage.ErrInvalidRequest)
+	}
+	ns := strings.TrimSpace(req.Namespace)
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	pushCtx := namespaces.WithNamespace(ctx, ns)
+	desc, err := conchimage.BootIndexDescriptorFromDigest(pushCtx, s.client.ContentStore(), req.BootIndexDigest)
+	if err != nil {
+		return err
+	}
+	if _, err := conchimage.InspectBootIndexContent(pushCtx, s.client.ContentStore(), desc); err != nil {
+		return fmt.Errorf("validate boot index %s before push: %w", desc.Digest, err)
+	}
+	resolver := docker.NewResolver(docker.ResolverOptions{
+		PlainHTTP: req.PlainHTTP,
+		Client:    registryHTTPClient(req.RegistryTimeout),
+		Credentials: func(string) (string, string, error) {
+			return req.Username, req.Password, nil
+		},
+	})
+	if err := s.client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
+		return fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err)
+	}
+	return nil
+}
+
 func (s *Service) List(ctx context.Context, req runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("image service has no containerd client")
@@ -236,7 +281,7 @@ func (s *Service) List(ctx context.Context, req runtimeapi.ListImagesOptions) ([
 	}
 	out := make([]runtimeapi.ImageRecord, 0, len(items))
 	for _, item := range items {
-		kind := imageKindFromLabels(item.Labels)
+		kind := externalComponentKind(imageKindFromLabels(item.Labels))
 		if kind == "" {
 			kind = s.classifyImageKind(listCtx, item)
 		}
@@ -304,16 +349,37 @@ func imageKindFromLabels(labels map[string]string) string {
 	return ""
 }
 
-func (s *Service) classifyImageKind(ctx context.Context, item images.Image) string {
-	if s == nil || s.client == nil {
+// externalComponentKind translates a persisted component annotation to the
+// classification exposed by ImageRecord.Kind. Boot Index kinds are determined
+// from index contents instead of labels.
+func externalComponentKind(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case conchimage.KindRootfs:
+		return runtimeapi.ImageKindBootComponentRootfs
+	case conchimage.KindSandbox:
+		return runtimeapi.ImageKindBootComponentSandbox
+	case conchimage.KindMemSnapshot:
+		return runtimeapi.ImageKindBootComponentMemory
+	default:
 		return ""
 	}
+}
+
+func (s *Service) classifyImageKind(ctx context.Context, item images.Image) string {
+	if s == nil || s.client == nil {
+		return runtimeapi.ImageKindOCIImage
+	}
+	var kind string
 	switch item.Target.MediaType {
 	case ocispec.MediaTypeImageIndex:
-		return s.classifyIndexKind(ctx, item.Target)
+		kind = s.classifyIndexKind(ctx, item.Target)
 	default:
-		return inferComponentKindFromName(item.Name)
+		kind = inferComponentKindFromName(item.Name)
 	}
+	if kind == "" {
+		return runtimeapi.ImageKindOCIImage
+	}
+	return kind
 }
 
 func (s *Service) classifyIndexKind(ctx context.Context, target ocispec.Descriptor) string {
@@ -344,9 +410,9 @@ func classifyConchIndexKind(index ocispec.Index) string {
 	}
 	if hasRootfs && hasSandbox {
 		if hasMem {
-			return "sandbox-snapshot"
+			return runtimeapi.ImageKindBootIndexResume
 		}
-		return "sandbox-base"
+		return runtimeapi.ImageKindBootIndexCold
 	}
 	return ""
 }
@@ -354,11 +420,11 @@ func classifyConchIndexKind(index ocispec.Index) string {
 func inferComponentKindFromName(name string) string {
 	switch {
 	case strings.Contains(name, "/rootfs-component:") || strings.HasSuffix(name, "-rootfs"):
-		return conchimage.KindRootfs
+		return runtimeapi.ImageKindBootComponentRootfs
 	case strings.Contains(name, "/sandbox-component:") || strings.HasSuffix(name, "-sandbox"):
-		return conchimage.KindSandbox
+		return runtimeapi.ImageKindBootComponentSandbox
 	case strings.Contains(name, "/mem-snapshot-component:") || strings.HasSuffix(name, "-mem"):
-		return conchimage.KindMemSnapshot
+		return runtimeapi.ImageKindBootComponentMemory
 	default:
 		return ""
 	}
@@ -405,6 +471,97 @@ func (s *Service) Unpack(ctx context.Context, req runtimeapi.UnpackImageOptions)
 	return results, nil
 }
 
+// InspectBootIndex resolves and validates a Boot Index directly by digest. It
+// does not create image records or snapshots.
+func (s *Service) InspectBootIndex(ctx context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+	_, _, info, err := s.inspectBootIndex(ctx, namespace, bootIndexDigest)
+	return info, err
+}
+
+// InspectBootIndexReference validates the complete Boot Index closure named
+// by a local image record without unpacking any component snapshots.
+func (s *Service) InspectBootIndexReference(ctx context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {
+	if s == nil || s.client == nil {
+		return conchimage.BootIndexInfo{}, fmt.Errorf("image service has no containerd client")
+	}
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return conchimage.BootIndexInfo{}, fmt.Errorf("%w: reference is required", conchimage.ErrInvalidRequest)
+	}
+	ns := strings.TrimSpace(namespace)
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	inspectCtx := namespaces.WithNamespace(ctx, ns)
+	img, err := s.client.GetImage(inspectCtx, reference)
+	if err != nil {
+		return conchimage.BootIndexInfo{}, fmt.Errorf("lookup boot index reference %s: %w", reference, err)
+	}
+	info, err := conchimage.InspectBootIndexContent(inspectCtx, s.client.ContentStore(), img.Target())
+	if err != nil {
+		return conchimage.BootIndexInfo{}, fmt.Errorf("inspect boot index reference %s: %w", reference, err)
+	}
+	return info, nil
+}
+
+// ResolveBootIndex validates a Boot Index by digest and idempotently unpacks
+// its components to the shared committed snapshots used as sandbox parents.
+func (s *Service) ResolveBootIndex(ctx context.Context, namespace, bootIndexDigest string) (conchimage.ResolveBootIndexResult, error) {
+	resolveCtx, desc, info, err := s.inspectBootIndex(ctx, namespace, bootIndexDigest)
+	if err != nil {
+		return conchimage.ResolveBootIndexResult{}, err
+	}
+	snapshotMap, err := conchimage.UnpackAllSubImagesFromDescriptor(resolveCtx, s.client.Client, desc)
+	if err != nil {
+		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("unpack boot index %s: %w", desc.Digest, err)
+	}
+	result := conchimage.ResolveBootIndexResult{
+		BootIndexInfo: info,
+		RootfsKey:     snapshotMap[conchimage.KindRootfs],
+		MemKey:        snapshotMap[conchimage.KindMemSnapshot],
+		VMKey:         snapshotMap[conchimage.KindSandbox],
+	}
+	if result.RootfsKey == "" || result.VMKey == "" {
+		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("boot index %s unpack returned incomplete component keys", desc.Digest)
+	}
+	if result.Resume && result.MemKey == "" {
+		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("resume boot index %s unpack returned an empty mem snapshot key", desc.Digest)
+	}
+	return result, nil
+}
+
+func (s *Service) inspectBootIndex(
+	ctx context.Context,
+	namespace, bootIndexDigest string,
+) (context.Context, ocispec.Descriptor, conchimage.BootIndexInfo, error) {
+	if s == nil || s.client == nil {
+		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, fmt.Errorf("image service has no containerd client")
+	}
+	if strings.TrimSpace(bootIndexDigest) == "" {
+		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", conchimage.ErrInvalidRequest)
+	}
+	ns := strings.TrimSpace(namespace)
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	resolveCtx := namespaces.WithNamespace(ctx, ns)
+	desc, err := conchimage.BootIndexDescriptorFromDigest(resolveCtx, s.client.ContentStore(), bootIndexDigest)
+	if err != nil {
+		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, err
+	}
+	info, err := conchimage.InspectBootIndexContent(resolveCtx, s.client.ContentStore(), desc)
+	if err != nil {
+		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, err
+	}
+	return resolveCtx, desc, info, nil
+}
+
 func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error) {
 	if s == nil || s.client == nil {
 		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("image service has no containerd client")
@@ -437,7 +594,7 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req runt
 	finalSnapshotKey, finalImageName, err := selectImportedSnapshot(
 		reorderImportedImages(importedImages, req.ImportedTag),
 		func(imgInfo images.Image) (map[string]string, bool, error) {
-			if err := conchimage.ValidateConchImageIndex(importCtx, s.client.Client, imgInfo.Name); err != nil {
+			if err := conchimage.ValidateBootIndexContent(importCtx, s.client.Client, imgInfo.Name); err != nil {
 				return nil, false, nil
 			}
 			snapshotMap, err := conchimage.UnpackAllSubImages(importCtx, s.client.Client, imgInfo.Name)
@@ -572,33 +729,112 @@ func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBo
 		return conchimage.PublishBootImageResult{}, fmt.Errorf("build boot index content: %w", err)
 	}
 
-	labelHandler := images.SetChildrenLabels(s.client.ContentStore(), images.ChildrenHandler(s.client.ContentStore()))
-	if err := images.WalkNotEmpty(publishCtx, labelHandler, indexDesc); err != nil {
-		return conchimage.PublishBootImageResult{}, fmt.Errorf("label boot index content: %w", err)
-	}
-	imageRecord := images.Image{Name: req.BootIndexTag, Target: indexDesc}
-	if _, err := s.client.ImageService().Update(publishCtx, imageRecord, "target"); err != nil {
-		if !errdefs.IsNotFound(err) {
-			return conchimage.PublishBootImageResult{}, fmt.Errorf("update boot image record %s: %w", req.BootIndexTag, err)
-		}
-		if _, err := s.client.ImageService().Create(publishCtx, imageRecord); err != nil {
-			return conchimage.PublishBootImageResult{}, fmt.Errorf("create boot image record %s: %w", req.BootIndexTag, err)
-		}
+	if err := s.publishBootIndexRecord(publishCtx, req.BootIndexTag, indexDesc); err != nil {
+		return conchimage.PublishBootImageResult{}, err
 	}
 
-	snapshotMap, err := conchimage.UnpackAllSubImages(publishCtx, s.client.Client, req.BootIndexTag)
-	if err != nil {
-		return conchimage.PublishBootImageResult{}, fmt.Errorf("unpack boot image %s: %w", req.BootIndexTag, err)
-	}
-	snapshotKey := snapshotMap[conchimage.KindRootfs]
-	if snapshotKey == "" {
-		return conchimage.PublishBootImageResult{}, fmt.Errorf("boot image %s unpack returned empty rootfs snapshot key", req.BootIndexTag)
-	}
 	return conchimage.PublishBootImageResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		SnapshotKey:     snapshotKey,
 		ImageName:       req.BootIndexTag,
 	}, nil
+}
+
+// PublishCheckpointBootImage packages captured memory and VMM state into OCI
+// content, reuses the source Boot Index's immutable rootfs and sandbox
+// components, and publishes a new Boot Index. It intentionally does not unpack
+// the index: checkpoint publication may add content and metadata, but it must
+// not create checkpoint snapshots.
+func (s *Service) PublishCheckpointBootImage(
+	ctx context.Context,
+	req conchimage.PublishCheckpointBootImageOptions,
+) (conchimage.PublishCheckpointBootImageResult, error) {
+	if s == nil || s.client == nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("image service has no containerd client")
+	}
+	if strings.TrimSpace(req.SourceBootIndexDigest) == "" {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: source_boot_index_digest is required", conchimage.ErrInvalidRequest)
+	}
+	req.BootIndexTag = strings.TrimSpace(req.BootIndexTag)
+	if req.BootIndexTag == "" {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
+	}
+	req.MemRoot = strings.TrimSpace(req.MemRoot)
+	if req.MemRoot == "" {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: mem_root is required", conchimage.ErrInvalidRequest)
+	}
+	req.VMMName = strings.TrimSpace(req.VMMName)
+	if req.VMMName == "" {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: vmm_name is required", conchimage.ErrInvalidRequest)
+	}
+	if req.MemorySizeMB <= 0 {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: memory_size_mb must be positive", conchimage.ErrInvalidRequest)
+	}
+
+	ns := strings.TrimSpace(req.Namespace)
+	if ns == "" {
+		ns = s.client.DefaultNamespace()
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	publishCtx, done, err := s.client.WithLease(namespaceCtx)
+	if err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("create content lease: %w", err)
+	}
+	defer done(publishCtx)
+
+	sourceDesc, err := conchimage.BootIndexDescriptorFromDigest(publishCtx, s.client.ContentStore(), req.SourceBootIndexDigest)
+	if err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("resolve source boot index: %w", err)
+	}
+	sourceInfo, err := conchimage.InspectBootIndexContent(publishCtx, s.client.ContentStore(), sourceDesc)
+	if err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("inspect source boot index: %w", err)
+	}
+	if sourceInfo.VMMName != "" && sourceInfo.VMMName != req.VMMName {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("source boot index VMM %q does not match capture VMM %q", sourceInfo.VMMName, req.VMMName)
+	}
+
+	memDesc, err := conchimage.BuildNativeComponentInContent(publishCtx, s.client.ContentStore(), []string{req.MemRoot}, conchimage.KindMemSnapshot, req.BootIndexTag+"-mem")
+	if err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("publish captured mem component: %w", err)
+	}
+	indexDesc, err := conchimage.BuildBootIndexInContent(publishCtx, s.client.ContentStore(), conchimage.BootIndexContentOptions{
+		RootfsDescriptor:  sourceInfo.RootfsDescriptor,
+		MemDescriptor:     memDesc,
+		SandboxDescriptor: sourceInfo.SandboxDescriptor,
+		Tag:               req.BootIndexTag,
+		VMMName:           req.VMMName,
+		MemorySizeMB:      req.MemorySizeMB,
+	})
+	if err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("build checkpoint boot index: %w", err)
+	}
+	if err := s.publishBootIndexRecord(publishCtx, req.BootIndexTag, indexDesc); err != nil {
+		return conchimage.PublishCheckpointBootImageResult{}, err
+	}
+	return conchimage.PublishCheckpointBootImageResult{
+		BootIndexDigest: indexDesc.Digest.String(),
+		ImageName:       req.BootIndexTag,
+	}, nil
+}
+
+func (s *Service) publishBootIndexRecord(ctx context.Context, tag string, indexDesc ocispec.Descriptor) error {
+	labelHandler := images.SetChildrenLabels(s.client.ContentStore(), images.ChildrenHandler(s.client.ContentStore()))
+	if err := images.WalkNotEmpty(ctx, labelHandler, indexDesc); err != nil {
+		return fmt.Errorf("label boot index content: %w", err)
+	}
+	imageRecord := images.Image{Name: tag, Target: indexDesc}
+	if _, err := s.client.ImageService().Update(ctx, imageRecord, "target"); err != nil {
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("update boot image record %s: %w", tag, err)
+		}
+		if _, err := s.client.ImageService().Create(ctx, imageRecord); err != nil {
+			return fmt.Errorf("create boot image record %s: %w", tag, err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error) {

@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -75,7 +74,7 @@ const resumeScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp \
--incoming file:{{ .SnapfilePath }}`
+-incoming file:{{ .SnapfilePath }},mapped=true`
 
 type StartScriptStratovirtArgs struct {
 	VmmBinaryPath string
@@ -84,7 +83,6 @@ type StartScriptStratovirtArgs struct {
 	MemorySize    string
 	MachineType   string
 	ConsoleDevice string
-	MemoryPath    string
 	KernelPath    string
 	RootfsPath    string
 	NamespaceID   string
@@ -100,14 +98,6 @@ type StartScriptStratovirtArgs struct {
 type StratovirtClient struct {
 	vmmType    int
 	socketPath string
-	config     *stratovirtSnapshotConfig
-}
-
-type stratovirtSnapshotConfig struct {
-	memorySize int64
-	kernelPath string
-	initrdPath string
-	vsockCID   uint32
 }
 
 func NewStratovirtClient(vmmType int, socketPath string) *StratovirtClient {
@@ -117,7 +107,7 @@ func NewStratovirtClient(vmmType int, socketPath string) *StratovirtClient {
 	}
 }
 
-func (s *StratovirtClient) PrepareLaunch(args *driver.ResourceArgs) error {
+func (s *StratovirtClient) PrepareLaunch(args *driver.ResourceArgs, isResume bool) error {
 	return nil
 }
 
@@ -193,7 +183,6 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 		MemorySize:    strconv.FormatInt(args.MemorySize, 10),
 		MachineType:   machineType,
 		ConsoleDevice: consoleDevice,
-		MemoryPath:    args.MemoryPath,
 		KernelPath:    args.KernelPath,
 		RootfsPath:    args.InitrdPath,
 		NamespaceID:   args.NamespaceID,
@@ -226,13 +215,6 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 			ulog.F("error", err),
 		)
 		return "", fmt.Errorf("error executing stratovirt start script template: %w", err)
-	}
-
-	s.config = &stratovirtSnapshotConfig{
-		memorySize: args.MemorySize,
-		kernelPath: args.KernelPath,
-		initrdPath: args.InitrdPath,
-		vsockCID:   args.VsockCID,
 	}
 
 	script := scriptBuffer.String()
@@ -490,10 +472,8 @@ func (s *StratovirtClient) PauseVM() error {
 	return nil
 }
 
-// StratoVirt resume is driven by "-incoming file:<path>" at process launch.
-// CheckAgentAlive sends "cont" if the restored VM is paused.
 func (s *StratovirtClient) ResumeVM() error {
-	return nil
+	return s.executeQMPCommand("cont", nil)
 }
 
 func (s *StratovirtClient) DeleteVM() error {
@@ -575,9 +555,6 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 		switch status {
 		case "completed":
 			logger.Info("Snapshot completed successfully")
-			if err := s.generateSnapshotConfig(snapfilePath); err != nil {
-				return fmt.Errorf("failed to generate snapshot config: %w", err)
-			}
 			return nil
 		case "failed":
 			return fmt.Errorf("snapshot failed")
@@ -587,47 +564,6 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 	}
 
 	return fmt.Errorf("snapshot timeout after %v", stratovirtSnapshotPollTimeout)
-}
-
-func (s *StratovirtClient) generateSnapshotConfig(snapfilePath string) error {
-	logger := ulog.GetLogger()
-
-	if s.config == nil {
-		return fmt.Errorf("snapshot config not available")
-	}
-
-	config := map[string]any{
-		"payload": map[string]any{
-			"kernel":    s.config.kernelPath,
-			"initramfs": s.config.initrdPath,
-		},
-		"memory": map[string]any{
-			"size": s.config.memorySize * 1024 * 1024,
-			"zones": []map[string]any{
-				{
-					"id":     "mem0",
-					"size":   fmt.Sprintf("%dM", s.config.memorySize),
-					"shared": true,
-				},
-			},
-		},
-		"vsock": map[string]any{
-			"cid": s.config.vsockCID,
-		},
-	}
-
-	configData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot config: %w", err)
-	}
-
-	configPath := filepath.Join(snapfilePath, "config.json")
-	if err := os.WriteFile(configPath, configData, 0640); err != nil {
-		return fmt.Errorf("failed to write snapshot config: %w", err)
-	}
-
-	logger.Info("Generated snapshot config file", ulog.F("path", configPath))
-	return nil
 }
 
 // StratoVirt consumes the snapshot during process launch via "-incoming file:<path>".

@@ -95,7 +95,7 @@ func ResolveBootParentSnapshotIDs(ctx context.Context, client *containerdclient.
 	if imageMeta.Target.MediaType != ocispec.MediaTypeImageIndex {
 		return BootParentSnapshotIDs{}, false, nil
 	}
-	if err := ValidateConchImageIndex(nsCtx, client.Client, imageName); err != nil {
+	if err := ValidateBootIndexContent(nsCtx, client.Client, imageName); err != nil {
 		return BootParentSnapshotIDs{}, false, nil
 	}
 

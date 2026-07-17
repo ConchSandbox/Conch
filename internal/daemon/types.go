@@ -7,11 +7,12 @@ import (
 )
 
 type pullImageRequest struct {
-	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
-	PlainHTTP bool   `json:"plain_http,omitempty"`
-	Username  string `json:"username,omitempty"`
-	Password  string `json:"password,omitempty"`
+	ImageName  string `json:"image_name"`
+	Namespace  string `json:"namespace,omitempty"`
+	PlainHTTP  bool   `json:"plain_http,omitempty"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+	SkipUnpack bool   `json:"skip_unpack,omitempty"`
 }
 
 type pushImageRequest struct {
@@ -61,38 +62,65 @@ type importImageArchiveResponse struct {
 	ImageName   string `json:"image_name"`
 }
 
-type convertImageRequest struct {
-	Source       string `json:"source"`
-	Namespace    string `json:"namespace,omitempty"`
-	BootIndexTag string `json:"boot_index_tag"`
-	PlainHTTP    bool   `json:"plain_http,omitempty"`
-	Username     string `json:"username,omitempty"`
-	Password     string `json:"password,omitempty"`
-	Snapshot     bool   `json:"snapshot,omitempty"`
-}
-
-type convertImageResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
-	RootfsImageRef  string `json:"rootfs_image_ref,omitempty"`
-	SourceImageRef  string `json:"source_image_ref,omitempty"`
-}
-
-type snapshotExportRequest struct {
-	Namespace        string `json:"namespace,omitempty"`
-	BootIndexTag     string `json:"boot_index_tag"`
-	RootfsSnapshotID string `json:"snapshot_id,omitempty"`
-	SandboxID        string `json:"sandbox_id,omitempty"`
-}
-
-type snapshotExportResponse struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
-}
-
 type snapshotInfoRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
+}
+
+type sandboxLifecycleRequest struct {
+	Namespace string `json:"namespace,omitempty"`
+	SandboxID string `json:"sandbox_id"`
+}
+
+type sandboxCheckpointRequest struct {
+	Namespace string            `json:"namespace,omitempty"`
+	SandboxID string            `json:"sandbox_id"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+type templateListRequest struct {
+	Namespace string `json:"namespace,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	BootMode  string `json:"boot_mode,omitempty"`
+}
+
+type templateIDRequest struct {
+	ID string `json:"id"`
+}
+
+type templateCreateRequest struct {
+	Source       string            `json:"source"`
+	Namespace    string            `json:"namespace,omitempty"`
+	BootIndexTag string            `json:"boot_index_tag,omitempty"`
+	PlainHTTP    bool              `json:"plain_http,omitempty"`
+	Username     string            `json:"username,omitempty"`
+	Password     string            `json:"password,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+}
+
+type templatePullRequest struct {
+	Reference string            `json:"reference"`
+	Namespace string            `json:"namespace,omitempty"`
+	PlainHTTP bool              `json:"plain_http,omitempty"`
+	Username  string            `json:"username,omitempty"`
+	Password  string            `json:"password,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+type templatePushRequest struct {
+	TemplateID      string `json:"template_id"`
+	RemoteReference string `json:"remote_reference"`
+	Namespace       string `json:"namespace,omitempty"`
+	PlainHTTP       bool   `json:"plain_http,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Password        string `json:"password,omitempty"`
+	RegistryTimeout string `json:"registry_timeout,omitempty"`
+}
+
+type templateRecordResponse = runtimeapi.TemplateRecord
+
+type templateListResponse struct {
+	Items []templateRecordResponse `json:"items"`
 }
 
 func imageRecordResponses(records []runtimeapi.ImageRecord) []imageRecordResponse {

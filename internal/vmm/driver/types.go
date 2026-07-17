@@ -38,7 +38,7 @@ type ResourceArgs struct {
 
 type Adapter interface {
 	BuildStartCmd(args *ResourceArgs, isResume bool) (string, error)
-	PrepareLaunch(args *ResourceArgs) error
+	PrepareLaunch(args *ResourceArgs, isResume bool) error
 	AfterProcessStart()
 	WaitForCreateReady(ctx context.Context, processExited <-chan error) error
 	WaitForResumeReady(ctx context.Context, processExited <-chan error) error

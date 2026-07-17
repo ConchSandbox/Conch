@@ -1,10 +1,11 @@
 package state
 
 const (
-	SandboxReady    = "READY"
-	SandboxNotReady = "NOTREADY"
-	SandboxStopped  = "STOPPED"
-	SandboxUnknown  = "UNKNOWN"
+	SandboxReady     = "READY"
+	SandboxNotReady  = "NOTREADY"
+	SandboxSuspended = "SUSPENDED"
+	SandboxStopped   = "STOPPED"
+	SandboxUnknown   = "UNKNOWN"
 
 	NetworkSlotCreating = "CREATING"
 	NetworkSlotWarmIdle = "WARM_IDLE"
@@ -15,45 +16,58 @@ const (
 	ContainerRunning = "RUNNING_PLACEHOLDER"
 	ContainerExited  = "EXITED"
 	ContainerUnknown = "UNKNOWN"
+
+	TemplateOriginImage      = "image"
+	TemplateOriginCheckpoint = "checkpoint"
+	TemplateBootModeCold     = "cold"
+	TemplateBootModeResume   = "resume"
+
+	TemplateCreating = "CREATING"
+	TemplateReady    = "READY"
+	TemplateFailed   = "FAILED"
 )
 
 type SandboxRecord struct {
-	PodSandboxID    string            `json:"pod_sandbox_id"`
-	ConchSandboxID  string            `json:"conch_sandbox_id"`
-	Namespace       string            `json:"namespace"`
-	PodNamespace    string            `json:"pod_namespace,omitempty"`
-	Name            string            `json:"name"`
-	UID             string            `json:"uid"`
-	Attempt         uint32            `json:"attempt"`
-	State           string            `json:"state"`
-	CreatedAt       int64             `json:"created_at"`
-	StoppedAt       int64             `json:"stopped_at,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
-	RuntimeHandler  string            `json:"runtime_handler,omitempty"`
-	LeaseID         string            `json:"lease_id,omitempty"`
-	ImageName       string            `json:"image_name,omitempty"`
-	SnapshotID      string            `json:"snapshot_id,omitempty"`
-	IP              string            `json:"ip,omitempty"`
-	VMMName         string            `json:"vmm_name,omitempty"`
-	VCPUNum         int64             `json:"vcpu_num,omitempty"`
-	RamMB           int64             `json:"ram_mb,omitempty"`
-	VMMPID          int               `json:"vmm_pid,omitempty"`
-	VMMSocketPath   string            `json:"vmm_socket_path,omitempty"`
-	VsockCID        uint32            `json:"vsock_cid,omitempty"`
-	VsockSocketPath string            `json:"vsock_socket_path,omitempty"`
-	NetworkSlotKey  string            `json:"network_slot_key,omitempty"`
-	NetworkNS       string            `json:"network_ns,omitempty"`
-	RootfsKey       string            `json:"rootfs_key,omitempty"`
-	MemKey          string            `json:"mem_key,omitempty"`
-	ParentRootfsID  string            `json:"parent_rootfs_id,omitempty"`
-	ParentMemID     string            `json:"parent_mem_id,omitempty"`
-	ParentVMID      string            `json:"parent_vm_id,omitempty"`
-	RootfsMount     string            `json:"rootfs_mount,omitempty"`
-	MemMount        string            `json:"mem_mount,omitempty"`
-	VMMount         string            `json:"vm_mount,omitempty"`
-	SnapshotRootDir string            `json:"snapshot_root_dir,omitempty"`
-	LastError       string            `json:"last_error,omitempty"`
+	PodSandboxID   string            `json:"pod_sandbox_id"`
+	ConchSandboxID string            `json:"conch_sandbox_id"`
+	Namespace      string            `json:"namespace"`
+	PodNamespace   string            `json:"pod_namespace,omitempty"`
+	Name           string            `json:"name"`
+	UID            string            `json:"uid"`
+	Attempt        uint32            `json:"attempt"`
+	State          string            `json:"state"`
+	CreatedAt      int64             `json:"created_at"`
+	StoppedAt      int64             `json:"stopped_at,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+	Annotations    map[string]string `json:"annotations,omitempty"`
+	RuntimeHandler string            `json:"runtime_handler,omitempty"`
+	LeaseID        string            `json:"lease_id,omitempty"`
+	// SourceTemplateID and SourceBootIndexDigest identify the immutable boot
+	// content used to create this sandbox.
+	SourceTemplateID              string   `json:"source_template_id,omitempty"`
+	SourceBootIndexDigest         string   `json:"source_boot_index_digest,omitempty"`
+	CheckpointHeadTemplateID      string   `json:"checkpoint_head_template_id,omitempty"`
+	CheckpointHeadBootIndexDigest string   `json:"checkpoint_head_boot_index_digest,omitempty"`
+	ImageName                     string   `json:"image_name,omitempty"`
+	SnapshotID                    string   `json:"snapshot_id,omitempty"`
+	IP                            string   `json:"ip,omitempty"`
+	VMMName                       string   `json:"vmm_name,omitempty"`
+	VCPUNum                       int64    `json:"vcpu_num,omitempty"`
+	RamMB                         int64    `json:"ram_mb,omitempty"`
+	VMMPID                        int      `json:"vmm_pid,omitempty"`
+	VMMSocketPath                 string   `json:"vmm_socket_path,omitempty"`
+	VsockCID                      uint32   `json:"vsock_cid,omitempty"`
+	VsockSocketPath               string   `json:"vsock_socket_path,omitempty"`
+	NetworkSlotKey                string   `json:"network_slot_key,omitempty"`
+	NetworkNS                     string   `json:"network_ns,omitempty"`
+	RootfsKey                     string   `json:"rootfs_key,omitempty"`
+	MemKey                        string   `json:"mem_key,omitempty"`
+	RootfsMount                   string   `json:"rootfs_mount,omitempty"`
+	RootfsPmemPaths               []string `json:"rootfs_pmem_paths,omitempty"`
+	MemMount                      string   `json:"mem_mount,omitempty"`
+	VMMount                       string   `json:"vm_mount,omitempty"`
+	SnapshotRootDir               string   `json:"snapshot_root_dir,omitempty"`
+	LastError                     string   `json:"last_error,omitempty"`
 }
 
 type NetworkSlotRecord struct {
@@ -89,39 +103,33 @@ type ContainerRecord struct {
 	LastError    string            `json:"last_error,omitempty"`
 }
 
-type SnapshotRuntimeRecord struct {
-	Namespace      string `json:"namespace"`
-	SandboxID      string `json:"sandbox_id"`
-	RootfsKey      string `json:"rootfs_key"`
-	MemKey         string `json:"mem_key"`
-	ParentRootfsID string `json:"parent_rootfs_id"`
-	ParentMemID    string `json:"parent_mem_id"`
-	ParentVMID     string `json:"parent_vm_id"`
-	LeaseID        string `json:"lease_id,omitempty"`
-	RootfsMount    string `json:"rootfs_mount"`
-	MemMount       string `json:"mem_mount"`
-	VMMount        string `json:"vm_mount"`
-	RootDir        string `json:"root_dir"`
-	MemSize        int64  `json:"mem_size"`
-	State          string `json:"state"`
-	LastError      string `json:"last_error,omitempty"`
+type TemplateRecord struct {
+	ID              string `json:"id"`
+	Origin          string `json:"origin"`
+	Namespace       string `json:"namespace"`
+	State           string `json:"state"`
+	BootIndexDigest string `json:"boot_index_digest,omitempty"`
+	// BootMode is a validated capability cache. BootIndexDigest remains the
+	// sole content identity for template records.
+	BootMode         string            `json:"boot_mode,omitempty"`
+	ParentTemplateID string            `json:"parent_template_id,omitempty"`
+	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
+	ImageName        string            `json:"image_name,omitempty"`
+	BuildRef         string            `json:"build_ref,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	CreatedAt        int64             `json:"created_at"`
+	UpdatedAt        int64             `json:"updated_at"`
+	LastError        string            `json:"last_error,omitempty"`
 }
 
-type ViewSnapshotRecord struct {
-	Namespace        string `json:"namespace"`
-	ParentSnapshotID string `json:"parent_snapshot_id"`
-	ViewSnapshotKey  string `json:"view_snapshot_key"`
-	LeaseID          string `json:"lease_id,omitempty"`
-	MountPoint       string `json:"mount_point"`
-	RefCount         int    `json:"ref_count"`
-	State            string `json:"state"`
-	LastError        string `json:"last_error,omitempty"`
-}
-
-type ViewAliasRecord struct {
-	Namespace        string `json:"namespace"`
-	AliasKey         string `json:"alias_key"`
-	SandboxID        string `json:"sandbox_id"`
-	ParentSnapshotID string `json:"parent_snapshot_id"`
-	MountKind        string `json:"mount_kind"`
+// CheckpointPublication describes the single state transition that publishes
+// a checkpoint template and advances the source sandbox's logical head.
+type CheckpointPublication struct {
+	TemplateID                  string
+	PodSandboxID                string
+	BootIndexDigest             string
+	BootMode                    string
+	BuildRef                    string
+	ExpectedHeadTemplateID      string
+	ExpectedHeadBootIndexDigest string
 }

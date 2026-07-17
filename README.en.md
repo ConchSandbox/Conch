@@ -60,22 +60,24 @@ After compilation, the binary files are located in the `bin/` directory. Start t
 
 ### Image Management
 
-Conch provides unified image management commands for converting an existing OCI rootfs image into a Conch native EROFS image, then pushing, pulling, and unpacking it:
+Conch provides unified image management commands for converting an existing OCI rootfs image into a bootable Template, then pushing, pulling, and unpacking it:
 
 ```bash
-conch convert --source docker.io/library/nginx:latest \
+conch template create --source docker.io/library/nginx:latest \
   --kernel ./bzImage \
   --initrd ./conch.initrd \
   -t localhost/conch/nginx:latest
 
-conch push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
-conch pull hub.oepkgs.net/conch/nginx:latest
+conch image push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
+conch image pull hub.oepkgs.net/conch/nginx:latest
+# Download OCI content without creating snapshots
+conch image pull --skip-unpack hub.oepkgs.net/conch/nginx:latest
 
 # Unpack a local Conch image separately
-conch unpack hub.oepkgs.net/conch/conch-index:v0.1
+conch image unpack hub.oepkgs.net/conch/conch-index:v0.1
 ```
 
-`conch convert` converts a standard OCI rootfs image into a native EROFS rootfs and combines it with the kernel/initrd component into a Conch boot index. `conch pull` automatically unpacks after pulling; `conch unpack` is mainly for separately unpacking local Conch images or troubleshooting.
+`conch template create` converts a standard OCI rootfs image into a native EROFS rootfs, combines it with the kernel/initrd component into a Conch boot index, and registers it as a Template. `conch image pull` unpacks by default, while `--skip-unpack` downloads OCI content only; `conch image unpack` is mainly for separately unpacking local Conch images or troubleshooting.
 
 For detailed design, see [Conch Image Workflow Design](docs/design/image-workflow.md).
 
@@ -88,17 +90,9 @@ sandbox:
   unix_socket: "/var/run/conchd/conchd.sock"   # Prefer Unix Socket connection
   api_url: "http://localhost:4063"              # Fallback HTTP connection when unix_socket is empty
   sandbox_id: ""                                # Leave empty to auto-generate
-
-snapshot:
-  snapshot_id: ""                               # Snapshot ID (optional: for snapshot boot)
-  vmm_name: "cloud-hypervisor"                  # Virtual machine monitor name
-  vcpu_num: 1                                   # Number of virtual CPUs
-  ram_mb: 1024                                  # Memory size in MB
+  template_id: "tmpl_xxx"                         # Template ID
 
 image:
-  image_name: "hub.oepkgs.net/conch/openeuler:odd-x86"  # Image name, replace as needed
-  # image_name: "hub.oepkgs.net/conch/openeuler:odd-aarch"  # aarch64 architecture image
-  use_snapshot: false                           # Set to true for snapshot image boot
   vmm_name: "cloud-hypervisor"                  # Virtual machine monitor name
   vcpu_num: 1                                   # Number of virtual CPUs
   ram_mb: 1024                                  # Memory size in MB

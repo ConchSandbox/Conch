@@ -25,6 +25,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 		CPUBoot:     2,
 		CPUMax:      4,
 		MemorySize:  1024,
+		MemoryPath:  "/must/not/be/used/mem.img",
 		NamespaceID: "ns-test",
 		TapName:     "tap0",
 		KernelPath:  "/tmp/kernel",
@@ -42,10 +43,63 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 		"-qmp unix:/tmp/conch-qmp.sock,server,nowait",
 		"-device vhost-vsock-pci,id=vsock0,guest-cid=42",
 		"conch.sandbox_id=sandbox-test",
+		"-m 1024M",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
+	}
+	for _, unwanted := range []string{"/must/not/be/used/mem.img", "-incoming", "memory-backend-file"} {
+		if strings.Contains(script, unwanted) {
+			t.Fatalf("cold script unexpectedly contains %q:\n%s", unwanted, script)
+		}
+	}
+}
+
+func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "stratovirt")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	script, err := client.BuildStartCmd(&driver.ResourceArgs{
+		CPUBoot:      1,
+		CPUMax:       1,
+		MemorySize:   256,
+		NamespaceID:  "ns-test",
+		TapName:      "tap0",
+		KernelPath:   "/tmp/kernel",
+		InitrdPath:   "/tmp/initrd",
+		SnapfilePath: "/tmp/snapshot",
+		MemoryPath:   "/must/not/be/used/mem.img",
+		VsockCID:     42,
+		SandboxId:    "sandbox-test",
+	}, true)
+	if err != nil {
+		t.Fatalf("BuildStartCmd() error = %v", err)
+	}
+
+	if want := "-incoming file:/tmp/snapshot,mapped=true"; !strings.Contains(script, want) {
+		t.Fatalf("resume script missing %q:\n%s", want, script)
+	}
+	if !strings.Contains(script, "-m 256M") {
+		t.Fatalf("resume script is missing captured memory size:\n%s", script)
+	}
+	if strings.Contains(script, "/must/not/be/used/mem.img") {
+		t.Fatalf("resume script consumed MemoryPath:\n%s", script)
+	}
+}
+
+func TestStratovirtPrepareLaunchDoesNotConsumeCLHSnapshotConfig(t *testing.T) {
+	client := NewStratovirtClient(1, filepath.Join(t.TempDir(), "qmp.sock"))
+	if err := client.PrepareLaunch(&driver.ResourceArgs{
+		SnapfilePath: filepath.Join(t.TempDir(), "conch", "snapshot"),
+		MemoryPath:   filepath.Join(t.TempDir(), "mem.img"),
+	}, true); err != nil {
+		t.Fatalf("PrepareLaunch() error = %v", err)
 	}
 }
 

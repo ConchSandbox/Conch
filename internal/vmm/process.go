@@ -95,7 +95,7 @@ func NewProcess(
 		return nil, err
 	}
 
-	if err := adapter.PrepareLaunch(vmmResourceArgs); err != nil {
+	if err := adapter.PrepareLaunch(vmmResourceArgs, isResume); err != nil {
 		logger.Error("Failed to prepare VMM launch", ulog.F("error", err))
 		adapter.Cleanup()
 		return nil, err
@@ -375,6 +375,13 @@ func (p *Process) Pid() int {
 
 func (p *Process) Pause(ctx context.Context) error {
 	return p.adapter.PauseVM()
+}
+
+func (p *Process) ResumeVM(ctx context.Context) error {
+	if err := p.adapter.ResumeVM(); err != nil {
+		return err
+	}
+	return p.waitForAgentAlive(ctx)
 }
 
 func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error {

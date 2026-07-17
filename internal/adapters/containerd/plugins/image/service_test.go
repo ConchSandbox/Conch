@@ -17,8 +17,8 @@ func TestClassifyConchIndexKind(t *testing.T) {
 			{Annotations: map[string]string{"io.conch.kind": "sandbox"}},
 		},
 	})
-	if base != "sandbox-base" {
-		t.Fatalf("base kind = %q, want sandbox-base", base)
+	if base != "boot-index-cold" {
+		t.Fatalf("base kind = %q, want boot-index-cold", base)
 	}
 
 	snapshot := classifyConchIndexKind(ocispec.Index{
@@ -28,8 +28,8 @@ func TestClassifyConchIndexKind(t *testing.T) {
 			{Annotations: map[string]string{"io.conch.kind": "mem-snapshot"}},
 		},
 	})
-	if snapshot != "sandbox-snapshot" {
-		t.Fatalf("snapshot kind = %q, want sandbox-snapshot", snapshot)
+	if snapshot != "boot-index-resume" {
+		t.Fatalf("snapshot kind = %q, want boot-index-resume", snapshot)
 	}
 
 	invalid := classifyConchIndexKind(ocispec.Index{
@@ -59,17 +59,39 @@ func TestNewStoresConfig(t *testing.T) {
 
 func TestInferComponentKindFromName(t *testing.T) {
 	cases := map[string]string{
-		"localhost/conch/rootfs-component:abc":       "rootfs",
-		"localhost/conch/demo:latest-rootfs":         "rootfs",
-		"localhost/conch/sandbox-component:def":      "sandbox",
-		"localhost/conch/demo:latest-sandbox":        "sandbox",
-		"localhost/conch/mem-snapshot-component:ghi": "mem-snapshot",
-		"localhost/conch/demo:latest-mem":            "mem-snapshot",
+		"localhost/conch/rootfs-component:abc":       "boot-component-rootfs",
+		"localhost/conch/demo:latest-rootfs":         "boot-component-rootfs",
+		"localhost/conch/sandbox-component:def":      "boot-component-sandbox",
+		"localhost/conch/demo:latest-sandbox":        "boot-component-sandbox",
+		"localhost/conch/mem-snapshot-component:ghi": "boot-component-memory",
+		"localhost/conch/demo:latest-mem":            "boot-component-memory",
 		"localhost/conch/demo:latest":                "",
 	}
 	for name, want := range cases {
 		if got := inferComponentKindFromName(name); got != want {
 			t.Fatalf("%s => %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestExternalComponentKindMapsContentAnnotations(t *testing.T) {
+	cases := map[string]string{
+		"rootfs":                 "boot-component-rootfs",
+		"sandbox":                "boot-component-sandbox",
+		"mem-snapshot":           "boot-component-memory",
+		"boot-index-cold":        "",
+		"boot-index-resume":      "",
+		"boot-component-rootfs":  "",
+		"boot-component-sandbox": "",
+		"boot-component-memory":  "",
+		"oci-image":              "",
+		"sandbox-base":           "",
+		"sandbox-snapshot":       "",
+		"custom":                 "",
+	}
+	for input, want := range cases {
+		if got := externalComponentKind(input); got != want {
+			t.Fatalf("externalComponentKind(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

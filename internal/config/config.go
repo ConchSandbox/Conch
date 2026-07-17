@@ -85,7 +85,7 @@ type SandboxConfig struct {
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
 	RequestTimeout     time.Duration `yaml:"request_timeout"`
-	DefaultImage       string        `yaml:"default_image"`
+	DefaultTemplateID  string        `yaml:"default_template_id"`
 	DefaultVMMName     string        `yaml:"default_vmm_name"`
 	DefaultVCPUNum     int64         `yaml:"default_vcpu_num"`
 	DefaultVCPUMax     int64         `yaml:"default_vcpu_max"`
@@ -149,7 +149,7 @@ func DefaultConfig() *Config {
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
-			DefaultImage:       "hub.oepkgs.net/conch/openeuler:odd-x86",
+			DefaultTemplateID:  "",
 			DefaultVMMName:     DefaultVMMName,
 			DefaultVCPUNum:     2,
 			DefaultVCPUMax:     2,
@@ -263,8 +263,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
 	}
-	if cfg.Sandbox.DefaultImage == "" {
-		cfg.Sandbox.DefaultImage = defaultCfg.Sandbox.DefaultImage
+	if cfg.Sandbox.DefaultTemplateID == "" {
+		cfg.Sandbox.DefaultTemplateID = defaultCfg.Sandbox.DefaultTemplateID
 	}
 	if cfg.Sandbox.DefaultVMMName == "" {
 		cfg.Sandbox.DefaultVMMName = defaultCfg.Sandbox.DefaultVMMName

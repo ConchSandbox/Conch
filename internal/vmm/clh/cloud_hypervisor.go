@@ -171,7 +171,22 @@ func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
 	return vmmFds, nil
 }
 
-func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs) error {
+func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs, isResume bool) error {
+	if isResume {
+		pmemPaths, err := PrepareRestore(RestoreResources{
+			SnapshotPath:    args.SnapfilePath,
+			MemoryPath:      args.MemoryPath,
+			KernelPath:      args.KernelPath,
+			InitrdPath:      args.InitrdPath,
+			PmemPaths:       args.PmemPaths,
+			VsockCID:        args.VsockCID,
+			VsockSocketPath: args.VsockSocketPath,
+		})
+		if err != nil {
+			return fmt.Errorf("prepare Cloud Hypervisor restore: %w", err)
+		}
+		args.PmemPaths = pmemPaths
+	}
 	fds, err := createVmmFds(c.socketPath)
 	if err != nil {
 		return err

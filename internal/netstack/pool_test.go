@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
 )
@@ -226,6 +227,69 @@ func TestPoolInUseTracking(t *testing.T) {
 	}
 	if len(p.inUse) != 0 {
 		t.Fatalf("inUse len after drain = %d, want 0", len(p.inUse))
+	}
+}
+
+func TestEnqueueReplacementReturnsWhenWarmPoolIsAlreadyFull(t *testing.T) {
+	p := &Pool{
+		newSlots: make(chan *Slot, 1),
+		done:     make(chan struct{}),
+	}
+	p.newSlots <- &Slot{Key: "idle"}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- p.enqueueReplacement(context.Background(), &Slot{Key: "released"})
+	}()
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "already full") {
+			t.Fatalf("enqueueReplacement() error = %v, want pool already full", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("enqueueReplacement() blocked when the warm pool was already full")
+	}
+}
+
+func TestReleaseDiscardsExcessSlotWhenWarmPoolIsAlreadyFull(t *testing.T) {
+	store := newFakeNetworkSlotStore()
+	storage := &fakeStorage{}
+	p := &Pool{
+		slotStorage: storage,
+		slotStore:   store,
+		newSlots:    make(chan *Slot, 1),
+		done:        make(chan struct{}),
+		inUse:       make(map[string]*Slot),
+		slotHealthCheck: func(context.Context, *Slot) error {
+			return nil
+		},
+	}
+	p.newSlots <- &Slot{Key: "idle"}
+	released := &Slot{Key: "released", Idx: firstSlotIndex}
+	released.assignSandbox("sandbox-a")
+	released.setNetNSPath(t.TempDir() + "/missing-netns")
+	p.trackInUse(released)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.Release(ctx, released); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if storage.released != 1 {
+		t.Fatalf("storage Release count = %d, want 1", storage.released)
+	}
+	if storage.acquired != 0 {
+		t.Fatalf("storage Acquire count = %d, want no replacement allocation", storage.acquired)
+	}
+	if len(p.inUse) != 0 {
+		t.Fatalf("in-use slots = %#v, want empty", p.inUse)
+	}
+	if _, ok := store.records[released.Key]; ok {
+		t.Fatalf("released excess slot record still exists")
+	}
+	if got := <-p.newSlots; got.Key != "idle" {
+		t.Fatalf("warm slot = %q, want existing idle slot", got.Key)
 	}
 }
 
