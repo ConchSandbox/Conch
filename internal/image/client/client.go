@@ -53,12 +53,19 @@ func ResolveBaseURL() string {
 
 // CreateRequest matches Conch SandboxCreateRequest.
 type CreateRequest struct {
-	Namespace  string `json:"namespace,omitempty"`
-	TemplateID string `json:"template_id"`
-	VmmName    string `json:"vmm_name"`
-	SandboxId  string `json:"sandbox_id"`
-	VcpuNum    int64  `json:"vcpu_num"`
-	RamMB      int64  `json:"ram_mb"`
+	Namespace    string        `json:"namespace,omitempty"`
+	TemplateID   string        `json:"template_id"`
+	VmmName      string        `json:"vmm_name"`
+	SandboxId    string        `json:"sandbox_id"`
+	VcpuNum      int64         `json:"vcpu_num"`
+	RamMB        int64         `json:"ram_mb"`
+	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
+}
+
+type VolumeMount struct {
+	Source   string `json:"source"`
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly,omitempty"`
 }
 
 // CreateResponse is the JSON response from sandbox create
@@ -581,6 +588,26 @@ func (c *Client) ListSnapshots(ctx context.Context, req ListSnapshotsRequest) ([
 func (c *Client) RemoveSnapshot(ctx context.Context, req RemoveSnapshotRequest) error {
 	var resp map[string]string
 	return c.postJSON(ctx, removeSnapshot, req, &resp)
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("create request %s: %w", path, err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return nil
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, payload any, out any) error {

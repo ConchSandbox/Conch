@@ -70,6 +70,13 @@ sandbox:
   default_vcpu_max: 2
   default_ram_mb: 4096
 
+volume:
+  max_mounts: 10
+  backend: virtiofs
+  virtiofs:
+    binary: /usr/libexec/virtiofsd
+    runtime_dir: /run/conch/sandboxes
+
 state:
   path: /var/lib/conch/state.db
 

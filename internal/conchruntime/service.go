@@ -21,6 +21,7 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -125,15 +126,16 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	req := sandbox.SandboxCreateRequest{
-		Namespace:  namespace,
-		TemplateID: opts.TemplateID,
-		VmmName:    opts.VMMName,
-		SandboxId:  opts.SandboxID,
-		LeaseID:    opts.LeaseID,
-		VcpuNum:    opts.VCPUNum,
-		VcpuMax:    opts.VCPUMax,
-		RamMB:      opts.RamMB,
-		AgentToken: agentToken,
+		Namespace:    namespace,
+		TemplateID:   opts.TemplateID,
+		VmmName:      opts.VMMName,
+		SandboxId:    opts.SandboxID,
+		LeaseID:      opts.LeaseID,
+		VcpuNum:      opts.VCPUNum,
+		VcpuMax:      opts.VCPUMax,
+		RamMB:        opts.RamMB,
+		AgentToken:   agentToken,
+		VolumeMounts: opts.VolumeMounts,
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -173,6 +175,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		MemMount:                      createResult.MemMount,
 		VMMount:                       createResult.VMMount,
 		SnapshotRootDir:               createResult.RootDir,
+		VolumeDevices:                 volumeDevicesToState(createResult.VolumeDevices),
 	}
 	if err != nil {
 		rec.State = state.SandboxUnknown
@@ -190,6 +193,27 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		IP:           createResult.IP,
 		AgentToken:   createResult.AgentToken,
 	}, nil
+}
+
+func volumeDevicesToState(devices []volume.Device) []state.VolumeDevice {
+	if len(devices) == 0 {
+		return nil
+	}
+	out := make([]state.VolumeDevice, 0, len(devices))
+	for _, device := range devices {
+		out = append(out, state.VolumeDevice{
+			SandboxID:  device.SandboxID,
+			Namespace:  device.Namespace,
+			Backend:    device.Backend,
+			Tag:        device.Tag,
+			Socket:     device.Socket,
+			VolumeDir:  device.VolumeDir,
+			ConfigPath: device.ConfigPath,
+			PID:        device.PID,
+			StartTime:  device.StartTime,
+		})
+	}
+	return out
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -252,6 +276,8 @@ func (s *Service) StopSandbox(ctx context.Context, namespace, podSandboxID strin
 	if err != nil {
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
+	} else {
+		rec.VolumeDevices = nil
 	}
 	_ = s.upsertSandbox(ctx, rec)
 	return err
@@ -280,6 +306,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID st
 	namespace = s.normalizeNamespace(namespace)
 	err := s.Sandbox.Suspend(sandbox.SandboxLifecycleRequest{Namespace: namespace, SandboxId: sandboxID})
 	if rec.PodSandboxID != "" {
+
 		rec.State = state.SandboxSuspended
 		if err != nil {
 			rec.State = state.SandboxUnknown
