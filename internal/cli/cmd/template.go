@@ -140,13 +140,16 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template pull: load config: %w", err)
 	}
-	result, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath).PullTemplate(ctx, client.TemplatePullRequest{
+	fmt.Println("------------------------------------------------------------")
+	fmt.Printf("Pulling template: %s\n", fs.Arg(0))
+	progressRenderer := newPullProgressRenderer(os.Stdout)
+	result, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath).PullTemplateWithProgress(ctx, client.TemplatePullRequest{
 		Reference: fs.Arg(0),
 		Namespace: ResolveConchNamespace(cfg, opts.namespace),
 		PlainHTTP: opts.plainHTTP,
 		Username:  username,
 		Password:  password,
-	})
+	}, progressRenderer.Handle)
 	if err != nil {
 		return fmt.Errorf("conch template pull: %w", err)
 	}

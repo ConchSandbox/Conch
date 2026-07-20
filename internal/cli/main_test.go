@@ -278,13 +278,14 @@ func TestPrintImagePullHelpIncludesExample(t *testing.T) {
 func TestRunImagePullPassesSkipUnpack(t *testing.T) {
 	var got client.PullImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/image/pull" {
-			t.Fatalf("path = %q, want /api/image/pull", r.URL.Path)
+		if r.URL.Path != "/api/image/pull/stream" {
+			t.Fatalf("path = %q, want /api/image/pull/stream", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode pull request: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": map[string]string{}})
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(client.PullProgressEvent{Status: "completed", Results: map[string]string{}})
 	}))
 	defer server.Close()
 	t.Setenv("CONCH_API_URL", server.URL)

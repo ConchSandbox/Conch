@@ -2,12 +2,60 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"flag"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/openeuler/Conch/internal/image/client"
 )
+
+func TestRunTemplatePullUsesProgressStream(t *testing.T) {
+	var request client.TemplatePullRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/template/pull/stream" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"downloading","component":"rootfs","progress":100,"total":100}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"completed","template":{"status":"ok","template_id":"tmpl_pulled","boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_ref":"registry.example/template:latest"}}` + "\n"))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CONCH_API_URL", server.URL)
+
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = writer
+	err = runTemplatePull(context.Background(), []string{"-n", "team-a", "registry.example/template:latest"})
+	_ = writer.Close()
+	os.Stdout = oldStdout
+	var output bytes.Buffer
+	_, _ = output.ReadFrom(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatalf("runTemplatePull() error = %v", err)
+	}
+	if request.Reference != "registry.example/template:latest" || request.Namespace != "team-a" {
+		t.Fatalf("request = %#v", request)
+	}
+	for _, want := range []string{"Pulling template:", "rootfs", "100.0%", "Template: tmpl_pulled"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, output.String())
+		}
+	}
+}
 
 func TestPrintTemplateHelpListsTemplateCommands(t *testing.T) {
 	var buf bytes.Buffer
