@@ -84,6 +84,7 @@ func runAsInit() {
 	if mergeReady {
 		prepareMergeRoot()
 		bindMountToMerge()
+		mountConfiguredVolumesOrAbort()
 		setupDevPts()
 		setupMergeFileLogging()
 
