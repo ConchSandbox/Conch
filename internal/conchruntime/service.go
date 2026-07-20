@@ -632,6 +632,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		Username:   opts.Username,
 		Password:   opts.Password,
 		SkipUnpack: true,
+		Progress:   opts.Progress,
 	}); err != nil {
 		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
 	}
