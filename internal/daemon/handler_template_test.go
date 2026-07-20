@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -90,5 +92,38 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 	if imageOps.pushBootIndexReq.BootIndexDigest != digest || imageOps.pushBootIndexReq.RemoteReference != "mirror.example.invalid/conch/template:copy" ||
 		imageOps.pushBootIndexReq.Namespace != "team-a" || !imageOps.pushBootIndexReq.PlainHTTP || imageOps.pushBootIndexReq.RegistryTimeout != "10m" {
 		t.Fatalf("Boot Index push request = %#v", imageOps.pushBootIndexReq)
+	}
+}
+
+func TestTemplatePullStreamWritesProgressAndResult(t *testing.T) {
+	const reference = "registry.example.invalid/conch/template:latest"
+	imageOps := &fakeImageService{
+		inspectReferenceResp: conchimage.BootIndexInfo{BootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		progress:             []runtimeapi.PullProgress{{Status: "downloading", Component: "rootfs", Progress: 40, Total: 100}},
+	}
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	runtimeService := conchruntime.New(&fakeSandboxOps{}, imageOps, imageOps, store, "default")
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/template/pull/stream", bytes.NewBufferString(`{"reference":"`+reference+`","namespace":"team-a"}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !imageOps.pullReq.SkipUnpack || imageOps.pullReq.Progress == nil {
+		t.Fatalf("template image pull request = %#v", imageOps.pullReq)
+	}
+	lines := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("stream lines = %d, want 3: %s", len(lines), recorder.Body.String())
+	}
+	if !strings.Contains(lines[1], `"status":"downloading"`) || !strings.Contains(lines[2], `"status":"completed"`) || !strings.Contains(lines[2], `"template_id"`) {
+		t.Fatalf("stream response = %s", recorder.Body.String())
 	}
 }

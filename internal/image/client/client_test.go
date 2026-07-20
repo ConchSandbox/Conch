@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -113,6 +114,253 @@ func TestImageAPIMethods(t *testing.T) {
 	}
 	if removeReq.ImageName != "localhost/conch/demo:latest" || removeReq.Namespace != "team-a" || !removeReq.Synchronous {
 		t.Fatalf("remove request = %#v", removeReq)
+	}
+}
+
+func TestPullImageWithProgressStreamsEvents(t *testing.T) {
+	var pullReq PullImageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pullImageStream {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&pullReq); err != nil {
+			t.Fatalf("decode pull request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"downloading","component":"rootfs","progress":40,"total":100}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"unpacking"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"completed","results":{"rootfs":"rootfs-id"}}` + "\n"))
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL)
+	var statuses []string
+	var components []string
+	var progressBytes []int64
+	results, err := c.PullImageWithProgress(context.Background(), PullImageRequest{
+		ImageName: "hub.oepkgs.net/conch/demo:latest",
+		Namespace: "team-a",
+	}, func(event PullProgressEvent) {
+		statuses = append(statuses, event.Status)
+		components = append(components, event.Component)
+		progressBytes = append(progressBytes, event.Progress)
+	})
+	if err != nil {
+		t.Fatalf("PullImageWithProgress: %v", err)
+	}
+	if pullReq.ImageName != "hub.oepkgs.net/conch/demo:latest" || pullReq.Namespace != "team-a" {
+		t.Fatalf("pull request = %#v", pullReq)
+	}
+	if got := strings.Join(statuses, ","); got != "started,downloading,unpacking,completed" {
+		t.Fatalf("statuses = %q", got)
+	}
+	if components[1] != "rootfs" || progressBytes[1] != 40 {
+		t.Fatalf("components=%#v progress=%#v", components, progressBytes)
+	}
+	if results["rootfs"] != "rootfs-id" {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestPullImageWithProgressUsesIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pullImageStream {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	c := NewClientWithConfigAndTimeout(server.URL, "", 30*time.Millisecond)
+	var statuses []string
+	_, err := c.PullImageWithProgress(context.Background(), PullImageRequest{
+		ImageName: "hub.oepkgs.net/conch/demo:latest",
+	}, func(event PullProgressEvent) {
+		statuses = append(statuses, event.Status)
+	})
+
+	if err == nil {
+		t.Fatal("PullImageWithProgress() error = nil")
+	}
+	if !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("error = %v, want idle timeout", err)
+	}
+	if len(statuses) != 1 || statuses[0] != "started" {
+		t.Fatalf("statuses = %#v, want started before idle timeout", statuses)
+	}
+}
+
+func TestPullImageWithProgressTimesOutWaitingForResponseHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"completed","results":{}}` + "\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	c := NewClientWithConfigAndTimeout(server.URL, "", 30*time.Millisecond)
+	_, err := c.PullImageWithProgress(context.Background(), PullImageRequest{ImageName: "demo"}, nil)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Fatalf("error = %v, want response header timeout", err)
+	}
+}
+
+func TestPullImageWithProgressUsesSeparateUnpackTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pullImageStream {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"unpacking"}` + "\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(80 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"status":"completed","results":{"rootfs":"rootfs-id"}}` + "\n"))
+	}))
+	defer server.Close()
+
+	c := NewClientWithConfigAndTimeout(server.URL, "", 30*time.Millisecond)
+	c.pullUnpackTimeout = 150 * time.Millisecond
+	results, err := c.PullImageWithProgress(context.Background(), PullImageRequest{
+		ImageName: "hub.oepkgs.net/conch/demo:latest",
+	}, nil)
+
+	if err != nil {
+		t.Fatalf("PullImageWithProgress: %v", err)
+	}
+	if results["rootfs"] != "rootfs-id" {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestPullImageWithProgressTimesOutStuckUnpack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pullImageStream {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"unpacking"}` + "\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	c := NewClientWithConfigAndTimeout(server.URL, "", 20*time.Millisecond)
+	c.pullUnpackTimeout = 50 * time.Millisecond
+	_, err := c.PullImageWithProgress(context.Background(), PullImageRequest{
+		ImageName: "hub.oepkgs.net/conch/demo:latest",
+	}, nil)
+
+	if err == nil {
+		t.Fatal("PullImageWithProgress() error = nil")
+	}
+	if !strings.Contains(err.Error(), "unpack timeout after 50ms") {
+		t.Fatalf("error = %v, want unpack timeout", err)
+	}
+}
+
+func TestPullImageWithProgressDoesNotExtendUnpackTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"unpacking"}` + "\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"status":"unpacking"}` + "\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL)
+	c.pullUnpackTimeout = 200 * time.Millisecond
+	started := time.Now()
+	_, err := c.PullImageWithProgress(context.Background(), PullImageRequest{ImageName: "demo"}, nil)
+	elapsed := time.Since(started)
+
+	if err == nil || !strings.Contains(err.Error(), "unpack timeout") {
+		t.Fatalf("error = %v, want unpack timeout", err)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("unpack timeout was extended by a repeated event: elapsed=%s", elapsed)
+	}
+}
+
+func TestPullTemplateWithProgressStreamsEvents(t *testing.T) {
+	var pullReq TemplatePullRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pullTemplateStream {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&pullReq); err != nil {
+			t.Fatalf("decode template pull request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"downloading","component":"rootfs","progress":40,"total":100}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"completed","template":{"status":"ok","template_id":"tmpl_pulled","boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_ref":"registry.example.invalid/conch/template:latest"}}` + "\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	c := NewClient(server.URL)
+	var statuses []string
+	result, err := c.PullTemplateWithProgress(context.Background(), TemplatePullRequest{
+		Reference: "registry.example.invalid/conch/template:latest",
+		Namespace: "team-a",
+	}, func(event PullProgressEvent) {
+		statuses = append(statuses, event.Status)
+	})
+	if err != nil {
+		t.Fatalf("PullTemplateWithProgress() error = %v", err)
+	}
+	if pullReq.Reference != "registry.example.invalid/conch/template:latest" || pullReq.Namespace != "team-a" {
+		t.Fatalf("pull request = %#v", pullReq)
+	}
+	if got := strings.Join(statuses, ","); got != "started,downloading,completed" {
+		t.Fatalf("statuses = %q", got)
+	}
+	if result.TemplateID != "tmpl_pulled" || result.BuildRef != pullReq.Reference {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestPullTemplateWithProgressResetsDownloadIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte(`{"status":"started"}` + "\n"))
+		flusher.Flush()
+		for progress := int64(1); progress <= 3; progress++ {
+			time.Sleep(40 * time.Millisecond)
+			_, _ = fmt.Fprintf(w, "{\"status\":\"downloading\",\"component\":\"rootfs\",\"progress\":%d,\"total\":3}\n", progress)
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte(`{"status":"completed","template":{"status":"ok","template_id":"tmpl_pulled"}}` + "\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	c := NewClientWithConfigAndTimeout(server.URL, "", 100*time.Millisecond)
+	if _, err := c.PullTemplateWithProgress(context.Background(), TemplatePullRequest{Reference: "demo"}, nil); err != nil {
+		t.Fatalf("active template pull exceeded total HTTP timeout instead of resetting idle timeout: %v", err)
 	}
 }
 
