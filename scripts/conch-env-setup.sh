@@ -160,12 +160,15 @@ run_build() {
     echo "--- Building Conch binaries locally ---"
     make gen-proto
     mkdir -p bin
+    version_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)
+    git_commit=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+    version_pkg="github.com/openeuler/Conch/internal/version"
     for dir in cmd/*; do
         [ -d "$dir" ] || continue
         name=$(basename "$dir")
         [ "$name" = "conch-unpack" ] && continue
         echo "building $name..."
-        go build -o "bin/$name" "./cmd/$name"
+        go build -ldflags "-X ${version_pkg}.Version=${version_tag} -X ${version_pkg}.Commit=${git_commit}" -o "bin/$name" "./cmd/$name"
     done
     echo "Conch build completed successfully."
 }

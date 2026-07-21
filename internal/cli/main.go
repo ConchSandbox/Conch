@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	cmd "github.com/openeuler/Conch/internal/cli/cmd"
+	"github.com/openeuler/Conch/internal/version"
 )
 
 func printHelp(out io.Writer) {
@@ -30,6 +31,10 @@ func printHelp(out io.Writer) {
 }
 
 func Run(args []string) int {
+	if len(args) == 1 && (args[0] == "-v" || args[0] == "--version") {
+		fmt.Fprintln(os.Stdout, version.String())
+		return 0
+	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		printHelp(os.Stdout)
 		return 0
