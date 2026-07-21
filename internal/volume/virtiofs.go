@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"github.com/moby/sys/mountinfo"
+
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
@@ -82,10 +85,18 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 
 	var binds []string
 	cleanup := func() {
+		var umountErr = false
 		for i := len(binds) - 1; i >= 0; i-- {
-			_ = unix.Unmount(binds[i], unix.MNT_DETACH)
+			if err := unix.Unmount(binds[i], unix.MNT_DETACH); err != nil {
+				umountErr = true
+				ulog.Warn("failed umount", ulog.F("bind", binds[i]))
+			}
 		}
-		_ = os.RemoveAll(runtimeDir)
+		if umountErr {
+			ulog.Warn("umount error occurred, skip remove", ulog.F("runtimeDir", runtimeDir))
+		} else {
+			_ = os.RemoveAll(runtimeDir)
+		}
 	}
 
 	for i, mount := range req.Mounts {
@@ -309,15 +320,7 @@ func isOurVirtiofsd(pid int, startTime uint64) bool {
 }
 
 func isMountPoint(path string) (bool, error) {
-	var st, parentSt unix.Stat_t
-	if err := unix.Stat(path, &st); err != nil {
-		return false, err
-	}
-	parent := filepath.Join(path, "..")
-	if err := unix.Stat(parent, &parentSt); err != nil {
-		return false, err
-	}
-	return st.Dev != parentSt.Dev || st.Ino == parentSt.Ino, nil
+	return mountinfo.Mounted(path)
 }
 
 func waitUnixSocket(path string, timeout time.Duration) error {

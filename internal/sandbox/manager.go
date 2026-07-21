@@ -831,6 +831,9 @@ func (m *Manager) Checkpoint(req SandboxCheckpointRequest) (SandboxCheckpointRes
 	if sbx == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxId)
 	}
+	if len(sbx.vmStartSpec.VirtioFS) > 0 {
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", req.SandboxId)
+	}
 	previousState := entry.state
 	entry.state = sandboxCheckpointing
 

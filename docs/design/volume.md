@@ -179,7 +179,6 @@ volume:
   virtiofs:
     binary: /usr/libexec/virtiofsd
     runtime_dir: /run/conch/sandboxes
-    queue_size: 1024
 ```
 
 字段：
@@ -202,9 +201,6 @@ volume.virtiofs.binary
 volume.virtiofs.runtime_dir
   per-sandbox runtime 目录的父目录，实际目录 = <runtime_dir>/<sandbox-id>/。
   默认值：/run/conch/sandboxes
-
-volume.virtiofs.queue_size
-  vhost-user-fs queue size。默认 1024。
 ```
 
 其他重要配置说明：
@@ -230,7 +226,7 @@ SDK 对外参数使用 Python 风格 `volume_mounts`，请求到 conchd 时转�
 from conch import Sandbox
 
 sandbox = Sandbox.create(
-    image_name="hub.oepkgs.net/conch/openeuler:odd-x86",
+    template_id="tmpl_8f3a2c1b9d4e6a7f0c2b5d8e1a4f7c9d",
     namespace="team-a",
     volume_mounts=[
         {"source": "/host/path/cache",   "path": "/mnt/cache"},
@@ -263,7 +259,7 @@ SDK 发送 payload：
 ```json
 {
   "namespace": "team-a",
-  "image_name": "hub.oepkgs.net/conch/openeuler:odd-x86",
+  "template_id": "tmpl_8f3a2c1b9d4e6a7f0c2b5d8e1a4f7c9d",
   "volumeMounts": [
     {"source": "/host/path/cache",   "path": "/mnt/cache", "readonly": false},
     {"source": "/host/path/dataset", "path": "/data",      "readonly": true}
