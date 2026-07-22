@@ -26,7 +26,6 @@ type Config struct {
 
 type Runtime interface {
 	CreateSandbox(context.Context, runtimeapi.SandboxCreateOptions) (runtimeapi.SandboxCreateResult, error)
-	StopSandbox(context.Context, string, string) error
 	RemoveSandbox(context.Context, string, string) error
 	CreateContainer(context.Context, runtimeapi.ContainerCreateOptions) (runtimeapi.ContainerCreateResult, error)
 	SetContainerState(context.Context, string, string) error

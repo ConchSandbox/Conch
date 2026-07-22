@@ -215,7 +215,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
-	s.router.HandleFunc("/api/sandbox/stop", s.handleStopSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
@@ -485,24 +484,6 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.runtimeService.ResumeSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
 		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func (s *Daemon) handleStopSandbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req sandboxLifecycleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.runtimeService.StopSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
-		http.Error(w, "Failed to stop sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

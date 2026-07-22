@@ -20,7 +20,6 @@ func printSandboxHelp(out io.Writer) {
 	fmt.Fprintln(out, "  checkpoint  Checkpoint a sandbox into a resumable template.")
 	fmt.Fprintln(out, "  suspend     Suspend a running sandbox.")
 	fmt.Fprintln(out, "  resume      Resume a suspended sandbox.")
-	fmt.Fprintln(out, "  stop        Stop a sandbox.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch sandbox <command> --help' for command-specific usage.")
 }
@@ -39,8 +38,6 @@ func RunSandbox(ctx context.Context, args []string) error {
 		return runSandboxLifecycle(ctx, args[1:], "suspend")
 	case "resume":
 		return runSandboxLifecycle(ctx, args[1:], "resume")
-	case "stop":
-		return runSandboxLifecycle(ctx, args[1:], "stop")
 	default:
 		printSandboxHelp(os.Stderr)
 		return fmt.Errorf("unknown sandbox command %q", args[0])
@@ -128,8 +125,6 @@ func runSandboxLifecycle(ctx context.Context, args []string, op string) error {
 		err = c.SuspendSandbox(ctx, id, ns)
 	case "resume":
 		err = c.ResumeSandbox(ctx, id, ns)
-	case "stop":
-		err = c.StopSandbox(ctx, id, ns)
 	}
 	if err != nil {
 		return fmt.Errorf("conch sandbox %s: %w", op, err)

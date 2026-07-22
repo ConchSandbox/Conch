@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +23,22 @@ type fakeSandboxOps struct {
 	checkpointErr      error
 	createResult       sandbox.SandboxCreateResult
 	deleteErr          error
+}
+
+type serializedDeleteOps struct {
+	fakeSandboxOps
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+	calls        atomic.Int32
+}
+
+func (f *serializedDeleteOps) Delete(sandbox.SandboxDeleteRequest) error {
+	if f.calls.Add(1) == 1 {
+		close(f.firstEntered)
+		<-f.releaseFirst
+		return nil
+	}
+	return errors.New("sandbox not found")
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
@@ -299,14 +315,14 @@ func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	}
 }
 
-func TestStopSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
+func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
 	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.StopSandbox(ctx, "default", "missing-pod"); err != nil {
-		t.Fatalf("StopSandbox() error = %v", err)
+	if err := svc.RemoveSandbox(ctx, "default", "missing-pod"); err != nil {
+		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 
 	records, err := store.ListSandboxes(ctx)
@@ -318,62 +334,46 @@ func TestStopSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	}
 }
 
-func TestStopSandboxTerminatesRecordedVMMWhenRuntimeMissing(t *testing.T) {
+func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
-	sandboxID := "sandbox-orphan"
-	cmd := exec.Command("sleep", "30")
-	cmd.Args[0] = sandboxID
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start test process: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
-
 	rec := state.SandboxRecord{
-		PodSandboxID:   "pod-1",
-		ConchSandboxID: sandboxID,
+		PodSandboxID:   "pod-serialized",
+		ConchSandboxID: "sandbox-serialized",
 		Namespace:      "default",
-		State:          state.SandboxNotReady,
-		VMMPID:         cmd.Process.Pid,
+		State:          state.SandboxReady,
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		matched, err := recordedVMMProcessMatches(rec)
-		if err != nil {
-			t.Fatalf("match test process: %v", err)
-		}
-		if matched {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("test process pid %d never exposed sandbox marker", cmd.Process.Pid)
-		}
-		time.Sleep(time.Millisecond)
-	}
-
 	if err := store.UpsertSandbox(ctx, rec); err != nil {
-		t.Fatalf("UpsertSandbox() error = %v", err)
+		t.Fatal(err)
 	}
-
-	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
-	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.StopSandbox(ctx, "default", "pod-1"); err != nil {
-		t.Fatalf("StopSandbox() error = %v", err)
+	ops := &serializedDeleteOps{
+		firstEntered: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
 	}
+	svc := New(ops, nil, nil, store, "default")
 
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() { firstDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
+	<-ops.firstEntered
+	go func() { secondDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("recorded VMM process pid %d still running", cmd.Process.Pid)
+	case err := <-secondDone:
+		t.Fatalf("second RemoveSandbox returned before first completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(ops.releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first RemoveSandbox() error = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second RemoveSandbox() error = %v", err)
+	}
+	if got := ops.calls.Load(); got != 2 {
+		t.Fatalf("Delete() calls = %d, want 2 serialized calls", got)
+	}
+	if _, err := store.GetSandbox(ctx, rec.PodSandboxID); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("sandbox record remains after Remove: %v", err)
 	}
 }
 

@@ -590,7 +590,7 @@ func (m *Manager) cleanupStaleVolumeState(rec state.SandboxRecord, errs *[]error
 	if m.volumeManager == nil || len(rec.VolumeDevices) == 0 {
 		return
 	}
-	if rec.State != state.SandboxStopped && processExists(rec.VMMPID) {
+	if processExists(rec.VMMPID) {
 		return
 	}
 	namespace := m.resolveNamespace(rec.Namespace)

@@ -17,7 +17,6 @@ Commands:
   checkpoint  Checkpoint a sandbox into a resumable template.
   suspend     Suspend a running sandbox.
   resume      Resume a suspended sandbox.
-  stop        Stop a sandbox.
 
 Run 'conch sandbox <command> --help' for command-specific usage.
 `
