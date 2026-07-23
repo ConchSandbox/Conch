@@ -138,11 +138,11 @@ try:
     sandbox.get_info()
 
     # 执行 Python 脚本
-    result = sandbox.execute(cmd="python3", content="print('hello Conch!')")
+    result = sandbox.commands.run(cmd="python3", content="print('hello Conch!')")
     print(result)
 
     # 执行带参数的系统命令
-    result = sandbox.execute(cmd="ls", args=["-l", "/root"])
+    result = sandbox.commands.run(cmd="ls", args=["-l", "/root"])
     print(result)
 except RuntimeError as e:
     print(f"Error: {e}")
@@ -151,7 +151,7 @@ finally:
         sandbox.delete()
 ```
 
-调用 `execute()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
+调用 `commands.run()` 之前必须先成功执行 `Sandbox.create()` 类方法，并确保 `./bin/conchd` 已经启动；否则 `Sandbox` 实例还没有关联到可用的 Agent client。
 
 更多 SDK 用法详见 [Python SDK API 文档](docs/guide/python-api.md)。
 

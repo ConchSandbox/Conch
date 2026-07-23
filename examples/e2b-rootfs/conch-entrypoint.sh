@@ -7,9 +7,9 @@ export ENVD_DISABLE_MMDS=1
 export ENVD_DISABLE_PORT_FORWARDER=1
 export E2B_LOCAL="${E2B_LOCAL:-1}"
 
-CONCH_LOG_DIR=/var/log/conch-agent
+CONCH_LOG_DIR=/var/log/conch-init
 CONCH_RUN_DIR=/run/conch
-CONCH_LOG="$CONCH_LOG_DIR/conch-agent.log"
+CONCH_LOG="$CONCH_LOG_DIR/conch-init.log"
 CONCH_READY_FILE="$CONCH_RUN_DIR/services-ready"
 CONCH_SERVICE_LOG="${CONCH_SERVICE_LOG:-$CONCH_LOG_DIR/service.log}"
 CONCH_ENVD_LOG="$CONCH_LOG_DIR/envd.log"

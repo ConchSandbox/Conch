@@ -352,12 +352,12 @@ func waitForAgentRetry(ctx context.Context, processExited <-chan error, delay ti
 	if delay <= 0 {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("cancelled waiting for conch-agent ready: %w", ctx.Err())
+			return fmt.Errorf("cancelled waiting for conch-init ready: %w", ctx.Err())
 		case waitErr, ok := <-processExited:
 			if !ok || waitErr == nil {
-				return fmt.Errorf("vmm process exited before conch-agent became ready")
+				return fmt.Errorf("vmm process exited before conch-init became ready")
 			}
-			return fmt.Errorf("vmm process exited before conch-agent became ready: %w", waitErr)
+			return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 		default:
 			return nil
 		}
@@ -368,12 +368,12 @@ func waitForAgentRetry(ctx context.Context, processExited <-chan error, delay ti
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("cancelled waiting for conch-agent ready: %w", ctx.Err())
+		return fmt.Errorf("cancelled waiting for conch-init ready: %w", ctx.Err())
 	case waitErr, ok := <-processExited:
 		if !ok || waitErr == nil {
-			return fmt.Errorf("vmm process exited before conch-agent became ready")
+			return fmt.Errorf("vmm process exited before conch-init became ready")
 		}
-		return fmt.Errorf("vmm process exited before conch-agent became ready: %w", waitErr)
+		return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 	case <-timer.C:
 		return nil
 	}

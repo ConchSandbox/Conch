@@ -1,21 +1,23 @@
 syntax = "proto3";
 
-option go_package = "./go_proto;go_proto";
+option go_package = "github.com/openeuler/Conch/api/go_proto;pb";
 
 package pb;
 
-message Empty {}
-
-// AgentService provides process/command management and file transfer capabilities
-service AgentService {
-  rpc HealthCheck (Empty) returns (CheckReply);
-  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
-  rpc PostFileStream(stream FileChunk) returns (PostFilesResponse);
-  rpc GetFileStream(GetFileRequest) returns (stream FileChunk);
+// ProcessService provides command execution and background process management.
+service ProcessService {
+  rpc StartProcess(StartProcessRequest) returns (stream ProcessEvent);
+  rpc Connect(ConnectProcessRequest) returns (stream ProcessEvent);
+  rpc List(ListProcessesRequest) returns (ListProcessesResponse);
+  rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
 }
 
-message CheckReply {
-  string message = 1;
+// FileService provides file transfer and file discovery capabilities.
+service FileService {
+  rpc PostFileStream(stream FileChunk) returns (PostFilesResponse);
+  rpc GetFileStream(GetFileRequest) returns (stream FileChunk);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc SearchFiles(SearchFilesRequest) returns (SearchFilesResponse);
 }
 
 message StartProcessRequest {
@@ -24,13 +26,89 @@ message StartProcessRequest {
   map<string, string> env = 3;
   string cwd = 4;
   string content = 5;
+  bool background = 6;
+  string tag = 7;
+  PTY pty = 8;
 }
 
-message StartProcessResponse {
-  string stdout = 1;
-  string stderr = 2;
-  int32 exit_code = 3;
+message ProcessConfig {
+  string cmd = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string cwd = 4;
+  PTY pty = 5;
+}
+
+message PTY {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string tag = 2;
+  ProcessConfig config = 3;
+  bool running = 4;
+  string started_at = 5;
+  int32 exit_code = 6;
+  string finished_at = 7;
+  string stdout = 8;
+  string stderr = 9;
+}
+
+message ProcessSelector {
+  int32 pid = 1;
+  string tag = 2;
+}
+
+message ProcessEvent {
+  oneof event {
+    ProcessStartEvent start = 1;
+    ProcessDataEvent data = 2;
+    ProcessEndEvent end = 3;
+    ProcessKeepAlive keepalive = 4;
+  }
+}
+
+message ProcessStartEvent {
+  int32 pid = 1;
+}
+
+message ProcessDataEvent {
+  oneof output {
+    string stdout = 1;
+    string stderr = 2;
+    string pty = 3;
+  }
+}
+
+message ProcessEndEvent {
+  int32 exit_code = 1;
+  bool exited = 2;
+  string status = 3;
   string error = 4;
+}
+
+message ProcessKeepAlive {
+}
+
+message ConnectProcessRequest {
+  ProcessSelector process = 1;
+}
+
+message ListProcessesRequest {
+}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message SendSignalRequest {
+  ProcessSelector process = 1;
+  int32 signal = 2;
+}
+
+message SendSignalResponse {
 }
 
 message FileChunk {
@@ -40,9 +118,46 @@ message FileChunk {
 
 message PostFilesResponse {
   int32 uploaded_count = 1;
-  string error = 2;
+  string error = 2 [deprecated = true];
+  repeated WriteInfo entries = 3;
+}
+
+message WriteInfo {
+  string name = 1;
+  string path = 2;
+  string type = 3;
 }
 
 message GetFileRequest {
   string filepath = 1;
+}
+
+message FileEntry {
+  string name = 1;
+  string path = 2;
+  string type = 3;
+  int64 size = 4;
+  string permissions = 5;
+  string modified_time = 6;
+  map<string, string> metadata = 7;
+  bool is_directory = 8;
+}
+
+message ListFilesRequest {
+  string path = 1;
+  int32 depth = 2;
+}
+
+message ListFilesResponse {
+  repeated FileEntry entries = 1;
+}
+
+message SearchFilesRequest {
+  string path = 1;
+  string pattern = 2;
+  repeated string exclude_patterns = 3;
+}
+
+message SearchFilesResponse {
+  repeated FileEntry entries = 1;
 }

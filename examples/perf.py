@@ -3,7 +3,7 @@
 import os
 import time
 
-from conch import Sandbox
+from conch import CommandExitException, Sandbox
 
 
 def perf_print_hello_by_template(template_id):
@@ -13,12 +13,12 @@ def perf_print_hello_by_template(template_id):
         box = Sandbox.create(template_id=template_id)
         t1 = time.perf_counter()
 
-        ret = box.execute(cmd='python3', content='print("hello")')
-        t2 = time.perf_counter()
-
-        if ret.exit_code != 0:
-            print(f"Execute failed: {ret.stderr}")
+        try:
+            box.commands.run(cmd='python3', content='print("hello")')
+        except CommandExitException as e:
+            print(f"Execute failed: {e.stderr or e.error}")
             return None
+        t2 = time.perf_counter()
 
         startup_s = t1 - t0
         exec_s = t2 - t1
@@ -55,12 +55,12 @@ def perf_print_hello_by_checkpoint(template_id):
         box = Sandbox.create(template_id=template_id)
         t1 = time.perf_counter()
 
-        ret = box.execute(cmd='python3', content='print("hello")')
-        t2 = time.perf_counter()
-
-        if ret.exit_code != 0:
-            print(f"Execute failed: {ret.stderr}")
+        try:
+            box.commands.run(cmd='python3', content='print("hello")')
+        except CommandExitException as e:
+            print(f"Execute failed: {e.stderr or e.error}")
             return
+        t2 = time.perf_counter()
 
         restore_s = t1 - t0
         exec_s = t2 - t1

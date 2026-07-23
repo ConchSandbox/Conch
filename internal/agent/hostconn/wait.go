@@ -16,7 +16,7 @@ import (
 
 const (
 	vsockReadyPort       = 4065
-	expectedAgentVersion = "0.0.3"
+	expectedAgentVersion = "0.0.4"
 	vsockReadTimeout     = 2 * time.Second
 	stratovirtVMMName    = "stratovirt"
 )
@@ -244,7 +244,7 @@ func readAgentReadyFromConn(conn net.Conn, sandboxID string, logger ulog.Logger)
 
 func validateAgentReady(agentMsg, sandboxID string, logger ulog.Logger, logPrefix string) error {
 	if strings.Contains(agentMsg, "NOT_READY") {
-		logger.Error("Agent gRPC service not started", ulog.F("sandboxId", sandboxID))
+		logger.Error("Agent API service not started", ulog.F("sandboxId", sandboxID))
 		return fmt.Errorf("agent reported NOT_READY")
 	}
 

@@ -1,5 +1,5 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-// Description: Filesystem mount logic for conch-agent PID 1
+// Description: Filesystem mount logic for conch-init PID 1
 
 package guestd
 

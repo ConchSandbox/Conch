@@ -1,35 +1,36 @@
 package guestd
 
 import (
-	"context"
+	"net/http"
 	"testing"
-
-	"google.golang.org/grpc/metadata"
 )
 
-func TestAgentAuthVerify(t *testing.T) {
+func TestAgentAuthVerifyHTTPHeader(t *testing.T) {
 	agentAuth.SetToken("secret")
 	t.Cleanup(func() {
 		agentAuth.SetToken("")
 	})
 
-	if err := agentAuth.verify(context.Background()); err == nil {
-		t.Fatal("verify() error = nil, want missing token error")
+	if err := agentAuth.verifyHTTPHeader(http.Header{}); err == nil {
+		t.Fatal("verifyHTTPHeader() error = nil, want missing token error")
 	}
-	wrongCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(agentTokenMetadataKey, "wrong"))
-	if err := agentAuth.verify(wrongCtx); err == nil {
-		t.Fatal("verify() error = nil, want invalid token error")
+	wrongHeader := http.Header{}
+	wrongHeader.Set(agentTokenHeaderKey, "wrong")
+	if err := agentAuth.verifyHTTPHeader(wrongHeader); err == nil {
+		t.Fatal("verifyHTTPHeader() error = nil, want invalid token error")
 	}
-	okCtx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(agentTokenMetadataKey, "secret"))
-	if err := agentAuth.verify(okCtx); err != nil {
-		t.Fatalf("verify() error = %v, want nil", err)
+	okHeader := http.Header{}
+	okHeader.Set(agentTokenHeaderKey, "secret")
+	if err := agentAuth.verifyHTTPHeader(okHeader); err != nil {
+		t.Fatalf("verifyHTTPHeader() error = %v, want nil", err)
 	}
 }
 
 func TestAgentAuthRequiresInitializedToken(t *testing.T) {
 	agentAuth.SetToken("")
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(agentTokenMetadataKey, "secret"))
-	if err := agentAuth.verify(ctx); err == nil {
-		t.Fatal("verify() error = nil, want uninitialized token error")
+	header := http.Header{}
+	header.Set(agentTokenHeaderKey, "secret")
+	if err := agentAuth.verifyHTTPHeader(header); err == nil {
+		t.Fatal("verifyHTTPHeader() error = nil, want uninitialized token error")
 	}
 }

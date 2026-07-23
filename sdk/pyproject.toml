@@ -6,17 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "conch"
 version = "0.1.0"
 description = "SDK for conch service"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     { name = "Conch Team" }
 ]
-keywords = ["conch", "sdk", "sandbox", "grpc"]
+keywords = ["conch", "sdk", "sandbox", "connect-rpc"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -24,10 +22,10 @@ classifiers = [
 dependencies = [
     "requests>=2.25.0",
     "requests-unixsocket>=0.3.0",
-    "grpcio>=1.57.0",
+    "connectrpc==0.11.0",
+    "protoc-gen-connect-python==0.9.0",
     "protobuf>=4.21.0",
     "PyYAML>=5.4.0",
-    "grpcio-tools>=1.57.0",
 ]
 
 [project.optional-dependencies]
@@ -38,9 +36,15 @@ Homepage = "https://atomgit.com/openeuler/Conch"
 Repository = "https://atomgit.com/openeuler/Conch"
 
 [tool.setuptools]
-packages = ["conch"]
-package-dir = { "conch" = "." }
+packages = ["conch", "api.py_proto"]
+package-dir = { "conch" = ".", "api.py_proto" = "../api/py_proto" }
 zip-safe = false
+
+[tool.setuptools.package-data]
+"api.py_proto" = ["*.pyi"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.pyc"]
 
 [project.scripts]
 conch-sdk-init-config = "conch.init_config:main"

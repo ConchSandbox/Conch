@@ -158,7 +158,6 @@ pull_function() {
 
 run_build() {
     echo "--- Building Conch binaries locally ---"
-    make gen-proto
     mkdir -p bin
     version_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)
     git_commit=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)

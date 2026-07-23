@@ -1,5 +1,5 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-// Description: Child process reaper for conch-agent PID 1
+// Description: Child process reaper for conch-init PID 1
 
 package guestd
 

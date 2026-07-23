@@ -1,5 +1,5 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-// Description: Network configuration for conch-agent PID 1
+// Description: Network configuration for conch-init PID 1
 
 package guestd
 

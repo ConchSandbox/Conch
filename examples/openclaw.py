@@ -38,13 +38,13 @@ def get_sandbox_home(sandbox):
     Get actual home directory in sandbox.
     Dynamically adapt to different users.
     """
-    whoami_result = sandbox.execute(cmd="whoami")
+    whoami_result = sandbox.commands.run(cmd="whoami")
     username = whoami_result.stdout.strip()
     
     if username == 'root':
         return '/root'
     
-    grep_result = sandbox.execute(
+    grep_result = sandbox.commands.run(
         cmd="sh",
         args=["-c", f"grep '^{username}:' /etc/passwd"]
     )
@@ -57,7 +57,7 @@ def setup_sandbox_configs(sandbox):
     Write required OpenClaw configurations to the sandbox filesystem.
     """
     # Initialize network interface
-    sandbox.execute(cmd="ip", args=["link", "set", "lo", "up"])
+    sandbox.commands.run(cmd="ip", args=["link", "set", "lo", "up"])
 
     # Get sandbox home directory (adapt to different users)
     sandbox_home = get_sandbox_home(sandbox)
@@ -115,7 +115,7 @@ def setup_sandbox_configs(sandbox):
             "filepath": file_path,
             "content": json_str.encode()
         })
-    sandbox.upload(files_to_upload)
+    sandbox.files.upload(files_to_upload)
 
 def main():
     template_id = get_config("CONCH_TEMPLATE_ID", "Enter Conch Template ID")
@@ -126,7 +126,7 @@ def main():
         setup_sandbox_configs(sandbox)
 
         # Get sandbox user for SSH connection
-        whoami_result = sandbox.execute(cmd="whoami")
+        whoami_result = sandbox.commands.run(cmd="whoami")
         sandbox_user = whoami_result.stdout.strip()
 
         print("Configuration complete, ready to start TUI...\n")
