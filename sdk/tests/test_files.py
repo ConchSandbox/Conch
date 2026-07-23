@@ -96,6 +96,78 @@ def sandbox_with_file_response(response):
     return sandbox
 
 
+class FakeDownloadChunk:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeDownloadClient:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def get_file_stream(self, request, headers=None):
+        return self.chunks
+
+
+def client_with_download_chunks(chunks):
+    client = AgentClient.__new__(AgentClient)
+    client.token = None
+    client.file_client = FakeDownloadClient(chunks)
+    return client
+
+
+def test_get_file_writes_complete_download():
+    client = client_with_download_chunks([
+        FakeDownloadChunk(b"hello "),
+        FakeDownloadChunk(b"conch"),
+    ])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = os.path.join(tmpdir, "downloaded.txt")
+        result = client.get_file("/tmp/remote.txt", local_path)
+
+        assert result == {"status": AgentClient.STATUS_SUCCESS, "size": 11, "message": "OK"}
+        with open(local_path, "rb") as f:
+            assert f.read() == b"hello conch"
+
+
+def test_get_file_failure_preserves_existing_file():
+    def failing_chunks():
+        yield FakeDownloadChunk(b"partial")
+        raise OSError("download failed")
+
+    client = client_with_download_chunks(failing_chunks())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = os.path.join(tmpdir, "downloaded.txt")
+        with open(local_path, "wb") as f:
+            f.write(b"original")
+
+        with pytest.raises(OSError, match="download failed"):
+            client.get_file("/tmp/remote.txt", local_path)
+
+        with open(local_path, "rb") as f:
+            assert f.read() == b"original"
+        assert not any(name.startswith(".conch-download-") for name in os.listdir(tmpdir))
+
+
+def test_get_file_failure_does_not_leave_partial_file():
+    def failing_chunks():
+        yield FakeDownloadChunk(b"partial")
+        raise OSError("download failed")
+
+    client = client_with_download_chunks(failing_chunks())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = os.path.join(tmpdir, "downloaded.txt")
+
+        with pytest.raises(OSError, match="download failed"):
+            client.get_file("/tmp/remote.txt", local_path)
+
+        assert not os.path.exists(local_path)
+        assert not any(name.startswith(".conch-download-") for name in os.listdir(tmpdir))
+
+
 def test_write_uses_server_entries():
     """WriteInfo should come from server entries when available."""
     sandbox = sandbox_with_file_response({

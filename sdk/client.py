@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from io import IOBase, TextIOBase
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -127,14 +128,27 @@ class AgentClient:
         }
 
     def get_file(self, remote_path: str, local_path: str) -> Dict[str, Any]:
-        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        local_dir = os.path.dirname(local_path) or "."
+        os.makedirs(local_dir, exist_ok=True)
         size = 0
         request = agent_pb2.GetFileRequest(filepath=remote_path)
         chunks = self._rpc_call(self.file_client.get_file_stream, request)
-        with open(local_path, "wb") as out:
-            for chunk in self._rpc_iter(chunks):
-                out.write(chunk.content)
-                size += len(chunk.content)
+        temp_path = None
+        committed = False
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix=".conch-download-", dir=local_dir)
+            with os.fdopen(fd, "wb") as out:
+                for chunk in self._rpc_iter(chunks):
+                    out.write(chunk.content)
+                    size += len(chunk.content)
+            os.replace(temp_path, local_path)
+            committed = True
+        finally:
+            if temp_path and not committed:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
         return {"status": self.STATUS_SUCCESS, "size": size, "message": "OK"}
 
     def stream_file(self, remote_path: str) -> Iterator[bytes]:
