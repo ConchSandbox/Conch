@@ -144,6 +144,7 @@ func runAsInit() {
 	}
 
 	if mergeReady {
+		markRootfsMergeReady()
 		prepareMergeRoot()
 		bindMountToMerge()
 		setupDevPts()

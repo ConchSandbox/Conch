@@ -111,9 +111,11 @@ func TestCheckAgentAPIHealthEndpoint(t *testing.T) {
 
 func TestCheckSandboxReadyUsesLoopbackEndpoint(t *testing.T) {
 	oldURL := agentAPIHealthURL
+	oldRootfsMergeReady := rootfsMergeReady.Load()
 	oldRootfsEntrypointExpected := rootfsEntrypointExpected.Load()
 	t.Cleanup(func() {
 		agentAPIHealthURL = oldURL
+		rootfsMergeReady.Store(oldRootfsMergeReady)
 		rootfsEntrypointExpected.Store(oldRootfsEntrypointExpected)
 	})
 
@@ -123,6 +125,7 @@ func TestCheckSandboxReadyUsesLoopbackEndpoint(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	agentAPIHealthURL = server.URL
+	rootfsMergeReady.Store(true)
 	rootfsEntrypointExpected.Store(false)
 
 	if !checkSandboxReady() {
@@ -137,5 +140,63 @@ func TestCheckSandboxReadyUsesLoopbackEndpoint(t *testing.T) {
 
 	if checkSandboxReady() {
 		t.Fatal("checkSandboxReady() = true for unhealthy loopback endpoint")
+	}
+}
+
+func TestCheckSandboxReadyRequiresRootfsMerge(t *testing.T) {
+	oldURL := agentAPIHealthURL
+	oldRootfsMergeReady := rootfsMergeReady.Load()
+	oldRootfsEntrypointExpected := rootfsEntrypointExpected.Load()
+	t.Cleanup(func() {
+		agentAPIHealthURL = oldURL
+		rootfsMergeReady.Store(oldRootfsMergeReady)
+		rootfsEntrypointExpected.Store(oldRootfsEntrypointExpected)
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"OK"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	agentAPIHealthURL = server.URL
+	rootfsEntrypointExpected.Store(false)
+	rootfsMergeReady.Store(false)
+
+	if checkSandboxReady() {
+		t.Fatal("checkSandboxReady() = true before rootfs merge")
+	}
+
+	markRootfsMergeReady()
+	if !checkSandboxReady() {
+		t.Fatal("checkSandboxReady() = false after rootfs merge with healthy control plane")
+	}
+}
+
+func TestCheckSandboxReadyDoesNotRequireRootfsServicesWhenAbsent(t *testing.T) {
+	oldURL := agentAPIHealthURL
+	oldRootfsMergeReady := rootfsMergeReady.Load()
+	oldRootfsEntrypointExpected := rootfsEntrypointExpected.Load()
+	oldRootfsServicesReady := rootfsServicesReady.Load()
+	t.Cleanup(func() {
+		agentAPIHealthURL = oldURL
+		rootfsMergeReady.Store(oldRootfsMergeReady)
+		rootfsEntrypointExpected.Store(oldRootfsEntrypointExpected)
+		rootfsServicesReady.Store(oldRootfsServicesReady)
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"OK"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	agentAPIHealthURL = server.URL
+	rootfsMergeReady.Store(true)
+	rootfsEntrypointExpected.Store(false)
+	rootfsServicesReady.Store(false)
+
+	if !checkSandboxReady() {
+		t.Fatal("checkSandboxReady() = false without rootfs services")
 	}
 }

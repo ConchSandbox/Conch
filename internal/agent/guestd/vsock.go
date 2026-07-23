@@ -28,6 +28,7 @@ var (
 	rootfsServicesReady      atomic.Bool
 	rootfsServicesReadyOnce  sync.Once
 	rootfsServicesReadyCh    = make(chan struct{})
+	rootfsMergeReady         atomic.Bool
 	rootfsEntrypointExpected atomic.Bool
 	agentAPIHealthURL        = "http://127.0.0.1" + ServerPort + "/health"
 )
@@ -258,6 +259,10 @@ func markRootfsServicesReady() {
 	})
 }
 
+func markRootfsMergeReady() {
+	rootfsMergeReady.Store(true)
+}
+
 func checkAgentAPIHealthEndpoint(url string) bool {
 	client := http.Client{Timeout: agentAPIHealthTimeout}
 	resp, err := client.Get(url)
@@ -277,6 +282,9 @@ func checkAgentAPIHealthEndpoint(url string) bool {
 
 func checkSandboxReady() bool {
 	if !checkAgentAPIHealthEndpoint(agentAPIHealthURL) {
+		return false
+	}
+	if !rootfsMergeReady.Load() {
 		return false
 	}
 
