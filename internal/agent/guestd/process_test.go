@@ -2,6 +2,7 @@ package guestd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,9 +17,9 @@ import (
 
 func TestStartProcessRejectsNilRequest(t *testing.T) {
 	server := &AgentServer{}
-	resp := startProcessForTest(t, server, nil)
-	if resp == nil || !strings.Contains(resp.Error, "request is required") {
-		t.Fatalf("StartProcess(nil) = %+v, want request error response", resp)
+	err := startProcessErrorForTest(t, server, nil)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "request is required") {
+		t.Fatalf("StartProcess(nil) error = %v, want InvalidArgument request error", err)
 	}
 }
 
@@ -40,6 +41,103 @@ func TestStartProcessReturnsExitCodeForNonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(resp.Stderr, "err") {
 		t.Fatalf("StartProcess() stderr = %q, want err", resp.Stderr)
+	}
+}
+
+func TestStartProcessStreamsForegroundOutputBeforeExit(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := &blockingFirstDataStream{
+		ctx:       ctx,
+		firstData: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf stream-first; while [ ! -f gate ]; do sleep 0.05; done; printf stream-second"},
+			Cwd:  workDir,
+		}, stream)
+	}()
+
+	select {
+	case <-stream.firstData:
+	case err := <-done:
+		t.Fatalf("StartProcess() returned before streaming first output: %v", err)
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not stream foreground output before command exit")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("StartProcess() returned before command was unblocked: %v", err)
+	default:
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "gate"), []byte("go"), 0o600); err != nil {
+		t.Fatalf("failed to create gate file: %v", err)
+	}
+	close(stream.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartProcess() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not finish after command was unblocked")
+	}
+
+	events := stream.Events()
+	if len(events) == 0 || events[0].GetStart() == nil {
+		t.Fatalf("StartProcess() first event = %+v, want start", events)
+	}
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{Cmd: "sh"}, events)
+	if resp.ExitCode != 0 {
+		t.Fatalf("StartProcess() exit code = %d, want 0", resp.ExitCode)
+	}
+	if !strings.Contains(resp.Stdout, "stream-first") || !strings.Contains(resp.Stdout, "stream-second") {
+		t.Fatalf("StartProcess() stdout = %q, want both streamed chunks", resp.Stdout)
+	}
+}
+
+func TestStartProcessCancelsForegroundCommandWhenDataSendFails(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamErr := errors.New("stream send failed")
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf before-fail; while [ ! -f gate ]; do sleep 0.05; done"},
+			Cwd:  workDir,
+		}, &failDataStream{ctx: ctx, err: streamErr})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, streamErr) {
+			t.Fatalf("StartProcess() error = %v, want stream error", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not return after foreground data send failed")
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
 	}
 }
 
@@ -72,14 +170,14 @@ func TestStartProcessRejectsContentWithArgs(t *testing.T) {
 	server := &AgentServer{}
 	workDir := t.TempDir()
 
-	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cmd:     "sh",
 		Args:    []string{"-c", "echo args-ran"},
 		Cwd:     workDir,
 		Content: "echo content-ran",
 	})
-	if resp == nil || !strings.Contains(resp.Error, "content and args cannot both be set") {
-		t.Fatalf("StartProcess(content with args) = %+v, want validation error", resp)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "content and args cannot both be set") {
+		t.Fatalf("StartProcess(content with args) error = %v, want InvalidArgument validation error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(workDir, "conch-script-*"))
@@ -127,6 +225,38 @@ func TestStartProcessSupportsPTY(t *testing.T) {
 	}
 	if !strings.Contains(resp.Stdout, "pty-ready") {
 		t.Fatalf("StartProcess(pty) stdout = %q, want pty-ready", resp.Stdout)
+	}
+}
+
+func TestStartProcessCancelsForegroundPTYCommandWhenDataSendFails(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamErr := errors.New("pty stream send failed")
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf pty-before-fail; while [ ! -f gate ]; do sleep 0.05; done"},
+			Cwd:  workDir,
+			Pty:  &pb.PTY{Cols: 80, Rows: 24},
+		}, &failDataStream{ctx: ctx, err: streamErr})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, streamErr) {
+			t.Fatalf("StartProcess(pty) error = %v, want stream error", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess(pty) did not return after foreground data send failed")
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
 	}
 }
 
@@ -185,15 +315,15 @@ func TestBackgroundProcessRejectsDuplicateRunningTag(t *testing.T) {
 	})
 
 	duplicateWorkDir := t.TempDir()
-	duplicateResp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cmd:        "sh",
 		Cwd:        duplicateWorkDir,
 		Content:    "echo should-not-run",
 		Background: true,
 		Tag:        "duplicate",
 	})
-	if duplicateResp == nil || !strings.Contains(duplicateResp.Error, "tag already exists") {
-		t.Fatalf("StartProcess(duplicate tag) = %+v, want duplicate tag error", duplicateResp)
+	if connect.CodeOf(err) != connect.CodeAlreadyExists || !strings.Contains(err.Error(), "tag already exists") {
+		t.Fatalf("StartProcess(duplicate tag) error = %v, want AlreadyExists duplicate tag error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(duplicateWorkDir, "conch-script-*"))
@@ -209,13 +339,13 @@ func TestBackgroundProcessCleansTemporaryScriptWhenCommandMissing(t *testing.T) 
 	server := &AgentServer{}
 	workDir := t.TempDir()
 
-	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cwd:        workDir,
 		Content:    "echo should-not-run",
 		Background: true,
 	})
-	if resp == nil || !strings.Contains(resp.Error, "command is required") {
-		t.Fatalf("StartProcess(background missing cmd) = %+v, want command error", resp)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("StartProcess(background missing cmd) error = %v, want InvalidArgument command error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(workDir, "conch-script-*"))
@@ -335,6 +465,65 @@ func (s *fakeProcessConnectStream) Events() []*pb.ProcessEvent {
 	return append([]*pb.ProcessEvent(nil), s.events...)
 }
 
+type blockingFirstDataStream struct {
+	ctx       context.Context
+	mu        sync.Mutex
+	events    []*pb.ProcessEvent
+	firstData chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (s *blockingFirstDataStream) Send(event *pb.ProcessEvent) error {
+	if event.GetData() != nil {
+		s.once.Do(func() {
+			close(s.firstData)
+		})
+		select {
+		case <-s.release:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
+
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockingFirstDataStream) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+func (s *blockingFirstDataStream) Events() []*pb.ProcessEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*pb.ProcessEvent(nil), s.events...)
+}
+
+type failDataStream struct {
+	ctx context.Context
+	err error
+}
+
+func (s *failDataStream) Send(event *pb.ProcessEvent) error {
+	if event.GetData() != nil {
+		return s.err
+	}
+	return nil
+}
+
+func (s *failDataStream) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
 type backgroundStart struct {
 	resp   *testProcessEventResult
 	cancel context.CancelFunc
@@ -356,6 +545,19 @@ func startProcessForTest(t *testing.T, server *AgentServer, req *pb.StartProcess
 		t.Fatalf("StartProcess() error = %v", err)
 	}
 	return responseFromProcessEvents(req, stream.Events())
+}
+
+func startProcessErrorForTest(t *testing.T, server *AgentServer, req *pb.StartProcessRequest) error {
+	t.Helper()
+	stream := &fakeProcessConnectStream{}
+	err := server.StartProcess(context.Background(), req, stream)
+	if err == nil {
+		t.Fatal("StartProcess() error = nil, want error")
+	}
+	if events := stream.Events(); len(events) != 0 {
+		t.Fatalf("StartProcess() streamed events on startup error: %+v", events)
+	}
+	return err
 }
 
 func startBackgroundProcessForTest(t *testing.T, server *AgentServer, req *pb.StartProcessRequest) *backgroundStart {

@@ -86,7 +86,7 @@ with Sandbox.create(template_id="tmpl_123") as sbx:
 ### 执行命令
 
 ```python
-sandbox.commands.run(cmd, args=[], cwd=None, env={}, content=None, background=False, tag=None, pty=None) -> CommandResult | CommandHandle
+sandbox.commands.run(cmd, args=[], cwd=None, env={}, content=None, background=False, tag=None, pty=None, on_stdout=None, on_stderr=None) -> CommandResult | CommandHandle
 ```
 
 在沙箱中执行命令或脚本。
@@ -104,6 +104,8 @@ sandbox.commands.run(cmd, args=[], cwd=None, env={}, content=None, background=Fa
 `content` 模式由 conch-init 在沙箱内创建临时脚本并执行，不能和脚本文件参数混用。需要指定脚本文件路径时，先使用 `sandbox.files.write()` 写入文件，再通过 `args` 执行该文件。
 
 **返回：** `background=False` 时返回 `CommandResult` 对象，`background=True` 时返回 `CommandHandle` 对象。前台命令非零退出时抛 `CommandExitException`，异常对象包含 `stdout`、`stderr`、`exit_code` 和 `error`。
+
+前台命令可额外传入 `on_stdout`、`on_stderr` 回调；PTY 输出通过 `CommandHandle.wait(on_pty=...)` 消费。
 
 **示例：**
 ```python
@@ -126,6 +128,15 @@ result = sbx.commands.run(cmd='python3', args=['/tmp/app.py'])
 # 指定环境变量（需要通过 shell 展开，参见 FAQ）
 result = sbx.commands.run(cmd='sh', args=['-c', 'echo $MY_VAR'],
                      env={'MY_VAR': 'conch_test'})
+
+# 前台流式回调
+chunks = []
+result = sbx.commands.run(
+    cmd='sh',
+    args=['-c', 'printf foo; printf bar >&2'],
+    on_stdout=lambda text: chunks.append(("stdout", text)),
+    on_stderr=lambda text: chunks.append(("stderr", text)),
+)
 ```
 
 后台命令：
@@ -148,6 +159,23 @@ result = sbx.commands.run(
 print(result.stdout)
 
 command.kill(signal=15)
+```
+
+后台命令和 `connect()` 返回的 `CommandHandle` 采用 E2B 风格的 `wait()` 消费输出：
+
+```python
+handle = sbx.commands.run(cmd='python3', args=['-m', 'http.server', '18080'], background=True)
+result = handle.wait(
+    on_pty=lambda text: print(text, end=''),
+    on_stdout=lambda text: print(text, end=''),
+    on_stderr=lambda text: print(text, end=''),
+)
+
+handle = sbx.commands.connect(tag='http-srv')
+result = handle.wait(
+    on_pty=lambda text: print(text, end=''),
+    on_stdout=lambda text: print(text, end=''),
+)
 ```
 
 ---
@@ -183,13 +211,13 @@ except KeyboardInterrupt:
 sbx.commands.kill(tag='http-srv', signal=15)
 ```
 
-`commands.connect()` 返回可迭代的 `CommandHandle`，用于持续读取后台进程后续输出，行为类似 `tail -f`。对于 `python -m http.server`、Web 服务、worker 等长期运行进程，`for stdout, stderr, pty in command` 会一直等待新输出，直到进程退出、连接断开或代码主动 `break`。在交互式 REPL 中查看长期服务输出时，应使用 `try/except KeyboardInterrupt` 并调用 `command.disconnect()`；如果只是验证服务是否启动，推荐另起一次 `commands.run()` 执行 `curl`/业务请求，然后用 `command.kill()` 或 `commands.kill()` 停止后台进程。
+`commands.connect()` 返回 `CommandHandle`。除兼容性的迭代方式外，更推荐用 `handle.wait()` 读取输出，和 E2B 的使用方式一致。对于 `python -m http.server`、Web 服务、worker 等长期运行进程，`handle.wait(...)` 会一直等待新输出，直到进程退出、连接断开或代码主动结束消费。在交互式 REPL 中查看长期服务输出时，应在合适时机调用 `command.disconnect()`；如果只是验证服务是否启动，推荐另起一次 `commands.run()` 执行 `curl`/业务请求，然后用 `command.kill()` 或 `commands.kill()` 停止后台进程。
 
 直接打印 `CommandHandle` 会显示目标进程选择器，例如 `process handle (pid=42, tag=http-srv)`。目标进程不存在时，`commands.connect()` 抛出 `NotFoundError`。`commands.kill()` 成功发送信号返回 `True`，目标进程不存在时返回 `False`；请求参数错误、认证失败、网络错误或其它 conch-init 错误会映射为 SDK 错误类型后抛出。
 
 后台命令输出来自 conch-init 的流式事件。启动后台命令后，建议通过返回的 `CommandHandle.wait()` 或 `commands.connect()` 及时消费输出；如果后台进程持续大量输出而客户端长期不读取，过量输出事件可能被丢弃，但进程本身不会因此阻塞。
 
-启用 `pty` 时，流式迭代会通过第三个返回值提供 PTY 输出；调用 `CommandHandle.wait()` 时，PTY 输出会按当前 SDK 兼容行为累计到 `CommandResult.stdout`。
+启用 `pty` 时，`CommandHandle.wait()` 可以通过 `on_pty` 接收 PTY 输出；当前 SDK 兼容行为会把 PTY 输出累计到 `CommandResult.stdout`。
 
 ---
 

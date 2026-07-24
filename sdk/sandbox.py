@@ -1,7 +1,7 @@
 import os
 from enum import Enum
 from io import IOBase, TextIOBase
-from typing import IO, Iterator, Optional, Dict, Any, List, Tuple, Literal, overload, TypedDict, Union
+from typing import IO, Callable, Iterator, Optional, Dict, Any, List, Tuple, Literal, overload, TypedDict, Union
 from dataclasses import dataclass, field
 from urllib.parse import quote_plus
 import requests
@@ -74,6 +74,7 @@ class SandboxInfo:
 Stdout = str
 Stderr = str
 PtyOutput = str
+OutputHandler = Callable[[str], None]
 
 
 class CommandResult:
@@ -270,33 +271,13 @@ class CommandHandle:
         self.pid = self.process.pid
         self.tag = self.process.tag or ""
         self._events = events
-        self._stdout = ""
-        self._stderr = ""
+        self._stdout: str = ""
+        self._stderr: str = ""
         self._result: Optional[CommandResult] = None
+        self._iteration_exception: Optional[Exception] = None
 
     def __iter__(self) -> Iterator[Tuple[Optional[Stdout], Optional[Stderr], Optional[PtyOutput]]]:
-        for event in self.stream_events():
-            if event.data:
-                if event.data.stdout:
-                    self._stdout += event.data.stdout
-                    yield event.data.stdout, None, None
-                if event.data.stderr:
-                    self._stderr += event.data.stderr
-                    yield None, event.data.stderr, None
-                if event.data.pty:
-                    self._stdout += event.data.pty
-                    yield None, None, event.data.pty
-            if event.end:
-                exit_code = int(event.end.get("exitCode", event.end.get("exit_code", UNKNOWN_EXIT_CODE)))
-                error = event.end.get("error", "")
-                self._result = CommandResult({
-                    "stdout": self._stdout,
-                    "stderr": self._stderr,
-                    "exit_code": exit_code,
-                    "error": error,
-                    "exited": event.end.get("exited"),
-                    "process_status": event.end.get("status", ""),
-                })
+        return self._handle_events()
 
     def __str__(self) -> str:
         selector = []
@@ -326,8 +307,41 @@ class CommandHandle:
             events.close()
         self._events = None
 
-    def wait(self) -> CommandResult:
+    def _handle_events(self) -> Iterator[Tuple[Optional[Stdout], Optional[Stderr], Optional[PtyOutput]]]:
+        try:
+            for event in self.stream_events():
+                if event.data:
+                    if event.data.stdout:
+                        self._stdout += event.data.stdout
+                        yield event.data.stdout, None, None
+                    if event.data.stderr:
+                        self._stderr += event.data.stderr
+                        yield None, event.data.stderr, None
+                    if event.data.pty:
+                        self._stdout += event.data.pty
+                        yield None, None, event.data.pty
+                if event.end:
+                    self._result = CommandResult({
+                        "stdout": self._stdout,
+                        "stderr": self._stderr,
+                        "exit_code": int(event.end.get("exitCode", event.end.get("exit_code", UNKNOWN_EXIT_CODE))),
+                        "error": event.end.get("error", ""),
+                        "exited": event.end.get("exited"),
+                        "process_status": event.end.get("status", ""),
+                    })
+        except Exception as exc:
+            self._iteration_exception = exc
+            raise
+
+    def wait(
+            self,
+            on_pty: Optional[OutputHandler] = None,
+            on_stdout: Optional[OutputHandler] = None,
+            on_stderr: Optional[OutputHandler] = None,
+    ) -> CommandResult:
         if self._result is not None:
+            if self._iteration_exception is not None:
+                raise self._iteration_exception
             if self._result.exit_code != 0:
                 raise CommandExitException(
                     stdout=self._result.stdout,
@@ -336,8 +350,20 @@ class CommandHandle:
                     error=self._result.error,
                 )
             return self._result
-        for _stdout, _stderr, _pty in self:
+        try:
+            for stdout, stderr, pty in self:
+                if stdout is not None and on_stdout:
+                    on_stdout(stdout)
+                elif stderr is not None and on_stderr:
+                    on_stderr(stderr)
+                elif pty is not None and on_pty:
+                    on_pty(pty)
+        except StopIteration:
             pass
+        except Exception as exc:
+            self._iteration_exception = exc
+        if self._iteration_exception is not None:
+            raise self._iteration_exception
         if self._result is None:
             raise SandboxError("Command ended without an end event")
         if self._result.exit_code != 0:
@@ -367,22 +393,76 @@ class CommandManager:
             background: bool = False,
             tag: Optional[str] = None,
             pty: Optional[Dict[str, int]] = None,
+            on_stdout: Optional[OutputHandler] = None,
+            on_stderr: Optional[OutputHandler] = None,
     ):
+        if background and (on_stdout is not None or on_stderr is not None):
+            raise InvalidArgumentError("callbacks are only supported by foreground run() or CommandHandle.wait()")
+
+        if background:
+            response = self._sandbox.client.start_process(
+                cmd=cmd,
+                args=args or [],
+                cwd=cwd,
+                env=env or {},
+                content=content,
+                background=True,
+                tag=tag,
+                pty=pty,
+            )
+            process = response.get("process")
+            if not process:
+                raise RuntimeError(response.get("error") or "failed to start background process")
+            return CommandHandle(self._sandbox, process, events=response.get("events"))
+
+        if on_stdout is not None or on_stderr is not None:
+            events = self._sandbox.client.stream_process(
+                cmd=cmd,
+                args=args or [],
+                cwd=cwd,
+                env=env or {},
+                content=content,
+                background=False,
+                tag=tag,
+                pty=pty,
+            )
+            try:
+                first_event = ProcessEvent(next(events))
+            except StopIteration as exc:
+                raise SandboxError("Failed to start process: missing start event") from exc
+            if not first_event.start:
+                raise SandboxError(f"Failed to start process: expected start event, got {first_event.raw}")
+            process = {
+                "pid": first_event.start.get("pid", 0),
+                "tag": tag or "",
+                "running": True,
+                "startedAt": "",
+                "exitCode": -1,
+                "finishedAt": "",
+                "stdout": "",
+                "stderr": "",
+                "config": {
+                    "cmd": cmd,
+                    "args": args or [],
+                    "env": env or {},
+                    "cwd": cwd,
+                },
+            }
+            if pty is not None:
+                process["config"]["pty"] = pty
+            handle = CommandHandle(self._sandbox, process, events=events)
+            return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr)
+
         response = self._sandbox.client.start_process(
             cmd=cmd,
             args=args or [],
             cwd=cwd,
             env=env or {},
             content=content,
-            background=background,
+            background=False,
             tag=tag,
             pty=pty,
         )
-        if background:
-            process = response.get("process")
-            if not process:
-                raise RuntimeError(response.get("error") or "failed to start background process")
-            return CommandHandle(self._sandbox, process, events=response.get("events"))
         result = CommandResult(response)
         if result.exit_code != 0:
             raise CommandExitException(

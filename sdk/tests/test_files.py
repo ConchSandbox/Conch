@@ -2,9 +2,12 @@ import os
 import tempfile
 
 import pytest
+from connectrpc.code import Code
+from connectrpc.errors import ConnectError
 
 from conch import FileType, InvalidArgumentError, NotFoundError, Sandbox
 from conch.client import AgentClient
+from api.py_proto import agent_pb2
 
 
 def test_upload_local_file(sandbox):
@@ -91,7 +94,7 @@ class FakeFileClient:
 
 
 def sandbox_with_file_response(response):
-    sandbox = Sandbox(api_url="http://unused", image_name="test")
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
     sandbox.client = FakeFileClient(response)
     return sandbox
 
@@ -237,3 +240,143 @@ def test_get_files_requires_remote_and_local():
 
     with pytest.raises(InvalidArgumentError, match="need 'remote' and 'local'"):
         client.get_files([{"remote": "/tmp/remote.txt"}])
+
+
+class FakeUploadFileClient:
+    def __init__(self):
+        self.calls = []
+
+    def post_file_stream(self, chunks, headers=None):
+        chunk_list = list(chunks)
+        self.calls.append(chunk_list)
+        path = chunk_list[0].filepath
+        return agent_pb2.PostFilesResponse(
+            uploaded_count=1,
+            entries=[agent_pb2.WriteInfo(name=os.path.basename(path), path=path, type="file")],
+        )
+
+
+def test_agent_client_post_files_uploads_text_and_bytes_content():
+    file_client = FakeUploadFileClient()
+    client = AgentClient("127.0.0.1")
+    client.file_client = file_client
+
+    result = client.post_files([
+        {"filepath": "/tmp/a.txt", "content": "hello"},
+        {"filepath": "/tmp/b.bin", "content": b"world"},
+    ])
+
+    assert result["status"] == AgentClient.STATUS_SUCCESS
+    assert result["uploaded_count"] == 2
+    assert result["entries"] == [
+        {"name": "a.txt", "path": "/tmp/a.txt", "type": "file"},
+        {"name": "b.bin", "path": "/tmp/b.bin", "type": "file"},
+    ]
+    assert [(chunk.filepath, chunk.content) for chunk in file_client.calls[0]] == [("/tmp/a.txt", b"hello")]
+    assert [(chunk.filepath, chunk.content) for chunk in file_client.calls[1]] == [("/tmp/b.bin", b"world")]
+
+
+def test_agent_client_post_files_chunks_large_content():
+    file_client = FakeUploadFileClient()
+    client = AgentClient("127.0.0.1")
+    client.file_client = file_client
+    client.FILE_CHUNK_SIZE = 3
+
+    client.post_files([{"filepath": "/tmp/large.bin", "content": b"abcdefg"}])
+
+    assert [(chunk.filepath, chunk.content) for chunk in file_client.calls[0]] == [
+        ("/tmp/large.bin", b"abc"),
+        ("", b"def"),
+        ("", b"g"),
+    ]
+
+
+def test_agent_client_post_files_uploads_empty_local_file():
+    file_client = FakeUploadFileClient()
+    client = AgentClient("127.0.0.1")
+    client.file_client = file_client
+
+    with tempfile.NamedTemporaryFile() as src:
+        client.post_files([{"filepath": "/tmp/empty.txt", "local_path": src.name}])
+
+    assert [(chunk.filepath, chunk.content) for chunk in file_client.calls[0]] == [("/tmp/empty.txt", b"")]
+
+
+def test_agent_client_stream_and_read_file():
+    class FakeFileClient:
+        def get_file_stream(self, request, headers=None):
+            assert request.filepath == "/tmp/read.txt"
+            return iter([
+                agent_pb2.FileChunk(content=b"hello "),
+                agent_pb2.FileChunk(content=b"conch"),
+            ])
+
+    client = AgentClient("127.0.0.1")
+    client.file_client = FakeFileClient()
+
+    assert list(client.stream_file("/tmp/read.txt")) == [b"hello ", b"conch"]
+    assert client.read_file("/tmp/read.txt") == b"hello conch"
+
+
+def test_agent_client_list_and_search_files_map_entries():
+    file_entry = agent_pb2.FileEntry(
+        name="app.py",
+        path="/tmp/app.py",
+        type="file",
+        size=12,
+        permissions="0644",
+        modified_time="2026-07-24T00:00:00Z",
+        metadata={"lang": "python"},
+        is_directory=False,
+    )
+
+    class FakeFileClient:
+        def list_files(self, request, headers=None):
+            assert request.path == "/tmp"
+            assert request.depth == 2
+            return agent_pb2.ListFilesResponse(entries=[file_entry])
+
+        def search_files(self, request, headers=None):
+            assert request.path == "/tmp"
+            assert request.pattern == "*.py"
+            assert list(request.exclude_patterns) == ["venv"]
+            return agent_pb2.SearchFilesResponse(entries=[file_entry])
+
+    client = AgentClient("127.0.0.1")
+    client.file_client = FakeFileClient()
+
+    expected = [{
+        "name": "app.py",
+        "path": "/tmp/app.py",
+        "type": "file",
+        "size": 12,
+        "permissions": "0644",
+        "modifiedTime": "2026-07-24T00:00:00Z",
+        "metadata": {"lang": "python"},
+        "isDirectory": False,
+    }]
+    assert client.list_files("/tmp", depth=2) == expected
+    assert client.search_files("/tmp", "*.py", exclude_patterns=["venv"]) == expected
+
+
+def test_files_read_rejects_invalid_format():
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+
+    with pytest.raises(InvalidArgumentError, match="format must be one of"):
+        sandbox.files.read("/tmp/read.txt", format="json")
+
+
+def test_file_stream_rpc_errors_are_mapped_to_sdk_errors():
+    class FakeFileClient:
+        def get_file_stream(self, request, headers=None):
+            def events():
+                raise ConnectError(Code.NOT_FOUND, f"file not found: {request.filepath}")
+                yield
+            return events()
+
+    client = AgentClient("127.0.0.1")
+    client.file_client = FakeFileClient()
+
+    with pytest.raises(NotFoundError, match="file not found: /tmp/missing") as exc:
+        client.read_file("/tmp/missing")
+    assert exc.value.__suppress_context__ is True

@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from itertools import chain
 from io import IOBase, TextIOBase
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -66,6 +67,58 @@ class AgentClient:
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
+        request = self._build_start_process_request(
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            content=content,
+            args=args,
+            background=background,
+            tag=tag,
+            pty=pty,
+        )
+        raw_events = self._rpc_call(self.process_client.start_process, request)
+        events = self._rpc_iter(raw_events)
+        if background:
+            return self._start_background_process_response(request, events)
+        return self._aggregate_process_response(events)
+
+    def stream_process(
+        self,
+        cmd: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        content: Optional[str] = None,
+        args: Optional[list] = None,
+        background: bool = False,
+        tag: Optional[str] = None,
+        pty: Optional[Dict[str, int]] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        request = self._build_start_process_request(
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            content=content,
+            args=args,
+            background=background,
+            tag=tag,
+            pty=pty,
+        )
+        raw_events = self._rpc_call(self.process_client.start_process, request)
+        for event in self._rpc_iter(raw_events):
+            yield self._process_event_to_dict(event)
+
+    def _build_start_process_request(
+        self,
+        cmd: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        content: Optional[str] = None,
+        args: Optional[list] = None,
+        background: bool = False,
+        tag: Optional[str] = None,
+        pty: Optional[Dict[str, int]] = None,
+    ) -> agent_pb2.StartProcessRequest:
         if content is not None and args:
             raise InvalidArgumentError("content cannot be used with args; write a file first and execute it via args")
         request = agent_pb2.StartProcessRequest(
@@ -79,12 +132,7 @@ class AgentClient:
         )
         if pty is not None:
             request.pty.CopyFrom(agent_pb2.PTY(cols=pty.get("cols", 0), rows=pty.get("rows", 0)))
-
-        raw_events = self._rpc_call(self.process_client.start_process, request)
-        events = self._rpc_iter(raw_events)
-        if background:
-            return self._start_background_process_response(request, events)
-        return self._aggregate_process_response(events)
+        return request
 
     def connect_process(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
         tag: Optional[str] = None) -> Iterator[Dict[str, Any]]:
@@ -251,7 +299,7 @@ class AgentClient:
 
         event = self._process_event_to_dict(first_event)
         if "start" not in event:
-            response = self._aggregate_process_response(iter([first_event]))
+            response = self._aggregate_process_response(chain([first_event], events))
             response["process"] = None
             return response
 
