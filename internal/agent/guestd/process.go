@@ -142,8 +142,7 @@ type processOutputWriter struct {
 }
 
 func (w processOutputWriter) Write(p []byte) (int, error) {
-	text := string(append([]byte(nil), p...))
-	w.process.appendOutput(text, w.stderr, w.pty)
+	w.process.appendOutput(p, w.stderr, w.pty)
 	return len(p), nil
 }
 
@@ -189,8 +188,7 @@ type foregroundOutputWriter struct {
 }
 
 func (w foregroundOutputWriter) Write(p []byte) (int, error) {
-	text := string(append([]byte(nil), p...))
-	event := processDataEvent(text, w.stderr, w.pty)
+	event := processDataEvent(p, w.stderr, w.pty)
 
 	<-w.state.started
 	w.state.mu.Lock()
@@ -220,44 +218,44 @@ func processStartEvent(pid int32) *pb.ProcessEvent {
 	}
 }
 
-func processStdoutEvent(text string) *pb.ProcessEvent {
+func processStdoutEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Stdout{Stdout: text},
+				Output: &pb.ProcessDataEvent_Stdout{Stdout: append([]byte(nil), data...)},
 			},
 		},
 	}
 }
 
-func processStderrEvent(text string) *pb.ProcessEvent {
+func processStderrEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Stderr{Stderr: text},
+				Output: &pb.ProcessDataEvent_Stderr{Stderr: append([]byte(nil), data...)},
 			},
 		},
 	}
 }
 
-func processPTYEvent(text string) *pb.ProcessEvent {
+func processPTYEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Pty{Pty: text},
+				Output: &pb.ProcessDataEvent_Pty{Pty: append([]byte(nil), data...)},
 			},
 		},
 	}
 }
 
-func processDataEvent(text string, stderr, isPTY bool) *pb.ProcessEvent {
+func processDataEvent(data []byte, stderr, isPTY bool) *pb.ProcessEvent {
 	switch {
 	case isPTY:
-		return processPTYEvent(text)
+		return processPTYEvent(data)
 	case stderr:
-		return processStderrEvent(text)
+		return processStderrEvent(data)
 	default:
-		return processStdoutEvent(text)
+		return processStdoutEvent(data)
 	}
 }
 
@@ -278,8 +276,8 @@ func processEndEvent(exitCode int32, errMsg string) *pb.ProcessEvent {
 	}
 }
 
-func (p *managedProcess) appendOutput(text string, stderr, isPTY bool) {
-	event := processDataEvent(text, stderr, isPTY)
+func (p *managedProcess) appendOutput(data []byte, stderr, isPTY bool) {
+	event := processDataEvent(data, stderr, isPTY)
 	select {
 	case p.dataEvents.Source <- event:
 	default:
@@ -812,7 +810,7 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 		for {
 			n, readErr := tty.Read(buf)
 			if n > 0 {
-				process.appendOutput(string(append([]byte(nil), buf[:n]...)), false, true)
+				process.appendOutput(buf[:n], false, true)
 			}
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, os.ErrClosed) || errors.Is(readErr, syscall.EIO) {
 				return

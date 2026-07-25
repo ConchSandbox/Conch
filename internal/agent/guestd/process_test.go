@@ -13,7 +13,27 @@ import (
 
 	"connectrpc.com/connect"
 	pb "github.com/openeuler/Conch/api/go_proto"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestProcessDataEventAllowsSplitUTF8Sequence(t *testing.T) {
+	want := []byte("中")
+	events := []*pb.ProcessEvent{
+		processDataEvent(want[:1], false, false),
+		processDataEvent(want[1:], false, false),
+	}
+
+	var got []byte
+	for _, event := range events {
+		if _, err := proto.Marshal(event); err != nil {
+			t.Fatalf("proto.Marshal() error = %v", err)
+		}
+		got = append(got, event.GetData().GetStdout()...)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("streamed bytes = %x, want %x", got, want)
+	}
+}
 
 func TestStartProcessRejectsNilRequest(t *testing.T) {
 	server := &AgentServer{}
@@ -617,9 +637,9 @@ func responseFromProcessEvents(req *pb.StartProcessRequest, events []*pb.Process
 			}
 		}
 		if data := event.GetData(); data != nil {
-			resp.Stdout += data.GetStdout()
-			resp.Stdout += data.GetPty()
-			resp.Stderr += data.GetStderr()
+			resp.Stdout += string(data.GetStdout())
+			resp.Stdout += string(data.GetPty())
+			resp.Stderr += string(data.GetStderr())
 		}
 		if end := event.GetEnd(); end != nil {
 			resp.ExitCode = end.ExitCode
@@ -653,7 +673,7 @@ func TestConnectBackgroundProcessStreamsOutput(t *testing.T) {
 	exited := false
 	for _, event := range stream.events {
 		if data := event.GetData(); data != nil {
-			stdout.WriteString(data.GetStdout())
+			stdout.Write(data.GetStdout())
 		}
 		if event.GetEnd() != nil {
 			exited = true
@@ -686,7 +706,7 @@ func TestConnectStreamsEndAfterLargeOutput(t *testing.T) {
 	exited := false
 	for _, event := range stream.events {
 		if data := event.GetData(); data != nil {
-			stdout.WriteString(data.GetStdout())
+			stdout.Write(data.GetStdout())
 		}
 		if event.GetEnd() != nil {
 			exited = true

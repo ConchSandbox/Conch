@@ -158,7 +158,7 @@ def test_agent_client_stream_process_yields_event_dicts():
             assert list(request.args) == ["-c", "echo ok"]
             return iter([
                 agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout="ok\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=b"ok\n")),
                 agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
             ])
 
@@ -170,6 +170,30 @@ def test_agent_client_stream_process_yields_event_dicts():
     assert events == [
         {"start": {"pid": 123}},
         {"data": {"stdout": "ok\n"}},
+        {"end": {"exitCode": 0, "exited": True, "status": "exited", "error": ""}},
+    ]
+
+
+def test_agent_client_stream_process_decodes_split_utf8_sequence():
+    encoded = "中".encode("utf-8")
+
+    class FakeProcessClient:
+        def start_process(self, request, headers=None):
+            return iter([
+                agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=encoded[:1])),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=encoded[1:])),
+                agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
+            ])
+
+    client = AgentClient("127.0.0.1")
+    client.process_client = FakeProcessClient()
+
+    events = list(client.stream_process(cmd="sh"))
+
+    assert events == [
+        {"start": {"pid": 123}},
+        {"data": {"stdout": "中"}},
         {"end": {"exitCode": 0, "exited": True, "status": "exited", "error": ""}},
     ]
 
@@ -199,9 +223,9 @@ def test_agent_client_start_process_builds_request_and_aggregates_output():
             assert request.background is False
             return iter([
                 agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout="ok\n")),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(pty="pty\n")),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stderr="warn\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=b"ok\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(pty=b"pty\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stderr=b"warn\n")),
                 agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
             ])
 
@@ -236,7 +260,7 @@ def test_agent_client_background_process_response_uses_start_stream():
             assert request.tag == "svc"
             return iter([
                 agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=321)),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout="boot\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=b"boot\n")),
                 agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
             ])
 
@@ -271,7 +295,7 @@ def test_agent_client_background_process_without_start_preserves_remaining_event
     class FakeProcessClient:
         def start_process(self, request, headers=None):
             return iter([
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout="partial\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=b"partial\n")),
                 agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=7, error="broken", exited=True, status="errored")),
             ])
 
@@ -294,7 +318,7 @@ def test_agent_client_connect_process_builds_selector_and_yields_events():
             assert request.process.tag == ""
             return iter([
                 agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=77)),
-                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout="attached\n")),
+                agent_pb2.ProcessEvent(data=agent_pb2.ProcessDataEvent(stdout=b"attached\n")),
             ])
 
     client = AgentClient("127.0.0.1")

@@ -50,7 +50,7 @@ func TestConnectStreamingJSONStartProcess(t *testing.T) {
 	for stream.Receive() {
 		event := stream.Msg()
 		if data := event.GetData(); data != nil {
-			stdout.WriteString(data.GetStdout())
+			stdout.Write(data.GetStdout())
 		}
 		if event.GetEnd() != nil {
 			exited = true

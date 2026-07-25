@@ -120,10 +120,10 @@ class ProcessDataEvent(_message.Message):
     PTY_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
-    pty: str
-    stderr: str
-    stdout: str
-    def __init__(self, stdout: _Optional[str] = ..., stderr: _Optional[str] = ..., pty: _Optional[str] = ...) -> None: ...
+    pty: bytes
+    stderr: bytes
+    stdout: bytes
+    def __init__(self, stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ..., pty: _Optional[bytes] = ...) -> None: ...
 
 class ProcessEndEvent(_message.Message):
     __slots__ = ["error", "exit_code", "exited", "status"]

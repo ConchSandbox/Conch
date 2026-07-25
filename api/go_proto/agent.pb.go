@@ -616,31 +616,31 @@ func (x *ProcessDataEvent) GetOutput() isProcessDataEvent_Output {
 	return nil
 }
 
-func (x *ProcessDataEvent) GetStdout() string {
+func (x *ProcessDataEvent) GetStdout() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Stdout); ok {
 			return x.Stdout
 		}
 	}
-	return ""
+	return nil
 }
 
-func (x *ProcessDataEvent) GetStderr() string {
+func (x *ProcessDataEvent) GetStderr() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Stderr); ok {
 			return x.Stderr
 		}
 	}
-	return ""
+	return nil
 }
 
-func (x *ProcessDataEvent) GetPty() string {
+func (x *ProcessDataEvent) GetPty() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Pty); ok {
 			return x.Pty
 		}
 	}
-	return ""
+	return nil
 }
 
 type isProcessDataEvent_Output interface {
@@ -648,15 +648,15 @@ type isProcessDataEvent_Output interface {
 }
 
 type ProcessDataEvent_Stdout struct {
-	Stdout string `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
+	Stdout []byte `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
 }
 
 type ProcessDataEvent_Stderr struct {
-	Stderr string `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
+	Stderr []byte `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
 }
 
 type ProcessDataEvent_Pty struct {
-	Pty string `protobuf:"bytes,3,opt,name=pty,proto3,oneof"`
+	Pty []byte `protobuf:"bytes,3,opt,name=pty,proto3,oneof"`
 }
 
 func (*ProcessDataEvent_Stdout) isProcessDataEvent_Output() {}
@@ -1554,9 +1554,9 @@ const file_agent_proto_rawDesc = "" +
 	"\x11ProcessStartEvent\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"d\n" +
 	"\x10ProcessDataEvent\x12\x18\n" +
-	"\x06stdout\x18\x01 \x01(\tH\x00R\x06stdout\x12\x18\n" +
-	"\x06stderr\x18\x02 \x01(\tH\x00R\x06stderr\x12\x12\n" +
-	"\x03pty\x18\x03 \x01(\tH\x00R\x03ptyB\b\n" +
+	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12\x18\n" +
+	"\x06stderr\x18\x02 \x01(\fH\x00R\x06stderr\x12\x12\n" +
+	"\x03pty\x18\x03 \x01(\fH\x00R\x03ptyB\b\n" +
 	"\x06output\"t\n" +
 	"\x0fProcessEndEvent\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +

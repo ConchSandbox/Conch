@@ -1,3 +1,4 @@
+import codecs
 import os
 import sys
 import tempfile
@@ -78,7 +79,7 @@ class AgentClient:
             pty=pty,
         )
         raw_events = self._rpc_call(self.process_client.start_process, request)
-        events = self._rpc_iter(raw_events)
+        events = self._decode_process_events(self._rpc_iter(raw_events))
         if background:
             return self._start_background_process_response(request, events)
         return self._aggregate_process_response(events)
@@ -105,8 +106,7 @@ class AgentClient:
             pty=pty,
         )
         raw_events = self._rpc_call(self.process_client.start_process, request)
-        for event in self._rpc_iter(raw_events):
-            yield self._process_event_to_dict(event)
+        yield from self._decode_process_events(self._rpc_iter(raw_events))
 
     def _build_start_process_request(
         self,
@@ -139,8 +139,7 @@ class AgentClient:
         selector = self._process_selector(process, pid=pid, tag=tag)
         request = agent_pb2.ConnectProcessRequest(process=selector)
         raw_events = self._rpc_call(self.process_client.connect, request)
-        for event in self._rpc_iter(raw_events):
-            yield self._process_event_to_dict(event)
+        yield from self._decode_process_events(self._rpc_iter(raw_events))
 
     def list_processes(self) -> List[Dict[str, Any]]:
         response = self._rpc_call(self.process_client.list, agent_pb2.ListProcessesRequest())
@@ -282,7 +281,7 @@ class AgentClient:
     def _start_background_process_response(
         self,
         request: agent_pb2.StartProcessRequest,
-        events: Iterator[agent_pb2.ProcessEvent],
+        events: Iterator[Dict[str, Any]],
     ) -> Dict[str, Any]:
         try:
             first_event = next(events)
@@ -297,7 +296,7 @@ class AgentClient:
                 "process": None,
             }
 
-        event = self._process_event_to_dict(first_event)
+        event = first_event
         if "start" not in event:
             response = self._aggregate_process_response(chain([first_event], events))
             response["process"] = None
@@ -322,16 +321,15 @@ class AgentClient:
             "exit_code": -1,
             "error": "",
             "process": process,
-            "events": (self._process_event_to_dict(event) for event in events),
+            "events": events,
         }
 
-    def _aggregate_process_response(self, events: Iterator[agent_pb2.ProcessEvent]) -> Dict[str, Any]:
+    def _aggregate_process_response(self, events: Iterator[Dict[str, Any]]) -> Dict[str, Any]:
         stdout = ""
         stderr = ""
         exit_code = -1
         error = "process ended without an end event"
-        for raw_event in events:
-            event = self._process_event_to_dict(raw_event)
+        for event in events:
             data = event.get("data") or {}
             stdout += data.get("stdout", "")
             # Preserve the previous unary API behavior where PTY output was returned as stdout.
@@ -463,6 +461,34 @@ class AgentClient:
         if which == "keepalive":
             return {"keepalive": {}}
         return {}
+
+    @classmethod
+    def _decode_process_events(
+        cls,
+        events: Iterator[agent_pb2.ProcessEvent],
+    ) -> Iterator[Dict[str, Any]]:
+        decoders = {
+            output: codecs.getincrementaldecoder("utf-8")(errors="replace")
+            for output in ("stdout", "stderr", "pty")
+        }
+        for raw_event in events:
+            event = cls._process_event_to_dict(raw_event)
+            data = event.get("data")
+            if data is not None:
+                output, raw = next(iter(data.items()), (None, None))
+                if output is None:
+                    yield event
+                    continue
+                text = decoders[output].decode(raw, final=False)
+                if text:
+                    yield {"data": {output: text}}
+                continue
+            if "end" in event:
+                for output, decoder in decoders.items():
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        yield {"data": {output: text}}
+            yield event
 
     @staticmethod
     def _write_info_to_dict(entry: agent_pb2.WriteInfo) -> Dict[str, Any]:
