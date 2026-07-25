@@ -19,7 +19,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -966,7 +965,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.runtimeService.SnapshotInfo(r.Context(), snapshotSvc.InfoRequest{
+	info, err := s.runtimeService.SnapshotInfo(r.Context(), runtimeapi.SnapshotInfoOptions{
 		Key:       req.Key,
 		Namespace: req.Namespace,
 	})
@@ -975,7 +974,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(info)
+	_ = json.NewEncoder(w).Encode(snapshotRecordHTTPResponse(info))
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -991,19 +990,22 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req snapshotSvc.ListRequest
+	var req listSnapshotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), req)
+	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), runtimeapi.ListSnapshotsOptions{
+		Namespace: req.Namespace,
+		Filters:   req.Filters,
+	})
 	if err != nil {
 		logger.Error("Failed to list snapshots", ulog.F("error", err))
 		http.Error(w, "Failed to list snapshots: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]snapshotSvc.Meta{"snapshots": snapshots})
+	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshotRecordHTTPResponses(snapshots)})
 }
 
 func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1019,23 +1021,27 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req snapshotSvc.RemoveRequest
+	var req removeSnapshotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.RemoveSnapshot(r.Context(), req); err != nil {
+	if req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	opts := runtimeapi.RemoveSnapshotOptions{
+		Key:       req.Key,
+		Namespace: req.Namespace,
+	}
+	if err := s.runtimeService.RemoveSnapshot(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove snapshot",
-			ulog.F("key", req.Key),
+			ulog.F("key", opts.Key),
 			ulog.F("error", err),
 		)
-		status := http.StatusInternalServerError
-		if errors.Is(err, snapshotSvc.ErrInvalidRequest) {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, "Failed to remove snapshot: "+err.Error(), status)
+		http.Error(w, "Failed to remove snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(removeSnapshotResponse{Status: "ok"})
 }

@@ -228,3 +228,18 @@ type RemoveSnapshotOptions struct {
 	Namespace string
 	Key       string
 }
+
+type SnapshotInfoOptions struct {
+	Namespace string
+	Key       string
+}
+
+type SnapshotRecord struct {
+	Key         string
+	Kind        string
+	Parent      string
+	Labels      map[string]string
+	StoragePath string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -54,13 +53,15 @@ type fakeImageService struct {
 }
 
 type fakeSnapshotService struct {
-	listReq   snapshotSvc.ListRequest
-	removeReq snapshotSvc.RemoveRequest
-	infoReq   snapshotSvc.InfoRequest
-	listErr   error
-	removeErr error
-	infoErr   error
-	snapshots []snapshotSvc.Meta
+	listReq     runtimeapi.ListSnapshotsOptions
+	removeReq   runtimeapi.RemoveSnapshotOptions
+	infoReq     runtimeapi.SnapshotInfoOptions
+	listErr     error
+	removeErr   error
+	infoErr     error
+	removeCalls int
+	snapshots   []runtimeapi.SnapshotRecord
+	infoResp    runtimeapi.SnapshotRecord
 }
 
 type fakeSandboxOps struct {
@@ -244,7 +245,7 @@ func newConvertHandlerServer(imageSvc conchruntime.ImageOps, templateBootIndexSv
 	return s
 }
 
-func (f *fakeSnapshotService) List(_ context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+func (f *fakeSnapshotService) List(_ context.Context, req runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error) {
 	f.listReq = req
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -252,17 +253,21 @@ func (f *fakeSnapshotService) List(_ context.Context, req snapshotSvc.ListReques
 	return f.snapshots, nil
 }
 
-func (f *fakeSnapshotService) Remove(_ context.Context, req snapshotSvc.RemoveRequest) error {
+func (f *fakeSnapshotService) Remove(_ context.Context, req runtimeapi.RemoveSnapshotOptions) error {
+	f.removeCalls++
 	f.removeReq = req
 	return f.removeErr
 }
 
-func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {
+func (f *fakeSnapshotService) Info(_ context.Context, req runtimeapi.SnapshotInfoOptions) (runtimeapi.SnapshotRecord, error) {
 	f.infoReq = req
 	if f.infoErr != nil {
-		return snapshotSvc.Meta{}, f.infoErr
+		return runtimeapi.SnapshotRecord{}, f.infoErr
 	}
-	return snapshotSvc.Meta{
+	if f.infoResp.Key != "" {
+		return f.infoResp, nil
+	}
+	return runtimeapi.SnapshotRecord{
 		Key:         req.Key,
 		Parent:      "parent-id",
 		StoragePath: "/snap/rootfs",
