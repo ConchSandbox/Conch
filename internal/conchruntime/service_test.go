@@ -17,11 +17,11 @@ import (
 )
 
 type fakeSandboxOps struct {
-	req                sandbox.SandboxCreateRequest
-	checkpointRequests []sandbox.SandboxCheckpointRequest
-	checkpointResults  []sandbox.SandboxCheckpointResult
+	req                sandbox.CreateRequest
+	checkpointRequests []sandbox.CheckpointRequest
+	checkpointResults  []sandbox.CheckpointResult
 	checkpointErr      error
-	createResult       sandbox.SandboxCreateResult
+	createResult       sandbox.CreateResult
 	deleteErr          error
 }
 
@@ -32,7 +32,7 @@ type serializedDeleteOps struct {
 	calls        atomic.Int32
 }
 
-func (f *serializedDeleteOps) Delete(sandbox.SandboxDeleteRequest) error {
+func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 	if f.calls.Add(1) == 1 {
 		close(f.firstEntered)
 		<-f.releaseFirst
@@ -41,14 +41,14 @@ func (f *serializedDeleteOps) Delete(sandbox.SandboxDeleteRequest) error {
 	return errors.New("sandbox not found")
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
+func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.req = req
 	result := f.createResult
 	if result.Namespace == "" {
 		result.Namespace = req.Namespace
 	}
 	if result.SandboxID == "" {
-		result.SandboxID = req.SandboxId
+		result.SandboxID = req.SandboxID
 	}
 	if result.IP == "" {
 		result.IP = "192.0.2.10"
@@ -59,28 +59,28 @@ func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.Sandb
 	return result, nil
 }
 
-func (f *fakeSandboxOps) Delete(sandbox.SandboxDeleteRequest) error {
+func (f *fakeSandboxOps) Delete(sandbox.DeleteRequest) error {
 	return f.deleteErr
 }
 
-func (f *fakeSandboxOps) Suspend(sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Suspend(sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Resume(sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Resume(sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
+func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
 	call := len(f.checkpointRequests)
 	f.checkpointRequests = append(f.checkpointRequests, req)
 	if f.checkpointErr != nil {
-		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
+		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
 	if call < len(f.checkpointResults) {
 		return f.checkpointResults[call], nil
 	}
-	return sandbox.SandboxCheckpointResult{}, nil
+	return sandbox.CheckpointResult{}, nil
 }
 
 func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
@@ -93,7 +93,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		VMMName:      "cloud-hypervisor",
 		MemorySizeMB: 512,
 	}
-	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{captured}}
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{captured}}
 	imageOps := &templateBuildImageOps{checkpointResults: []conchimage.PublishCheckpointBootImageResult{{
 		BootIndexDigest: t1Digest,
 		ImageName:       "localhost/conch/checkpoints:t1",
@@ -144,9 +144,9 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 	// Generation identity and parent snapshot IDs are deliberately absent from
 	// the runtime capture seam; it receives only the sandbox identity.
-	if got, want := sandboxOps.checkpointRequests[0], (sandbox.SandboxCheckpointRequest{
+	if got, want := sandboxOps.checkpointRequests[0], (sandbox.CheckpointRequest{
 		Namespace: "team-a",
-		SandboxId: "sandbox-a",
+		SandboxID: "sandbox-a",
 	}); got != want {
 		t.Fatalf("checkpoint request = %#v, want %#v", got, want)
 	}
@@ -197,7 +197,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	t2Digest := digest.FromString("lineage-t2").String()
 	memRoot1 := t.TempDir()
 	memRoot2 := t.TempDir()
-	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{
 		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256},
 		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256},
 	}}
@@ -382,7 +382,7 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{
-		createResult: sandbox.SandboxCreateResult{
+		createResult: sandbox.CreateResult{
 			RootfsKey:   "sandbox-1",
 			MemKey:      "sandbox-1-mem",
 			RootfsMount: "/run/conch/rootfs",
@@ -436,11 +436,11 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	if sandboxOps.req.TemplateID != "tmpl_default" {
 		t.Fatalf("TemplateID = %q", sandboxOps.req.TemplateID)
 	}
-	if sandboxOps.req.VmmName != "cloud-hypervisor" {
-		t.Fatalf("VmmName = %q", sandboxOps.req.VmmName)
+	if sandboxOps.req.VMMName != "cloud-hypervisor" {
+		t.Fatalf("VmmName = %q", sandboxOps.req.VMMName)
 	}
-	if sandboxOps.req.VcpuNum != 2 || sandboxOps.req.VcpuMax != 4 || sandboxOps.req.RamMB != 4096 {
-		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VcpuNum, sandboxOps.req.VcpuMax, sandboxOps.req.RamMB)
+	if sandboxOps.req.VCPUNum != 2 || sandboxOps.req.VCPUMax != 4 || sandboxOps.req.RAMMB != 4096 {
+		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
 	}
 	if sandboxOps.req.AgentToken == "" {
 		t.Fatal("AgentToken is empty")
@@ -473,11 +473,11 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
-	if sandboxOps.req.TemplateID != "tmpl_resume_explicit" || sandboxOps.req.VmmName != "explicit-vmm" {
+	if sandboxOps.req.TemplateID != "tmpl_resume_explicit" || sandboxOps.req.VMMName != "explicit-vmm" {
 		t.Fatalf("request = %#v", sandboxOps.req)
 	}
-	if sandboxOps.req.VcpuNum != 6 || sandboxOps.req.VcpuMax != 8 || sandboxOps.req.RamMB != 8192 {
-		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VcpuNum, sandboxOps.req.VcpuMax, sandboxOps.req.RamMB)
+	if sandboxOps.req.VCPUNum != 6 || sandboxOps.req.VCPUMax != 8 || sandboxOps.req.RAMMB != 8192 {
+		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
 	}
 }
 

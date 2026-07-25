@@ -50,7 +50,7 @@ func ResolveBaseURL() string {
 	return baseURL
 }
 
-// CreateRequest matches Conch SandboxCreateRequest.
+// CreateRequest matches POST /api/sandbox/create.
 type CreateRequest struct {
 	Namespace    string        `json:"namespace,omitempty"`
 	TemplateID   string        `json:"template_id"`

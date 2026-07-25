@@ -28,7 +28,6 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
-	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -366,7 +365,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req = sandbox.SandboxCreateRequest{}
+	var req sandboxCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -375,19 +374,19 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		Namespace:    req.Namespace,
-		PodSandboxID: req.SandboxId,
-		SandboxID:    req.SandboxId,
+		PodSandboxID: req.SandboxID,
+		SandboxID:    req.SandboxID,
 		LeaseID:      req.LeaseID,
 		TemplateID:   req.TemplateID,
-		VMMName:      req.VmmName,
-		VCPUNum:      req.VcpuNum,
-		VCPUMax:      req.VcpuMax,
-		RamMB:        req.RamMB,
+		VMMName:      req.VMMName,
+		VCPUNum:      req.VCPUNum,
+		VCPUMax:      req.VCPUMax,
+		RamMB:        req.RAMMB,
 		VolumeMounts: req.VolumeMounts,
 	})
 	if err != nil {
 		logger.Error("Failed to create sandbox",
-			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
 		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
@@ -417,24 +416,24 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req sandbox.SandboxDeleteRequest
+	var req sandboxDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	err := s.runtimeService.RemoveSandbox(r.Context(), req.Namespace, req.SandboxId)
+	err := s.runtimeService.RemoveSandbox(r.Context(), req.Namespace, req.SandboxID)
 	if err != nil {
 		logger.Error("Failed to delete sandbox",
-			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
 		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxId))
+	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxID))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

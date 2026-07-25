@@ -26,11 +26,11 @@ import (
 )
 
 type SandboxOps interface {
-	Create(sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error)
-	Delete(sandbox.SandboxDeleteRequest) error
-	Suspend(sandbox.SandboxLifecycleRequest) error
-	Resume(sandbox.SandboxLifecycleRequest) error
-	Checkpoint(sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error)
+	Create(sandbox.CreateRequest) (sandbox.CreateResult, error)
+	Delete(sandbox.DeleteRequest) error
+	Suspend(sandbox.LifecycleRequest) error
+	Resume(sandbox.LifecycleRequest) error
+	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
 type ImageOps interface {
@@ -163,15 +163,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, err
 	}
 
-	req := sandbox.SandboxCreateRequest{
+	req := sandbox.CreateRequest{
 		Namespace:    namespace,
 		TemplateID:   opts.TemplateID,
-		VmmName:      opts.VMMName,
-		SandboxId:    opts.SandboxID,
+		VMMName:      opts.VMMName,
+		SandboxID:    opts.SandboxID,
 		LeaseID:      opts.LeaseID,
-		VcpuNum:      opts.VCPUNum,
-		VcpuMax:      opts.VCPUMax,
-		RamMB:        opts.RamMB,
+		VCPUNum:      opts.VCPUNum,
+		VCPUMax:      opts.VCPUMax,
+		RAMMB:        opts.RamMB,
 		AgentToken:   agentToken,
 		VolumeMounts: opts.VolumeMounts,
 	}
@@ -295,7 +295,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Delete(sandbox.SandboxDeleteRequest{Namespace: namespace, SandboxId: sandboxID})
+	err := s.Sandbox.Delete(sandbox.DeleteRequest{Namespace: namespace, SandboxID: sandboxID})
 	if err != nil && strings.Contains(err.Error(), "not found") {
 		err = nil
 	}
@@ -328,7 +328,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID st
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Suspend(sandbox.SandboxLifecycleRequest{Namespace: namespace, SandboxId: sandboxID})
+	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
 	if rec.PodSandboxID != "" {
 
 		rec.State = state.SandboxSuspended
@@ -356,7 +356,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, podSandboxID str
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Resume(sandbox.SandboxLifecycleRequest{Namespace: namespace, SandboxId: sandboxID})
+	err := s.Sandbox.Resume(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
 	if rec.PodSandboxID != "" {
 		rec.State = state.SandboxReady
 		if err != nil {
@@ -431,9 +431,9 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		return SandboxCheckpointResult{}, err
 	}
 
-	captured, err := s.Sandbox.Checkpoint(sandbox.SandboxCheckpointRequest{
+	captured, err := s.Sandbox.Checkpoint(sandbox.CheckpointRequest{
 		Namespace: namespace,
-		SandboxId: sandboxID,
+		SandboxID: sandboxID,
 	})
 	if err != nil {
 		_ = s.Templates.MarkFailed(ctx, templateRecord.ID, err)

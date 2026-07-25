@@ -66,14 +66,14 @@ type fakeSnapshotService struct {
 }
 
 type fakeSandboxOps struct {
-	createReq      sandbox.SandboxCreateRequest
-	checkpointReq  sandbox.SandboxCheckpointRequest
-	suspendReq     sandbox.SandboxLifecycleRequest
-	resumeReq      sandbox.SandboxLifecycleRequest
-	deleteReqs     []sandbox.SandboxDeleteRequest
+	createReq      sandbox.CreateRequest
+	checkpointReq  sandbox.CheckpointRequest
+	suspendReq     sandbox.LifecycleRequest
+	resumeReq      sandbox.LifecycleRequest
+	deleteReqs     []sandbox.DeleteRequest
 	createErr      error
 	checkpointErr  error
-	checkpointResp sandbox.SandboxCheckpointResult
+	checkpointResp sandbox.CheckpointResult
 }
 
 func (f *fakeImageService) Pull(_ context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
@@ -285,42 +285,42 @@ func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoReque
 	}, nil
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
+func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.createReq = req
 	if f.createErr != nil {
-		return sandbox.SandboxCreateResult{}, f.createErr
+		return sandbox.CreateResult{}, f.createErr
 	}
-	return sandbox.SandboxCreateResult{IP: "192.0.2.2", Namespace: req.Namespace, SandboxID: req.SandboxId}, nil
+	return sandbox.CreateResult{IP: "192.0.2.2", Namespace: req.Namespace, SandboxID: req.SandboxID}, nil
 }
 
-func (f *fakeSandboxOps) Delete(req sandbox.SandboxDeleteRequest) error {
+func (f *fakeSandboxOps) Delete(req sandbox.DeleteRequest) error {
 	f.deleteReqs = append(f.deleteReqs, req)
 	return nil
 }
 
-func (f *fakeSandboxOps) Suspend(req sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Suspend(req sandbox.LifecycleRequest) error {
 	f.suspendReq = req
 	return nil
 }
 
-func (f *fakeSandboxOps) Resume(req sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Resume(req sandbox.LifecycleRequest) error {
 	f.resumeReq = req
 	return nil
 }
 
-func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
+func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
 	f.checkpointReq = req
 	if f.checkpointErr != nil {
-		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
+		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
 	if f.checkpointResp.MemRootPath != "" {
 		return f.checkpointResp, nil
 	}
 	memRoot, err := os.MkdirTemp("", "conch-daemon-checkpoint-test-*")
 	if err != nil {
-		return sandbox.SandboxCheckpointResult{}, err
+		return sandbox.CheckpointResult{}, err
 	}
-	return sandbox.SandboxCheckpointResult{
+	return sandbox.CheckpointResult{
 		MemRootPath: memRoot,
 		VMMName:     "cloud-hypervisor",
 	}, nil
