@@ -239,28 +239,7 @@ func (s *AgentServer) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (
 	}
 
 	resp := &pb.ListFilesResponse{}
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == root {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		currentDepth := pathDepth(rel)
-		if currentDepth > depth {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
+	err = walkDirectory(ctx, root, depth, func(path string, info os.FileInfo) error {
 		resp.Entries = append(resp.Entries, fileEntryFromInfo(path, info))
 		return nil
 	})
@@ -307,24 +286,32 @@ func (s *AgentServer) SearchFiles(ctx context.Context, req *pb.SearchFilesReques
 		}
 	}
 
-	resp := &pb.SearchFilesResponse{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, connectErrorf(connect.CodeNotFound, "path not found: %s", root)
 		}
-		if path == root || d.IsDir() {
+		return nil, connectErrorf(fileAccessCode(err), "failed to stat path %s: %v", root, err)
+	}
+
+	resp := &pb.SearchFilesResponse{}
+	if !rootInfo.IsDir() {
+		if globMatches(req.Pattern, filepath.Base(root), filepath.Base(root)) &&
+			!excludedByGlob(req.ExcludePatterns, filepath.Base(root), filepath.Base(root)) {
+			resp.Entries = append(resp.Entries, fileEntryFromInfo(root, rootInfo))
+		}
+		return resp, nil
+	}
+	err = walkDirectory(ctx, root, 0, func(path string, info os.FileInfo) error {
+		if info.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		if !globMatches(req.Pattern, rel, d.Name()) || excludedByGlob(req.ExcludePatterns, rel, d.Name()) {
+		if !globMatches(req.Pattern, rel, info.Name()) || excludedByGlob(req.ExcludePatterns, rel, info.Name()) {
 			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
 		}
 		resp.Entries = append(resp.Entries, fileEntryFromInfo(path, info))
 		return nil
@@ -340,6 +327,62 @@ func (s *AgentServer) SearchFiles(ctx context.Context, req *pb.SearchFilesReques
 		ulog.F("pattern", req.Pattern),
 		ulog.F("count", len(resp.Entries)))
 	return resp, nil
+}
+
+// walkDirectory follows directory symlinks while preserving the requested
+// logical paths. Real paths in the active recursion chain prevent link cycles.
+func walkDirectory(ctx context.Context, root string, maxDepth int, visit func(string, os.FileInfo) error) error {
+	active := make(map[string]bool)
+	var walk func(string, int) error
+	walk = func(dir string, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return err
+		}
+		realDir, err = filepath.Abs(realDir)
+		if err != nil {
+			return err
+		}
+		if active[realDir] {
+			return nil
+		}
+		active[realDir] = true
+		defer delete(active, realDir)
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			path := filepath.Join(dir, entry.Name())
+			info, err := os.Stat(path)
+			if err != nil {
+				if entry.Type()&os.ModeSymlink == 0 {
+					return err
+				}
+				info, err = entry.Info()
+				if err != nil {
+					return err
+				}
+			}
+			if err := visit(path, info); err != nil {
+				return err
+			}
+			if info.IsDir() && (maxDepth == 0 || depth < maxDepth) {
+				if err := walk(path, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(root, 1)
 }
 
 func pathDepth(rel string) int {
