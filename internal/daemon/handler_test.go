@@ -57,11 +57,9 @@ type fakeSnapshotService struct {
 	listReq   snapshotSvc.ListRequest
 	removeReq snapshotSvc.RemoveRequest
 	infoReq   snapshotSvc.InfoRequest
-	chainReq  snapshotSvc.InfoRequest
 	listErr   error
 	removeErr error
 	infoErr   error
-	chainErr  error
 	snapshots []snapshotSvc.Meta
 }
 
@@ -268,20 +266,6 @@ func (f *fakeSnapshotService) Info(_ context.Context, req snapshotSvc.InfoReques
 		Key:         req.Key,
 		Parent:      "parent-id",
 		StoragePath: "/snap/rootfs",
-	}, nil
-}
-
-func (f *fakeSnapshotService) Chain(_ context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Chain, error) {
-	f.chainReq = req
-	if f.chainErr != nil {
-		return snapshotSvc.Chain{}, f.chainErr
-	}
-	return snapshotSvc.Chain{
-		Info: snapshotSvc.Meta{
-			Key:         req.Key,
-			StoragePath: "/snap/rootfs",
-		},
-		ChainPaths: []string{"/snap/parent", "/snap/rootfs"},
 	}, nil
 }
 

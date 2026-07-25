@@ -52,11 +52,6 @@ type Meta struct {
 	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
 }
 
-type Chain struct {
-	Info       Meta     `json:"info"`
-	ChainPaths []string `json:"chain_paths"`
-}
-
 type Service struct {
 	client *containerdclient.Client
 	server *conchsnapshot.Server
@@ -192,32 +187,6 @@ func (s *Service) Info(ctx context.Context, req InfoRequest) (Meta, error) {
 	meta := snapshotMeta(stat)
 	meta.StoragePath = storagePath
 	return meta, nil
-}
-
-func (s *Service) Chain(ctx context.Context, req InfoRequest) (Chain, error) {
-	var rev []string
-	var first Meta
-	cur := req.Key
-	for cur != "" {
-		info, err := s.Info(ctx, InfoRequest{Key: cur, Namespace: req.Namespace})
-		if err != nil {
-			return Chain{}, fmt.Errorf("snapshot %s: %w", cur, err)
-		}
-		if first.Key == "" {
-			first = info
-		}
-		if info.StoragePath == "" {
-			return Chain{}, fmt.Errorf("snapshot %s has empty storage path", cur)
-		}
-		rev = append(rev, info.StoragePath)
-		cur = info.Parent
-	}
-
-	out := make([]string, 0, len(rev))
-	for i := len(rev) - 1; i >= 0; i-- {
-		out = append(out, rev[i])
-	}
-	return Chain{Info: first, ChainPaths: out}, nil
 }
 
 func snapshotMeta(info snapshots.Info) Meta {

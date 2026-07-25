@@ -67,3 +67,14 @@ func TestHandleRemoveSnapshotInvalidRequest(t *testing.T) {
 		t.Fatalf("remove request = %#v", svc.removeReq)
 	}
 }
+
+func TestSnapshotChainRouteRemoved(t *testing.T) {
+	server := newSnapshotHandlerServer(&fakeSnapshotService{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/chain", bytes.NewBufferString(`{"namespace":"team-a","key":"sha256:rootfs"}`))
+	server.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}

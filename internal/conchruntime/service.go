@@ -61,7 +61,6 @@ type SnapshotOps interface {
 	List(context.Context, snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error)
 	Remove(context.Context, snapshotSvc.RemoveRequest) error
 	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
-	Chain(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Chain, error)
 }
 
 type Service struct {
@@ -927,13 +926,6 @@ func (s *Service) SnapshotInfo(ctx context.Context, req snapshotSvc.InfoRequest)
 		return snapshotSvc.Meta{}, fmt.Errorf("snapshot service is not configured")
 	}
 	return s.Snapshot.Info(ctx, req)
-}
-
-func (s *Service) SnapshotChain(ctx context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Chain, error) {
-	if s == nil || s.Snapshot == nil {
-		return snapshotSvc.Chain{}, fmt.Errorf("snapshot service is not configured")
-	}
-	return s.Snapshot.Chain(ctx, req)
 }
 
 func (s *Service) CreateContainer(ctx context.Context, opts ContainerCreateOptions) (ContainerCreateResult, error) {

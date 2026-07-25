@@ -209,28 +209,29 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 func (s *Daemon) routes() {
-	// sandbox
 	s.router.HandleFunc("/api/sandbox/create", s.handleCreateSandbox)
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
+
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
 	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
 	s.router.HandleFunc("/api/template/remove", s.handleRemoveTemplate)
+
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 	s.router.HandleFunc("/api/snapshot/remove", s.handleRemoveSnapshot)
+	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
+
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
 	s.router.HandleFunc("/api/image/push", s.handlePushImage)
 	s.router.HandleFunc("/api/image/list", s.handleListImage)
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
-	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
-	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
 
 func (s *Daemon) Start(addr string, unixSocket string) error {
@@ -975,37 +976,6 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(info)
-}
-
-func (s *Daemon) handleSnapshotChain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req snapshotInfoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
-		return
-	}
-	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	chain, err := s.runtimeService.SnapshotChain(r.Context(), snapshotSvc.InfoRequest{
-		Key:       req.Key,
-		Namespace: req.Namespace,
-	})
-	if err != nil {
-		http.Error(w, "Failed to get snapshot chain: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(chain)
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
