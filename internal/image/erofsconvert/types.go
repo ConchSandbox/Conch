@@ -3,7 +3,10 @@ package erofsconvert
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -13,7 +16,28 @@ const (
 	ToolkitLegacyLayerMediaType = "application/vnd.erofs"
 	DefaultAlignBytes           = int64(2 * 1024 * 1024)
 	DefaultMkfsOption           = "--fsalignblks=512"
+	ConchBuildUnixTimeEnv       = "CONCH_BUILD_UNIX_TIME"
+	// ReproducibleFilesystemUUID is the default UUID hard-coded by
+	// github.com/erofs/erofs-container-toolkit/pkg/converter when no UUID
+	// option is supplied.
+	// Native Conch components use the same value so both EROFS build paths
+	// avoid random superblock bytes and produce reproducible images.
+	ReproducibleFilesystemUUID = "fead9a88-fd26-578a-a655-9cbddcb89e76"
 )
+
+// BuildUnixTime returns the configured build timestamp, or the current time
+// when reproducible builds are not requested.
+func BuildUnixTime() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(ConchBuildUnixTimeEnv))
+	if raw == "" {
+		return time.Now().Unix(), nil
+	}
+	epoch, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || epoch < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer, got %q", ConchBuildUnixTimeEnv, raw)
+	}
+	return epoch, nil
+}
 
 type RootfsErofsConverter interface {
 	Convert(ctx context.Context, req ConvertRootfsRequest) (ConvertRootfsResult, error)

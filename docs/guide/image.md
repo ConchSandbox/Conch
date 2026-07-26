@@ -14,6 +14,11 @@ conch template create \
   -t localhost/conch/openeuler:latest
 ```
 
+如需确定性构建（输入相同则输出相同），需要固定构建时间，即固定环境变量 `CONCH_BUILD_UNIX_TIME`：
+1. 确定性构建initrd：对构建 initrd 的脚本设置环境变量 `CONCH_BUILD_UNIX_TIME`；
+2. 确定性构建template：启动 `conchd` 时指定环境变量 `CONCH_BUILD_UNIX_TIME`；
+
+
 所有 Template（包括 `conch sandbox checkpoint` 产生的可恢复 Template）统一通过以下命令管理：
 
 ```bash

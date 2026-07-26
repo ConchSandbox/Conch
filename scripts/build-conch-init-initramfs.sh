@@ -112,9 +112,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for tool in curl tar gzip cpio find install mkdir ln rm cp ls mktemp dirname; do
+for tool in curl tar gzip cpio find sort touch install mkdir ln rm cp ls mktemp dirname date; do
     require_cmd "$tool"
 done
+
+if [ -z "${CONCH_BUILD_UNIX_TIME:-}" ]; then
+    CONCH_BUILD_UNIX_TIME="$(date +%s)"
+fi
+[[ "$CONCH_BUILD_UNIX_TIME" =~ ^[0-9]+$ ]] || die "CONCH_BUILD_UNIX_TIME must be a non-negative integer"
 
 [ -f "$INIT_BIN" ] || die "conch-init binary does not exist: $INIT_BIN"
 [ -z "$MODULES_DIR" ] || [ -d "$MODULES_DIR" ] || die "kernel modules directory does not exist: $MODULES_DIR"
@@ -154,7 +159,9 @@ rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"
 
 echo "Downloading Alpine minirootfs: $alpine_url"
-curl -fsSL "$alpine_url" -o "$WORK_DIR/$alpine_tar"
+if [ ! -f "$WORK_DIR/$alpine_tar" ]; then
+    curl -fsSL "$alpine_url" -o "$WORK_DIR/$alpine_tar"
+fi
 tar -xzf "$WORK_DIR/$alpine_tar" -C "$ROOTFS_DIR"
 
 install -m 0755 "$INIT_BIN" "$ROOTFS_DIR/sbin/conch-init"
@@ -167,9 +174,14 @@ fi
 
 ln -sf sbin/conch-init "$ROOTFS_DIR/init"
 
+# Normalize archive metadata after all files and links have been installed.
+find "$ROOTFS_DIR" -exec touch -h -d "@${CONCH_BUILD_UNIX_TIME}" {} +
+
 (
     cd "$ROOTFS_DIR"
-    find . -print0 | cpio --null -o --format=newc | gzip -9
+    find . -print0 | LC_ALL=C sort -z | \
+        cpio --null --create --format=newc --reproducible --owner=0:0 --quiet | \
+        gzip -n -9
 ) > "$OUTPUT"
 
 ls -lh "$OUTPUT"

@@ -3,7 +3,10 @@ package erofsconvert
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -12,6 +15,13 @@ import (
 	"github.com/containerd/platforms"
 	toolkit "github.com/erofs/erofs-container-toolkit/pkg/converter"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+const mkfsSourceDateEpochEnv = "SOURCE_DATE_EPOCH"
+
+var (
+	configureMkfsBuildEnvOnce sync.Once
+	configureMkfsBuildEnvErr  error
 )
 
 type ToolkitConverter struct {
@@ -30,6 +40,9 @@ func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest
 	}
 	req, err := NormalizeRequest(req)
 	if err != nil {
+		return ConvertRootfsResult{}, err
+	}
+	if err := configureMkfsBuildEnvironment(); err != nil {
 		return ConvertRootfsResult{}, err
 	}
 
@@ -62,6 +75,28 @@ func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest
 		ManifestDigest: converted.Target.Digest.String(),
 		Layers:         layers,
 	}, nil
+}
+
+func configureMkfsBuildEnvironment() error {
+	configureMkfsBuildEnvOnce.Do(func() {
+		if strings.TrimSpace(os.Getenv(ConchBuildUnixTimeEnv)) == "" {
+			configureMkfsBuildEnvErr = os.Unsetenv(mkfsSourceDateEpochEnv)
+			return
+		}
+		epoch, err := BuildUnixTime()
+		if err != nil {
+			configureMkfsBuildEnvErr = err
+			return
+		}
+		// erofs-container-toolkit starts mkfs.erofs internally and only
+		// accepts SOURCE_DATE_EPOCH. Configure this process-level bridge once,
+		// before conversions can run concurrently.
+		configureMkfsBuildEnvErr = os.Setenv(mkfsSourceDateEpochEnv, strconv.FormatInt(epoch, 10))
+	})
+	if configureMkfsBuildEnvErr != nil {
+		return fmt.Errorf("configure reproducible EROFS timestamp: %w", configureMkfsBuildEnvErr)
+	}
+	return nil
 }
 
 func normalizeToolkitErofsManifest(ctx context.Context, cs content.Store, originalDesc, convertedDesc ocispec.Descriptor) (*ocispec.Descriptor, error) {

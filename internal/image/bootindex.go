@@ -154,6 +154,10 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 	if len(paths) == 0 {
 		return ocispec.Descriptor{}, fmt.Errorf("%s component has no paths", kind)
 	}
+	buildUnixTime, err := erofsconvert.BuildUnixTime()
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
 
 	workDir, err := os.MkdirTemp("", "conch-native-erofs-*")
 	if err != nil {
@@ -182,7 +186,7 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 		}
 		if info.IsDir() {
 			layerPath = filepath.Join(workDir, fmt.Sprintf("%s-layer-%d.erofs", kind, i))
-			if err := buildErofsLayer(ctx, path, layerPath); err != nil {
+			if err := buildErofsLayer(ctx, path, layerPath, buildUnixTime); err != nil {
 				return ocispec.Descriptor{}, err
 			}
 		} else if !info.Mode().IsRegular() {
@@ -200,17 +204,17 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 		diffIDs = append(diffIDs, desc.Digest)
 	}
 
-	now := time.Now()
+	created := time.Unix(buildUnixTime, 0).UTC()
 	history := make([]ocispec.History, 0, len(layerDescs))
 	for range layerDescs {
 		history = append(history, ocispec.History{
-			Created:    &now,
+			Created:    &created,
 			CreatedBy:  "conch native erofs " + kind,
 			EmptyLayer: false,
 		})
 	}
 	config := ocispec.Image{
-		Created: &now,
+		Created: &created,
 		Platform: ocispec.Platform{
 			Architecture: runtime.GOARCH,
 			OS:           runtime.GOOS,
@@ -512,11 +516,15 @@ func validateBootIndexManifestKinds(manifests []ocispec.Descriptor) (map[string]
 	return components, nil
 }
 
-func buildErofsLayer(ctx context.Context, srcDir, outPath string) error {
+func buildErofsLayer(ctx context.Context, srcDir, outPath string, buildUnixTime int64) error {
 	args := []string{
 		"--quiet",
 		"-Enoinline_data",
 		"--all-root",
+		"--sort=path",
+		"--workers=1",
+		"-T", strconv.FormatInt(buildUnixTime, 10),
+		"-U", erofsconvert.ReproducibleFilesystemUUID,
 		erofsconvert.DefaultMkfsOption,
 		outPath,
 		srcDir,
