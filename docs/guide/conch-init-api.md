@@ -25,7 +25,7 @@ curl --request GET \
 {"status":"OK","message":"OK"}
 ```
 
-流式 RPC 使用 Connect streaming envelope，不是裸 JSON body。文档中的 streaming 示例展示单条 JSON message；直接 HTTP 调用时需要按 Connect 协议为每条 message 添加 5 字节 frame header。测试脚本或 Connect client 会负责 framing。
+`ProcessDataEvent.stdout`、`stderr` 和 `pty` 在 protobuf 中是 `bytes`。Connect JSON 使用 base64 表示这些字段；Python SDK 会对每个输出通道执行增量 UTF-8 解码，因此 SDK 示例中看到的是普通字符串。
 
 ## 接口列表
 
@@ -42,32 +42,77 @@ curl --request GET \
 
 ## 执行命令
 
-执行命令或脚本。`StartProcess` 是服务端流式 RPC，返回 `stream ProcessEvent`。使用 `background` 参数区分同步执行和后台进程。`content` 字段用于让 Agent 在 sandbox 内生成临时脚本并执行。
-
 接口名称：`runCommand`
 
 ```text
 pb.ProcessService/StartProcess
 ```
 
+### 入参
+
+| 字段 | 类型 | 是否必填 | 说明 |
+| --- | --- | --- | --- |
+| `cmd` | string | 必填 | 可执行命令，例如 `python3`、`sh` |
+| `args` | string[] | 可选 | 命令参数 |
+| `env` | object | 可选 | 本次执行追加环境变量 |
+| `cwd` | string | 可选 | 工作目录；为空时使用当前用户 home 目录 |
+| `content` | string | 可选 | 脚本内容；非空时 `args` 必须为空 |
+| `background` | boolean | 可选 | 是否后台启动 |
+| `tag` | string | 可选 | 后台进程标签 |
+| `pty` | object/null | 可选 | PTY 配置；省略或 `null` 时不启用 |
+| `pty.cols` | integer | 可选 | PTY 列数，未传或为 0 时使用默认值 |
+| `pty.rows` | integer | 可选 | PTY 行数，未传或为 0 时使用默认值 |
+| `stdin` | bytes | 可选 | 一次性写入子进程标准输入的字节；Connect JSON 中使用 base64 |
+
+`content` 与 `args` 互斥；`stdin` 与 `pty` 互斥。
+
+`Connect-Timeout-Ms` 指定进程最长执行时间，单位为毫秒。值为 `0` 或缺失时不设置超时。
+
+### 出参
+
+```text
+stream ProcessEvent
+```
+
+```json
+{"start": {"pid": 23456}}
+{"data": {"stdout": "aGVsbG8K"}}
+{"end": {"exitCode": 0, "exited": true, "status": "exited", "error": ""}}
+```
+
+`stdout`、`stderr` 和 `pty` 为 base64 编码的 bytes。进程启动前的请求错误通过 Connect status error 返回；命令的非零退出码通过 `end.exitCode` 返回。
+
+### 说明
+
+执行命令或脚本。`background` 区分前台执行和后台进程。
+
 ### SDK
 
 同步执行：
 
 ```python
-sandbox = Sandbox.create()
+from conch import Sandbox
+
+sandbox = Sandbox.create(template_id="<template_id>")
 
 result = sandbox.commands.run(
     cmd="python3",
     args=["-c", "print('hello')"],
-    cwd="/workspace",
+    cwd="/tmp",
     env={"DEMO_KEY": "demo-value"},
     background=False,
     pty=None,
 )
 
-print(result.stdout)
+print(result.stdout, end="")
 print(result.exit_code)
+```
+
+输出：
+
+```text
+hello
+0
 ```
 
 使用 `content` 执行脚本文本：
@@ -76,10 +121,38 @@ print(result.exit_code)
 script_result = sandbox.commands.run(
     cmd="python3",
     content="print('hello from content')",
-    cwd="/workspace",
+    cwd="/tmp",
     background=False,
     pty=None,
 )
+
+print(script_result.stdout, end="")
+```
+
+传入标准输入和执行超时：
+
+```python
+from conch import TimeoutException
+
+stdin_result = sandbox.commands.run(
+    cmd="python3",
+    args=["-c", "import sys; print(sys.stdin.buffer.read().hex())"],
+    stdin=b"\x00\xff",
+)
+print(stdin_result.stdout, end="")  # 00ff
+
+try:
+    sandbox.commands.run(cmd="sleep", args=["10"], timeout=0.2)
+except TimeoutException:
+    print("timed out")
+```
+
+输出：
+
+```text
+hello from content
+00ff
+timed out
 ```
 
 后台执行：
@@ -88,33 +161,43 @@ script_result = sandbox.commands.run(
 command = sandbox.commands.run(
     cmd="python3",
     args=["-m", "http.server", "18080"],
-    cwd="/workspace",
+    cwd="/tmp",
     env={},
     background=True,
     tag="http-srv",
     pty=None,
 )
+
+print(command)
+```
+
+输出中的 PID 由系统动态分配：
+
+```text
+process handle (pid=204, tag=http-srv)
 ```
 
 ### 直接调用 Agent API
-
-`StartProcess` 使用 Connect server-streaming 编码。下面展示请求 message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
 
 同步执行请求：
 
 ```json
 {
   "cmd": "python3",
-  "args": ["-c", "print(\"hello\")"],
-  "cwd": "/workspace",
+  "args": ["-c", "import sys; print(sys.stdin.read(), end='')"],
+  "cwd": "/tmp",
   "env": {
     "DEMO_KEY": "demo-value"
   },
   "content": "",
   "background": false,
-  "pty": null
+  "pty": null,
+  "stdin": "aGVsbG8K"
 }
 ```
+
+`stdin` 是 protobuf `bytes` 字段，因此 Connect JSON 使用 base64；上例的
+`aGVsbG8K` 解码后是 `hello\n`。Agent 在启动子进程时写入该内容，并在写入后关闭标准输入。
 
 使用 `content` 请求：
 
@@ -122,7 +205,7 @@ command = sandbox.commands.run(
 {
   "cmd": "python3",
   "args": [],
-  "cwd": "/workspace",
+  "cwd": "/tmp",
   "env": {
     "DEMO_KEY": "demo-value"
   },
@@ -138,7 +221,7 @@ command = sandbox.commands.run(
 {
   "cmd": "python3",
   "args": ["-m", "http.server", "18080"],
-  "cwd": "/workspace",
+  "cwd": "/tmp",
   "env": {},
   "content": "",
   "background": true,
@@ -147,51 +230,9 @@ command = sandbox.commands.run(
 }
 ```
 
-### 请求参数
-
-| 字段 | 类型 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| `cmd` | string | 必填 | 可执行命令，例如 `python3`、`sh` |
-| `args` | string[] | 可选 | 命令参数 |
-| `env` | object | 可选 | 本次执行追加环境变量 |
-| `cwd` | string | 可选 | 工作目录；为空时使用当前用户 home 目录 |
-| `content` | string | 可选 | 脚本文本内容。非空时 `args` 必须为空 |
-| `background` | boolean | 可选 | 是否后台启动 |
-| `tag` | string | 可选 | 后台进程标签 |
-| `pty` | object/null | 可选 | PTY 配置；省略或 `null` 时不启用 |
-| `pty.cols` | integer | 可选 | PTY 列数，未传或为 0 时使用默认值 |
-| `pty.rows` | integer | 可选 | PTY 行数，未传或为 0 时使用默认值 |
-
-`content` 不是 stdin。它用于执行一段脚本文本，例如 `cmd="python3"` 配合 `content="print('hello')"`。当前实现要求 `content` 和 `args` 互斥。
-
-### 响应流
-
-返回类型：
-
-```text
-stream ProcessEvent
-```
-
-同步执行会发送输出事件和最终结束事件：
-
-```json
-{"data": {"stdout": "hello\n"}}
-{"end": {"exitCode": 0, "exited": true, "status": "exited", "error": ""}}
-```
-
-后台执行先发送 `start` 事件，随后持续发送输出和最终 `end` 事件。SDK 的 `CommandHandle.wait()` 会消费启动时返回的同一个 stream，因此短命后台进程不会因为退出后无法重新 `Connect` 而丢失结果。后台输出通过内存事件队列转发，调用方需要及时消费 `StartProcess` 或 `Connect` 返回的 stream；如果进程持续大量输出而客户端长期不读取，过量输出事件可能被丢弃，但进程本身不会因此阻塞。
-
-```json
-{"start": {"pid": 23456}}
-{"data": {"stdout": "ready\n"}}
-{"end": {"exitCode": 0, "exited": true, "status": "exited", "error": ""}}
-```
-
-参数错误、命令启动失败和执行错误通过 `end.error` 表达。非零退出码不是 RPC 错误，`end.error` 为空，`end.exitCode` 为实际退出码。
+后台执行先发送 `start`，随后持续发送输出和最终 `end`。调用方需要及时消费 `StartProcess` 或 `Connect` 返回的 stream；过量后台输出事件可能被丢弃，但进程不会因此阻塞。超时会终止前台和后台进程，前台调用返回 Connect `DeadlineExceeded`。
 
 ## 连接后台进程
-
-连接正在运行的后台进程并读取后续输出。通过 `process.pid` 或 `process.tag` 连接。
 
 接口名称：`connectBackgroundProcess`
 
@@ -199,19 +240,109 @@ stream ProcessEvent
 pb.ProcessService/Connect
 ```
 
+### 入参
+
+| 字段 | 类型 | 是否必填 | 说明 |
+| --- | --- | --- | --- |
+| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
+| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
+
+### 出参
+
+```text
+stream ProcessEvent
+```
+
+```json
+{"start":{"pid":23456}}
+{"data":{"stdout":"U2VydmluZyBIVFRQIG9uIDAuMC4wLjAgcG9ydCAxODA4MCAuLi4K"}}
+{"data":{"stderr":"d2Fybgo="}}
+{"data":{"pty":"aW50ZXJhY3RpdmUgb3V0cHV0DQo="}}
+{"end":{"exitCode":0,"exited":true,"status":"exited","error":""}}
+```
+
+### 说明
+
+连接正在运行的后台进程并读取后续输出。通过 `process.pid` 或 `process.tag` 连接。
+
 ### SDK
 
 ```python
 command = sandbox.commands.connect(tag="http-srv")
 print(command)  # process handle (pid=42, tag=http-srv)
 
-for stdout, stderr, pty in command:
-    print(stdout or stderr or pty or "", end="")
+result = command.wait(
+    on_stdout=lambda data: print(data, end=""),
+    on_stderr=lambda data: print(data, end=""),
+)
+print("exit_code:", result.exit_code)
 ```
 
-### cURL / 直接调用 Agent API
+短命后台进程的实际输出示例：
 
-`Connect` 是服务端流式 RPC。下面展示单条 Connect JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
+```text
+background-ready
+exit_code: 0
+```
+
+长时间运行且持续写日志的服务可通过 `Connect` 读取后续 stdout。下面的 worker 在连接建立后持续输出心跳：
+
+```python
+starter = sandbox.commands.run(
+    cmd="python3",
+    content="""import time
+time.sleep(1)  # 让 Connect 有机会先建立订阅
+print("service-ready", flush=True)
+count = 0
+while True:
+    count += 1
+    print(f"heartbeat {count}", flush=True)
+    time.sleep(1)
+""",
+    background=True,
+    tag="heartbeat-worker",
+)
+# StartProcess 的输出流不再使用，改由 Connect 读取。
+starter.disconnect()
+
+command = sandbox.commands.connect(tag="heartbeat-worker")
+received = []
+for stdout, stderr, pty in command:
+    if stdout:
+        print(stdout, end="")
+        received.append(stdout)
+    # 收到两次心跳后主动停止本次输出读取。
+    if "".join(received).count("heartbeat") >= 2:
+        command.disconnect()
+        break
+
+# wait() 同样会持续读取输出，直到服务退出；交互式场景不要直接阻塞等待。
+process = next(item for item in sandbox.commands.list() if item.tag == "heartbeat-worker")
+print("running:", process.running)
+print("exit_code:", process.exit_code)
+
+# 仅断开本次输出流，服务仍继续运行。
+process = next(item for item in sandbox.commands.list() if item.tag == "heartbeat-worker")
+print("still_running:", process.running)
+
+# 需要停止服务时显式发送信号。
+sandbox.commands.kill(tag="heartbeat-worker", signal=15)
+```
+
+服务未退出时的状态示例：
+
+```text
+service-ready
+heartbeat 1
+heartbeat 2
+running: True
+exit_code: -1
+still_running: True
+```
+
+`stdout` 的事件分片不保证与日志行一一对应，调用方应按自身协议累积和解析输出。`disconnect()` 只关闭当前客户端的 `Connect` 输出流，不会终止后台进程。长服务只有在退出或收到信号后才会在流中发送 `end` 事件；此后 `CommandHandle.wait()` 才返回最终的退出码。
+
+### 请求示例
 
 ```json
 {
@@ -221,28 +352,9 @@ for stdout, stderr, pty in command:
 }
 ```
 
-### 请求消息
-
-| 字段 | 类型 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
-| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
-
-### 响应
-
-`stream ProcessEvent`
-
-```json
-{"start":{"pid":23456}}
-{"data":{"stdout":"Serving HTTP on 0.0.0.0 port 18080 ...\n"}}
-{"data":{"stderr":"warn\n"}}
-{"data":{"pty":"interactive output\r\n"}}
-{"end":{"exitCode":0,"exited":true,"status":"exited","error":""}}
-```
+三个 data 字段均为 base64 编码的 bytes。SDK callback 接收到的是增量 UTF-8 解码后的字符串。
 
 ## 列出后台进程
-
-列出 sandbox 内由 Agent 当前管理的后台进程，返回进程配置、PID 和标签。命令输出通过 `Connect` 流读取。
 
 接口名称：`listBackgroundProcesses`
 
@@ -250,10 +362,44 @@ for stdout, stderr, pty in command:
 pb.ProcessService/List
 ```
 
+### 入参
+
+无入参字段。
+
+### 出参
+
+```json
+{
+  "processes": [
+    {
+      "pid": 23456,
+      "tag": "http-srv",
+      "config": {"cmd": "python3", "args": ["-m", "http.server", "18080"], "env": {}, "cwd": "/tmp", "pty": null},
+      "running": true,
+      "startedAt": "2026-07-11T10:00:00Z",
+      "exitCode": -1,
+      "finishedAt": ""
+    }
+  ]
+}
+```
+
+### 说明
+
+列出 sandbox 内由 Agent 当前管理的后台进程。命令输出通过 `Connect` 流读取。
+
 ### SDK
 
 ```python
 processes = sandbox.commands.list()
+for process in processes:
+    print(process.pid, process.tag, process.running, process.cmd, process.args)
+```
+
+实际输出示例：
+
+```text
+204 docs-background True /bin/sh ['-c', 'sleep 1; echo background-ready']
 ```
 
 ### cURL
@@ -267,37 +413,7 @@ curl --request POST \
   --data '{}'
 ```
 
-### 请求参数
-
-无入参字段。
-
-### 响应
-
-```json
-{
-  "processes": [
-    {
-      "pid": 23456,
-      "tag": "http-srv",
-      "config": {
-        "cmd": "python3",
-        "args": ["-m", "http.server", "18080"],
-        "env": {},
-        "cwd": "/workspace",
-        "pty": null
-      },
-      "running": true,
-      "startedAt": "2026-07-11T10:00:00Z",
-      "exitCode": -1,
-      "finishedAt": ""
-    }
-  ]
-}
-```
-
 ## 发送进程信号
-
-向后台进程发送信号。可通过 `pid` 或 `tag` 指定目标进程。调用方必须传入非 0 `signal`。
 
 接口名称：`killBackgroundProcess`
 
@@ -305,10 +421,45 @@ curl --request POST \
 pb.ProcessService/SendSignal
 ```
 
+### 入参
+
+| 字段 | 类型 | 是否必填 | 说明 |
+| --- | --- | --- | --- |
+| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
+| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
+| `signal` | integer | 必填 | 信号编号，必须非 0；`15` 为 SIGTERM，`9` 为 SIGKILL |
+
+### 出参
+
+```json
+{}
+```
+
+### 说明
+
+向后台进程发送信号。目标进程不存在时返回 Connect `NotFound`。
+
 ### SDK
 
 ```python
 ok = sandbox.commands.kill(tag="http-srv", signal=15)
+print(ok)
+```
+
+输出：
+
+```text
+True
+```
+
+不存在的目标返回 `False`：
+
+```python
+print(sandbox.commands.kill(tag="does-not-exist", signal=15))
+```
+
+```text
+False
 ```
 
 SDK 成功发送信号返回 `True`，目标进程不存在时返回 `False`；其它错误会映射为 SDK 错误类型后抛出。
@@ -329,25 +480,7 @@ curl --request POST \
   }'
 ```
 
-### 请求参数
-
-| 字段 | 类型 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| `process.pid` | integer | 可选 | 进程 PID；与 `process.tag` 二选一 |
-| `process.tag` | string | 可选 | 进程标签；与 `process.pid` 二选一 |
-| `signal` | integer | 必填 | 信号编号，必须非 0；`15` 为 SIGTERM，`9` 为 SIGKILL |
-
-### 响应
-
-```json
-{}
-```
-
-错误通过 Connect status error 返回：缺少 selector 或 `signal=0` 返回 `InvalidArgument`，目标进程不存在返回 `NotFound`，目标进程已退出或信号发送时刚好结束返回 `FailedPrecondition`。
-
 ## 上传文件
-
-上传本地文件或写入内容到 sandbox。
 
 接口名称：`uploadFile`
 
@@ -355,53 +488,57 @@ curl --request POST \
 pb.FileService/PostFileStream
 ```
 
-### SDK
-
-```python
-# 写入文本内容
-entry = sandbox.files.write("/workspace/remote.txt", "hello\n")
-print(entry.path)
-
-# 批量写入内容
-entries = sandbox.files.write_files([
-    {"path": "/workspace/a.txt", "data": "a"},
-    {"path": "/workspace/b.txt", "data": b"b"},
-])
-
-# 上传本地文件
-entry = sandbox.files.upload("local.txt", "/workspace/remote.txt")
-```
-
-### cURL / 直接调用 Agent API
-
-`PostFileStream` 是客户端流式 RPC。下面展示单条 `FileChunk` JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
-
-```json
-{
-  "filepath": "/workspace/remote.txt",
-  "content": "aGVsbG8K"
-}
-```
-
-### 流式消息
+### 入参
 
 | 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
 | `filepath` | string | 首个分片必填 | sandbox 内目标路径；第一片必须传，后续分片可省略或传相同路径 |
 | `content` | bytes | 可选 | 文件分片内容；JSON 示例中按 base64 表示，单片最大 1 MiB |
 
-### 响应
+### 出参
 
 ```json
 {
   "uploadedCount": 1,
-  "entries": [
-    {
-      "name": "remote.txt",
-      "path": "/workspace/remote.txt",
-      "type": "file"
-    }
-  ]
+  "entries": [{"name": "remote.txt", "path": "/tmp/conch-doc-api/remote.txt", "type": "file"}]
+}
+```
+
+### 说明
+
+上传本地文件或写入内容到 sandbox。
+
+### SDK
+
+```python
+# 写入文本内容
+entry = sandbox.files.write("/tmp/conch-doc-api/remote.txt", "hello\n")
+print(entry)
+
+# 批量写入内容
+entries = sandbox.files.write_files([
+    {"path": "/tmp/conch-doc-api/a.txt", "data": "a"},
+    {"path": "/tmp/conch-doc-api/main.py", "data": b"print('ok')\n"},
+])
+print(entries)
+
+# 上传本地文件
+entry = sandbox.files.upload("local.txt", "/tmp/conch-doc-api/uploaded.txt")
+```
+
+`write()` 和 `write_files()` 的实际输出：
+
+```text
+WriteInfo(name='remote.txt', type=<FileType.FILE: 'file'>, path='/tmp/conch-doc-api/remote.txt')
+[WriteInfo(name='a.txt', type=<FileType.FILE: 'file'>, path='/tmp/conch-doc-api/a.txt'), WriteInfo(name='main.py', type=<FileType.FILE: 'file'>, path='/tmp/conch-doc-api/main.py')]
+```
+
+### 请求示例
+
+```json
+{
+  "filepath": "/tmp/conch-doc-api/remote.txt",
+  "content": "aGVsbG8K"
 }
 ```
 
@@ -409,50 +546,65 @@ entry = sandbox.files.upload("local.txt", "/workspace/remote.txt")
 
 ## 下载文件
 
-从 sandbox 下载文件或读取文件内容。
-
 接口名称：`downloadFile`
 
 ```text
 pb.FileService/GetFileStream
 ```
 
-### SDK
-
-```python
-content = sandbox.files.read("/workspace/remote.txt")
-raw = sandbox.files.read("/workspace/remote.txt", format="bytes")
-
-result = sandbox.files.download("/workspace/remote.txt", "remote.txt")
-```
-
-`read()` 默认按 UTF-8 文本返回；二进制内容请显式使用 `format="bytes"`。
-
-### cURL / 直接调用 Agent API
-
-`GetFileStream` 是服务端流式 RPC。下面展示请求 JSON message；直接 HTTP 调用时该 message 需要使用 Connect streaming frame 编码，不能作为裸 JSON 直接 `curl --data`。
-
-```json
-{
-  "filepath": "/workspace/remote.txt"
-}
-```
-
-### 请求消息
+### 入参
 
 | 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
 | `filepath` | string | 必填 | sandbox 内源文件路径 |
 
-### 响应
+### 出参
 
-`stream FileChunk`
+```text
+stream FileChunk
+```
 
-响应为文件分片流，每片最大 1 MiB。第一片包含 `filepath`，后续分片通常只包含 `content`。Direct JSON 中 `content` 按 base64 表示。
+每片最大 1 MiB。第一片包含 `filepath`，后续分片通常只包含 `content`。
+
+### 说明
+
+从 sandbox 下载文件或读取文件内容。
+
+### SDK
+
+```python
+content = sandbox.files.read("/tmp/conch-doc-api/remote.txt")
+raw = sandbox.files.read("/tmp/conch-doc-api/remote.txt", format="bytes")
+chunks = sandbox.files.read("/tmp/conch-doc-api/remote.txt", format="stream")
+
+result = sandbox.files.download("/tmp/conch-doc-api/remote.txt", "remote.txt")
+
+print(repr(content))
+print(repr(raw))
+print(repr(b"".join(chunks)))
+print(result)
+```
+
+`read()` 默认按 UTF-8 文本返回；二进制内容请显式使用 `format="bytes"`。
+
+输出：
+
+```text
+'hello\n'
+b'hello\n'
+b'hello\n'
+{'status': 0, 'size': 6, 'message': 'OK'}
+```
+
+### 请求示例
+
+```json
+{
+  "filepath": "/tmp/conch-doc-api/remote.txt"
+}
+```
 
 ## 列出文件
-
-列出 sandbox 目录下的文件和目录。
 
 接口名称：`listFiles`
 
@@ -460,13 +612,58 @@ result = sandbox.files.download("/workspace/remote.txt", "remote.txt")
 pb.FileService/ListFiles
 ```
 
+### 入参
+
+| 字段 | 类型 | 是否必填 | 说明 |
+| --- | --- | --- | --- |
+| `path` | string | 必填 | 待列举路径 |
+| `depth` | integer | 可选 | 递归深度；`1` 表示当前目录；省略、`0` 或负数按 `1` 处理 |
+
+### 出参
+
+```json
+{
+  "entries": [
+    {
+      "name": "remote.txt",
+      "path": "/tmp/conch-doc-api/remote.txt",
+      "type": "file",
+      "size": "6",
+      "isDirectory": false,
+      "permissions": "-rw-r--r--",
+      "modifiedTime": "2026-07-11T10:00:00Z",
+      "metadata": {}
+    }
+  ]
+}
+```
+
+### 说明
+
+列出 sandbox 目录下的文件和目录。
+
 ### SDK
 
 ```python
-items = sandbox.files.list("/workspace", depth=2)
+items = sandbox.files.list("/tmp/conch-doc-api", depth=2)
 for item in items:
-    print(item.path, item.size)
+    print(item.path, item.type, item.size, item.is_directory)
 ```
+
+假设 `linked` 是指向 `target` 的目录符号链接，输出示例为：
+
+```text
+/tmp/conch-doc-api/a.txt FileType.FILE 1 False
+/tmp/conch-doc-api/linked FileType.DIR 60 True
+/tmp/conch-doc-api/linked/main.py FileType.FILE 12 False
+/tmp/conch-doc-api/remote.txt FileType.FILE 6 False
+/tmp/conch-doc-api/target FileType.DIR 60 True
+/tmp/conch-doc-api/target/main.py FileType.FILE 12 False
+```
+
+目录符号链接会作为目录返回，并在 `depth` 允许时沿链接的逻辑路径继续列举。实现会检测当前递归链中的真实路径，避免符号链接环导致无限遍历；失效符号链接仍作为普通条目返回。
+
+PID、时间戳和目录条目的 `size` 由运行时环境决定，示例值不应作为固定断言；文件内容大小可以稳定断言。
 
 ### cURL
 
@@ -477,26 +674,35 @@ curl --request POST \
   --header 'Content-Type: application/json' \
   --header "conch-init-token: ${AGENT_TOKEN}" \
   --data '{
-    "path": "/workspace",
+    "path": "/tmp/conch-doc-api",
     "depth": 2
   }'
 ```
 
-### 请求参数
+## 搜索文件
+
+接口名称：`searchFiles`
+
+```text
+pb.FileService/SearchFiles
+```
+
+### 入参
 
 | 字段 | 类型 | 是否必填 | 说明 |
 | --- | --- | --- | --- |
-| `path` | string | 必填 | 待列举路径 |
-| `depth` | integer | 可选 | 递归深度；`1` 表示当前目录；省略、`0` 或负数按 `1` 处理 |
+| `path` | string | 必填 | 搜索根目录 |
+| `pattern` | string | 必填 | glob 匹配模式 |
+| `excludePatterns` | string[] | 可选 | 排除模式 |
 
-### 响应
+### 出参
 
 ```json
 {
   "entries": [
     {
-      "name": "remote.txt",
-      "path": "/workspace/remote.txt",
+      "name": "main.py",
+      "path": "/tmp/conch-doc-api/target/main.py",
       "type": "file",
       "size": "12",
       "isDirectory": false,
@@ -508,26 +714,27 @@ curl --request POST \
 }
 ```
 
-## 搜索文件
+### 说明
 
 按 glob 模式搜索文件。
-
-接口名称：`searchFiles`
-
-```text
-pb.FileService/SearchFiles
-```
 
 ### SDK
 
 ```python
 items = sandbox.files.search(
-    path="/workspace",
+    path="/tmp/conch-doc-api",
     pattern="*.py",
     exclude_patterns=["*.bak"],
 )
 for item in items:
     print(item.path, item.type)
+```
+
+目录符号链接也会参与递归搜索。实际输出示例：
+
+```text
+/tmp/conch-doc-api/linked/main.py FileType.FILE
+/tmp/conch-doc-api/target/main.py FileType.FILE
 ```
 
 ### cURL
@@ -539,35 +746,8 @@ curl --request POST \
   --header 'Content-Type: application/json' \
   --header "conch-init-token: ${AGENT_TOKEN}" \
   --data '{
-    "path": "/workspace",
+    "path": "/tmp/conch-doc-api",
     "pattern": "*.py",
     "excludePatterns": ["*.bak"]
   }'
-```
-
-### 请求参数
-
-| 字段 | 类型 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| `path` | string | 必填 | 搜索根目录 |
-| `pattern` | string | 必填 | glob 匹配模式 |
-| `excludePatterns` | string[] | 可选 | 排除模式 |
-
-### 响应
-
-```json
-{
-  "entries": [
-    {
-      "name": "main.py",
-      "path": "/workspace/main.py",
-      "type": "file",
-      "size": "128",
-      "isDirectory": false,
-      "permissions": "-rw-r--r--",
-      "modifiedTime": "2026-07-11T10:00:00Z",
-      "metadata": {}
-    }
-  ]
-}
 ```
