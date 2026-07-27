@@ -3,9 +3,11 @@ package guestd
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +122,61 @@ func TestBackgroundProcessPassesStdin(t *testing.T) {
 	}
 	if resp.Stdout != "<background input>" {
 		t.Fatalf("background process stdout = %q, want stdin content", resp.Stdout)
+	}
+}
+
+func TestStartProcessTimeout(t *testing.T) {
+	server := &AgentServer{}
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:  "sleep",
+		Args: []string{"5"},
+		Cwd:  t.TempDir(),
+	}, stream, 50*time.Millisecond)
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("StartProcess(timeout) error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("StartProcess(timeout) ran for %s, want less than one second", elapsed)
+	}
+}
+
+func TestBackgroundProcessTimeout(t *testing.T) {
+	server := &AgentServer{}
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:        "sleep",
+		Args:       []string{"5"},
+		Cwd:        t.TempDir(),
+		Tag:        "timeout-bg",
+		Background: true,
+	}, stream, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartProcess(background timeout) error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("background process ran for %s, want less than one second", elapsed)
+	}
+	if end := responseFromProcessEvents(&pb.StartProcessRequest{}, stream.Events()); end.ExitCode == 0 {
+		t.Fatal("background process exit code = 0, want timeout termination")
+	}
+}
+
+func TestDetermineTimeoutFromHeader(t *testing.T) {
+	header := http.Header{"Connect-Timeout-Ms": []string{"250"}}
+	got, err := determineTimeoutFromHeader(header)
+	if err != nil || got != 250*time.Millisecond {
+		t.Fatalf("determineTimeoutFromHeader() = (%s, %v), want (250ms, nil)", got, err)
+	}
+	header.Set("Connect-Timeout-Ms", "-1")
+	if _, err := determineTimeoutFromHeader(header); err == nil {
+		t.Fatal("determineTimeoutFromHeader(-1) error = nil, want error")
+	}
+	header.Set("Connect-Timeout-Ms", strconv.FormatInt(maxProcessTimeoutMilliseconds+1, 10))
+	if _, err := determineTimeoutFromHeader(header); err == nil {
+		t.Fatal("determineTimeoutFromHeader(overflow) error = nil, want error")
 	}
 }
 

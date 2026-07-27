@@ -68,6 +68,7 @@ class AgentClient:
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
         stdin: Optional[Union[str, bytes]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Dict[str, Any]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -80,7 +81,7 @@ class AgentClient:
             pty=pty,
             stdin=stdin,
         )
-        raw_events = self._rpc_call(self.process_client.start_process, request)
+        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
         events = self._decode_process_events(self._rpc_iter(raw_events))
         if background:
             return self._start_background_process_response(request, events)
@@ -97,6 +98,7 @@ class AgentClient:
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
         stdin: Optional[Union[str, bytes]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Iterator[Dict[str, Any]]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -109,7 +111,7 @@ class AgentClient:
             pty=pty,
             stdin=stdin,
         )
-        raw_events = self._rpc_call(self.process_client.start_process, request)
+        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
         yield from self._decode_process_events(self._rpc_iter(raw_events))
 
     def _build_start_process_request(
@@ -262,9 +264,14 @@ class AgentClient:
         body_text = response.text.strip()
         return f"HTTP {response.status_code}: {body_text}" if body_text else f"HTTP {response.status_code}"
 
-    def _rpc_call(self, method, request):
+    def _rpc_call(self, method, request, timeout_ms: Optional[int] = None):
         try:
-            return method(request, headers=self._headers())
+            if timeout_ms is not None and timeout_ms < 0:
+                raise InvalidArgumentError("timeout_ms must not be negative")
+            headers = self._headers()
+            if timeout_ms is not None:
+                headers["Connect-Timeout-Ms"] = str(timeout_ms)
+            return method(request, headers=headers)
         except ConnectError as exc:
             raise handle_rpc_error(exc) from None
 

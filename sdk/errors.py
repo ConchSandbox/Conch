@@ -18,6 +18,10 @@ class AuthenticationError(SandboxError):
     pass
 
 
+class TimeoutException(SandboxError):
+    pass
+
+
 def handle_rpc_error(exc: ConnectError) -> Exception:
     if exc.code == Code.INVALID_ARGUMENT:
         return InvalidArgumentError(exc.message)
@@ -25,4 +29,6 @@ def handle_rpc_error(exc: ConnectError) -> Exception:
         return AuthenticationError(exc.message)
     if exc.code == Code.NOT_FOUND:
         return NotFoundError(exc.message)
+    if exc.code == Code.DEADLINE_EXCEEDED:
+        return TimeoutException(exc.message)
     return SandboxError(f"{exc.code}: {exc.message}")

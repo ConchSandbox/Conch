@@ -2,7 +2,15 @@ import pytest
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
-from conch import CommandExitException, CommandHandle, InvalidArgumentError, NotFoundError, Sandbox, SandboxError
+from conch import (
+    CommandExitException,
+    CommandHandle,
+    InvalidArgumentError,
+    NotFoundError,
+    Sandbox,
+    SandboxError,
+    TimeoutException,
+)
 from conch.client import AgentClient
 from api.py_proto import agent_pb2
 
@@ -211,6 +219,40 @@ def test_foreground_run_callbacks_propagate_start_rpc_errors():
         sandbox.commands.run(cmd="missing-command", on_stdout=lambda text: None)
 
 
+def test_foreground_run_raises_timeout_exception():
+    class FakeProcessClient:
+        def start_process(self, request, headers=None):
+            def events():
+                yield agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123))
+                raise ConnectError(Code.DEADLINE_EXCEEDED, "process execution timed out")
+
+            return events()
+
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox.client = AgentClient("127.0.0.1")
+    sandbox.client.process_client = FakeProcessClient()
+
+    with pytest.raises(TimeoutException, match="process execution timed out"):
+        sandbox.commands.run(cmd="sleep", args=["10"])
+
+
+def test_foreground_callback_run_raises_timeout_exception():
+    class FakeProcessClient:
+        def start_process(self, request, headers=None):
+            def events():
+                yield agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123))
+                raise ConnectError(Code.DEADLINE_EXCEEDED, "process execution timed out")
+
+            return events()
+
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox.client = AgentClient("127.0.0.1")
+    sandbox.client.process_client = FakeProcessClient()
+
+    with pytest.raises(TimeoutException, match="process execution timed out"):
+        sandbox.commands.run(cmd="sleep", args=["10"], on_stdout=lambda text: None)
+
+
 def test_agent_client_start_process_builds_request_and_aggregates_output():
     class FakeProcessClient:
         def start_process(self, request, headers=None):
@@ -263,10 +305,28 @@ def test_agent_client_start_process_sends_stdin():
     assert result["exit_code"] == 0
 
 
+def test_agent_client_start_process_sends_timeout_header():
+    class FakeProcessClient:
+        def start_process(self, request, headers=None):
+            assert headers["Connect-Timeout-Ms"] == "1500"
+            return iter([
+                agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
+                agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
+            ])
+
+    client = AgentClient("127.0.0.1")
+    client.process_client = FakeProcessClient()
+
+    result = client.start_process(cmd="sleep", args=["1"], timeout_ms=1500)
+
+    assert result["exit_code"] == 0
+
+
 def test_command_manager_forwards_stdin():
     class FakeAgentClient:
         def start_process(self, **kwargs):
             assert kwargs["stdin"] == "input\n"
+            assert kwargs["timeout_ms"] == 1500
             return {
                 "status": AgentClient.STATUS_SUCCESS,
                 "stdout": "input\n",
@@ -278,7 +338,7 @@ def test_command_manager_forwards_stdin():
     sandbox = Sandbox(api_url="http://unused", template_id="test")
     sandbox.client = FakeAgentClient()
 
-    result = sandbox.commands.run(cmd="cat", stdin="input\n")
+    result = sandbox.commands.run(cmd="cat", stdin="input\n", timeout=1.5)
 
     assert result.stdout == "input\n"
 
@@ -288,6 +348,7 @@ def test_command_manager_forwards_stdin_to_background_process():
         def start_process(self, **kwargs):
             assert kwargs["background"] is True
             assert kwargs["stdin"] == "input\n"
+            assert kwargs["timeout_ms"] == 1500
             return {
                 "process": {"pid": 123, "tag": "stdin-bg", "running": True},
                 "events": iter(()),
@@ -296,7 +357,7 @@ def test_command_manager_forwards_stdin_to_background_process():
     sandbox = Sandbox(api_url="http://unused", template_id="test")
     sandbox.client = FakeAgentClient()
 
-    handle = sandbox.commands.run(cmd="cat", background=True, stdin="input\n")
+    handle = sandbox.commands.run(cmd="cat", background=True, stdin="input\n", timeout=1.5)
 
     assert handle.pid == 123
 
@@ -305,6 +366,7 @@ def test_command_manager_forwards_stdin_to_streamed_process():
     class FakeAgentClient:
         def stream_process(self, **kwargs):
             assert kwargs["stdin"] == "input\n"
+            assert kwargs["timeout_ms"] == 1500
             return iter([
                 {"start": {"pid": 123}},
                 {"data": {"stdout": "input\n"}},
@@ -315,7 +377,7 @@ def test_command_manager_forwards_stdin_to_streamed_process():
     sandbox.client = FakeAgentClient()
     output = []
 
-    result = sandbox.commands.run(cmd="cat", stdin="input\n", on_stdout=output.append)
+    result = sandbox.commands.run(cmd="cat", stdin="input\n", timeout=1.5, on_stdout=output.append)
 
     assert result.stdout == "input\n"
     assert output == ["input\n"]

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -23,6 +25,7 @@ import (
 type managedProcess struct {
 	mu         sync.Mutex
 	cmd        *exec.Cmd
+	cancel     context.CancelFunc
 	tty        *os.File
 	info       *pb.ProcessInfo
 	dataEvents *processEventMultiplexer
@@ -32,6 +35,8 @@ type managedProcess struct {
 	outputDone chan struct{}
 	tempScript string
 }
+
+const maxProcessTimeoutMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
 
 type processEventSubscriber struct {
 	ch   chan *pb.ProcessEvent
@@ -656,6 +661,10 @@ func signaledProcessError(state *os.ProcessState) error {
 
 // Starts a process with custom working dir, environment, and script content.
 func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequest, stream processConnectStream) error {
+	return s.startProcess(ctx, req, stream, 0)
+}
+
+func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequest, stream processConnectStream, requestTimeout time.Duration) error {
 	if req == nil {
 		return connectError(connect.CodeInvalidArgument, "start process request is required")
 	}
@@ -699,35 +708,43 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 
 	if req.Background {
-		return s.startBackgroundProcess(req, args, workDir, scriptPath, stream)
+		return s.startBackgroundProcess(req, args, workDir, scriptPath, stream, requestTimeout)
 	}
 
+	procCtx, cancelProc := processContext(requestTimeout)
+	defer cancelProc()
+
 	// Execute command
-	exitCode, streamFailed, err := s.executeCmd(ctx, req.Cmd, args, workDir, req.Env, req.Stdin, req.Pty, stream)
+	exitCode, streamFailed, err := s.executeCmd(procCtx, req.Cmd, args, workDir, req.Env, req.Stdin, req.Pty, stream)
 	errMsg := ""
 	if err != nil {
 		if streamFailed {
 			return err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connectErrorf(connect.CodeDeadlineExceeded, "process execution timed out: %v", err)
 		}
 		return connectErrorf(connect.CodeInvalidArgument, "failed to execute process: %v", err)
 	}
 	return sendForegroundEnd(stream, int32(exitCode), errMsg)
 }
 
-func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream) error {
+func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream, requestTimeout time.Duration) error {
 	if req.Cmd == "" {
 		cleanupTempScript(scriptPath)
 		return connectError(connect.CodeInvalidArgument, "command is required")
 	}
 
-	cmd := exec.Command(req.Cmd, args...)
+	procCtx, cancelProc := processContext(requestTimeout)
+	cmd := exec.CommandContext(procCtx, req.Cmd, args...)
 	applyCommandEnvAndDir(cmd, workDir, req.Env)
 	if req.Pty == nil {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
 
 	process := &managedProcess{
-		cmd: cmd,
+		cmd:    cmd,
+		cancel: cancelProc,
 		info: &pb.ProcessInfo{
 			Tag: req.Tag,
 			Config: &pb.ProcessConfig{
@@ -761,6 +778,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 				s.processMu.Unlock()
 				dataCancel()
 				endCancel()
+				cancelProc()
 				cleanupTempScript(scriptPath)
 				return connectError(connect.CodeAlreadyExists, "background process tag already exists: "+req.Tag)
 			}
@@ -769,6 +787,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 			s.processMu.Unlock()
 			dataCancel()
 			endCancel()
+			cancelProc()
 			cleanupTempScript(scriptPath)
 			return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 		}
@@ -784,6 +803,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	if err := startManagedProcess(process, req.Pty); err != nil {
 		dataCancel()
 		endCancel()
+		cancelProc()
 		cleanupTempScript(scriptPath)
 		return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 	}
@@ -797,6 +817,33 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	go s.waitManagedProcess(process)
 
 	return s.streamManagedProcessEvents(process, data, dataCancel, end, endCancel, stream)
+}
+
+func determineTimeoutFromHeader(header http.Header) (time.Duration, error) {
+	timeoutHeader := header.Get("Connect-Timeout-Ms")
+	if timeoutHeader == "" {
+		return 0, nil
+	}
+
+	timeout, err := strconv.Atoi(timeoutHeader)
+	if err != nil {
+		return 0, err
+	}
+	if timeout < 0 {
+		return 0, fmt.Errorf("Connect-Timeout-Ms must not be negative")
+	}
+	if int64(timeout) > maxProcessTimeoutMilliseconds {
+		return 0, fmt.Errorf("Connect-Timeout-Ms exceeds the maximum supported duration")
+	}
+	return time.Duration(timeout) * time.Millisecond, nil
+}
+
+func processContext(requestTimeout time.Duration) (context.Context, context.CancelFunc) {
+	// Keep process lifetime independent from RPC cancellation, matching E2B behavior.
+	if requestTimeout > 0 {
+		return context.WithTimeout(context.Background(), requestTimeout)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
@@ -833,6 +880,9 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 }
 
 func (s *AgentServer) waitManagedProcess(p *managedProcess) {
+	if p.cancel != nil {
+		defer p.cancel()
+	}
 	waitErr := p.cmd.Wait()
 	if p.outputDone != nil {
 		select {

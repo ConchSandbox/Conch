@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	pb "github.com/openeuler/Conch/api/go_proto"
@@ -64,6 +65,37 @@ func TestConnectStreamingJSONStartProcess(t *testing.T) {
 	}
 	if !exited {
 		t.Fatal("StartProcess() stream did not receive end event")
+	}
+}
+
+func TestConnectStreamingStartProcessHonorsTimeoutHeader(t *testing.T) {
+	agentAuth.SetToken("secret")
+	defer agentAuth.SetToken("")
+
+	httpServer := httptest.NewServer(newAgentHTTPHandler())
+	defer httpServer.Close()
+
+	client := agentconnect.NewProcessServiceClient(httpServer.Client(), httpServer.URL)
+	req := connect.NewRequest(&pb.StartProcessRequest{
+		Cmd:  "sleep",
+		Args: []string{"5"},
+		Cwd:  t.TempDir(),
+	})
+	req.Header().Set(agentTokenHeaderKey, "secret")
+	req.Header().Set("Connect-Timeout-Ms", "50")
+
+	started := time.Now()
+	stream, err := client.StartProcess(context.Background(), req)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v, want stream", err)
+	}
+	for stream.Receive() {
+	}
+	if err := stream.Err(); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("StartProcess() stream error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("StartProcess() ran for %s, want less than one second", elapsed)
 	}
 }
 

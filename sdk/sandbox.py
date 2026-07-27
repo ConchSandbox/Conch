@@ -1,4 +1,5 @@
 import os
+import math
 from enum import Enum
 from io import IOBase, TextIOBase
 from typing import IO, Callable, Iterator, Optional, Dict, Any, List, Tuple, Literal, overload, TypedDict, Union
@@ -394,11 +395,15 @@ class CommandManager:
             tag: Optional[str] = None,
             pty: Optional[Dict[str, int]] = None,
             stdin: Optional[Union[str, bytes]] = None,
+            timeout: Optional[float] = None,
             on_stdout: Optional[OutputHandler] = None,
             on_stderr: Optional[OutputHandler] = None,
     ):
         if background and (on_stdout is not None or on_stderr is not None):
             raise InvalidArgumentError("callbacks are only supported by foreground run() or CommandHandle.wait()")
+        if timeout is not None and timeout < 0:
+            raise InvalidArgumentError("timeout must not be negative")
+        timeout_ms = math.ceil(timeout * 1000) if timeout is not None else None
 
         if background:
             response = self._sandbox.client.start_process(
@@ -411,6 +416,7 @@ class CommandManager:
                 tag=tag,
                 pty=pty,
                 stdin=stdin,
+                timeout_ms=timeout_ms,
             )
             process = response.get("process")
             if not process:
@@ -428,6 +434,7 @@ class CommandManager:
                 tag=tag,
                 pty=pty,
                 stdin=stdin,
+                timeout_ms=timeout_ms,
             )
             try:
                 first_event = ProcessEvent(next(events))
@@ -466,6 +473,7 @@ class CommandManager:
             tag=tag,
             pty=pty,
             stdin=stdin,
+            timeout_ms=timeout_ms,
         )
         result = CommandResult(response)
         if result.exit_code != 0:
