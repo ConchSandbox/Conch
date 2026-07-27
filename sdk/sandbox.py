@@ -393,6 +393,7 @@ class CommandManager:
             background: bool = False,
             tag: Optional[str] = None,
             pty: Optional[Dict[str, int]] = None,
+            stdin: Optional[Union[str, bytes]] = None,
             on_stdout: Optional[OutputHandler] = None,
             on_stderr: Optional[OutputHandler] = None,
     ):
@@ -409,6 +410,7 @@ class CommandManager:
                 background=True,
                 tag=tag,
                 pty=pty,
+                stdin=stdin,
             )
             process = response.get("process")
             if not process:
@@ -425,6 +427,7 @@ class CommandManager:
                 background=False,
                 tag=tag,
                 pty=pty,
+                stdin=stdin,
             )
             try:
                 first_event = ProcessEvent(next(events))
@@ -462,6 +465,7 @@ class CommandManager:
             background=False,
             tag=tag,
             pty=pty,
+            stdin=stdin,
         )
         result = CommandResult(response)
         if result.exit_code != 0:

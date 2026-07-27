@@ -31,6 +31,7 @@ type StartProcessRequest struct {
 	Background    bool                   `protobuf:"varint,6,opt,name=background,proto3" json:"background,omitempty"`
 	Tag           string                 `protobuf:"bytes,7,opt,name=tag,proto3" json:"tag,omitempty"`
 	Pty           *PTY                   `protobuf:"bytes,8,opt,name=pty,proto3" json:"pty,omitempty"`
+	Stdin         []byte                 `protobuf:"bytes,9,opt,name=stdin,proto3" json:"stdin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -117,6 +118,13 @@ func (x *StartProcessRequest) GetTag() string {
 func (x *StartProcessRequest) GetPty() *PTY {
 	if x != nil {
 		return x.Pty
+	}
+	return nil
+}
+
+func (x *StartProcessRequest) GetStdin() []byte {
+	if x != nil {
+		return x.Stdin
 	}
 	return nil
 }
@@ -1503,7 +1511,7 @@ var File_agent_proto protoreflect.FileDescriptor
 
 const file_agent_proto_rawDesc = "" +
 	"\n" +
-	"\vagent.proto\x12\x02pb\"\xa0\x02\n" +
+	"\vagent.proto\x12\x02pb\"\xb6\x02\n" +
 	"\x13StartProcessRequest\x12\x10\n" +
 	"\x03cmd\x18\x01 \x01(\tR\x03cmd\x12\x12\n" +
 	"\x04args\x18\x02 \x03(\tR\x04args\x122\n" +
@@ -1514,7 +1522,8 @@ const file_agent_proto_rawDesc = "" +
 	"background\x18\x06 \x01(\bR\n" +
 	"background\x12\x10\n" +
 	"\x03tag\x18\a \x01(\tR\x03tag\x12\x19\n" +
-	"\x03pty\x18\b \x01(\v2\a.pb.PTYR\x03pty\x1a6\n" +
+	"\x03pty\x18\b \x01(\v2\a.pb.PTYR\x03pty\x12\x14\n" +
+	"\x05stdin\x18\t \x01(\fR\x05stdin\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc8\x01\n" +

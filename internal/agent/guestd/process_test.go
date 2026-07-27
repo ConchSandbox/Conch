@@ -64,6 +64,65 @@ func TestStartProcessReturnsExitCodeForNonZeroExit(t *testing.T) {
 	}
 }
 
+func TestStartProcessPassesStdin(t *testing.T) {
+	server := &AgentServer{}
+	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:   "sh",
+		Args:  []string{"-c", "read line; printf '<%s>' \"$line\""},
+		Cwd:   t.TempDir(),
+		Stdin: []byte("hello from stdin\n"),
+	})
+	if resp.ExitCode != 0 {
+		t.Fatalf("StartProcess() exit code = %d, want 0", resp.ExitCode)
+	}
+	if resp.Stdout != "<hello from stdin>" {
+		t.Fatalf("StartProcess() stdout = %q, want stdin content", resp.Stdout)
+	}
+}
+
+func TestStartProcessRejectsStdinWithPTY(t *testing.T) {
+	server := &AgentServer{}
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
+		Cmd:   "sh",
+		Args:  []string{"-c", "cat"},
+		Cwd:   t.TempDir(),
+		Pty:   &pb.PTY{Cols: 80, Rows: 24},
+		Stdin: []byte("input"),
+	})
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "stdin cannot be used with pty") {
+		t.Fatalf("StartProcess(stdin with pty) error = %v, want InvalidArgument", err)
+	}
+}
+
+func TestBackgroundProcessPassesStdin(t *testing.T) {
+	server := &AgentServer{}
+	bg := startBackgroundProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:        "sh",
+		Args:       []string{"-c", "read line; printf '<%s>' \"$line\""},
+		Cwd:        t.TempDir(),
+		Tag:        "stdin-bg",
+		Background: true,
+		Stdin:      []byte("background input\n"),
+	})
+
+	select {
+	case err := <-bg.done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("StartProcess(background stdin) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background process did not finish after reading stdin")
+	}
+
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{}, bg.stream.Events())
+	if resp.ExitCode != 0 {
+		t.Fatalf("background process exit code = %d, want 0", resp.ExitCode)
+	}
+	if resp.Stdout != "<background input>" {
+		t.Fatalf("background process stdout = %q, want stdin content", resp.Stdout)
+	}
+}
+
 func TestStartProcessStreamsForegroundOutputBeforeExit(t *testing.T) {
 	server := &AgentServer{}
 	workDir := t.TempDir()
@@ -548,6 +607,7 @@ type backgroundStart struct {
 	resp   *testProcessEventResult
 	cancel context.CancelFunc
 	done   chan error
+	stream *fakeProcessConnectStream
 }
 
 type testProcessEventResult struct {
@@ -606,6 +666,7 @@ func startBackgroundProcessForTest(t *testing.T, server *AgentServer, req *pb.St
 		resp:   responseFromProcessEvents(req, stream.Events()),
 		cancel: cancel,
 		done:   done,
+		stream: stream,
 	}
 	t.Cleanup(func() {
 		cancel()

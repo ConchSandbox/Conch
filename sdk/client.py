@@ -4,7 +4,7 @@ import sys
 import tempfile
 from itertools import chain
 from io import IOBase, TextIOBase
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import requests
 from connectrpc.code import Code
@@ -67,6 +67,7 @@ class AgentClient:
         background: bool = False,
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
     ) -> Dict[str, Any]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -77,6 +78,7 @@ class AgentClient:
             background=background,
             tag=tag,
             pty=pty,
+            stdin=stdin,
         )
         raw_events = self._rpc_call(self.process_client.start_process, request)
         events = self._decode_process_events(self._rpc_iter(raw_events))
@@ -94,6 +96,7 @@ class AgentClient:
         background: bool = False,
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
     ) -> Iterator[Dict[str, Any]]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -104,6 +107,7 @@ class AgentClient:
             background=background,
             tag=tag,
             pty=pty,
+            stdin=stdin,
         )
         raw_events = self._rpc_call(self.process_client.start_process, request)
         yield from self._decode_process_events(self._rpc_iter(raw_events))
@@ -118,9 +122,12 @@ class AgentClient:
         background: bool = False,
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
     ) -> agent_pb2.StartProcessRequest:
         if content is not None and args:
             raise InvalidArgumentError("content cannot be used with args; write a file first and execute it via args")
+        if pty is not None and stdin is not None:
+            raise InvalidArgumentError("stdin cannot be used with pty")
         request = agent_pb2.StartProcessRequest(
             cmd=cmd,
             args=args or [],
@@ -132,6 +139,8 @@ class AgentClient:
         )
         if pty is not None:
             request.pty.CopyFrom(agent_pb2.PTY(cols=pty.get("cols", 0), rows=pty.get("rows", 0)))
+        if stdin is not None:
+            request.stdin = stdin.encode() if isinstance(stdin, str) else stdin
         return request
 
     def connect_process(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,

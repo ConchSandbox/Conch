@@ -246,6 +246,81 @@ def test_agent_client_start_process_builds_request_and_aggregates_output():
     assert result["exit_code"] == 0
 
 
+def test_agent_client_start_process_sends_stdin():
+    class FakeProcessClient:
+        def start_process(self, request, headers=None):
+            assert request.stdin == b"input\\n"
+            return iter([
+                agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
+                agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),
+            ])
+
+    client = AgentClient("127.0.0.1")
+    client.process_client = FakeProcessClient()
+
+    result = client.start_process(cmd="cat", stdin="input\\n")
+
+    assert result["exit_code"] == 0
+
+
+def test_command_manager_forwards_stdin():
+    class FakeAgentClient:
+        def start_process(self, **kwargs):
+            assert kwargs["stdin"] == "input\n"
+            return {
+                "status": AgentClient.STATUS_SUCCESS,
+                "stdout": "input\n",
+                "stderr": "",
+                "exit_code": 0,
+                "error": "",
+            }
+
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox.client = FakeAgentClient()
+
+    result = sandbox.commands.run(cmd="cat", stdin="input\n")
+
+    assert result.stdout == "input\n"
+
+
+def test_command_manager_forwards_stdin_to_background_process():
+    class FakeAgentClient:
+        def start_process(self, **kwargs):
+            assert kwargs["background"] is True
+            assert kwargs["stdin"] == "input\n"
+            return {
+                "process": {"pid": 123, "tag": "stdin-bg", "running": True},
+                "events": iter(()),
+            }
+
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox.client = FakeAgentClient()
+
+    handle = sandbox.commands.run(cmd="cat", background=True, stdin="input\n")
+
+    assert handle.pid == 123
+
+
+def test_command_manager_forwards_stdin_to_streamed_process():
+    class FakeAgentClient:
+        def stream_process(self, **kwargs):
+            assert kwargs["stdin"] == "input\n"
+            return iter([
+                {"start": {"pid": 123}},
+                {"data": {"stdout": "input\n"}},
+                {"end": {"exitCode": 0, "exited": True, "status": "exited", "error": ""}},
+            ])
+
+    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox.client = FakeAgentClient()
+    output = []
+
+    result = sandbox.commands.run(cmd="cat", stdin="input\n", on_stdout=output.append)
+
+    assert result.stdout == "input\n"
+    assert output == ["input\n"]
+
+
 def test_agent_client_start_process_rejects_content_with_args():
     client = AgentClient("127.0.0.1")
 

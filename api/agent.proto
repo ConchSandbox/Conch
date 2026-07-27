@@ -29,6 +29,7 @@ message StartProcessRequest {
   bool background = 6;
   string tag = 7;
   PTY pty = 8;
+  bytes stdin = 9;
 }
 
 message ProcessConfig {

@@ -1,6 +1,7 @@
 package guestd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -517,7 +518,7 @@ func applyCommandEnvAndDir(cmd *exec.Cmd, workDir string, envMap map[string]stri
 }
 
 // Execute command and stream output events while it is running.
-func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []string, workDir string, envMap map[string]string, ptyConfig *pb.PTY, stream processConnectStream) (int, bool, error) {
+func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []string, workDir string, envMap map[string]string, stdin []byte, ptyConfig *pb.PTY, stream processConnectStream) (int, bool, error) {
 	if cmdName == "" {
 		return -1, false, fmt.Errorf("command is required")
 	}
@@ -530,6 +531,7 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 	if ptyConfig != nil {
 		return executePtyCmd(cmdCtx, cmd, ptyConfig, stream, cancel)
 	}
+	cmd.Stdin = bytes.NewReader(stdin)
 
 	outputState := newForegroundOutputState(cancel)
 	cmd.Stdout = foregroundOutputWriter{stream: stream, state: outputState}
@@ -667,6 +669,9 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 	if req.Content != "" && len(req.Args) > 0 {
 		return connectError(connect.CodeInvalidArgument, "content and args cannot both be set")
 	}
+	if req.Pty != nil && len(req.Stdin) > 0 {
+		return connectError(connect.CodeInvalidArgument, "stdin cannot be used with pty")
+	}
 
 	// Prepare work dir
 	workDir, err := s.prepareWorkDir(req.Cwd)
@@ -698,7 +703,7 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 
 	// Execute command
-	exitCode, streamFailed, err := s.executeCmd(ctx, req.Cmd, args, workDir, req.Env, req.Pty, stream)
+	exitCode, streamFailed, err := s.executeCmd(ctx, req.Cmd, args, workDir, req.Env, req.Stdin, req.Pty, stream)
 	errMsg := ""
 	if err != nil {
 		if streamFailed {
@@ -717,6 +722,9 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 
 	cmd := exec.Command(req.Cmd, args...)
 	applyCommandEnvAndDir(cmd, workDir, req.Env)
+	if req.Pty == nil {
+		cmd.Stdin = bytes.NewReader(req.Stdin)
+	}
 
 	process := &managedProcess{
 		cmd: cmd,
