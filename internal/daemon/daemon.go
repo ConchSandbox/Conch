@@ -29,6 +29,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -41,6 +42,7 @@ type Daemon struct {
 	containerdHost *containerdhost.Host
 	stateStore     state.Store
 	runtimeService *conchruntime.Service
+	volumeManager  *volume.Manager
 	criServer      *cri.Server
 	daemonClient   *containerdclient.Client
 	httpServer     *http.Server
@@ -103,6 +105,18 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 	s.stateStore = store
 	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
+	s.volumeManager, err = volume.NewManager(volume.Config{
+		MaxMounts: cfg.Volume.MaxMounts,
+		Backend:   cfg.Volume.Backend,
+		Virtiofs: volume.VirtiofsConfig{
+			Binary:     cfg.Volume.Virtiofs.Binary,
+			RuntimeDir: cfg.Volume.Virtiofs.RuntimeDir,
+		},
+	})
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("init volume manager: %w", err)
+	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
 		RootDir:          cfg.Containerd.RootDir,
@@ -129,6 +143,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
+			VolumeManager:      s.volumeManager,
 		},
 	})
 	if err != nil {
@@ -369,6 +384,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUNum:      req.VcpuNum,
 		VCPUMax:      req.VcpuMax,
 		RamMB:        req.RamMB,
+		VolumeMounts: req.VolumeMounts,
 	})
 	if err != nil {
 		logger.Error("Failed to create sandbox",

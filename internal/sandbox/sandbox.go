@@ -11,6 +11,7 @@ import (
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/vmm"
+	"github.com/openeuler/Conch/internal/vmm/driver"
 )
 
 const (
@@ -45,6 +46,7 @@ type VMStartSpec struct {
 	InitrdPath   string
 	SnapfilePath string
 	PmemPaths    []string
+	VirtioFS     []driver.VirtioFSDevice
 }
 
 func vmStartSpecFromBootSpec(spec template.SandboxBootSpec) VMStartSpec {
@@ -69,8 +71,25 @@ func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
 	if rec.VMMName == vmm.StratovirtName {
 		spec.MemoryPath = ""
 	}
+
 	spec.PmemPaths = append([]string(nil), rec.RootfsPmemPaths...)
-	return vmStartSpecFromBootSpec(spec)
+	vmStartSpec := vmStartSpecFromBootSpec(spec)
+	vmStartSpec.VirtioFS = volumeDevicesFromRecord(rec.VolumeDevices)
+	return vmStartSpec
+}
+
+func volumeDevicesFromRecord(devices []state.VolumeDevice) []driver.VirtioFSDevice {
+	if len(devices) == 0 {
+		return nil
+	}
+	out := make([]driver.VirtioFSDevice, 0, len(devices))
+	for _, device := range devices {
+		out = append(out, driver.VirtioFSDevice{
+			Tag:    device.Tag,
+			Socket: device.Socket,
+		})
+	}
+	return out
 }
 
 type Sandbox struct {
@@ -179,6 +198,7 @@ func ResumeSandbox(
 		SnapfilePath:    vmStartSpec.SnapfilePath,
 		InitrdPath:      vmStartSpec.InitrdPath,
 		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
+		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
 	}
@@ -263,6 +283,7 @@ func CreateSandbox(
 		KernelPath:      vmStartSpec.KernelPath,
 		InitrdPath:      vmStartSpec.InitrdPath,
 		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
+		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
 		SandboxId:       sandboxId,

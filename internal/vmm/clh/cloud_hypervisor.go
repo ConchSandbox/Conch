@@ -40,11 +40,11 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 {{ .PmemArgs }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
---cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}" \
+--cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
 --api-socket fd={{ .ApiSocketFd }} \
 --console null \
 --net "tap={{ .TapName }}" \
---vsock "cid={{ .VsockCID }},socket={{ .VsockSocketPath }}" \
+{{ .FsArgs }}--vsock "cid={{ .VsockCID }},socket={{ .VsockSocketPath }}" \
 --event-monitor fd={{ .EventMonitorFd }} \
 --seccomp false`
 
@@ -67,6 +67,8 @@ type StartScriptCLHArgs struct {
 	InitrdPath      string
 	PlatformArgs    string
 	PmemArgs        string
+	FsArgs          string
+	SharefsCmdline  string
 	NamespaceID     string
 	TapName         string
 	VsockCID        uint32
@@ -381,6 +383,14 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 		vmmBinaryPath = path
 	}
 
+	fsArgs := ""
+	sharefsCmdline := ""
+	if len(args.VirtioFS) > 0 {
+		dev := args.VirtioFS[0]
+		fsArgs = fmt.Sprintf("--fs \"tag=%s,socket=%s\" \\\n", dev.Tag, dev.Socket)
+		sharefsCmdline = " conch.sharefs=virtiofs"
+	}
+
 	clhArgs := StartScriptCLHArgs{
 		VmmBinaryPath:   vmmBinaryPath,
 		CPUBoot:         args.CPUBoot,
@@ -391,6 +401,8 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 		InitrdPath:      args.InitrdPath,
 		PlatformArgs:    buildPlatformArgs(args.PmemPaths),
 		PmemArgs:        buildPmemArgs(args.PmemPaths),
+		FsArgs:          fsArgs,
+		SharefsCmdline:  sharefsCmdline,
 		NamespaceID:     args.NamespaceID,
 		TapName:         args.TapName,
 		VsockCID:        args.VsockCID,

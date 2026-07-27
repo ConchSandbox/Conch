@@ -16,6 +16,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -134,6 +135,7 @@ var (
 	readyMu          sync.Mutex
 	readyCh          chan<- *Service
 	networkSlotStore netstack.NetworkSlotStore
+	volumeManager    *volume.Manager
 )
 
 func SetReadyChannel(ch chan<- *Service) {
@@ -148,10 +150,22 @@ func SetNetworkSlotStore(store netstack.NetworkSlotStore) {
 	networkSlotStore = store
 }
 
+func SetVolumeManager(manager *volume.Manager) {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	volumeManager = manager
+}
+
 func currentNetworkSlotStore() netstack.NetworkSlotStore {
 	readyMu.Lock()
 	defer readyMu.Unlock()
 	return networkSlotStore
+}
+
+func currentVolumeManager() *volume.Manager {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	return volumeManager
 }
 
 func publishReady(svc *Service) {
@@ -202,6 +216,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			svc.manager.SetVolumeManager(currentVolumeManager())
 			publishReady(svc)
 			return svc, nil
 		},
