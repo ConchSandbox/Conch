@@ -43,11 +43,11 @@ type VirtioFSDevice struct {
 }
 
 type Adapter interface {
-	BuildStartCmd(args *ResourceArgs, isResume bool) (string, error)
-	PrepareLaunch(args *ResourceArgs, isResume bool) error
+	BuildStartCmd(args *ResourceArgs, restore bool) (string, error)
+	PrepareLaunch(args *ResourceArgs, restore bool) error
 	AfterProcessStart()
 	WaitForCreateReady(ctx context.Context, processExited <-chan error) error
-	WaitForResumeReady(ctx context.Context, processExited <-chan error) error
+	WaitForRestoreReady(ctx context.Context, processExited <-chan error) error
 	CheckAgentAlive(ctx context.Context, processExited <-chan error) error
 	PauseVM() error
 	ResumeVM() error

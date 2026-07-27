@@ -64,7 +64,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 	}
 }
 
-func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
+func TestStratovirtBuildRestoreCmdUsesMappedCheckpoint(t *testing.T) {
 	binDir := t.TempDir()
 	binPath := filepath.Join(binDir, "stratovirt")
 	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0755); err != nil {
@@ -91,13 +91,13 @@ func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
 	}
 
 	if want := "-incoming file:/tmp/snapshot,mapped=true"; !strings.Contains(script, want) {
-		t.Fatalf("resume script missing %q:\n%s", want, script)
+		t.Fatalf("restore script missing %q:\n%s", want, script)
 	}
 	if !strings.Contains(script, "-m 256M") {
-		t.Fatalf("resume script is missing captured memory size:\n%s", script)
+		t.Fatalf("restore script is missing captured memory size:\n%s", script)
 	}
 	if strings.Contains(script, "/must/not/be/used/mem.img") {
-		t.Fatalf("resume script consumed MemoryPath:\n%s", script)
+		t.Fatalf("restore script consumed MemoryPath:\n%s", script)
 	}
 }
 

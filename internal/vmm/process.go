@@ -77,7 +77,7 @@ func (p *Process) isAPIReady() bool {
 
 func NewProcess(
 	vmmName, vmmBinary, sandboxId string,
-	vmmResourceArgs *ResourceArgs, isResume bool,
+	vmmResourceArgs *ResourceArgs, restore bool,
 ) (*Process, error) {
 	logger := ulog.GetLogger()
 
@@ -93,7 +93,7 @@ func NewProcess(
 		return nil, err
 	}
 
-	if err := adapter.PrepareLaunch(vmmResourceArgs, isResume); err != nil {
+	if err := adapter.PrepareLaunch(vmmResourceArgs, restore); err != nil {
 		logger.Error("Failed to prepare VMM launch", ulog.F("error", err))
 		adapter.Cleanup()
 		return nil, err
@@ -106,7 +106,7 @@ func NewProcess(
 		exitSignal:      make(chan error, 1),
 	}
 
-	startScript, err := adapter.BuildStartCmd(vmmResourceArgs, isResume)
+	startScript, err := adapter.BuildStartCmd(vmmResourceArgs, restore)
 	if err != nil {
 		logger.Error("Failed to build start command", ulog.F("error", err))
 		adapter.Cleanup()
@@ -218,11 +218,11 @@ func (p *Process) Create(ctx context.Context) error {
 	return nil
 }
 
-func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
+func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 	logger := ulog.GetLogger()
 
-	logger.Info("Resuming VMM from snapshot",
-		ulog.F("snapshot", snapfilePath),
+	logger.Info("Restoring VMM from snapshot",
+		ulog.F("snapshot", snapshotPath),
 	)
 
 	err := p.startCmd(ctx)
@@ -231,13 +231,13 @@ func (p *Process) Resume(ctx context.Context, snapfilePath string) error {
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
-	if err := p.adapter.WaitForResumeReady(ctx, p.exitSignal); err != nil {
+	if err := p.adapter.WaitForRestoreReady(ctx, p.exitSignal); err != nil {
 		vmmStopErr := p.Stop()
-		return errors.Join(fmt.Errorf("error waiting for vmm resume readiness: %w", err), vmmStopErr)
+		return errors.Join(fmt.Errorf("error waiting for vmm restore readiness: %w", err), vmmStopErr)
 	}
 
 	// preferVNC=false: to achieve fast startup, load memory on demand.
-	err = p.adapter.LoadSnapshot(snapfilePath, false)
+	err = p.adapter.LoadSnapshot(snapshotPath, false)
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error loading snapshot: %w", err), vmmStopErr)

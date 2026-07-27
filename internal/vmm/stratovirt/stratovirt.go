@@ -58,7 +58,7 @@ const startScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp`
 
-const resumeScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
+const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 -machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
@@ -115,7 +115,7 @@ func NewStratovirtClient(vmmType int, socketPath, vmmBinary string) *StratovirtC
 	}
 }
 
-func (s *StratovirtClient) PrepareLaunch(args *driver.ResourceArgs, isResume bool) error {
+func (s *StratovirtClient) PrepareLaunch(args *driver.ResourceArgs, restore bool) error {
 	return nil
 }
 
@@ -127,7 +127,7 @@ func (s *StratovirtClient) WaitForCreateReady(ctx context.Context, processExited
 	return waitForVmmSocket(ctx, s.socketPath, processExited)
 }
 
-func (s *StratovirtClient) WaitForResumeReady(ctx context.Context, processExited <-chan error) error {
+func (s *StratovirtClient) WaitForRestoreReady(ctx context.Context, processExited <-chan error) error {
 	return waitForVmmSocket(ctx, s.socketPath, processExited)
 }
 
@@ -165,7 +165,7 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited <-ch
 	}
 }
 
-func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
+func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool) (string, error) {
 	logger := ulog.GetLogger()
 	nsenterPath, err := exec.LookPath("nsenter")
 	if err != nil {
@@ -215,8 +215,8 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 	}
 
 	scriptContent := startScriptStratovirt
-	if isResume {
-		scriptContent = resumeScriptStratovirt
+	if restore {
+		scriptContent = restoreScriptStratovirt
 	}
 	templateSt := template.Must(template.New("stratovirt-start").Parse(scriptContent))
 

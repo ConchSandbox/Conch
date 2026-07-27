@@ -50,7 +50,7 @@ const startScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 // -vv use for printing log when test
 // Current VM lifecycle is bound to Conch; Conch exit causes VM process termination. Detachment needed for follow-up.
 
-const resumeScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
+const restoreScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 --api-socket fd={{ .ApiSocketFd }} \
 --event-monitor fd={{ .EventMonitorFd }} \
@@ -175,8 +175,8 @@ func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
 	return vmmFds, nil
 }
 
-func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs, isResume bool) error {
-	if isResume {
+func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs, restore bool) error {
+	if restore {
 		pmemPaths, err := PrepareRestore(RestoreResources{
 			SnapshotPath:    args.SnapfilePath,
 			MemoryPath:      args.MemoryPath,
@@ -217,7 +217,7 @@ func (c *CLHClient) WaitForCreateReady(ctx context.Context, processExited <-chan
 	return c.waitForSourceEvent(ctx, "vm", EventBooted)
 }
 
-func (c *CLHClient) WaitForResumeReady(ctx context.Context, processExited <-chan error) error {
+func (c *CLHClient) WaitForRestoreReady(ctx context.Context, processExited <-chan error) error {
 	return nil
 }
 
@@ -377,7 +377,7 @@ func buildRequest(method, fullCommand, requestBody string) string {
 	return request
 }
 
-func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
+func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, restore bool) (string, error) {
 	logger := ulog.GetLogger()
 	nsenterPath, err := exec.LookPath("nsenter")
 	if err != nil {
@@ -424,8 +424,8 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 	}
 
 	var scriptContent string
-	if isResume {
-		scriptContent = resumeScriptCLH
+	if restore {
+		scriptContent = restoreScriptCLH
 	} else {
 		scriptContent = startScriptCLH
 	}

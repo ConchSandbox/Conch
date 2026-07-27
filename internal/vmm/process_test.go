@@ -100,7 +100,7 @@ func (c *blockingDaemonClient) AfterProcessStart() {}
 func (c *blockingDaemonClient) WaitForCreateReady(context.Context, <-chan error) error {
 	return nil
 }
-func (c *blockingDaemonClient) WaitForResumeReady(context.Context, <-chan error) error {
+func (c *blockingDaemonClient) WaitForRestoreReady(context.Context, <-chan error) error {
 	return nil
 }
 func (c *blockingDaemonClient) Cleanup() {}
