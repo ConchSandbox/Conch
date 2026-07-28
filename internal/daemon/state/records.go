@@ -4,7 +4,6 @@ const (
 	SandboxReady     = "READY"
 	SandboxNotReady  = "NOTREADY"
 	SandboxSuspended = "SUSPENDED"
-	SandboxStopped   = "STOPPED"
 	SandboxUnknown   = "UNKNOWN"
 
 	NetworkSlotCreating = "CREATING"
@@ -37,7 +36,6 @@ type SandboxRecord struct {
 	Attempt        uint32            `json:"attempt"`
 	State          string            `json:"state"`
 	CreatedAt      int64             `json:"created_at"`
-	StoppedAt      int64             `json:"stopped_at,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
 	Annotations    map[string]string `json:"annotations,omitempty"`
 	RuntimeHandler string            `json:"runtime_handler,omitempty"`

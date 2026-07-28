@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,22 +17,38 @@ import (
 )
 
 type fakeSandboxOps struct {
-	req                sandbox.SandboxCreateRequest
-	checkpointRequests []sandbox.SandboxCheckpointRequest
-	checkpointResults  []sandbox.SandboxCheckpointResult
+	req                sandbox.CreateRequest
+	checkpointRequests []sandbox.CheckpointRequest
+	checkpointResults  []sandbox.CheckpointResult
 	checkpointErr      error
-	createResult       sandbox.SandboxCreateResult
+	createResult       sandbox.CreateResult
 	deleteErr          error
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.SandboxCreateResult, error) {
+type serializedDeleteOps struct {
+	fakeSandboxOps
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+	calls        atomic.Int32
+}
+
+func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
+	if f.calls.Add(1) == 1 {
+		close(f.firstEntered)
+		<-f.releaseFirst
+		return nil
+	}
+	return errors.New("sandbox not found")
+}
+
+func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.req = req
 	result := f.createResult
 	if result.Namespace == "" {
 		result.Namespace = req.Namespace
 	}
 	if result.SandboxID == "" {
-		result.SandboxID = req.SandboxId
+		result.SandboxID = req.SandboxID
 	}
 	if result.IP == "" {
 		result.IP = "192.0.2.10"
@@ -43,28 +59,28 @@ func (f *fakeSandboxOps) Create(req sandbox.SandboxCreateRequest) (sandbox.Sandb
 	return result, nil
 }
 
-func (f *fakeSandboxOps) Delete(sandbox.SandboxDeleteRequest) error {
+func (f *fakeSandboxOps) Delete(sandbox.DeleteRequest) error {
 	return f.deleteErr
 }
 
-func (f *fakeSandboxOps) Suspend(sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Suspend(sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Resume(sandbox.SandboxLifecycleRequest) error {
+func (f *fakeSandboxOps) Resume(sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Checkpoint(req sandbox.SandboxCheckpointRequest) (sandbox.SandboxCheckpointResult, error) {
+func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
 	call := len(f.checkpointRequests)
 	f.checkpointRequests = append(f.checkpointRequests, req)
 	if f.checkpointErr != nil {
-		return sandbox.SandboxCheckpointResult{}, f.checkpointErr
+		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
 	if call < len(f.checkpointResults) {
 		return f.checkpointResults[call], nil
 	}
-	return sandbox.SandboxCheckpointResult{}, nil
+	return sandbox.CheckpointResult{}, nil
 }
 
 func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
@@ -77,7 +93,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		VMMName:      "cloud-hypervisor",
 		MemorySizeMB: 512,
 	}
-	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{captured}}
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{captured}}
 	imageOps := &templateBuildImageOps{checkpointResults: []conchimage.PublishCheckpointBootImageResult{{
 		BootIndexDigest: t1Digest,
 		ImageName:       "localhost/conch/checkpoints:t1",
@@ -128,9 +144,9 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 	// Generation identity and parent snapshot IDs are deliberately absent from
 	// the runtime capture seam; it receives only the sandbox identity.
-	if got, want := sandboxOps.checkpointRequests[0], (sandbox.SandboxCheckpointRequest{
+	if got, want := sandboxOps.checkpointRequests[0], (sandbox.CheckpointRequest{
 		Namespace: "team-a",
-		SandboxId: "sandbox-a",
+		SandboxID: "sandbox-a",
 	}); got != want {
 		t.Fatalf("checkpoint request = %#v, want %#v", got, want)
 	}
@@ -181,7 +197,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	t2Digest := digest.FromString("lineage-t2").String()
 	memRoot1 := t.TempDir()
 	memRoot2 := t.TempDir()
-	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.SandboxCheckpointResult{
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{
 		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256},
 		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256},
 	}}
@@ -299,14 +315,14 @@ func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	}
 }
 
-func TestStopSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
+func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
 	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.StopSandbox(ctx, "default", "missing-pod"); err != nil {
-		t.Fatalf("StopSandbox() error = %v", err)
+	if err := svc.RemoveSandbox(ctx, "default", "missing-pod"); err != nil {
+		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 
 	records, err := store.ListSandboxes(ctx)
@@ -318,62 +334,46 @@ func TestStopSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	}
 }
 
-func TestStopSandboxTerminatesRecordedVMMWhenRuntimeMissing(t *testing.T) {
+func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
-	sandboxID := "sandbox-orphan"
-	cmd := exec.Command("sleep", "30")
-	cmd.Args[0] = sandboxID
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start test process: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
-
 	rec := state.SandboxRecord{
-		PodSandboxID:   "pod-1",
-		ConchSandboxID: sandboxID,
+		PodSandboxID:   "pod-serialized",
+		ConchSandboxID: "sandbox-serialized",
 		Namespace:      "default",
-		State:          state.SandboxNotReady,
-		VMMPID:         cmd.Process.Pid,
+		State:          state.SandboxReady,
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		matched, err := recordedVMMProcessMatches(rec)
-		if err != nil {
-			t.Fatalf("match test process: %v", err)
-		}
-		if matched {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("test process pid %d never exposed sandbox marker", cmd.Process.Pid)
-		}
-		time.Sleep(time.Millisecond)
-	}
-
 	if err := store.UpsertSandbox(ctx, rec); err != nil {
-		t.Fatalf("UpsertSandbox() error = %v", err)
+		t.Fatal(err)
 	}
-
-	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
-	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.StopSandbox(ctx, "default", "pod-1"); err != nil {
-		t.Fatalf("StopSandbox() error = %v", err)
+	ops := &serializedDeleteOps{
+		firstEntered: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
 	}
+	svc := New(ops, nil, nil, store, "default")
 
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() { firstDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
+	<-ops.firstEntered
+	go func() { secondDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("recorded VMM process pid %d still running", cmd.Process.Pid)
+	case err := <-secondDone:
+		t.Fatalf("second RemoveSandbox returned before first completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(ops.releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first RemoveSandbox() error = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second RemoveSandbox() error = %v", err)
+	}
+	if got := ops.calls.Load(); got != 2 {
+		t.Fatalf("Delete() calls = %d, want 2 serialized calls", got)
+	}
+	if _, err := store.GetSandbox(ctx, rec.PodSandboxID); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("sandbox record remains after Remove: %v", err)
 	}
 }
 
@@ -382,7 +382,7 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{
-		createResult: sandbox.SandboxCreateResult{
+		createResult: sandbox.CreateResult{
 			RootfsKey:   "sandbox-1",
 			MemKey:      "sandbox-1-mem",
 			RootfsMount: "/run/conch/rootfs",
@@ -436,11 +436,11 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	if sandboxOps.req.TemplateID != "tmpl_default" {
 		t.Fatalf("TemplateID = %q", sandboxOps.req.TemplateID)
 	}
-	if sandboxOps.req.VmmName != "cloud-hypervisor" {
-		t.Fatalf("VmmName = %q", sandboxOps.req.VmmName)
+	if sandboxOps.req.VMMName != "cloud-hypervisor" {
+		t.Fatalf("VmmName = %q", sandboxOps.req.VMMName)
 	}
-	if sandboxOps.req.VcpuNum != 2 || sandboxOps.req.VcpuMax != 4 || sandboxOps.req.RamMB != 4096 {
-		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VcpuNum, sandboxOps.req.VcpuMax, sandboxOps.req.RamMB)
+	if sandboxOps.req.VCPUNum != 2 || sandboxOps.req.VCPUMax != 4 || sandboxOps.req.RAMMB != 4096 {
+		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
 	}
 	if sandboxOps.req.AgentToken == "" {
 		t.Fatal("AgentToken is empty")
@@ -473,11 +473,11 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
-	if sandboxOps.req.TemplateID != "tmpl_resume_explicit" || sandboxOps.req.VmmName != "explicit-vmm" {
+	if sandboxOps.req.TemplateID != "tmpl_resume_explicit" || sandboxOps.req.VMMName != "explicit-vmm" {
 		t.Fatalf("request = %#v", sandboxOps.req)
 	}
-	if sandboxOps.req.VcpuNum != 6 || sandboxOps.req.VcpuMax != 8 || sandboxOps.req.RamMB != 8192 {
-		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VcpuNum, sandboxOps.req.VcpuMax, sandboxOps.req.RamMB)
+	if sandboxOps.req.VCPUNum != 6 || sandboxOps.req.VCPUMax != 8 || sandboxOps.req.RAMMB != 8192 {
+		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
 	}
 }
 

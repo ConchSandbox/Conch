@@ -69,7 +69,7 @@ func newID() (string, error) {
 
 func (s *service) StopPodSandbox(ctx context.Context, req *runtimev1.StopPodSandboxRequest) (*runtimev1.StopPodSandboxResponse, error) {
 	rec, _ := s.store.GetSandbox(ctx, req.GetPodSandboxId())
-	if err := s.runtime.StopSandbox(ctx, rec.Namespace, req.GetPodSandboxId()); err != nil {
+	if err := s.runtime.RemoveSandbox(ctx, rec.Namespace, req.GetPodSandboxId()); err != nil {
 		return nil, err
 	}
 	return &runtimev1.StopPodSandboxResponse{}, nil

@@ -44,7 +44,6 @@ SANDBOX_CREATE_PATH = "/api/sandbox/create"
 SANDBOX_DELETE_PATH = "/api/sandbox/delete"
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
-SANDBOX_STOP_PATH = "/api/sandbox/stop"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
 
 RANDOM_ID_HEX_BYTES = 12
@@ -699,9 +698,6 @@ class Sandbox:
 
     def resume(self) -> bool:
         return self._lifecycle(SANDBOX_RESUME_PATH)
-
-    def stop(self) -> bool:
-        return self._lifecycle(SANDBOX_STOP_PATH)
 
     def _lifecycle(self, path: str) -> bool:
         payload = {

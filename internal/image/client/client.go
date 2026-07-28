@@ -27,7 +27,6 @@ const (
 	createSandbox      = "/api/sandbox/create"
 	suspendSandbox     = "/api/sandbox/suspend"
 	resumeSandbox      = "/api/sandbox/resume"
-	stopSandbox        = "/api/sandbox/stop"
 	checkpointSandbox  = "/api/sandbox/checkpoint"
 	createTemplate     = "/api/template/create"
 	pullTemplate       = "/api/template/pull"
@@ -51,7 +50,7 @@ func ResolveBaseURL() string {
 	return baseURL
 }
 
-// CreateRequest matches Conch SandboxCreateRequest.
+// CreateRequest matches POST /api/sandbox/create.
 type CreateRequest struct {
 	Namespace    string        `json:"namespace,omitempty"`
 	TemplateID   string        `json:"template_id"`
@@ -395,11 +394,6 @@ func (c *Client) SuspendSandbox(ctx context.Context, sandboxID, namespace string
 func (c *Client) ResumeSandbox(ctx context.Context, sandboxID, namespace string) error {
 	var resp map[string]string
 	return c.postJSON(ctx, resumeSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
-}
-
-func (c *Client) StopSandbox(ctx context.Context, sandboxID, namespace string) error {
-	var resp map[string]string
-	return c.postJSON(ctx, stopSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
 }
 
 func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID, namespace string) (string, error) {
