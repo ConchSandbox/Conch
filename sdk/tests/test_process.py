@@ -305,10 +305,10 @@ def test_agent_client_start_process_sends_stdin():
     assert result["exit_code"] == 0
 
 
-def test_agent_client_start_process_sends_timeout_header():
+def test_agent_client_start_process_sets_connect_timeout():
     class FakeProcessClient:
-        def start_process(self, request, headers=None):
-            assert headers["Connect-Timeout-Ms"] == "1500"
+        def start_process(self, request, headers=None, timeout_ms=None):
+            assert timeout_ms == 1500
             return iter([
                 agent_pb2.ProcessEvent(start=agent_pb2.ProcessStartEvent(pid=123)),
                 agent_pb2.ProcessEvent(end=agent_pb2.ProcessEndEvent(exit_code=0, exited=True, status="exited")),

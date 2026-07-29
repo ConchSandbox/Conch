@@ -287,8 +287,10 @@ class AgentClient:
             if timeout_ms is not None and timeout_ms < 0:
                 raise InvalidArgumentError("timeout_ms must not be negative")
             headers = self._headers()
-            if timeout_ms is not None:
-                headers["Connect-Timeout-Ms"] = str(timeout_ms)
+            # Connect applies this deadline to its HTTP transport and emits the
+            # corresponding protocol timeout header.
+            if timeout_ms:
+                return method(request, headers=headers, timeout_ms=timeout_ms)
             return method(request, headers=headers)
         except ConnectError as exc:
             raise handle_rpc_error(exc) from None
