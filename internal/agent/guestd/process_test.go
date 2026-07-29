@@ -53,8 +53,8 @@ func TestStartProcessReturnsExitCodeForNonZeroExit(t *testing.T) {
 		Args: []string{"-c", "echo out; echo err >&2; exit 7"},
 		Cwd:  t.TempDir(),
 	})
-	if resp.Error != "" {
-		t.Fatalf("StartProcess() response error = %q, want empty", resp.Error)
+	if !strings.Contains(resp.Error, "exit status 7") {
+		t.Fatalf("StartProcess() response error = %q, want exit status", resp.Error)
 	}
 	if resp.ExitCode != 7 {
 		t.Fatalf("StartProcess() exit code = %d, want 7", resp.ExitCode)
@@ -182,6 +182,60 @@ func TestStartProcessTimeoutTerminatesChildProcessGroup(t *testing.T) {
 			t.Fatalf("child process %d still running after command timeout", childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStartProcessStreamsSignalTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pty  *pb.PTY
+	}{
+		{name: "standard"},
+		{name: "pty", pty: &pb.PTY{Cols: 80, Rows: 24}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := startProcessForTest(t, &AgentServer{}, &pb.StartProcessRequest{
+				Cmd:  "sh",
+				Args: []string{"-c", "printf signal-before-exit; kill -TERM $$"},
+				Cwd:  t.TempDir(),
+				Pty:  tc.pty,
+			})
+			if !strings.Contains(resp.Stdout, "signal-before-exit") {
+				t.Fatalf("stdout = %q, want signal output", resp.Stdout)
+			}
+			if resp.ExitCode != -1 {
+				t.Fatalf("exit code = %d, want -1 for signal termination", resp.ExitCode)
+			}
+			if !strings.Contains(resp.Error, "signal: terminated") {
+				t.Fatalf("end error = %q, want signal termination message", resp.Error)
+			}
+		})
+	}
+}
+
+func TestBackgroundProcessStreamsNonZeroExitResult(t *testing.T) {
+	server := &AgentServer{}
+	bg := startBackgroundProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:        "sh",
+		Args:       []string{"-c", "exit 7"},
+		Cwd:        t.TempDir(),
+		Background: true,
+	})
+	select {
+	case err := <-bg.done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("StartProcess(background) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background process did not finish")
+	}
+
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{}, bg.stream.Events())
+	if resp.ExitCode != 7 {
+		t.Fatalf("background exit code = %d, want 7", resp.ExitCode)
+	}
+	if !strings.Contains(resp.Error, "exit status 7") {
+		t.Fatalf("background end error = %q, want exit status", resp.Error)
 	}
 }
 

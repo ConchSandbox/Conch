@@ -599,13 +599,10 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return exitCode, false, ctxErr
 	}
-	if err := signaledProcessError(cmd.ProcessState); err != nil {
-		return exitCode, false, err
-	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			return exitCode, false, nil
+			return exitCode, false, &processExitError{cause: waitErr}
 		}
 		return exitCode, false, waitErr
 	}
@@ -662,14 +659,12 @@ func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY, stream
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return exitCode, false, ctxErr
 	}
-	if err := signaledProcessError(cmd.ProcessState); err != nil {
-		return exitCode, false, err
-	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) {
-			return exitCode, false, waitErr
+		if errors.As(waitErr, &exitErr) {
+			return exitCode, false, &processExitError{cause: waitErr}
 		}
+		return exitCode, false, waitErr
 	}
 	if readErr != nil {
 		return exitCode, false, readErr
@@ -677,15 +672,12 @@ func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY, stream
 	return exitCode, false, nil
 }
 
-func signaledProcessError(state *os.ProcessState) error {
-	if state == nil {
-		return nil
-	}
-	status, ok := state.Sys().(syscall.WaitStatus)
-	if !ok || !status.Signaled() {
-		return nil
-	}
-	return fmt.Errorf("process terminated by signal %s", status.Signal())
+type processExitError struct {
+	cause error
+}
+
+func (e *processExitError) Error() string {
+	return e.cause.Error()
 }
 
 // Starts a process with custom working dir, environment, and script content.
@@ -752,6 +744,10 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return connectErrorf(connect.CodeDeadlineExceeded, "process execution timed out: %v", err)
+		}
+		var processErr *processExitError
+		if errors.As(err, &processErr) {
+			return sendForegroundEnd(stream, int32(exitCode), processErr.Error())
 		}
 		return connectErrorf(connect.CodeInvalidArgument, "failed to execute process: %v", err)
 	}
@@ -936,13 +932,8 @@ func (s *AgentServer) waitManagedProcess(p *managedProcess) {
 	}
 
 	errMsg := ""
-	if err := signaledProcessError(p.cmd.ProcessState); err != nil {
-		errMsg = err.Error()
-	} else if waitErr != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) {
-			errMsg = waitErr.Error()
-		}
+	if waitErr != nil {
+		errMsg = waitErr.Error()
 	}
 	if p.tempScript != "" {
 		cleanupTempScript(p.tempScript)
