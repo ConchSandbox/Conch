@@ -19,7 +19,6 @@ var ErrNotFound = errors.New("state record not found")
 var buckets = [][]byte{
 	[]byte("sandboxes"),
 	[]byte("network_slots"),
-	[]byte("containers"),
 	[]byte("templates"),
 }
 
@@ -65,7 +64,7 @@ func (s *BoltStore) init() error {
 }
 
 func (s *BoltStore) upsert(_ context.Context, bucket []byte, key string, value any) error {
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		return fmt.Errorf("state key is required")
 	}
 	data, err := json.Marshal(value)
@@ -78,7 +77,7 @@ func (s *BoltStore) upsert(_ context.Context, bucket []byte, key string, value a
 }
 
 func (s *BoltStore) get(_ context.Context, bucket []byte, key string, value any) error {
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		return fmt.Errorf("state key is required")
 	}
 	return s.db.View(func(tx *bolt.Tx) error {
@@ -102,7 +101,7 @@ func (s *BoltStore) list(_ context.Context, bucket []byte, appendValue func([]by
 }
 
 func (s *BoltStore) delete(_ context.Context, bucket []byte, key string) error {
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		return fmt.Errorf("state key is required")
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -111,7 +110,7 @@ func (s *BoltStore) delete(_ context.Context, bucket []byte, key string) error {
 }
 
 func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error {
-	return s.upsert(ctx, []byte("sandboxes"), rec.PodSandboxID, rec)
+	return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
 }
 
 func (s *BoltStore) GetSandbox(ctx context.Context, id string) (SandboxRecord, error) {
@@ -164,33 +163,6 @@ func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotKey string) error
 	return s.delete(ctx, []byte("network_slots"), slotKey)
 }
 
-func (s *BoltStore) UpsertContainer(ctx context.Context, rec ContainerRecord) error {
-	return s.upsert(ctx, []byte("containers"), rec.ContainerID, rec)
-}
-
-func (s *BoltStore) GetContainer(ctx context.Context, id string) (ContainerRecord, error) {
-	var rec ContainerRecord
-	err := s.get(ctx, []byte("containers"), id, &rec)
-	return rec, err
-}
-
-func (s *BoltStore) ListContainers(ctx context.Context) ([]ContainerRecord, error) {
-	var out []ContainerRecord
-	err := s.list(ctx, []byte("containers"), func(data []byte) error {
-		var rec ContainerRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
-func (s *BoltStore) DeleteContainer(ctx context.Context, id string) error {
-	return s.delete(ctx, []byte("containers"), id)
-}
-
 func (s *BoltStore) UpsertTemplate(ctx context.Context, rec TemplateRecord) error {
 	return s.upsert(ctx, []byte("templates"), rec.ID, rec)
 }
@@ -223,13 +195,13 @@ func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
 // transaction, so a failed transaction can only leave safe orphaned content.
 func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointPublication) error {
 	templateID := strings.TrimSpace(publication.TemplateID)
-	podSandboxID := strings.TrimSpace(publication.PodSandboxID)
+	sandboxID := strings.TrimSpace(publication.SandboxID)
 	rawDigest := strings.TrimSpace(publication.BootIndexDigest)
 	if templateID == "" {
 		return fmt.Errorf("template id is required")
 	}
-	if podSandboxID == "" {
-		return fmt.Errorf("pod sandbox id is required")
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox id is required")
 	}
 	if rawDigest == "" {
 		return fmt.Errorf("boot index digest is required")
@@ -259,10 +231,10 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointP
 		}
 
 		var sandboxRecord SandboxRecord
-		if data := sandboxes.Get([]byte(podSandboxID)); data == nil {
-			return fmt.Errorf("%w: %s", ErrNotFound, podSandboxID)
+		if data := sandboxes.Get([]byte(sandboxID)); data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, sandboxID)
 		} else if err := json.Unmarshal(data, &sandboxRecord); err != nil {
-			return fmt.Errorf("unmarshal sandbox record %s: %w", podSandboxID, err)
+			return fmt.Errorf("unmarshal sandbox record %s: %w", sandboxID, err)
 		}
 		currentHeadID := strings.TrimSpace(sandboxRecord.CheckpointHeadTemplateID)
 		if currentHeadID == "" {
@@ -273,16 +245,16 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointP
 			currentHeadDigest = strings.TrimSpace(sandboxRecord.SourceBootIndexDigest)
 		}
 		if expected := strings.TrimSpace(publication.ExpectedHeadTemplateID); expected != "" && currentHeadID != expected {
-			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", podSandboxID, expected, currentHeadID)
+			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", sandboxID, expected, currentHeadID)
 		}
 		if expected := strings.TrimSpace(publication.ExpectedHeadBootIndexDigest); expected != "" && currentHeadDigest != expected {
-			return fmt.Errorf("sandbox %s checkpoint head digest changed from %s to %s", podSandboxID, expected, currentHeadDigest)
+			return fmt.Errorf("sandbox %s checkpoint head digest changed from %s to %s", sandboxID, expected, currentHeadDigest)
 		}
 		if parentID := strings.TrimSpace(templateRecord.ParentTemplateID); parentID != currentHeadID {
-			return fmt.Errorf("template %s parent %s does not match sandbox %s checkpoint head %s", templateID, parentID, podSandboxID, currentHeadID)
+			return fmt.Errorf("template %s parent %s does not match sandbox %s checkpoint head %s", templateID, parentID, sandboxID, currentHeadID)
 		}
-		if sourceID := strings.TrimSpace(templateRecord.SourceSandboxID); sourceID != "" && sourceID != strings.TrimSpace(sandboxRecord.ConchSandboxID) {
-			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.ConchSandboxID)
+		if sourceID := strings.TrimSpace(templateRecord.SourceSandboxID); sourceID != "" && sourceID != strings.TrimSpace(sandboxRecord.SandboxID) {
+			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)
 		}
 
 		templateRecord.BootIndexDigest = parsedDigest.String()
@@ -305,6 +277,6 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointP
 		if err := templates.Put([]byte(templateID), templateData); err != nil {
 			return err
 		}
-		return sandboxes.Put([]byte(podSandboxID), sandboxData)
+		return sandboxes.Put([]byte(sandboxID), sandboxData)
 	})
 }

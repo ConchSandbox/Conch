@@ -15,7 +15,7 @@ The project is developed around the following new sandbox requirements of Agents
 
 - Lightweight and Secure Isolation -- Supports virtual sandboxes to securely isolate Agent tasks. It also supports full lifecycle management, including creation, suspension, resumption, and deletion operations.
 - Snapshot Boot Acceleration -- Supports snapshot functionality for virtual machine memory and root file systems. Through snapshot mechanisms, it enables second-level sandbox startup, significantly improving resource utilization efficiency in large-scale deployment scenarios. Snapshots adopt Copy-on-Write technology to minimize storage overhead.
-- Streamlined Container Networking -- Uses CNI plugins for the outer sandbox network namespace while Conch keeps ownership of reusable slots, sandbox netns lifecycle, guest tap setup, and VM-side NAT. This keeps the fast network pool model while aligning the outer network boundary with CRI-style runtimes.
+- Streamlined Container Networking -- Uses CNI plugins for the outer sandbox network namespace while Conch keeps ownership of reusable slots, sandbox netns lifecycle, guest tap setup, and VM-side NAT. This keeps the fast network pool model with a clear outer network boundary.
 
 ## Quick Start
 
@@ -68,13 +68,14 @@ conch template create --source docker.io/library/nginx:latest \
   --initrd ./conch.initrd \
   -t localhost/conch/nginx:latest
 
-conch image push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
-conch image pull hub.oepkgs.net/conch/nginx:latest
+# registry.example.com is a placeholder; replace it with your registry
+conch image push localhost/conch/nginx:latest registry.example.com/conch/nginx:latest
+conch image pull registry.example.com/conch/nginx:latest
 # Download OCI content without creating snapshots
-conch image pull --skip-unpack hub.oepkgs.net/conch/nginx:latest
+conch image pull --skip-unpack registry.example.com/conch/nginx:latest
 
 # Unpack a local Conch image separately
-conch image unpack hub.oepkgs.net/conch/conch-index:v0.1
+conch image unpack registry.example.com/conch/nginx:latest
 ```
 
 `conch template create` converts a standard OCI rootfs image into a native EROFS rootfs, combines it with the kernel/initrd component into a Conch boot index, and registers it as a Template. `conch image pull` unpacks by default, while `--skip-unpack` downloads OCI content only; `conch image unpack` is mainly for separately unpacking local Conch images or troubleshooting.

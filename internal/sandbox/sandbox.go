@@ -134,7 +134,7 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 		vmStartSpec: vmStartSpec,
 		vmmName:     rec.VMMName,
 		namespace:   rec.Namespace,
-		sandboxID:   rec.ConchSandboxID,
+		sandboxID:   rec.SandboxID,
 		leaseID:     rec.LeaseID,
 		slot:        slot,
 	}

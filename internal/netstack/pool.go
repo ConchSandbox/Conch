@@ -601,7 +601,7 @@ func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
 		return err
 	}
 
-	cniResult, err := p.cniManager.SetupPodNetwork(ctx, cniID, netnsPath, opts...)
+	cniResult, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to setup cni network: %w", err)
 	}
@@ -772,7 +772,7 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 			errs = append(errs, err)
 		}
 		if p != nil && p.cniManager != nil {
-			cniErr = p.teardownPodNetworkWithRetry(ctx, slot, netnsPath)
+			cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
 		}
 		if cniErr == nil {
 			slot.clearSlotNetwork()
@@ -802,10 +802,10 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 	return errors.Join(errs...)
 }
 
-func (p *Pool) teardownPodNetworkWithRetry(ctx context.Context, slot *Slot, netnsPath string) error {
+func (p *Pool) teardownSandboxNetworkWithRetry(ctx context.Context, slot *Slot, netnsPath string) error {
 	var lastErr error
 	for attempt := 0; attempt <= cniTeardownRetryAttempts; attempt++ {
-		err := p.cniManager.TeardownPodNetwork(ctx, slot.CNIContainerID(), netnsPath, slot.cniOpts...)
+		err := p.cniManager.TeardownSandboxNetwork(ctx, slot.CNIContainerID(), netnsPath, slot.cniOpts...)
 		if err == nil {
 			return nil
 		}

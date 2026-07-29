@@ -22,7 +22,6 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
-	"github.com/openeuler/Conch/internal/cri"
 	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -41,7 +40,6 @@ type Daemon struct {
 	stateStore     state.Store
 	runtimeService *conchruntime.Service
 	volumeManager  *volume.Manager
-	criServer      *cri.Server
 	daemonClient   *containerdclient.Client
 	httpServer     *http.Server
 	listener       net.Listener
@@ -179,27 +177,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 	logger.Info("State recovery reconciled",
 		ulog.F("sandboxes_checked", recoveryResult.SandboxesChecked),
 		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
-		ulog.F("containers_checked", recoveryResult.ContainersChecked),
-		ulog.F("containers_downgraded", recoveryResult.ContainersDowngraded),
 		ulog.F("runtime_leases_checked", recoveryResult.RuntimeLeasesChecked),
 		ulog.F("lease_errors", recoveryResult.LeaseErrors),
 		ulog.F("sandboxes_rehydrated", recoveryResult.SandboxesRehydrated),
 		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
 		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
 	)
-
-	if cfg.CRI.Enabled {
-		s.criServer = cri.New(cri.Config{
-			Socket: cfg.CRI.Socket,
-		}, s.runtimeService, store)
-		if err := s.criServer.Start(); err != nil {
-			cancel()
-			_ = store.Close()
-			_ = host.Close()
-			return nil, fmt.Errorf("start cri server: %w", err)
-		}
-		logger.Info("CRI server initialized", ulog.F("socket", cfg.CRI.Socket))
-	}
 
 	handleSignals(ctx, cancel, s)
 
@@ -321,13 +304,6 @@ func (s *Daemon) Shutdown() {
 			}
 		}
 
-		if s.criServer != nil {
-			finish := cleanupdiag.Start("daemon.cri.stop")
-			s.criServer.Stop()
-			finish(nil)
-			logger.Info("CRI server stopped")
-		}
-
 		if s.containerdHost != nil {
 			finish := cleanupdiag.Start("daemon.containerd_host.close")
 			err := s.containerdHost.Close()
@@ -374,7 +350,6 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		Namespace:    req.Namespace,
-		PodSandboxID: req.SandboxID,
 		SandboxID:    req.SandboxID,
 		LeaseID:      req.LeaseID,
 		TemplateID:   req.TemplateID,
@@ -402,6 +377,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":      "ok",
+		"sandbox_id":  result.SandboxID,
 		"ip":          result.IP,
 		"agent_token": result.AgentToken,
 	})
@@ -500,9 +476,9 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
-		Namespace:    req.Namespace,
-		PodSandboxID: req.SandboxID,
-		Labels:       req.Labels,
+		Namespace: req.Namespace,
+		SandboxID: req.SandboxID,
+		Labels:    req.Labels,
 	})
 	if err != nil {
 		http.Error(w, "Failed to checkpoint sandbox: "+err.Error(), http.StatusInternalServerError)

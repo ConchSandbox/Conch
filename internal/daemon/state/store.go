@@ -15,11 +15,6 @@ type Store interface {
 	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)
 	DeleteNetworkSlot(context.Context, string) error
 
-	UpsertContainer(context.Context, ContainerRecord) error
-	GetContainer(context.Context, string) (ContainerRecord, error)
-	ListContainers(context.Context) ([]ContainerRecord, error)
-	DeleteContainer(context.Context, string) error
-
 	UpsertTemplate(context.Context, TemplateRecord) error
 	GetTemplate(context.Context, string) (TemplateRecord, error)
 	ListTemplates(context.Context) ([]TemplateRecord, error)

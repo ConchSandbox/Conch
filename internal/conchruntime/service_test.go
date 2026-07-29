@@ -103,8 +103,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
 
 	before := state.SandboxRecord{
-		PodSandboxID:                  "pod-a",
-		ConchSandboxID:                "sandbox-a",
+		SandboxID:                     "sandbox-a",
 		Namespace:                     "team-a",
 		State:                         state.SandboxReady,
 		SourceTemplateID:              "t0",
@@ -129,9 +128,9 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 
 	result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
-		Namespace:    "team-a",
-		PodSandboxID: "pod-a",
-		Labels:       map[string]string{"generation": "t1"},
+		Namespace: "team-a",
+		SandboxID: "sandbox-a",
+		Labels:    map[string]string{"generation": "t1"},
 	})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox() error = %v", err)
@@ -178,7 +177,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		t.Fatalf("t1 lineage = %#v", t1)
 	}
 
-	after, err := store.GetSandbox(ctx, "pod-a")
+	after, err := store.GetSandbox(ctx, "sandbox-a")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -209,8 +208,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	svc := New(sandboxOps, imageOps, imageOps, store, "default")
 	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:                  "pod-lineage",
-		ConchSandboxID:                "sandbox-lineage",
+		SandboxID:                     "sandbox-lineage",
 		Namespace:                     "team-a",
 		State:                         state.SandboxReady,
 		SourceTemplateID:              "t0",
@@ -223,11 +221,11 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
-	t1Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", PodSandboxID: "pod-lineage"})
+	t1Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", SandboxID: "sandbox-lineage"})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox(t1) error = %v", err)
 	}
-	t2Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", PodSandboxID: "pod-lineage"})
+	t2Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", SandboxID: "sandbox-lineage"})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox(t2) error = %v", err)
 	}
@@ -272,7 +270,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 		t.Fatalf("checkpoint template states = (%#v, %#v)", t1, t2)
 	}
 
-	rec, err := store.GetSandbox(ctx, "pod-lineage")
+	rec, err := store.GetSandbox(ctx, "sandbox-lineage")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -293,20 +291,19 @@ func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	store := newTestStore(t)
 
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:   "pod-1",
-		ConchSandboxID: "sandbox-1",
-		Namespace:      "default",
-		State:          state.SandboxReady,
+		SandboxID: "sandbox-1",
+		Namespace: "default",
+		State:     state.SandboxReady,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("cleanup failed")}
 	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.RemoveSandbox(ctx, "default", "pod-1"); err == nil {
+	if err := svc.RemoveSandbox(ctx, "default", "sandbox-1"); err == nil {
 		t.Fatalf("RemoveSandbox() error = nil, want cleanup error")
 	}
-	rec, err := store.GetSandbox(ctx, "pod-1")
+	rec, err := store.GetSandbox(ctx, "sandbox-1")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -321,7 +318,7 @@ func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
 	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.RemoveSandbox(ctx, "default", "missing-pod"); err != nil {
+	if err := svc.RemoveSandbox(ctx, "default", "missing-sandbox"); err != nil {
 		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 
@@ -338,10 +335,9 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	rec := state.SandboxRecord{
-		PodSandboxID:   "pod-serialized",
-		ConchSandboxID: "sandbox-serialized",
-		Namespace:      "default",
-		State:          state.SandboxReady,
+		SandboxID: "sandbox-serialized",
+		Namespace: "default",
+		State:     state.SandboxReady,
 	}
 	if err := store.UpsertSandbox(ctx, rec); err != nil {
 		t.Fatal(err)
@@ -354,9 +350,9 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	secondDone := make(chan error, 1)
-	go func() { firstDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
+	go func() { firstDone <- svc.RemoveSandbox(ctx, "default", rec.SandboxID) }()
 	<-ops.firstEntered
-	go func() { secondDone <- svc.RemoveSandbox(ctx, "default", rec.PodSandboxID) }()
+	go func() { secondDone <- svc.RemoveSandbox(ctx, "default", rec.SandboxID) }()
 	select {
 	case err := <-secondDone:
 		t.Fatalf("second RemoveSandbox returned before first completed: %v", err)
@@ -372,7 +368,7 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	if got := ops.calls.Load(); got != 2 {
 		t.Fatalf("Delete() calls = %d, want 2 serialized calls", got)
 	}
-	if _, err := store.GetSandbox(ctx, rec.PodSandboxID); !errors.Is(err, state.ErrNotFound) {
+	if _, err := store.GetSandbox(ctx, rec.SandboxID); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("sandbox record remains after Remove: %v", err)
 	}
 }
@@ -395,14 +391,13 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	svc := New(sandboxOps, nil, nil, store, "default")
 
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
-		PodSandboxID: "pod-1",
-		SandboxID:    "sandbox-1",
-		TemplateID:   "tmpl-1",
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
 	}); err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
-	rec, err := store.GetSandbox(ctx, "pod-1")
+	rec, err := store.GetSandbox(ctx, "sandbox-1")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -447,6 +442,30 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 	if result.AgentToken != sandboxOps.req.AgentToken {
 		t.Fatalf("result.AgentToken = %q, want generated token", result.AgentToken)
+	}
+	if result.SandboxID != "sandbox-1" || sandboxOps.req.SandboxID != "sandbox-1" {
+		t.Fatalf("sandbox identity = result:%q request:%q", result.SandboxID, sandboxOps.req.SandboxID)
+	}
+}
+
+func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, nil, store, "default")
+
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if result.SandboxID == "" || sandboxOps.req.SandboxID != result.SandboxID {
+		t.Fatalf("sandbox identity = result:%q request:%q", result.SandboxID, sandboxOps.req.SandboxID)
+	}
+	record, err := store.GetSandbox(context.Background(), result.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if record.SandboxID != result.SandboxID {
+		t.Fatalf("record.SandboxID = %q, want %q", record.SandboxID, result.SandboxID)
 	}
 }
 

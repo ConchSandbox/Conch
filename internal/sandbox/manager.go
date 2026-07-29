@@ -517,45 +517,45 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 			m.cleanupStaleVolumeState(rec, &errs)
 			continue
 		}
-		if rec.ConchSandboxID == "" {
+		if rec.SandboxID == "" {
 			continue
 		}
 		sb, err := attachSandboxFromRecord(rec, m.pool)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("attach sandbox %s: %w", rec.PodSandboxID, err))
+			errs = append(errs, fmt.Errorf("attach sandbox %s: %w", rec.SandboxID, err))
 			continue
 		}
 		sb.leaseID = rec.LeaseID
 		if rec.VsockCID != 0 {
-			if err := m.cidAllocator.ReserveCID(rec.ConchSandboxID, rec.VsockCID); err != nil {
-				if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.ConchSandboxID); cleanupErr != nil {
+			if err := m.cidAllocator.ReserveCID(rec.SandboxID, rec.VsockCID); err != nil {
+				if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 				}
-				errs = append(errs, fmt.Errorf("reserve cid for %s: %w", rec.ConchSandboxID, err))
+				errs = append(errs, fmt.Errorf("reserve cid for %s: %w", rec.SandboxID, err))
 				continue
 			}
 		}
 		if sb.slot != nil && m.pool != nil {
-			if err := m.pool.RestoreInUse(sb.slot, rec.ConchSandboxID, rec.IP); err != nil {
-				if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.ConchSandboxID); cleanupErr != nil {
+			if err := m.pool.RestoreInUse(sb.slot, rec.SandboxID, rec.IP); err != nil {
+				if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 				}
-				errs = append(errs, fmt.Errorf("restore network slot for %s: %w", rec.ConchSandboxID, err))
+				errs = append(errs, fmt.Errorf("restore network slot for %s: %w", rec.SandboxID, err))
 				continue
 			}
 		}
 		volumeDevices := volumeDevicesFromState(rec.VolumeDevices)
 		if len(volumeDevices) > 0 && m.volumeManager == nil {
 			err := fmt.Errorf("volume manager is not configured")
-			if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.ConchSandboxID); cleanupErr != nil {
+			if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
 				err = errors.Join(err, cleanupErr)
 			}
-			errs = append(errs, fmt.Errorf("restore volume state for %s: %w", rec.ConchSandboxID, err))
+			errs = append(errs, fmt.Errorf("restore volume state for %s: %w", rec.SandboxID, err))
 			continue
 		}
 		if len(volumeDevices) > 0 {
 			namespace := rec.Namespace
-			sandboxID := rec.ConchSandboxID
+			sandboxID := rec.SandboxID
 			volumeManager := m.volumeManager
 			registerSandboxVolumeCleanup(sb, volumeManager, namespace, sandboxID, volumeDevices)
 			if err := volumeManager.RestoreSandbox(namespace, sandboxID, volumeDevices); err != nil {
@@ -566,11 +566,11 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 				continue
 			}
 		}
-		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.ConchSandboxID), &sandboxEntry{
+		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.SandboxID), &sandboxEntry{
 			state: sandboxReady,
 			sbx:   sb,
 		})
-		restoredSandboxIDs[rec.ConchSandboxID] = struct{}{}
+		restoredSandboxIDs[rec.SandboxID] = struct{}{}
 		restored++
 	}
 	return restored, restoredSandboxIDs, errors.Join(errs...)
@@ -594,10 +594,7 @@ func (m *Manager) cleanupStaleVolumeState(rec state.SandboxRecord, errs *[]error
 		return
 	}
 	namespace := m.resolveNamespace(rec.Namespace)
-	sandboxID := rec.ConchSandboxID
-	if sandboxID == "" {
-		sandboxID = rec.PodSandboxID
-	}
+	sandboxID := rec.SandboxID
 	if sandboxID == "" {
 		return
 	}

@@ -11,11 +11,6 @@ const (
 	NetworkSlotAssigned = "ASSIGNED"
 	NetworkSlotCleaning = "CLEANING"
 
-	ContainerCreated = "CREATED"
-	ContainerRunning = "RUNNING_PLACEHOLDER"
-	ContainerExited  = "EXITED"
-	ContainerUnknown = "UNKNOWN"
-
 	TemplateOriginImage      = "image"
 	TemplateOriginCheckpoint = "checkpoint"
 	TemplateBootModeCold     = "cold"
@@ -27,27 +22,17 @@ const (
 )
 
 type SandboxRecord struct {
-	PodSandboxID   string            `json:"pod_sandbox_id"`
-	ConchSandboxID string            `json:"conch_sandbox_id"`
-	Namespace      string            `json:"namespace"`
-	PodNamespace   string            `json:"pod_namespace,omitempty"`
-	Name           string            `json:"name"`
-	UID            string            `json:"uid"`
-	Attempt        uint32            `json:"attempt"`
-	State          string            `json:"state"`
-	CreatedAt      int64             `json:"created_at"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	Annotations    map[string]string `json:"annotations,omitempty"`
-	RuntimeHandler string            `json:"runtime_handler,omitempty"`
-	LeaseID        string            `json:"lease_id,omitempty"`
+	SandboxID string `json:"sandbox_id"`
+	Namespace string `json:"namespace"`
+	State     string `json:"state"`
+	CreatedAt int64  `json:"created_at"`
+	LeaseID   string `json:"lease_id,omitempty"`
 	// SourceTemplateID and SourceBootIndexDigest identify the immutable boot
 	// content used to create this sandbox.
 	SourceTemplateID              string         `json:"source_template_id,omitempty"`
 	SourceBootIndexDigest         string         `json:"source_boot_index_digest,omitempty"`
 	CheckpointHeadTemplateID      string         `json:"checkpoint_head_template_id,omitempty"`
 	CheckpointHeadBootIndexDigest string         `json:"checkpoint_head_boot_index_digest,omitempty"`
-	ImageName                     string         `json:"image_name,omitempty"`
-	SnapshotID                    string         `json:"snapshot_id,omitempty"`
 	IP                            string         `json:"ip,omitempty"`
 	VMMName                       string         `json:"vmm_name,omitempty"`
 	VCPUNum                       int64          `json:"vcpu_num,omitempty"`
@@ -95,25 +80,6 @@ type NetworkSlotRecord struct {
 	LastError string `json:"last_error,omitempty"`
 }
 
-type ContainerRecord struct {
-	ContainerID  string            `json:"container_id"`
-	PodSandboxID string            `json:"pod_sandbox_id"`
-	Name         string            `json:"name"`
-	State        string            `json:"state"`
-	CreatedAt    int64             `json:"created_at"`
-	StartedAt    int64             `json:"started_at,omitempty"`
-	FinishedAt   int64             `json:"finished_at,omitempty"`
-	Image        string            `json:"image,omitempty"`
-	ImageRef     string            `json:"image_ref,omitempty"`
-	Command      []string          `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	LogPath      string            `json:"log_path,omitempty"`
-	ExitCode     int32             `json:"exit_code,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	Annotations  map[string]string `json:"annotations,omitempty"`
-	LastError    string            `json:"last_error,omitempty"`
-}
-
 type TemplateRecord struct {
 	ID              string `json:"id"`
 	Origin          string `json:"origin"`
@@ -137,7 +103,7 @@ type TemplateRecord struct {
 // a checkpoint template and advances the source sandbox's logical head.
 type CheckpointPublication struct {
 	TemplateID                  string
-	PodSandboxID                string
+	SandboxID                   string
 	BootIndexDigest             string
 	BootMode                    string
 	BuildRef                    string

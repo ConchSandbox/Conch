@@ -5,7 +5,7 @@
 ## 基本设计
 
 - Conch 创建可复用网络槽位和网络命名空间。
-- Conch 为每个槽位使用专属的 CNI ID 调用 CNI `ADD`，例如 `conch-slot-2`，而非按照 CRI 的惯例使用临时生成的沙箱ID。
+- Conch 为每个槽位使用专属的 CNI ID 调用 CNI `ADD`，例如 `conch-slot-2`，而非使用临时生成的沙箱 ID。
 - CNI 创建外层沙箱接口，通常是 `eth0`，包括 bridge/veth、IPAM、路由以及策略等。
 - Conch 随后创建虚拟机侧 `tap`，在内部启用转发，并在对外 IP 与 tap 子网内 IP 之间安装本地转发规则。
 - 在显式删除槽位时，Conch 先移除 tap/NAT，再调用 CNI `DEL`，删除网络命名空间，最后根据 CNI 配置移除 Conch 拥有的空 CNI bridge link。

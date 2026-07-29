@@ -135,21 +135,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
 	}
+	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
-		opts.SandboxID = opts.PodSandboxID
-	}
-	if opts.PodSandboxID == "" {
-		opts.PodSandboxID = opts.SandboxID
-	}
-	if opts.PodSandboxID == "" {
 		id, err := NewID()
 		if err != nil {
 			return SandboxCreateResult{}, err
 		}
-		opts.PodSandboxID = id
 		opts.SandboxID = id
 	}
-	unlock := s.lifecycleLocks.lock(opts.PodSandboxID)
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
 	namespace := s.normalizeNamespace(opts.Namespace)
 	if opts.LeaseID == "" {
@@ -177,18 +171,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
 	rec := state.SandboxRecord{
-		PodSandboxID:                  opts.PodSandboxID,
-		ConchSandboxID:                opts.SandboxID,
+		SandboxID:                     opts.SandboxID,
 		Namespace:                     namespace,
-		PodNamespace:                  firstNonEmpty(opts.PodNamespace, opts.Namespace),
-		Name:                          opts.Name,
-		UID:                           opts.UID,
-		Attempt:                       opts.Attempt,
 		State:                         state.SandboxReady,
 		CreatedAt:                     createdAt,
-		Labels:                        copyMap(opts.Labels),
-		Annotations:                   copyMap(opts.Annotations),
-		RuntimeHandler:                opts.RuntimeHandler,
 		LeaseID:                       opts.LeaseID,
 		SourceTemplateID:              opts.TemplateID,
 		SourceBootIndexDigest:         createResult.BootIndexDigest,
@@ -223,11 +209,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, err
 	}
 	return SandboxCreateResult{
-		PodSandboxID: opts.PodSandboxID,
-		SandboxID:    opts.SandboxID,
-		Namespace:    namespace,
-		IP:           createResult.IP,
-		AgentToken:   createResult.AgentToken,
+		SandboxID:  opts.SandboxID,
+		Namespace:  namespace,
+		IP:         createResult.IP,
+		AgentToken: createResult.AgentToken,
 	}, nil
 }
 
@@ -274,20 +259,16 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 	}
 }
 
-func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID string) error {
+func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
-	unlock := s.lifecycleLocks.lock(podSandboxID)
+	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, recErr := s.getSandbox(ctx, podSandboxID)
+	rec, recErr := s.getSandbox(ctx, sandboxID)
 	stateFound := recErr == nil
 	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
 		return fmt.Errorf("get sandbox state: %w", recErr)
-	}
-	sandboxID := rec.ConchSandboxID
-	if sandboxID == "" {
-		sandboxID = podSandboxID
 	}
 	if namespace == "" {
 		namespace = rec.Namespace
@@ -306,29 +287,24 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 		return err
 	}
 	if s.Store != nil {
-		return s.Store.DeleteSandbox(ctx, podSandboxID)
+		return s.Store.DeleteSandbox(ctx, sandboxID)
 	}
 	return nil
 }
 
-func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID string) error {
+func (s *Service) SuspendSandbox(ctx context.Context, namespace, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
-	unlock := s.lifecycleLocks.lock(podSandboxID)
+	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, _ := s.getSandbox(ctx, podSandboxID)
-	sandboxID := rec.ConchSandboxID
-	if sandboxID == "" {
-		sandboxID = podSandboxID
-	}
+	rec, _ := s.getSandbox(ctx, sandboxID)
 	if namespace == "" {
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
 	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
-	if rec.PodSandboxID != "" {
-
+	if rec.SandboxID != "" {
 		rec.State = state.SandboxSuspended
 		if err != nil {
 			rec.State = state.SandboxUnknown
@@ -339,23 +315,19 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID st
 	return err
 }
 
-func (s *Service) ResumeSandbox(ctx context.Context, namespace, podSandboxID string) error {
+func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
-	unlock := s.lifecycleLocks.lock(podSandboxID)
+	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, _ := s.getSandbox(ctx, podSandboxID)
-	sandboxID := rec.ConchSandboxID
-	if sandboxID == "" {
-		sandboxID = podSandboxID
-	}
+	rec, _ := s.getSandbox(ctx, sandboxID)
 	if namespace == "" {
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
 	err := s.Sandbox.Resume(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
-	if rec.PodSandboxID != "" {
+	if rec.SandboxID != "" {
 		rec.State = state.SandboxReady
 		if err != nil {
 			rec.State = state.SandboxUnknown
@@ -372,9 +344,9 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if s == nil || s.Sandbox == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("sandbox service is not configured")
 	}
-	unlock := s.lifecycleLocks.lock(opts.PodSandboxID)
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
-	rec, err := s.getSandbox(ctx, opts.PodSandboxID)
+	rec, err := s.getSandbox(ctx, opts.SandboxID)
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
@@ -387,10 +359,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if s.Templates == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
 	}
-	sandboxID := rec.ConchSandboxID
-	if sandboxID == "" {
-		sandboxID = opts.PodSandboxID
-	}
+	sandboxID := rec.SandboxID
 	namespace := opts.Namespace
 	if namespace == "" {
 		namespace = rec.Namespace
@@ -454,7 +423,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	}
 	if err := s.Templates.PublishCheckpoint(ctx, state.CheckpointPublication{
 		TemplateID:                  templateRecord.ID,
-		PodSandboxID:                rec.PodSandboxID,
+		SandboxID:                   rec.SandboxID,
 		BootIndexDigest:             published.BootIndexDigest,
 		BootMode:                    state.TemplateBootModeResume,
 		BuildRef:                    published.ImageName,
@@ -925,55 +894,6 @@ func (s *Service) SnapshotInfo(ctx context.Context, opts runtimeapi.SnapshotInfo
 		return runtimeapi.SnapshotRecord{}, fmt.Errorf("snapshot service is not configured")
 	}
 	return s.Snapshot.Info(ctx, opts)
-}
-
-func (s *Service) CreateContainer(ctx context.Context, opts ContainerCreateOptions) (ContainerCreateResult, error) {
-	if opts.ContainerID == "" {
-		id, err := NewID()
-		if err != nil {
-			return ContainerCreateResult{}, err
-		}
-		opts.ContainerID = id
-	}
-	rec := state.ContainerRecord{
-		ContainerID:  opts.ContainerID,
-		PodSandboxID: opts.PodSandboxID,
-		Name:         opts.Name,
-		State:        state.ContainerCreated,
-		CreatedAt:    time.Now().UnixNano(),
-		Image:        opts.Image,
-		ImageRef:     opts.ImageRef,
-		Command:      append([]string(nil), opts.Command...),
-		Args:         append([]string(nil), opts.Args...),
-		LogPath:      opts.LogPath,
-		Labels:       copyMap(opts.Labels),
-		Annotations:  copyMap(opts.Annotations),
-	}
-	if s != nil && s.Store != nil {
-		if err := s.Store.UpsertContainer(ctx, rec); err != nil {
-			return ContainerCreateResult{}, err
-		}
-	}
-	return ContainerCreateResult{ContainerID: opts.ContainerID}, nil
-}
-
-func (s *Service) SetContainerState(ctx context.Context, containerID, next string) error {
-	if s == nil || s.Store == nil {
-		return nil
-	}
-	rec, err := s.Store.GetContainer(ctx, containerID)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UnixNano()
-	rec.State = next
-	switch next {
-	case state.ContainerRunning:
-		rec.StartedAt = now
-	case state.ContainerExited:
-		rec.FinishedAt = now
-	}
-	return s.Store.UpsertContainer(ctx, rec)
 }
 
 func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) error {

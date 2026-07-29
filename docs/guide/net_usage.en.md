@@ -5,7 +5,7 @@ This guide describes how to configure and verify the current Conch network desig
 ## Basic Design
 
 - Conch creates reusable network slots and network namespaces.
-- Conch calls CNI `ADD` for each slot with a dedicated CNI ID, such as `conch-slot-2`, instead of using a temporarily generated sandbox ID in the usual CRI style.
+- Conch calls CNI `ADD` for each slot with a dedicated CNI ID, such as `conch-slot-2`, instead of using a temporary sandbox ID.
 - CNI creates the outer sandbox interface, normally `eth0`, including bridge/veth, IPAM, routes, and policy.
 - Conch then creates the VM-facing `tap`, enables forwarding inside the namespace, and installs local forwarding rules between the outer IP and the IP inside the tap subnet.
 - When a slot is explicitly removed, Conch removes tap/NAT first, calls CNI `DEL`, deletes the network namespace, and finally removes the empty Conch-owned CNI bridge link selected from the CNI config.

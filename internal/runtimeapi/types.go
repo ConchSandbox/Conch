@@ -19,23 +19,15 @@ const (
 )
 
 type SandboxCreateOptions struct {
-	Namespace      string
-	PodNamespace   string
-	PodSandboxID   string
-	SandboxID      string
-	Name           string
-	UID            string
-	Attempt        uint32
-	Labels         map[string]string
-	Annotations    map[string]string
-	RuntimeHandler string
-	LeaseID        string
-	TemplateID     string
-	VMMName        string
-	VCPUNum        int64
-	VCPUMax        int64
-	RamMB          int64
-	VolumeMounts   []volume.Mount
+	Namespace    string
+	SandboxID    string
+	LeaseID      string
+	TemplateID   string
+	VMMName      string
+	VCPUNum      int64
+	VCPUMax      int64
+	RamMB        int64
+	VolumeMounts []volume.Mount
 }
 
 type SandboxDefaults struct {
@@ -47,22 +39,16 @@ type SandboxDefaults struct {
 }
 
 type SandboxCreateResult struct {
-	PodSandboxID string
-	SandboxID    string
-	Namespace    string
-	IP           string
-	AgentToken   string
-}
-
-type SandboxLifecycleOptions struct {
-	Namespace    string
-	PodSandboxID string
+	SandboxID  string
+	Namespace  string
+	IP         string
+	AgentToken string
 }
 
 type SandboxCheckpointOptions struct {
-	Namespace    string
-	PodSandboxID string
-	Labels       map[string]string
+	Namespace string
+	SandboxID string
+	Labels    map[string]string
 }
 
 type SandboxCheckpointResult struct {
@@ -134,23 +120,6 @@ type TemplateRecord struct {
 	CreatedAt        int64             `json:"created_at,omitempty"`
 	UpdatedAt        int64             `json:"updated_at,omitempty"`
 	LastError        string            `json:"last_error,omitempty"`
-}
-
-type ContainerCreateOptions struct {
-	ContainerID  string
-	PodSandboxID string
-	Name         string
-	Image        string
-	ImageRef     string
-	Command      []string
-	Args         []string
-	LogPath      string
-	Labels       map[string]string
-	Annotations  map[string]string
-}
-
-type ContainerCreateResult struct {
-	ContainerID string
 }
 
 type PullImageOptions struct {

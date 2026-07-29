@@ -1,6 +1,6 @@
 # Conch Netstack
 
-Conch uses a daemon-owned network pool with prefilled slots ready to be leased to pod sandboxes.
+Conch uses a daemon-owned network pool with prefilled slots ready to be leased to sandboxes.
 
 - A "slot" is the unit of the Conch network pool. Each slot represents one reusable sandbox network namespace and its prepared network state:
   - a stable slot identity, such as `conch-slot-2`
@@ -19,6 +19,6 @@ Network ownership is split as follows:
 
 The reusable slot pool, network namespace lifecycle, and VM guest tap/NAT model are inspired by the [E2B sandbox network design](https://github.com/e2b-dev/infra/tree/main/packages/orchestrator/internal/sandbox/network). Conch keeps those ideas because they are useful for fast sandbox startup and slot reuse.
 
-The major change in this package is the CRI/CNI compatibility split: Conch no longer directly builds the outer bridge/veth/IP/route stack. That outer sandbox networking boundary is now delegated to CNI plugins, while Conch remains responsible for the VM edge.
+The major change in this package is the Sandbox/CNI responsibility split: Conch no longer directly builds the outer bridge/veth/IP/route stack. That outer sandbox networking boundary is now delegated to CNI plugins, while Conch remains responsible for the VM edge.
 
 See [docs/guide/net_usage.en.md](../../docs/guide/net_usage.en.md) for host requirements, CNI configuration, runtime flow, and manual verification steps.

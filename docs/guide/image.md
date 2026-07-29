@@ -25,28 +25,30 @@ conch template rm <tmpl_id>
 
 ## 2. conch image pull / push / unpack
 
+以下命令中的 `registry.example.com` 是占位域名，使用时需替换为实际镜像仓库。
+
 `conch image pull` 用于拉取 Conch 镜像，并在本地完成 unpack：
 
 ```bash
-conch image pull hub.oepkgs.net/conch/openeuler:cri-v0.0.1-x86
+conch image pull registry.example.com/conch/openeuler:latest
 ```
 
 如果只需要下载 OCI content、暂时不生成本地 snapshot：
 
 ```bash
-conch image pull --skip-unpack hub.oepkgs.net/conch/openeuler:cri-v0.0.1-x86
+conch image pull --skip-unpack registry.example.com/conch/openeuler:latest
 ```
 
 `conch image push` 用于推送本地 Conch OCI index：
 
 ```bash
-conch image push localhost/conch/openeuler:latest hub.oepkgs.net/conch/openeuler:latest
+conch image push localhost/conch/openeuler:latest registry.example.com/conch/openeuler:latest
 ```
 
 `conch image unpack` 用于把已有 Conch boot OCI index 解包到 conchd 管理的 containerd store：
 
 ```bash
-conch image unpack hub.oepkgs.net/conch/openeuler:cri-v0.0.1-x86
+conch image unpack registry.example.com/conch/openeuler:latest
 ```
 
 这些命令会通过 conchd API 操作 conchd 进程内的 containerd store，支持通过配置读取 `server.unix_socket` 或 `server.host` / `server.port`，以及 `containerd.default_namespace`。使用 `--skip-unpack` 拉取后，可以稍后通过 `conch image unpack` 单独生成 snapshot。
@@ -98,4 +100,3 @@ conch debug snapshot rm sha256:xxxxxxxx
 ## 5. 相关文档
 
 - 镜像工作流设计：`docs/design/image-workflow.md`
-- CRI 使用文档：`docs/guide/cri.md`

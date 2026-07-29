@@ -19,11 +19,13 @@ type fakeSandboxRehydrator struct {
 	count      int
 	restoredID map[string]struct{}
 	err        error
+	records    []state.SandboxRecord
 	cleanupID  map[string]struct{}
 	cleanupErr error
 }
 
 func (f *fakeSandboxRehydrator) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
+	f.records = append([]state.SandboxRecord(nil), records...)
 	return f.count, f.restoredID, f.err
 }
 
@@ -43,7 +45,7 @@ func (f *fakeLeaseClient) WithRuntimeLease(ctx context.Context, namespace, lease
 	return ctx, leaseID, nil
 }
 
-func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
+func TestReconcileDowngradesUnverifiableSandbox(t *testing.T) {
 	ctx := context.Background()
 	store, err := state.OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {
@@ -52,19 +54,11 @@ func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 	defer store.Close()
 
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:   "pod-1",
-		ConchSandboxID: "sandbox-1",
-		Namespace:      "default",
-		State:          state.SandboxReady,
+		SandboxID: "sandbox-1",
+		Namespace: "default",
+		State:     state.SandboxReady,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
-	}
-	if err := store.UpsertContainer(ctx, state.ContainerRecord{
-		ContainerID:  "container-1",
-		PodSandboxID: "pod-1",
-		State:        state.ContainerRunning,
-	}); err != nil {
-		t.Fatalf("UpsertContainer() error = %v", err)
 	}
 
 	leases := &fakeLeaseClient{}
@@ -79,9 +73,6 @@ func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 	if result.SandboxesDowngraded != 1 {
 		t.Fatalf("SandboxesDowngraded = %d, want 1", result.SandboxesDowngraded)
 	}
-	if result.ContainersDowngraded != 1 {
-		t.Fatalf("ContainersDowngraded = %d, want 1", result.ContainersDowngraded)
-	}
 	if result.RuntimeLeasesChecked != 1 {
 		t.Fatalf("RuntimeLeasesChecked = %d, want 1", result.RuntimeLeasesChecked)
 	}
@@ -89,7 +80,7 @@ func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 		t.Fatalf("runtime lease = %q, want %q", leases.seen["default"], containerdclient.RuntimeLeaseID("default"))
 	}
 
-	sandbox, err := store.GetSandbox(ctx, "pod-1")
+	sandbox, err := store.GetSandbox(ctx, "sandbox-1")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -98,14 +89,6 @@ func TestReconcileDowngradesUnverifiableSandboxAndContainer(t *testing.T) {
 	}
 	if sandbox.LeaseID != containerdclient.RuntimeLeaseID("default") {
 		t.Fatalf("sandbox.LeaseID = %q, want runtime lease", sandbox.LeaseID)
-	}
-
-	container, err := store.GetContainer(ctx, "container-1")
-	if err != nil {
-		t.Fatalf("GetContainer() error = %v", err)
-	}
-	if container.State != state.ContainerUnknown {
-		t.Fatalf("container.State = %q, want %q", container.State, state.ContainerUnknown)
 	}
 }
 
@@ -118,8 +101,7 @@ func TestReconcileDowngradesSandboxWithMissingMount(t *testing.T) {
 	defer store.Close()
 
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:    "pod-1",
-		ConchSandboxID:  "sandbox-1",
+		SandboxID:       "sandbox-1",
 		Namespace:       "default",
 		State:           state.SandboxReady,
 		VMMSocketPath:   t.TempDir() + "/vmm.sock",
@@ -142,7 +124,7 @@ func TestReconcileDowngradesSandboxWithMissingMount(t *testing.T) {
 	if result.SandboxesDowngraded != 1 {
 		t.Fatalf("SandboxesDowngraded = %d, want 1", result.SandboxesDowngraded)
 	}
-	rec, err := store.GetSandbox(ctx, "pod-1")
+	rec, err := store.GetSandbox(ctx, "sandbox-1")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
@@ -168,8 +150,7 @@ func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:    "pod-1",
-		ConchSandboxID:  "sandbox-1",
+		SandboxID:       "sandbox-1",
 		Namespace:       "default",
 		State:           state.SandboxReady,
 		NetworkNS:       nsPath,
@@ -215,8 +196,7 @@ func TestReconcileCleansStaleAssignedNetworkSlotsAfterRehydrate(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:    "pod-ready",
-		ConchSandboxID:  "sandbox-ready",
+		SandboxID:       "sandbox-ready",
 		Namespace:       "default",
 		State:           state.SandboxReady,
 		NetworkNS:       nsPath,
@@ -241,6 +221,9 @@ func TestReconcileCleansStaleAssignedNetworkSlotsAfterRehydrate(t *testing.T) {
 	}
 	if result.SandboxesRehydrated != 1 {
 		t.Fatalf("SandboxesRehydrated = %d, want 1", result.SandboxesRehydrated)
+	}
+	if len(rehydrator.records) != 1 || rehydrator.records[0].SandboxID != "sandbox-ready" {
+		t.Fatalf("rehydrated records = %#v, want sandbox-ready", rehydrator.records)
 	}
 	if _, ok := rehydrator.cleanupID["sandbox-ready"]; !ok {
 		t.Fatalf("cleanup ids = %#v, want sandbox-ready", rehydrator.cleanupID)

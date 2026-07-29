@@ -164,7 +164,7 @@ func TestStorePublishCheckpointDelegatesAtomicTransition(t *testing.T) {
 		t.Fatalf("UpsertTemplate() error = %v", err)
 	}
 	if err := raw.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:                  "pod-1",
+		SandboxID:                     "sandbox-1",
 		SourceTemplateID:              "t0",
 		SourceBootIndexDigest:         digest.FromString("source boot index").String(),
 		CheckpointHeadTemplateID:      "t0",
@@ -175,7 +175,7 @@ func TestStorePublishCheckpointDelegatesAtomicTransition(t *testing.T) {
 	checkpointDigest := digest.FromString("checkpoint boot index").String()
 	if err := store.PublishCheckpoint(ctx, state.CheckpointPublication{
 		TemplateID:                  "t1",
-		PodSandboxID:                "pod-1",
+		SandboxID:                   "sandbox-1",
 		BootIndexDigest:             checkpointDigest,
 		BootMode:                    state.TemplateBootModeResume,
 		ExpectedHeadTemplateID:      "t0",
@@ -188,7 +188,7 @@ func TestStorePublishCheckpointDelegatesAtomicTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate() error = %v", err)
 	}
-	sandboxRecord, err := raw.GetSandbox(ctx, "pod-1")
+	sandboxRecord, err := raw.GetSandbox(ctx, "sandbox-1")
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
