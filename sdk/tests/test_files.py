@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 
 import pytest
@@ -132,6 +133,34 @@ def test_get_file_writes_complete_download():
         assert result == {"status": AgentClient.STATUS_SUCCESS, "size": 11, "message": "OK"}
         with open(local_path, "rb") as f:
             assert f.read() == b"hello conch"
+
+
+def test_get_file_preserves_existing_target_mode():
+    client = client_with_download_chunks([FakeDownloadChunk(b"replacement")])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = os.path.join(tmpdir, "downloaded.sh")
+        with open(local_path, "wb") as f:
+            f.write(b"original")
+        os.chmod(local_path, 0o751)
+
+        client.get_file("/tmp/remote.sh", local_path)
+
+        assert stat.S_IMODE(os.stat(local_path).st_mode) == 0o751
+
+
+def test_get_file_new_target_uses_umask_mode():
+    client = client_with_download_chunks([FakeDownloadChunk(b"new file")])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = os.path.join(tmpdir, "downloaded.txt")
+        previous_umask = os.umask(0o027)
+        try:
+            client.get_file("/tmp/remote.txt", local_path)
+        finally:
+            os.umask(previous_umask)
+
+        assert stat.S_IMODE(os.stat(local_path).st_mode) == 0o640
 
 
 def test_get_file_failure_preserves_existing_file():

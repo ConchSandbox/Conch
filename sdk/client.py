@@ -1,7 +1,8 @@
 import codecs
 import os
+import secrets
+import stat
 import sys
-import tempfile
 from itertools import chain
 from io import IOBase, TextIOBase
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -18,6 +19,17 @@ if PROJECT_ROOT not in sys.path:
 from api.py_proto import agent_connect
 from api.py_proto import agent_pb2
 from .errors import InvalidArgumentError, handle_rpc_error
+
+
+def _create_download_temp(local_dir: str) -> tuple[int, str]:
+    for _ in range(100):
+        temp_path = os.path.join(local_dir, f".conch-download-{secrets.token_hex(16)}")
+        try:
+            # os.open applies the caller's umask to 0o666, matching open(..., "wb").
+            return os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), temp_path
+        except FileExistsError:
+            continue
+    raise FileExistsError("failed to create a unique download temporary file")
 
 
 class AgentClient:
@@ -188,13 +200,19 @@ class AgentClient:
     def get_file(self, remote_path: str, local_path: str) -> Dict[str, Any]:
         local_dir = os.path.dirname(local_path) or "."
         os.makedirs(local_dir, exist_ok=True)
+        try:
+            target_mode = stat.S_IMODE(os.stat(local_path).st_mode)
+        except FileNotFoundError:
+            target_mode = None
         size = 0
         request = agent_pb2.GetFileRequest(filepath=remote_path)
         chunks = self._rpc_call(self.file_client.get_file_stream, request)
         temp_path = None
         committed = False
         try:
-            fd, temp_path = tempfile.mkstemp(prefix=".conch-download-", dir=local_dir)
+            fd, temp_path = _create_download_temp(local_dir)
+            if target_mode is not None:
+                os.fchmod(fd, target_mode)
             with os.fdopen(fd, "wb") as out:
                 for chunk in self._rpc_iter(chunks):
                     out.write(chunk.content)
