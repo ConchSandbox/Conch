@@ -522,6 +522,34 @@ func applyCommandEnvAndDir(cmd *exec.Cmd, workDir string, envMap map[string]stri
 	cmd.Env = env
 }
 
+// configureCommandProcessGroup keeps command descendants within a group that can
+// be terminated when the command context expires. PTY startup creates its own
+// session (and therefore process group), so it must not also request Setpgid.
+func configureCommandProcessGroup(cmd *exec.Cmd, usesPTY bool) {
+	if !usesPTY {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+}
+
+func terminateCommandProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
 // Execute command and stream output events while it is running.
 func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []string, workDir string, envMap map[string]string, stdin []byte, ptyConfig *pb.PTY, stream processConnectStream) (int, bool, error) {
 	if cmdName == "" {
@@ -533,6 +561,7 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 
 	cmd := exec.CommandContext(cmdCtx, cmdName, args...)
 	applyCommandEnvAndDir(cmd, workDir, envMap)
+	configureCommandProcessGroup(cmd, ptyConfig != nil)
 	if ptyConfig != nil {
 		return executePtyCmd(cmdCtx, cmd, ptyConfig, stream, cancel)
 	}
@@ -547,7 +576,7 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 	}
 	if err := stream.Send(processStartEvent(int32(cmd.Process.Pid))); err != nil {
 		outputState.failBeforeStart(err)
-		_ = cmd.Process.Kill()
+		_ = terminateCommandProcessGroup(cmd)
 		_ = cmd.Wait()
 		exitCode := -1
 		if cmd.ProcessState != nil {
@@ -603,7 +632,7 @@ func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY, stream
 
 	if err := stream.Send(processStartEvent(int32(cmd.Process.Pid))); err != nil {
 		outputState.failBeforeStart(err)
-		_ = cmd.Process.Kill()
+		_ = terminateCommandProcessGroup(cmd)
 		_ = tty.Close()
 		_ = cmd.Wait()
 		exitCode := -1
@@ -738,6 +767,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	procCtx, cancelProc := processContext(requestTimeout)
 	cmd := exec.CommandContext(procCtx, req.Cmd, args...)
 	applyCommandEnvAndDir(cmd, workDir, req.Env)
+	configureCommandProcessGroup(cmd, req.Pty != nil)
 	if req.Pty == nil {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}

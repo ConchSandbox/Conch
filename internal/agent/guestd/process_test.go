@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -139,6 +140,48 @@ func TestStartProcessTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("StartProcess(timeout) ran for %s, want less than one second", elapsed)
+	}
+}
+
+func TestStartProcessTimeoutTerminatesChildProcessGroup(t *testing.T) {
+	server := &AgentServer{}
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:  "sh",
+		Args: []string{"-c", "sleep 5 & echo $! > \"$1\"; wait", "sh", childPIDPath},
+		Cwd:  t.TempDir(),
+	}, stream, 50*time.Millisecond)
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("StartProcess(timeout) error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("StartProcess(timeout) ran for %s, want less than one second", elapsed)
+	}
+
+	pidBytes, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatalf("ReadFile(child pid) error = %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("child pid = %q: %v", pidBytes, err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		err = syscall.Kill(childPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("check child pid %d: %v", childPID, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child process %d still running after command timeout", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
