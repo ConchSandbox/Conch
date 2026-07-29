@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,7 +74,9 @@ type Service struct {
 	Templates         conchtemplate.Store
 	DefaultNamespace  string
 	SandboxDefaults   SandboxDefaults
+	SandboxLogs       *SandboxLogBuffer
 	lifecycleLocks    sandboxLifecycleLocks
+	logCleanupOnce    sync.Once
 }
 
 type sandboxLifecycleLock struct {
@@ -123,6 +126,7 @@ func New(sandboxOps SandboxOps, imageOps ImageOps, templateBootIndexOps Template
 		Store:             store,
 		Templates:         conchtemplate.NewStore(store),
 		DefaultNamespace:  namespace,
+		SandboxLogs:       newSandboxLogBuffer(defaultSandboxLogLimit),
 	}
 }
 
@@ -137,6 +141,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
 	}
+	logSandboxID := strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
 		opts.SandboxID = opts.PodSandboxID
 	}
@@ -151,6 +156,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		opts.PodSandboxID = id
 		opts.SandboxID = id
 	}
+	logSandboxID = strings.TrimSpace(opts.SandboxID)
 	unlock := s.lifecycleLocks.lock(opts.PodSandboxID)
 	defer unlock()
 	namespace := s.normalizeNamespace(opts.Namespace)
@@ -162,7 +168,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
-
+	s.ClearSandboxLogsFor(namespace, logSandboxID)
 	req := sandbox.CreateRequest{
 		Namespace:    namespace,
 		TemplateID:   opts.TemplateID,
@@ -218,14 +224,19 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VolumeDevices:                 volumeDevicesToState(createResult.VolumeDevices),
 	}
 	if err != nil {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("create failed: %v", err))
+		s.ExpireSandboxLogsFor(namespace, logSandboxID)
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
 		_ = s.upsertSandbox(ctx, rec)
 		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("create state persist failed: %v", err))
+		s.ExpireSandboxLogsFor(namespace, logSandboxID)
 		return SandboxCreateResult{}, err
 	}
+	s.AppendSandboxLogFor(namespace, logSandboxID, "info", fmt.Sprintf("created sandbox namespace=%s ip=%s", namespace, createResult.IP))
 	return SandboxCreateResult{
 		PodSandboxID: opts.PodSandboxID,
 		SandboxID:    opts.SandboxID,
@@ -288,12 +299,14 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 	}
 	unlock := s.lifecycleLocks.lock(podSandboxID)
 	defer unlock()
+
 	rec, recErr := s.getSandbox(ctx, podSandboxID)
 	stateFound := recErr == nil
 	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
 		return fmt.Errorf("get sandbox state: %w", recErr)
 	}
 	sandboxID := rec.ConchSandboxID
+	logSandboxID := strings.TrimSpace(rec.ConchSandboxID)
 	if sandboxID == "" {
 		sandboxID = podSandboxID
 	}
@@ -301,6 +314,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
+
 	err := s.Sandbox.Delete(sandbox.DeleteRequest{Namespace: namespace, SandboxID: sandboxID})
 	if err != nil && strings.Contains(err.Error(), "not found") {
 		err = nil
@@ -311,11 +325,17 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, podSandboxID str
 			rec.LastError = err.Error()
 			_ = s.upsertSandbox(ctx, rec)
 		}
+		s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("delete failed: %v", err))
 		return err
 	}
 	if s.Store != nil {
-		return s.Store.DeleteSandbox(ctx, podSandboxID)
+		if err := s.Store.DeleteSandbox(ctx, podSandboxID); err != nil {
+			s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("delete failed: %v", err))
+			return err
+		}
 	}
+	s.AppendSandboxLogFor(namespace, logSandboxID, "info", "deleted sandbox")
+	s.ExpireSandboxLogsFor(namespace, logSandboxID)
 	return nil
 }
 
@@ -327,6 +347,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID st
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, podSandboxID)
 	sandboxID := rec.ConchSandboxID
+	logSandboxID := strings.TrimSpace(rec.ConchSandboxID)
 	if sandboxID == "" {
 		sandboxID = podSandboxID
 	}
@@ -341,8 +362,16 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, podSandboxID st
 		if err != nil {
 			rec.State = state.SandboxUnknown
 			rec.LastError = err.Error()
+		} else {
+			rec.LastError = ""
 		}
 		_ = s.upsertSandbox(ctx, rec)
+	}
+	if err != nil {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("pause failed: %v", err))
+	} else {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "info", "paused sandbox")
+		s.ExpireSandboxLogsFor(namespace, logSandboxID)
 	}
 	return err
 }
@@ -355,6 +384,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, podSandboxID str
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, podSandboxID)
 	sandboxID := rec.ConchSandboxID
+	logSandboxID := strings.TrimSpace(rec.ConchSandboxID)
 	if sandboxID == "" {
 		sandboxID = podSandboxID
 	}
@@ -372,6 +402,11 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, podSandboxID str
 			rec.LastError = ""
 		}
 		_ = s.upsertSandbox(ctx, rec)
+	}
+	if err != nil {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "error", fmt.Sprintf("resume failed: %v", err))
+	} else {
+		s.AppendSandboxLogFor(namespace, logSandboxID, "info", "resumed sandbox")
 	}
 	return err
 }
@@ -1032,4 +1067,331 @@ func copyMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+const (
+	defaultSandboxLogLimit           = 1024
+	defaultSandboxLogTTL             = 24 * time.Hour
+	defaultSandboxLogCleanupInterval = 8 * time.Hour
+)
+
+type sandboxLogCursor struct {
+	timestamp int64
+	id        uint64
+}
+
+func normalizeSandboxLogKey(key SandboxLogKey) SandboxLogKey {
+	key.Namespace = strings.TrimSpace(key.Namespace)
+	if key.Namespace == "" {
+		key.Namespace = "default"
+	}
+	key.SandboxID = strings.TrimSpace(key.SandboxID)
+	return key
+}
+
+func parseSandboxLogCursor(raw string) (sandboxLogCursor, error) {
+	if raw == "" {
+		return sandboxLogCursor{}, nil
+	}
+	timestamp, id, ok := strings.Cut(raw, ":")
+	if !ok {
+		return sandboxLogCursor{}, fmt.Errorf("cursor must have timestamp:id format")
+	}
+	timestampMillis, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || timestampMillis < 0 {
+		return sandboxLogCursor{}, fmt.Errorf("cursor timestamp is invalid")
+	}
+	sequenceID, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return sandboxLogCursor{}, fmt.Errorf("cursor sequence id is invalid")
+	}
+	return sandboxLogCursor{timestamp: timestampMillis, id: sequenceID}, nil
+}
+
+func ValidateSandboxLogCursor(raw string) error {
+	_, err := parseSandboxLogCursor(raw)
+	return err
+}
+
+func formatSandboxLogCursor(entry SandboxLogEntry) string {
+	return fmt.Sprintf("%d:%d", entry.Time.UnixMilli(), entry.ID)
+}
+
+func sandboxLogEntryBeforeCursor(entry SandboxLogEntry, cursor sandboxLogCursor) bool {
+	timestamp := entry.Time.UnixMilli()
+	return timestamp < cursor.timestamp || timestamp == cursor.timestamp && entry.ID < cursor.id
+}
+
+func sandboxLogEntryAfterCursor(entry SandboxLogEntry, cursor sandboxLogCursor) bool {
+	timestamp := entry.Time.UnixMilli()
+	return timestamp > cursor.timestamp || timestamp == cursor.timestamp && entry.ID > cursor.id
+}
+
+type SandboxLogBuffer struct {
+	mu        sync.Mutex
+	limit     int
+	ttl       time.Duration
+	now       func() time.Time
+	nextID    map[SandboxLogKey]uint64
+	expiresAt map[SandboxLogKey]time.Time
+	entries   map[SandboxLogKey][]SandboxLogEntry
+}
+
+func newSandboxLogBuffer(limit int, ttl ...time.Duration) *SandboxLogBuffer {
+	if limit <= 0 {
+		limit = defaultSandboxLogLimit
+	}
+	logTTL := defaultSandboxLogTTL
+	if len(ttl) > 0 && ttl[0] > 0 {
+		logTTL = ttl[0]
+	}
+	return &SandboxLogBuffer{
+		limit:     limit,
+		ttl:       logTTL,
+		now:       time.Now,
+		nextID:    make(map[SandboxLogKey]uint64),
+		expiresAt: make(map[SandboxLogKey]time.Time),
+		entries:   make(map[SandboxLogKey][]SandboxLogEntry),
+	}
+}
+
+func (b *SandboxLogBuffer) Append(sandboxID, level, message string) {
+	b.AppendKey(SandboxLogKey{Namespace: "default", SandboxID: sandboxID}, level, message)
+}
+
+func (b *SandboxLogBuffer) AppendKey(key SandboxLogKey, level, message string) {
+	key = normalizeSandboxLogKey(key)
+	level = strings.ToLower(strings.TrimSpace(level))
+	message = strings.TrimSpace(message)
+	if b == nil || key.SandboxID == "" || message == "" {
+		return
+	}
+	if level == "" {
+		level = "info"
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now().UTC()
+	b.pruneExpiredLocked(now)
+	delete(b.expiresAt, key)
+	b.nextID[key]++
+	logs := append(b.entries[key], SandboxLogEntry{
+		ID:        b.nextID[key],
+		Time:      now,
+		Namespace: key.Namespace,
+		SandboxID: key.SandboxID,
+		Level:     level,
+		Message:   message,
+	})
+	if len(logs) > b.limit {
+		logs = logs[len(logs)-b.limit:]
+	}
+	b.entries[key] = logs
+}
+
+func (b *SandboxLogBuffer) Get(opts SandboxLogsOptions) SandboxLogsResult {
+	key := normalizeSandboxLogKey(SandboxLogKey{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
+	if b == nil || key.SandboxID == "" {
+		return SandboxLogsResult{Logs: []SandboxLogEntry{}}
+	}
+	cursor, _ := parseSandboxLogCursor(opts.Cursor)
+	level := strings.ToLower(strings.TrimSpace(opts.Level))
+	search := strings.ToLower(strings.TrimSpace(opts.Search))
+	out := make([]SandboxLogEntry, 0)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pruneExpiredLocked(b.now().UTC())
+	logs := b.entries[key]
+	appendEntry := func(entry SandboxLogEntry) bool {
+		if level != "" && strings.ToLower(entry.Level) != level {
+			return false
+		}
+		if search != "" && !strings.Contains(strings.ToLower(entry.Message), search) {
+			return false
+		}
+		out = append(out, entry)
+		return opts.Limit > 0 && len(out) >= opts.Limit
+	}
+	if strings.EqualFold(opts.Direction, "backward") {
+		for i := len(logs) - 1; i >= 0; i-- {
+			entry := logs[i]
+			if opts.Cursor != "" && !sandboxLogEntryBeforeCursor(entry, cursor) {
+				continue
+			}
+			if appendEntry(entry) {
+				break
+			}
+		}
+	} else {
+		for _, entry := range logs {
+			if opts.Cursor != "" && !sandboxLogEntryAfterCursor(entry, cursor) {
+				continue
+			}
+			if appendEntry(entry) {
+				break
+			}
+		}
+	}
+	result := SandboxLogsResult{Logs: out}
+	if len(out) > 0 {
+		result.NextCursor = formatSandboxLogCursor(out[len(out)-1])
+	}
+	return result
+}
+
+func (b *SandboxLogBuffer) Expire(sandboxID string) {
+	b.ExpireKey(SandboxLogKey{Namespace: "default", SandboxID: sandboxID})
+}
+
+func (b *SandboxLogBuffer) ExpireKey(key SandboxLogKey) {
+	key = normalizeSandboxLogKey(key)
+	if b == nil || key.SandboxID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.entries[key]; !ok {
+		return
+	}
+	b.expiresAt[key] = b.now().UTC().Add(b.ttl)
+}
+
+func (b *SandboxLogBuffer) pruneExpiredLocked(now time.Time) {
+	for key, expiresAt := range b.expiresAt {
+		if now.Before(expiresAt) {
+			continue
+		}
+		delete(b.entries, key)
+		delete(b.nextID, key)
+		delete(b.expiresAt, key)
+	}
+}
+
+func (b *SandboxLogBuffer) pruneExpired(now time.Time) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pruneExpiredLocked(now.UTC())
+}
+
+func (b *SandboxLogBuffer) Clear(sandboxID string) {
+	b.ClearKey(SandboxLogKey{Namespace: "default", SandboxID: sandboxID})
+}
+
+func (b *SandboxLogBuffer) ClearKey(key SandboxLogKey) {
+	key = normalizeSandboxLogKey(key)
+	if b == nil || key.SandboxID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.entries, key)
+	delete(b.nextID, key)
+	delete(b.expiresAt, key)
+}
+
+func (s *Service) AppendSandboxLog(sandboxID, level, message string) {
+	s.AppendSandboxLogFor("default", sandboxID, level, message)
+}
+
+func (s *Service) AppendSandboxLogFor(namespace, sandboxID, level, message string) {
+	if s == nil {
+		return
+	}
+	if s.SandboxLogs == nil {
+		s.SandboxLogs = newSandboxLogBuffer(defaultSandboxLogLimit)
+	}
+	s.SandboxLogs.AppendKey(SandboxLogKey{Namespace: namespace, SandboxID: sandboxID}, level, message)
+}
+
+func (s *Service) SetSandboxLogTTL(ttl time.Duration) {
+	if s == nil || ttl <= 0 {
+		return
+	}
+	if s.SandboxLogs == nil {
+		s.SandboxLogs = newSandboxLogBuffer(defaultSandboxLogLimit, ttl)
+		return
+	}
+	s.SandboxLogs.mu.Lock()
+	defer s.SandboxLogs.mu.Unlock()
+	s.SandboxLogs.ttl = ttl
+}
+
+func (s *Service) StartSandboxLogCleanup(ctx context.Context, interval ...time.Duration) {
+	if s == nil || ctx == nil {
+		return
+	}
+	cleanupInterval := defaultSandboxLogCleanupInterval
+	if len(interval) > 0 && interval[0] > 0 {
+		cleanupInterval = interval[0]
+	}
+	if s.SandboxLogs == nil {
+		s.SandboxLogs = newSandboxLogBuffer(defaultSandboxLogLimit)
+	}
+	logs := s.SandboxLogs
+	s.logCleanupOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(cleanupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case now := <-ticker.C:
+					logs.pruneExpired(now)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (s *Service) ExpireSandboxLogs(sandboxID string) {
+	s.ExpireSandboxLogsFor("default", sandboxID)
+}
+
+func (s *Service) ExpireSandboxLogsFor(namespace, sandboxID string) {
+	if s == nil || s.SandboxLogs == nil {
+		return
+	}
+	s.SandboxLogs.ExpireKey(SandboxLogKey{Namespace: namespace, SandboxID: sandboxID})
+}
+
+func (s *Service) ClearSandboxLogs(sandboxID string) {
+	s.ClearSandboxLogsFor("default", sandboxID)
+}
+
+func (s *Service) ClearSandboxLogsFor(namespace, sandboxID string) {
+	if s == nil || s.SandboxLogs == nil {
+		return
+	}
+	s.SandboxLogs.ClearKey(SandboxLogKey{Namespace: namespace, SandboxID: sandboxID})
+}
+
+func (s *Service) HasSandboxLogs(namespace, sandboxID string) bool {
+	if s == nil || s.SandboxLogs == nil {
+		return false
+	}
+	key := normalizeSandboxLogKey(SandboxLogKey{Namespace: namespace, SandboxID: sandboxID})
+	s.SandboxLogs.mu.Lock()
+	defer s.SandboxLogs.mu.Unlock()
+	s.SandboxLogs.pruneExpiredLocked(s.SandboxLogs.now().UTC())
+	_, ok := s.SandboxLogs.entries[key]
+	return ok
+}
+
+func (s *Service) GetSandboxLogs(_ context.Context, opts SandboxLogsOptions) (SandboxLogsResult, error) {
+	if strings.TrimSpace(opts.SandboxID) == "" {
+		return SandboxLogsResult{}, fmt.Errorf("sandbox id is required")
+	}
+	if err := ValidateSandboxLogCursor(opts.Cursor); err != nil {
+		return SandboxLogsResult{}, err
+	}
+	if s == nil || s.SandboxLogs == nil {
+		return SandboxLogsResult{Logs: []SandboxLogEntry{}}, nil
+	}
+	opts.Namespace = s.normalizeNamespace(opts.Namespace)
+	return s.SandboxLogs.Get(opts), nil
 }

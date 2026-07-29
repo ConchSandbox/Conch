@@ -141,7 +141,8 @@ type sandboxLogEntryResponse struct {
 }
 
 type getSandboxLogsResponse struct {
-	Logs []sandboxLogEntryResponse `json:"logs"`
+	Logs       []sandboxLogEntryResponse `json:"logs"`
+	NextCursor string                    `json:"nextCursor"`
 }
 
 type updateSandboxNetworkRequest = runtimeapi.SandboxNetworkConfig

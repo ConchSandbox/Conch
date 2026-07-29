@@ -241,23 +241,22 @@ sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `cursor` | int | 查询起始时间戳，单位为毫秒，必须大于或等于 `0` |
-| `limit` | int | 最多返回的日志数量，默认值为 `1000`，取值范围为 `0` 至 `1000` |
-| `direction` | str | 查询方向；`forward` 从 `cursor` 向后查询较新的日志，`backward` 向前查询较旧的日志 |
-| `level` | str | 最低日志级别，例如 `info`、`warn` 或 `error`；低于该级别的日志不会返回 |
-| `search` | str | 对日志消息进行区分大小写的子字符串匹配，最大长度为 `25` 个字符 |
+| `cursor` | str | 不透明分页游标，格式由服务端管理；首次查询时省略，后续查询使用上一次响应中的 `nextCursor` |
+| `limit` | int | 最多返回的日志数量，默认值为 `1000`，取值范围为 `1` 至 `1000` |
+| `direction` | str | 查询方向；`forward` 返回游标之后的日志，`backward` 返回游标之前的日志；省略游标的反向查询从最新日志开始 |
+| `level` | str | 按日志级别精确筛选，例如 `info`、`warn` 或 `error`，不区分大小写 |
+| `search` | str | 对日志消息进行不区分大小写的子字符串匹配，最大长度为 `256` 个字符 |
 
-返回格式为 `{"logs": [...]}`。每条日志包含：
+返回格式为 `{"logs": [...], "nextCursor": "..."}`。`nextCursor` 用于继续同一方向的分页查询。每条日志包含：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `timestamp` | str | 日志产生时间，使用 RFC 3339 格式 |
 | `message` | str | 日志正文 |
 | `level` | str | 日志严重级别，例如 `info`、`warn` 或 `error` |
-| `fields` | dict[str, str] | 日志附加上下文，例如沙箱 ID、命名空间或操作名称 |
+| `fields` | dict[str, str] | 日志附加上下文，当前包含 `namespace` 和 `sandboxID` |
 
-如果没有找到符合条件的日志，则返回 `{"logs": []}`。
-注：后端功能将在后续 PR 中实现。
+如果没有找到符合条件的日志，则返回 `{"logs": [], "nextCursor": ""}`。
 
 ### 更新沙箱网络策略
 

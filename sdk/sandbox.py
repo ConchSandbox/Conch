@@ -951,7 +951,7 @@ class Sandbox:
 
     def logs(
             self,
-            cursor: Optional[int] = None,
+            cursor: Optional[str] = None,
             limit: Optional[int] = None,
             direction: Optional[str] = None,
             level: Optional[str] = None,

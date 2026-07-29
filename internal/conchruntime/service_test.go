@@ -288,6 +288,302 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}
 }
 
+func TestSandboxLogsEmptyAndPerSandbox(t *testing.T) {
+	ctx := context.Background()
+	svc := New(nil, nil, nil, nil, "default")
+
+	empty, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-a"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(empty.Logs) != 0 {
+		t.Fatalf("empty logs = %#v, want none", empty.Logs)
+	}
+
+	svc.AppendSandboxLog("sandbox-a", "info", "created sandbox")
+	svc.AppendSandboxLog("sandbox-b", "info", "other sandbox")
+	svc.AppendSandboxLog("sandbox-a", "info", "paused sandbox")
+
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-a"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox"})
+	if got.Logs[0].ID != 1 || got.Logs[1].ID != 2 {
+		t.Fatalf("log IDs = %d,%d, want 1,2", got.Logs[0].ID, got.Logs[1].ID)
+	}
+	if got.Logs[0].SandboxID != "sandbox-a" || got.Logs[0].Level != "info" || got.Logs[0].Time.IsZero() {
+		t.Fatalf("log entry = %#v, want structured sandbox info entry with timestamp", got.Logs[0])
+	}
+}
+
+func TestSandboxLogBufferDropsOldestEntries(t *testing.T) {
+	buf := newSandboxLogBuffer(2)
+	buf.Append("sandbox-a", "info", "one")
+	buf.Append("sandbox-a", "info", "two")
+	buf.Append("sandbox-a", "info", "three")
+
+	got := buf.Get(SandboxLogsOptions{SandboxID: "sandbox-a"})
+	assertLogMessages(t, got.Logs, []string{"two", "three"})
+	if got.Logs[0].ID != 2 || got.Logs[1].ID != 3 {
+		t.Fatalf("log IDs = %d,%d, want 2,3", got.Logs[0].ID, got.Logs[1].ID)
+	}
+}
+
+func TestSandboxLogsCursorLimitLevelAndSearch(t *testing.T) {
+	ctx := context.Background()
+	svc := New(nil, nil, nil, nil, "default")
+	now := time.UnixMilli(1000)
+	svc.SandboxLogs.now = func() time.Time {
+		now = now.Add(time.Millisecond)
+		return now
+	}
+	svc.AppendSandboxLog("sandbox-a", "info", "created sandbox")
+	svc.AppendSandboxLog("sandbox-a", "error", "network update failed")
+	svc.AppendSandboxLog("sandbox-a", "warn", "network update delayed")
+	svc.AppendSandboxLog("sandbox-a", "error", "delete failed")
+
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    "1001:1",
+		Limit:     1,
+		Level:     "ERROR",
+		Search:    "FAILED",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"network update failed"})
+
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    got.NextCursor,
+		Level:     "error",
+		Search:    "failed",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"delete failed"})
+
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    "1004:0",
+		Limit:     2,
+		Direction: "backward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"network update delayed", "network update failed"})
+}
+
+func TestSandboxLogsAreIsolatedByNamespace(t *testing.T) {
+	ctx := context.Background()
+	svc := New(nil, nil, nil, nil, "default")
+	svc.AppendSandboxLogFor("tenant-a", "sandbox-1", "info", "tenant a")
+	svc.AppendSandboxLogFor("tenant-b", "sandbox-1", "info", "tenant b")
+
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{Namespace: "tenant-a", SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"tenant a"})
+	if got.Logs[0].Namespace != "tenant-a" {
+		t.Fatalf("log namespace = %q, want tenant-a", got.Logs[0].Namespace)
+	}
+	svc.ClearSandboxLogsFor("tenant-a", "sandbox-1")
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{Namespace: "tenant-b", SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"tenant b"})
+}
+
+func TestSandboxLogsCompoundCursorHandlesSameMillisecond(t *testing.T) {
+	ctx := context.Background()
+	svc := New(nil, nil, nil, nil, "default")
+	svc.SandboxLogs.now = func() time.Time { return time.UnixMilli(1000) }
+	svc.AppendSandboxLog("sandbox-a", "info", "one")
+	svc.AppendSandboxLog("sandbox-a", "info", "two")
+	svc.AppendSandboxLog("sandbox-a", "info", "three")
+
+	first, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-a", Limit: 2})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, first.Logs, []string{"one", "two"})
+	if first.NextCursor != "1000:2" {
+		t.Fatalf("NextCursor = %q, want 1000:2", first.NextCursor)
+	}
+	second, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    first.NextCursor,
+		Limit:     2,
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, second.Logs, []string{"three"})
+
+	backward, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Limit:     2,
+		Direction: "backward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, backward.Logs, []string{"three", "two"})
+	older, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    backward.NextCursor,
+		Direction: "backward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, older.Logs, []string{"one"})
+}
+
+func TestRemoveSandboxExpiresLogsAfterTTL(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+	svc := New(&fakeSandboxOps{}, nil, nil, store, "default")
+	svc.SetSandboxLogTTL(time.Minute)
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	svc.SandboxLogs.now = func() time.Time { return now }
+	svc.AppendSandboxLog("sandbox-1", "info", "created sandbox")
+
+	if err := svc.RemoveSandbox(ctx, "default", "pod-1"); err != nil {
+		t.Fatalf("RemoveSandbox() error = %v", err)
+	}
+
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"created sandbox", "deleted sandbox"})
+
+	now = now.Add(time.Minute)
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(got.Logs) != 0 {
+		t.Fatalf("logs = %#v, want empty after TTL", got.Logs)
+	}
+}
+
+func TestSandboxLogAppendBeforeTTLCancelsExpiry(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	svc := New(nil, nil, nil, nil, "default")
+	svc.SetSandboxLogTTL(time.Minute)
+	svc.SandboxLogs.now = func() time.Time { return now }
+	svc.AppendSandboxLog("sandbox-a", "info", "created sandbox")
+	svc.ExpireSandboxLogs("sandbox-a")
+
+	now = now.Add(30 * time.Second)
+	svc.AppendSandboxLog("sandbox-a", "info", "reused sandbox")
+
+	now = now.Add(time.Minute)
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-a"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"created sandbox", "reused sandbox"})
+}
+
+func TestSuspendSandboxExpiresLogsAfterTTL(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+	svc := New(&fakeSandboxOps{}, nil, nil, store, "default")
+	svc.SetSandboxLogTTL(time.Minute)
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	svc.SandboxLogs.now = func() time.Time { return now }
+	svc.AppendSandboxLog("sandbox-1", "info", "created sandbox")
+
+	if err := svc.SuspendSandbox(ctx, "default", "pod-1"); err != nil {
+		t.Fatalf("SuspendSandbox() error = %v", err)
+	}
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox"})
+
+	now = now.Add(time.Minute)
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(got.Logs) != 0 {
+		t.Fatalf("logs = %#v, want empty after TTL", got.Logs)
+	}
+}
+
+func TestResumeSandboxCancelsLogExpiry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+	svc := New(&fakeSandboxOps{}, nil, nil, store, "default")
+	svc.SetSandboxLogTTL(time.Minute)
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	svc.SandboxLogs.now = func() time.Time { return now }
+	svc.AppendSandboxLog("sandbox-1", "info", "created sandbox")
+
+	if err := svc.SuspendSandbox(ctx, "default", "pod-1"); err != nil {
+		t.Fatalf("SuspendSandbox() error = %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	if err := svc.ResumeSandbox(ctx, "default", "pod-1"); err != nil {
+		t.Fatalf("ResumeSandbox() error = %v", err)
+	}
+
+	now = now.Add(time.Minute)
+	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox", "resumed sandbox"})
+}
+
+func assertLogMessages(t *testing.T, got []SandboxLogEntry, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("logs = %#v, want messages %#v", got, want)
+	}
+	for i := range want {
+		if got[i].Message != want[i] {
+			t.Fatalf("logs[%d].Message = %q, want %q", i, got[i].Message, want[i])
+		}
+	}
+}
+
 func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

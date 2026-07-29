@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -168,6 +169,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
+	s.runtimeService.StartSandboxLogCleanup(ctx)
 	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
 		Store:             store,
 		LeaseClient:       daemonClient,
@@ -564,12 +566,89 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request, sandbo
 }
 
 func (s *Daemon) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request, sandboxID string) {
+	const defaultLogLimit = 1000
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// TODO: return persisted or buffered sandbox logs when the logging backend is wired.
-	writeJSON(w, getSandboxLogsResponse{Logs: []sandboxLogEntryResponse{}})
+	if s.runtimeService == nil {
+		http.Error(w, "Runtime service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if s.stateStore == nil {
+		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	cursor := query.Get("cursor")
+	if err := conchruntime.ValidateSandboxLogCursor(cursor); err != nil {
+		http.Error(w, "Invalid cursor", http.StatusBadRequest)
+		return
+	}
+	limit := defaultLogLimit
+	if query.Get("limit") != "" {
+		parsedLimit, parseErr := strconv.Atoi(query.Get("limit"))
+		if parseErr != nil {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsedLimit
+	}
+	if limit < 1 || limit > defaultLogLimit {
+		http.Error(w, "Invalid limit", http.StatusBadRequest)
+		return
+	}
+	direction := strings.ToLower(query.Get("direction"))
+	if direction != "" && direction != "forward" && direction != "backward" {
+		http.Error(w, "Invalid direction", http.StatusBadRequest)
+		return
+	}
+	if utf8.RuneCountInString(query.Get("search")) > 256 {
+		http.Error(w, "Invalid search", http.StatusBadRequest)
+		return
+	}
+	namespace := s.resolveNamespace(query.Get("namespace"))
+	record, err := s.findSandboxRecord(r.Context(), sandboxID, namespace)
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record != nil {
+		namespace = record.Namespace
+		sandboxID = record.ConchSandboxID
+	} else if !s.runtimeService.HasSandboxLogs(namespace, sandboxID) {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	result, err := s.runtimeService.GetSandboxLogs(r.Context(), conchruntime.SandboxLogsOptions{
+		Namespace: namespace,
+		SandboxID: sandboxID,
+		Cursor:    cursor,
+		Limit:     limit,
+		Direction: direction,
+		Level:     query.Get("level"),
+		Search:    query.Get("search"),
+	})
+	if err != nil {
+		http.Error(w, "Failed to get sandbox logs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	logs := make([]sandboxLogEntryResponse, len(result.Logs))
+	for i, entry := range result.Logs {
+		logs[i] = sandboxLogEntryResponse{
+			Timestamp: entry.Time.UTC().Format(time.RFC3339Nano),
+			Message:   entry.Message,
+			Level:     entry.Level,
+			Fields: map[string]string{
+				"namespace": entry.Namespace,
+				"sandboxID": entry.SandboxID,
+			},
+		}
+	}
+	writeJSON(w, getSandboxLogsResponse{Logs: logs, NextCursor: result.NextCursor})
 }
 
 func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request, sandboxID string) {
@@ -758,7 +837,16 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.runtimeService.SuspendSandbox(r.Context(), req.Namespace, req.SandboxID)
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	err = s.runtimeService.SuspendSandbox(r.Context(), record.Namespace, record.PodSandboxID)
 	if err != nil {
 		logger.Error("Failed to suspend sandbox",
 			ulog.F("sandbox_id", req.SandboxID),
@@ -784,7 +872,16 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.ResumeSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	if err := s.runtimeService.ResumeSandbox(r.Context(), record.Namespace, record.PodSandboxID); err != nil {
 		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
