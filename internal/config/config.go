@@ -24,6 +24,7 @@ type Config struct {
 	Containerd ContainerdConfig `yaml:"containerd"`
 	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
+	Volume     VolumeConfig     `yaml:"volume"`
 	State      StateConfig      `yaml:"state"`
 	CRI        CRIConfig        `yaml:"cri"`
 }
@@ -92,6 +93,17 @@ type SandboxConfig struct {
 	DefaultRAMMB       int64         `yaml:"default_ram_mb"`
 }
 
+type VolumeConfig struct {
+	MaxMounts int                  `yaml:"max_mounts"`
+	Backend   string               `yaml:"backend"`
+	Virtiofs  VolumeVirtiofsConfig `yaml:"virtiofs"`
+}
+
+type VolumeVirtiofsConfig struct {
+	Binary     string `yaml:"binary"`
+	RuntimeDir string `yaml:"runtime_dir"`
+}
+
 type StateConfig struct {
 	Path string `yaml:"path"`
 }
@@ -154,6 +166,14 @@ func DefaultConfig() *Config {
 			DefaultVCPUNum:     2,
 			DefaultVCPUMax:     2,
 			DefaultRAMMB:       4096,
+		},
+		Volume: VolumeConfig{
+			MaxMounts: 10,
+			Backend:   "virtiofs",
+			Virtiofs: VolumeVirtiofsConfig{
+				Binary:     "virtiofsd",
+				RuntimeDir: "/run/conch/sandboxes",
+			},
 		},
 		State: StateConfig{
 			Path: "/var/lib/conch/state.db",
@@ -277,6 +297,18 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.DefaultRAMMB == 0 {
 		cfg.Sandbox.DefaultRAMMB = defaultCfg.Sandbox.DefaultRAMMB
+	}
+	if cfg.Volume.MaxMounts == 0 {
+		cfg.Volume.MaxMounts = defaultCfg.Volume.MaxMounts
+	}
+	if cfg.Volume.Backend == "" {
+		cfg.Volume.Backend = defaultCfg.Volume.Backend
+	}
+	if cfg.Volume.Virtiofs.Binary == "" {
+		cfg.Volume.Virtiofs.Binary = defaultCfg.Volume.Virtiofs.Binary
+	}
+	if cfg.Volume.Virtiofs.RuntimeDir == "" {
+		cfg.Volume.Virtiofs.RuntimeDir = defaultCfg.Volume.Virtiofs.RuntimeDir
 	}
 	if cfg.State.Path == "" {
 		cfg.State.Path = defaultCfg.State.Path

@@ -28,7 +28,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
-	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -41,6 +41,7 @@ type Daemon struct {
 	containerdHost *containerdhost.Host
 	stateStore     state.Store
 	runtimeService *conchruntime.Service
+	volumeManager  *volume.Manager
 	criServer      *cri.Server
 	daemonClient   *containerdclient.Client
 	httpServer     *http.Server
@@ -103,6 +104,18 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 	s.stateStore = store
 	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
+	s.volumeManager, err = volume.NewManager(volume.Config{
+		MaxMounts: cfg.Volume.MaxMounts,
+		Backend:   cfg.Volume.Backend,
+		Virtiofs: volume.VirtiofsConfig{
+			Binary:     cfg.Volume.Virtiofs.Binary,
+			RuntimeDir: cfg.Volume.Virtiofs.RuntimeDir,
+		},
+	})
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("init volume manager: %w", err)
+	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
 		RootDir:          cfg.Containerd.RootDir,
@@ -129,6 +142,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
+			VolumeManager:      s.volumeManager,
 		},
 	})
 	if err != nil {
@@ -200,7 +214,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
-	s.router.HandleFunc("/api/sandbox/stop", s.handleStopSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
@@ -352,7 +365,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req = sandbox.SandboxCreateRequest{}
+	var req sandboxCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -361,18 +374,19 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		Namespace:    req.Namespace,
-		PodSandboxID: req.SandboxId,
-		SandboxID:    req.SandboxId,
+		PodSandboxID: req.SandboxID,
+		SandboxID:    req.SandboxID,
 		LeaseID:      req.LeaseID,
 		TemplateID:   req.TemplateID,
-		VMMName:      req.VmmName,
-		VCPUNum:      req.VcpuNum,
-		VCPUMax:      req.VcpuMax,
-		RamMB:        req.RamMB,
+		VMMName:      req.VMMName,
+		VCPUNum:      req.VCPUNum,
+		VCPUMax:      req.VCPUMax,
+		RamMB:        req.RAMMB,
+		VolumeMounts: req.VolumeMounts,
 	})
 	if err != nil {
 		logger.Error("Failed to create sandbox",
-			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
 		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
@@ -402,24 +416,24 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req sandbox.SandboxDeleteRequest
+	var req sandboxDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Warn("Invalid request body", ulog.F("error", err))
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	err := s.runtimeService.RemoveSandbox(r.Context(), req.Namespace, req.SandboxId)
+	err := s.runtimeService.RemoveSandbox(r.Context(), req.Namespace, req.SandboxID)
 	if err != nil {
 		logger.Error("Failed to delete sandbox",
-			ulog.F("sandbox_id", req.SandboxId),
+			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
 		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxId))
+	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxID))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -469,24 +483,6 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.runtimeService.ResumeSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
 		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func (s *Daemon) handleStopSandbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req sandboxLifecycleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.runtimeService.StopSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
-		http.Error(w, "Failed to stop sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

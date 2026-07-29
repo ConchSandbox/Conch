@@ -74,7 +74,7 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	if response.Status != "ok" || response.TemplateID == "" || response.BootIndexDigest != checkpointDigest {
 		t.Fatalf("checkpoint response = %#v", response)
 	}
-	if sandboxOps.checkpointReq.SandboxId != "sandbox-1" {
+	if sandboxOps.checkpointReq.SandboxID != "sandbox-1" {
 		t.Fatalf("checkpoint request = %#v", sandboxOps.checkpointReq)
 	}
 	if imageOps.checkpointPublishReq.SourceBootIndexDigest != sourceDigest {

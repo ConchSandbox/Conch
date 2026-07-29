@@ -5,8 +5,10 @@ package guestd
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -217,4 +219,126 @@ func bindMountToMerge() {
 			logger.Info("Bind mounted path", ulog.F("source", dir), ulog.F("target", target))
 		}
 	}
+}
+
+const (
+	conchSharefsPrefix = "conch.sharefs="
+	conchfsTag         = "conchfs"
+	conchfsMountPoint  = "/run/conch/volume"
+	conchfsConfigFile  = "config.json"
+)
+
+type conchVolumeConfig struct {
+	Version int                `json:"version"`
+	Mounts  []conchVolumeMount `json:"mounts"`
+}
+
+type conchVolumeMount struct {
+	Index    int    `json:"index"`
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly,omitempty"`
+}
+
+// mountConfiguredVolumesOrAbort mounts the single virtiofs shared dir exported
+// by conchd, reads its config.json, and bind-mounts each declared volume into
+// the OverlayFS merge layer so the volumes are visible post-chroot at the
+// user-declared Path. Volume mounts are part of sandbox creation correctness:
+// if any step fails, completed mounts are rolled back and PID 1 exits so the
+// host observes sandbox startup failure. If the cmdline does not carry the
+// sharefs switch, the sandbox has no volumes and the whole path is skipped.
+func mountConfiguredVolumesOrAbort() {
+	logger := ulog.GetLogger()
+	if !sharefsEnabled() {
+		return
+	}
+	logger.Info("conch sharefs enabled, preparing virtiofs shared dir")
+	if err := os.MkdirAll(conchfsMountPoint, 0755); err != nil {
+		logger.Error("Failed to create virtiofs mount point",
+			ulog.F("target", conchfsMountPoint), ulog.F("error", err))
+		os.Exit(1)
+	}
+	// Mount the single virtiofs shared dir exported by conchd. (virtiofsd 1.13.x
+	// has no host cache flag; the guest uses the virtiofs default cache mode.)
+	if err := mountFS(conchfsTag, conchfsMountPoint, "virtiofs", 0, ""); err != nil {
+		logger.Error("Failed to mount virtiofs shared",
+			ulog.F("tag", conchfsTag), ulog.F("target", conchfsMountPoint), ulog.F("error", err))
+		os.Exit(1)
+	}
+	logger.Info("virtiofs shared dir mounted", ulog.F("target", conchfsMountPoint))
+
+	cfgPath := filepath.Join(conchfsMountPoint, conchfsConfigFile)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		logger.Error("Failed to read volume config.json", ulog.F("path", cfgPath), ulog.F("error", err))
+		os.Exit(1)
+	}
+	var cfg conchVolumeConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		logger.Error("Failed to parse volume config.json", ulog.F("error", err))
+		os.Exit(1)
+	}
+	logger.Info("volume config loaded", ulog.F("mounts", len(cfg.Mounts)))
+	if len(cfg.Mounts) == 0 {
+		return
+	}
+
+	var mountedTargets []string
+	rollback := func() {
+		for i := len(mountedTargets) - 1; i >= 0; i-- {
+			target := mountedTargets[i]
+			if err := syscall.Unmount(target, 0); err != nil {
+				logger.Warn("Failed to rollback mounted volume", ulog.F("target", target), ulog.F("error", err))
+			}
+		}
+	}
+	abort := func(message string, fields ...ulog.Field) {
+		logger.Error(message, fields...)
+		rollback()
+		os.Exit(1)
+	}
+	for _, mount := range cfg.Mounts {
+		target := filepath.Clean(mount.Path)
+		if !filepath.IsAbs(target) || isBlockedVolumeTarget(target) {
+			abort("Invalid volume mount config", ulog.F("path", mount.Path), ulog.F("index", mount.Index))
+		}
+		mergeTarget := filepath.Join(MergeTarget, strings.TrimPrefix(target, "/"))
+		if err := os.MkdirAll(mergeTarget, 0755); err != nil {
+			abort("Failed to create volume mount target", ulog.F("target", mergeTarget), ulog.F("error", err))
+		}
+		source := filepath.Join(conchfsMountPoint, strconv.Itoa(mount.Index))
+		if err := mountFS(source, mergeTarget, "", syscall.MS_BIND, ""); err != nil {
+			abort("Failed to bind volume", ulog.F("source", source), ulog.F("target", mergeTarget), ulog.F("error", err))
+		}
+		if mount.Readonly {
+			if err := mountFS("none", mergeTarget, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
+				abort("Failed to remount volume readonly", ulog.F("target", mergeTarget), ulog.F("error", err))
+			}
+		}
+		mountedTargets = append(mountedTargets, mergeTarget)
+		logger.Info("Mounted volume", ulog.F("source", source), ulog.F("target", mergeTarget), ulog.F("readonly", mount.Readonly))
+	}
+}
+
+func sharefsEnabled() bool {
+	data, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return false
+	}
+	for _, field := range strings.Fields(string(data)) {
+		if strings.HasPrefix(field, conchSharefsPrefix) {
+			return strings.TrimPrefix(field, conchSharefsPrefix) == "virtiofs"
+		}
+	}
+	return false
+}
+
+func isBlockedVolumeTarget(target string) bool {
+	switch target {
+	case "/", "/proc", "/sys", "/dev", "/run":
+		return true
+	}
+	return strings.HasPrefix(target, "/proc/") ||
+		strings.HasPrefix(target, "/sys/") ||
+		strings.HasPrefix(target, "/dev/") ||
+		strings.HasPrefix(target, "/run/")
 }

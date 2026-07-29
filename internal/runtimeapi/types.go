@@ -1,6 +1,10 @@
 package runtimeapi
 
-import "time"
+import (
+	"time"
+
+	"github.com/openeuler/Conch/internal/volume"
+)
 
 // ImageRecord.Kind values exposed by the image API. These classify the
 // user-visible image record, not the io.conch.kind annotation stored on Boot
@@ -31,6 +35,7 @@ type SandboxCreateOptions struct {
 	VCPUNum        int64
 	VCPUMax        int64
 	RamMB          int64
+	VolumeMounts   []volume.Mount
 }
 
 type SandboxDefaults struct {

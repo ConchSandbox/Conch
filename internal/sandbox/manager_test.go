@@ -86,7 +86,7 @@ func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
 			capture := &recordingCheckpointCapture{result: want}
 			m, entry, sbx := checkpointTestManager(tt.initialState, capture)
 
-			got, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+			got, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
 			if err != nil {
 				t.Fatalf("Checkpoint() error = %v", err)
 			}
@@ -124,7 +124,7 @@ func TestCheckpointCaptureErrorRestoresPreviousLifecycleState(t *testing.T) {
 			capture := &recordingCheckpointCapture{err: errCapture}
 			m, entry, _ := checkpointTestManager(tt.initialState, capture)
 
-			_, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+			_, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
 			if !errors.Is(err, errCapture) {
 				t.Fatalf("Checkpoint() error = %v, want errors.Is(capture error)", err)
 			}
@@ -140,7 +140,7 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	capture := &recordingCheckpointCapture{err: errors.Join(ErrCheckpointResume, errResume)}
 	m, entry, _ := checkpointTestManager(sandboxReady, capture)
 
-	_, err := m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+	_, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
 	if !errors.Is(err, ErrCheckpointResume) || !errors.Is(err, errResume) {
 		t.Fatalf("Checkpoint() error = %v, want joined resume failure", err)
 	}
@@ -231,7 +231,7 @@ func TestLifecycleOperationsRejectCreatingSandbox(t *testing.T) {
 	entry.mu.Unlock()
 	defer m.sandboxes.CompareAndDelete(key, entry)
 
-	err = m.Delete(SandboxDeleteRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+	err = m.Delete(DeleteRequest{Namespace: "ns", SandboxID: "sandbox-a"})
 	if err == nil {
 		t.Fatal("Delete() succeeded for creating sandbox")
 	}
@@ -239,7 +239,7 @@ func TestLifecycleOperationsRejectCreatingSandbox(t *testing.T) {
 		t.Fatalf("Delete() error = %v, want creating state", err)
 	}
 
-	_, err = m.Checkpoint(SandboxCheckpointRequest{Namespace: "ns", SandboxId: "sandbox-a"})
+	_, err = m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
 	if err == nil {
 		t.Fatal("Checkpoint() succeeded for creating sandbox")
 	}

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/internal/volume"
 )
 
 type pullImageRequest struct {
@@ -65,6 +66,23 @@ type importImageArchiveResponse struct {
 type snapshotInfoRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
+}
+
+type sandboxCreateRequest struct {
+	Namespace    string         `json:"namespace"`
+	TemplateID   string         `json:"template_id"`
+	VMMName      string         `json:"vmm_name"`
+	SandboxID    string         `json:"sandbox_id"`
+	LeaseID      string         `json:"lease_id,omitempty"`
+	VCPUNum      int64          `json:"vcpu_num"`
+	VCPUMax      int64          `json:"vcpu_max"`
+	RAMMB        int64          `json:"ram_mb"`
+	VolumeMounts []volume.Mount `json:"volumeMounts,omitempty"`
+}
+
+type sandboxDeleteRequest struct {
+	Namespace string `json:"namespace"`
+	SandboxID string `json:"sandbox_id"`
 }
 
 type sandboxLifecycleRequest struct {

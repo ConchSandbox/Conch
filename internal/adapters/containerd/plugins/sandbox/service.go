@@ -16,6 +16,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -80,23 +81,23 @@ func parseDuration(raw string, fallback time.Duration) (time.Duration, error) {
 	return time.ParseDuration(raw)
 }
 
-func (s *Service) Create(req conchsandbox.SandboxCreateRequest) (conchsandbox.SandboxCreateResult, error) {
+func (s *Service) Create(req conchsandbox.CreateRequest) (conchsandbox.CreateResult, error) {
 	return s.manager.Create(req)
 }
 
-func (s *Service) Delete(req conchsandbox.SandboxDeleteRequest) error {
+func (s *Service) Delete(req conchsandbox.DeleteRequest) error {
 	return s.manager.Delete(req)
 }
 
-func (s *Service) Suspend(req conchsandbox.SandboxLifecycleRequest) error {
+func (s *Service) Suspend(req conchsandbox.LifecycleRequest) error {
 	return s.manager.Suspend(req)
 }
 
-func (s *Service) Resume(req conchsandbox.SandboxLifecycleRequest) error {
+func (s *Service) Resume(req conchsandbox.LifecycleRequest) error {
 	return s.manager.Resume(req)
 }
 
-func (s *Service) Checkpoint(req conchsandbox.SandboxCheckpointRequest) (conchsandbox.SandboxCheckpointResult, error) {
+func (s *Service) Checkpoint(req conchsandbox.CheckpointRequest) (conchsandbox.CheckpointResult, error) {
 	return s.manager.Checkpoint(req)
 }
 
@@ -134,6 +135,7 @@ var (
 	readyMu          sync.Mutex
 	readyCh          chan<- *Service
 	networkSlotStore netstack.NetworkSlotStore
+	volumeManager    *volume.Manager
 )
 
 func SetReadyChannel(ch chan<- *Service) {
@@ -148,10 +150,22 @@ func SetNetworkSlotStore(store netstack.NetworkSlotStore) {
 	networkSlotStore = store
 }
 
+func SetVolumeManager(manager *volume.Manager) {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	volumeManager = manager
+}
+
 func currentNetworkSlotStore() netstack.NetworkSlotStore {
 	readyMu.Lock()
 	defer readyMu.Unlock()
 	return networkSlotStore
+}
+
+func currentVolumeManager() *volume.Manager {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	return volumeManager
 }
 
 func publishReady(svc *Service) {
@@ -202,6 +216,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			svc.manager.SetVolumeManager(currentVolumeManager())
 			publishReady(svc)
 			return svc, nil
 		},

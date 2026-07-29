@@ -147,6 +147,7 @@ func runAsInit() {
 		markRootfsMergeReady()
 		prepareMergeRoot()
 		bindMountToMerge()
+		mountConfiguredVolumesOrAbort()
 		setupDevPts()
 		setupMergeFileLogging()
 

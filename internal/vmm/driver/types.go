@@ -21,6 +21,7 @@ type ResourceArgs struct {
 	// Rootfs
 	InitrdPath string
 	PmemPaths  []string
+	VirtioFS   []VirtioFSDevice
 
 	// Snapshot
 	SnapfilePath string
@@ -34,6 +35,11 @@ type ResourceArgs struct {
 
 	EventMonitorFd int
 	ApiSocketFd    int
+}
+
+type VirtioFSDevice struct {
+	Tag    string
+	Socket string
 }
 
 type Adapter interface {

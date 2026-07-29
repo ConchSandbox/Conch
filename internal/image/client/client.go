@@ -27,7 +27,6 @@ const (
 	createSandbox      = "/api/sandbox/create"
 	suspendSandbox     = "/api/sandbox/suspend"
 	resumeSandbox      = "/api/sandbox/resume"
-	stopSandbox        = "/api/sandbox/stop"
 	checkpointSandbox  = "/api/sandbox/checkpoint"
 	createTemplate     = "/api/template/create"
 	pullTemplate       = "/api/template/pull"
@@ -51,14 +50,21 @@ func ResolveBaseURL() string {
 	return baseURL
 }
 
-// CreateRequest matches Conch SandboxCreateRequest.
+// CreateRequest matches POST /api/sandbox/create.
 type CreateRequest struct {
-	Namespace  string `json:"namespace,omitempty"`
-	TemplateID string `json:"template_id"`
-	VmmName    string `json:"vmm_name"`
-	SandboxId  string `json:"sandbox_id"`
-	VcpuNum    int64  `json:"vcpu_num"`
-	RamMB      int64  `json:"ram_mb"`
+	Namespace    string        `json:"namespace,omitempty"`
+	TemplateID   string        `json:"template_id"`
+	VmmName      string        `json:"vmm_name"`
+	SandboxId    string        `json:"sandbox_id"`
+	VcpuNum      int64         `json:"vcpu_num"`
+	RamMB        int64         `json:"ram_mb"`
+	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
+}
+
+type VolumeMount struct {
+	Source   string `json:"source"`
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly,omitempty"`
 }
 
 // CreateResponse is the JSON response from sandbox create
@@ -390,11 +396,6 @@ func (c *Client) ResumeSandbox(ctx context.Context, sandboxID, namespace string)
 	return c.postJSON(ctx, resumeSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
 }
 
-func (c *Client) StopSandbox(ctx context.Context, sandboxID, namespace string) error {
-	var resp map[string]string
-	return c.postJSON(ctx, stopSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
-}
-
 func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID, namespace string) (string, error) {
 	var resp SandboxCheckpointResponse
 	if err := c.postJSON(ctx, checkpointSandbox, SandboxCheckpointRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp); err != nil {
@@ -581,6 +582,26 @@ func (c *Client) ListSnapshots(ctx context.Context, req ListSnapshotsRequest) ([
 func (c *Client) RemoveSnapshot(ctx context.Context, req RemoveSnapshotRequest) error {
 	var resp map[string]string
 	return c.postJSON(ctx, removeSnapshot, req, &resp)
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("create request %s: %w", path, err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return nil
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, payload any, out any) error {

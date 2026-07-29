@@ -45,23 +45,24 @@ func stratovirtConsoleDevice() (string, error) {
 
 const startScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} \
--machine {{ .MachineType }} \
+-machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
 -initrd {{ .RootfsPath }} \
--append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw conch.sandbox_id={{ .SandboxId }}" \
+-append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
 -m {{ .MemorySize }}M \
 -smp {{ .CPUBoot }} \
 -qmp unix:{{ .VmmSocket }},server,nowait \
 -serial socket,path={{ .SerialSocket }},server,nowait \
 -netdev tap,id=net0,ifname={{ .TapName }} \
 -device virtio-net-pci,netdev=net0,id=net0,bus=pcie.0,addr=0x10 \
+{{ .VirtioFSDevices }} \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp`
 
 const resumeScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 {{ .VmmBinaryPath }} \
--machine {{ .MachineType }} \
+-machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
 -initrd {{ .RootfsPath }} \
 -append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw" \
@@ -77,22 +78,28 @@ const resumeScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 -incoming file:{{ .SnapfilePath }},mapped=true`
 
 type StartScriptStratovirtArgs struct {
-	VmmBinaryPath string
-	CPUBoot       int64
-	CPUMax        int64
-	MemorySize    string
-	MachineType   string
-	ConsoleDevice string
-	KernelPath    string
-	RootfsPath    string
-	NamespaceID   string
-	TapName       string
-	VmmSocket     string
-	SerialSocket  string
-	SnapfilePath  string
-	SandboxId     string
-	VsockCID      uint32
-	PmemDevices   string
+	VmmBinaryPath   string
+	CPUBoot         int64
+	CPUMax          int64
+	MemorySize      string
+	MachineType     string
+	ConsoleDevice   string
+	KernelPath      string
+	RootfsPath      string
+	NamespaceID     string
+	TapName         string
+	VmmSocket       string
+	SerialSocket    string
+	SnapfilePath    string
+	SandboxId       string
+	VsockCID        uint32
+	PmemDevices     string
+	VirtioFSDevices string
+	SharefsCmdline  string
+	// MachineOpts is appended to -machine (e.g. ",mem-share=on" when virtiofs
+	// mounts are present, since vhost-user-fs needs guest memory shared with
+	// the userspace virtiofsd backend).
+	MachineOpts string
 }
 
 type StratovirtClient struct {
@@ -177,22 +184,25 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 	}
 
 	stArgs := StartScriptStratovirtArgs{
-		VmmBinaryPath: vmmBinaryPath,
-		CPUBoot:       args.CPUBoot,
-		CPUMax:        args.CPUMax,
-		MemorySize:    strconv.FormatInt(args.MemorySize, 10),
-		MachineType:   machineType,
-		ConsoleDevice: consoleDevice,
-		KernelPath:    args.KernelPath,
-		RootfsPath:    args.InitrdPath,
-		NamespaceID:   args.NamespaceID,
-		TapName:       args.TapName,
-		VmmSocket:     s.socketPath,
-		SerialSocket:  s.socketPath + ".serial",
-		SnapfilePath:  args.SnapfilePath,
-		SandboxId:     args.SandboxId,
-		VsockCID:      args.VsockCID,
-		PmemDevices:   buildStratovirtPmemDevices(args.PmemPaths),
+		VmmBinaryPath:   vmmBinaryPath,
+		CPUBoot:         args.CPUBoot,
+		CPUMax:          args.CPUMax,
+		MemorySize:      strconv.FormatInt(args.MemorySize, 10),
+		MachineType:     machineType,
+		ConsoleDevice:   consoleDevice,
+		KernelPath:      args.KernelPath,
+		RootfsPath:      args.InitrdPath,
+		NamespaceID:     args.NamespaceID,
+		TapName:         args.TapName,
+		VmmSocket:       s.socketPath,
+		SerialSocket:    s.socketPath + ".serial",
+		SnapfilePath:    args.SnapfilePath,
+		SandboxId:       args.SandboxId,
+		VsockCID:        args.VsockCID,
+		PmemDevices:     buildStratovirtPmemDevices(args.PmemPaths),
+		VirtioFSDevices: buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths)),
+		SharefsCmdline:  buildSharefsCmdline(args.VirtioFS),
+		MachineOpts:     stratovirtMachineOpts(args.VirtioFS),
 	}
 
 	if _, err = os.Stat(stArgs.VmmBinaryPath); err != nil {
@@ -220,6 +230,53 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 	script := scriptBuffer.String()
 	logger.Debug("Build start command (Stratovirt)", ulog.F("script", script))
 	return script, nil
+}
+
+// buildStratovirtVirtioFSDevices renders the -chardev/-device pair for each
+// virtiofs mount. Two StratoVirt requirements drove this shape:
+//   - vhost-user-fs-pci MUST carry an explicit bus=pcie.0,addr=...; StratoVirt
+//     rejects the device with "Should set bus"/"Should set addr" otherwise.
+//   - The address must not collide with virtio-pmem devices, which occupy the
+//     0x12.. range (one per rootfs layer). fs devices are therefore placed
+//     right above the pmem range.
+func buildStratovirtVirtioFSDevices(devices []driver.VirtioFSDevice, pmemCount int) string {
+	var args []string
+	baseAddr := 0x12 + pmemCount
+	for i, device := range devices {
+		if strings.TrimSpace(device.Socket) == "" || strings.TrimSpace(device.Tag) == "" {
+			continue
+		}
+		charID := fmt.Sprintf("charfs%d", i)
+		devID := fmt.Sprintf("fs%d", i)
+		addr := fmt.Sprintf("0x%x", baseAddr+i)
+		args = append(args,
+			fmt.Sprintf("-chardev socket,id=%s,path=%s", charID, device.Socket),
+			fmt.Sprintf("-device vhost-user-fs-pci,id=%s,chardev=%s,tag=%s,bus=pcie.0,addr=%s", devID, charID, device.Tag, addr),
+		)
+	}
+	return strings.Join(args, " \\\n")
+}
+
+// stratovirtMachineOpts returns machine-level options appended to -machine.
+// vhost-user-fs requires guest memory to be shared with the virtiofsd backend
+// process, so mem-share=on must be set whenever a virtiofs mount is attached.
+func stratovirtMachineOpts(virtioFS []driver.VirtioFSDevice) string {
+	if len(virtioFS) == 0 {
+		return ""
+	}
+	return ",mem-share=on"
+}
+
+// buildSharefsCmdline appends the minimal sharefs switch to the kernel cmdline
+// when a virtiofs device is attached. The per-mount volume table is delivered
+// through the shared dir's config.json (read by the guest agent), NOT via the
+// cmdline, so the cmdline payload is constant-size and never collides with the
+// Stratovirt kernel params <=255 byte limit.
+func buildSharefsCmdline(virtioFS []driver.VirtioFSDevice) string {
+	if len(virtioFS) == 0 {
+		return ""
+	}
+	return " conch.sharefs=virtiofs"
 }
 
 func buildStratovirtPmemDevices(pmemPaths []string) string {

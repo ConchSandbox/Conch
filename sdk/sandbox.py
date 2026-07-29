@@ -29,7 +29,10 @@ ERROR_KEY = "error"
 MESSAGE_KEY = "message"
 IP_KEY = "ip"
 AGENT_TOKEN_KEY = "agent_token"
+
 TEMPLATE_ID_RESP_KEY = "template_id"
+VOLUME_MOUNTS_KEY = "volumeMounts"
+
 
 # Config keys
 CFG_SANDBOX_SECTION = "sandbox"
@@ -42,7 +45,6 @@ SANDBOX_CREATE_PATH = "/api/sandbox/create"
 SANDBOX_DELETE_PATH = "/api/sandbox/delete"
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
-SANDBOX_STOP_PATH = "/api/sandbox/stop"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
 
 RANDOM_ID_HEX_BYTES = 12
@@ -634,6 +636,7 @@ class Sandbox:
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
+            volume_mounts: Optional[List[Dict[str, Any]]] = None,
             config_path: Optional[str] = None,
     ):
         self._config: Dict[str, Any] = load_config(config_path=config_path)
@@ -658,6 +661,8 @@ class Sandbox:
         self.ram_mb = ram_mb
         self.commands = CommandManager(self)
         self.files = FilesManager(self)
+        self.volume_mounts = volume_mounts or []
+
 
 
     def _build_control_plane_url(self, path: str) -> str:
@@ -681,8 +686,9 @@ class Sandbox:
         if not self.template_id:
             raise ValueError("template_id is required")
 
+
         config = self._config[CFG_IMAGE_SECTION]
-        return {
+        payload = {
             NAMESPACE_KEY: self.namespace,
             TEMPLATE_ID_KEY: self.template_id,
             VMM_NAME_KEY: self._get_vmm_name(),
@@ -691,6 +697,9 @@ class Sandbox:
             VCPU_MAX_KEY: self.vcpu_max or config[VCPU_MAX_KEY],
             RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
+        if self.volume_mounts:
+            payload[VOLUME_MOUNTS_KEY] = self.volume_mounts
+        return payload
 
     def _update_client_from_result(self, result: Dict[str, Any]):
         # Initialize/update the AgentClient based on sandbox creation result
@@ -782,9 +791,6 @@ class Sandbox:
     def resume(self) -> bool:
         return self._lifecycle(SANDBOX_RESUME_PATH)
 
-    def stop(self) -> bool:
-        return self._lifecycle(SANDBOX_STOP_PATH)
-
     def _lifecycle(self, path: str) -> bool:
         payload = {
             NAMESPACE_KEY: self.namespace,
@@ -800,14 +806,14 @@ class Sandbox:
     def create(cls, template_id: Optional[str] = None, **kwargs) -> "Sandbox":
         sbx = cls(template_id=template_id, **kwargs)
         return sbx._do_create()
-    
+
     def get_info(self) -> SandboxInfo:
         return SandboxInfo(
             sandbox_id=self.sandbox_id,
             ip=self.ip if self.ip else "",
             template_id=self.template_id,
         )
-    
+
     def health_check(self) -> Dict[str, Any]:
         # Check sandbox health status
         try:
