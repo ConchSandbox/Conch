@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -80,6 +81,7 @@ type fakeSandboxOps struct {
 	checkpointReq  sandbox.CheckpointRequest
 	suspendReq     sandbox.LifecycleRequest
 	resumeReq      sandbox.LifecycleRequest
+	updateReq      sandbox.NetworkUpdateRequest
 	deleteReqs     []sandbox.DeleteRequest
 	createErr      error
 	checkpointErr  error
@@ -323,6 +325,11 @@ func (f *fakeSandboxOps) Resume(req sandbox.LifecycleRequest) error {
 	return nil
 }
 
+func (f *fakeSandboxOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+	f.updateReq = req
+	return nil
+}
+
 func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
 	f.checkpointReq = req
 	if f.checkpointErr != nil {
@@ -390,6 +397,41 @@ func TestMatchesSandboxState(t *testing.T) {
 	}
 }
 
+func TestSandboxNetworkResponseFromRecordPreservesPresence(t *testing.T) {
+	maskRequestHost := "masked.example"
+	for _, test := range []struct {
+		name          string
+		allowInternet *bool
+	}{
+		{name: "unset"},
+		{name: "false", allowInternet: testBoolPointer(false)},
+		{name: "true", allowInternet: testBoolPointer(true)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(runtimeapi.SandboxNetworkConfig{
+				AllowOut:            []string{"192.0.2.1"},
+				MaskRequestHost:     &maskRequestHost,
+				AllowInternetAccess: test.allowInternet,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			network, allowInternet := sandboxNetworkResponseFromRecord(raw)
+			if network.MaskRequestHost != maskRequestHost ||
+				!reflect.DeepEqual(network.AllowOut, []string{"192.0.2.1"}) {
+				t.Fatalf("network response = %#v", network)
+			}
+			if !reflect.DeepEqual(allowInternet, test.allowInternet) {
+				t.Fatalf("allowInternetAccess = %#v, want %#v", allowInternet, test.allowInternet)
+			}
+		})
+	}
+}
+
+func testBoolPointer(value bool) *bool {
+	return &value
+}
+
 func TestSandboxV1Handlers(t *testing.T) {
 	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -412,6 +454,16 @@ func TestSandboxV1Handlers(t *testing.T) {
 	}
 	server.routes()
 
+	allowInternet := false
+	maskRequestHost := "masked.example"
+	network, err := json.Marshal(runtimeapi.SandboxNetworkConfig{
+		AllowOut:            []string{"192.0.2.1"},
+		MaskRequestHost:     &maskRequestHost,
+		AllowInternetAccess: &allowInternet,
+	})
+	if err != nil {
+		t.Fatalf("marshal network: %v", err)
+	}
 	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
 		PodSandboxID:     "pod-1",
 		ConchSandboxID:   "sandbox-1",
@@ -420,6 +472,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		SourceTemplateID: "tmpl-1",
 		VCPUNum:          2,
 		RamMB:            128,
+		Network:          network,
 	}); err != nil {
 		t.Fatalf("seed sandbox: %v", err)
 	}
@@ -448,7 +501,10 @@ func TestSandboxV1Handlers(t *testing.T) {
 			t.Fatalf("decode get response: %v", err)
 		}
 		if record.SandboxID != "sandbox-1" || record.TemplateID != "tmpl-1" ||
-			record.ConchInitAccessToken == nil || record.AllowInternetAccess == nil || record.Domain == nil {
+			record.ConchInitAccessToken == nil || record.AllowInternetAccess == nil || *record.AllowInternetAccess ||
+			record.Domain == nil || record.Network == nil ||
+			record.Network.MaskRequestHost != maskRequestHost ||
+			!reflect.DeepEqual(record.Network.AllowOut, []string{"192.0.2.1"}) {
 			t.Fatalf("get response = %#v", record)
 		}
 	})
@@ -470,6 +526,15 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 		if got := sandboxOps.createReq.Env["SOME_RANDOM_KEY"]; got != "key123" {
 			t.Fatalf("Env[SOME_RANDOM_KEY] = %q, want key123", got)
+		}
+	})
+
+	t.Run("create rejects unsupported network fields", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+			"sandbox_id":"sandbox-invalid","template_id":"tmpl-2","network":{"rules":{"rule":true}}
+		}`))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
 	})
 
@@ -498,6 +563,23 @@ func TestSandboxV1Handlers(t *testing.T) {
 	t.Run("network", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", bytes.NewBufferString(`{"allowOut":["192.0.2.1"]}`))
 		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		if sandboxOps.updateReq.SandboxID != "sandbox-1" || len(sandboxOps.updateReq.Network) == 0 {
+			t.Fatalf("network update request = %#v", sandboxOps.updateReq)
+		}
+	})
+
+	t.Run("network accepts empty reserved fields", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", bytes.NewBufferString(`{"egressProxy":{},"rules":{}}`))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("network rejects unsupported proxy", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", bytes.NewBufferString(`{"egressProxy":{"username":"user"}}`))
+		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
 	})

@@ -2,6 +2,7 @@ package conchruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -12,6 +13,8 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -23,6 +26,8 @@ type fakeSandboxOps struct {
 	checkpointErr      error
 	createResult       sandbox.CreateResult
 	deleteErr          error
+	updateNetworkReq   sandbox.NetworkUpdateRequest
+	updateNetworkErr   error
 }
 
 type serializedDeleteOps struct {
@@ -32,6 +37,19 @@ type serializedDeleteOps struct {
 	calls        atomic.Int32
 }
 
+type serializedNetworkUpdateOps struct {
+	fakeSandboxOps
+	updateEntered chan struct{}
+	releaseUpdate chan struct{}
+	deleteEntered chan struct{}
+}
+
+type rollbackNetworkUpdateOps struct {
+	fakeSandboxOps
+	requests []sandbox.NetworkUpdateRequest
+	errs     []error
+}
+
 func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 	if f.calls.Add(1) == 1 {
 		close(f.firstEntered)
@@ -39,6 +57,27 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 		return nil
 	}
 	return errors.New("sandbox not found")
+}
+
+func (f *serializedNetworkUpdateOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+	f.updateNetworkReq = req
+	close(f.updateEntered)
+	<-f.releaseUpdate
+	return nil
+}
+
+func (f *serializedNetworkUpdateOps) Delete(sandbox.DeleteRequest) error {
+	close(f.deleteEntered)
+	return nil
+}
+
+func (f *rollbackNetworkUpdateOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+	call := len(f.requests)
+	f.requests = append(f.requests, req)
+	if call < len(f.errs) {
+		return f.errs[call]
+	}
+	return nil
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
@@ -69,6 +108,11 @@ func (f *fakeSandboxOps) Suspend(sandbox.LifecycleRequest) error {
 
 func (f *fakeSandboxOps) Resume(sandbox.LifecycleRequest) error {
 	return nil
+}
+
+func (f *fakeSandboxOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+	f.updateNetworkReq = req
+	return f.updateNetworkErr
 }
 
 func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
@@ -710,6 +754,281 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	}
 	if rec.SnapshotRootDir != "conch/snapshot" {
 		t.Fatalf("SnapshotRootDir = %q", rec.SnapshotRootDir)
+	}
+}
+
+func TestCreateSandboxForwardsAndPersistsNetwork(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, nil, store, "default")
+	allowInternet := false
+	network := &runtimeapi.SandboxNetworkConfig{
+		AllowOut:            []string{"192.0.2.1"},
+		DenyOut:             []string{"198.51.100.0/24"},
+		AllowInternetAccess: &allowInternet,
+	}
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+		TemplateID:   "tmpl-1",
+		Network:      network,
+	}); err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+
+	var forwarded runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(sandboxOps.req.Network, &forwarded); err != nil {
+		t.Fatalf("decode forwarded network: %v", err)
+	}
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	var persisted runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(rec.Network, &persisted); err != nil {
+		t.Fatalf("decode persisted network: %v", err)
+	}
+	if !reflect.DeepEqual(forwarded, *network) || !reflect.DeepEqual(persisted, *network) {
+		t.Fatalf("network forwarding mismatch: forwarded=%#v persisted=%#v", forwarded, persisted)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigReplacesEgressAndPreservesIngress(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	allowPublicTraffic := true
+	maskRequestHost := "masked.example"
+	allowInternet := false
+	existing, err := json.Marshal(runtimeapi.SandboxNetworkConfig{
+		AllowPublicTraffic:  &allowPublicTraffic,
+		AllowOut:            []string{"192.0.2.1"},
+		DenyOut:             []string{"198.51.100.0/24"},
+		EgressProxy:         &runtimeapi.SandboxEgressProxyConfig{Address: "http://proxy.example"},
+		MaskRequestHost:     &maskRequestHost,
+		Rules:               map[string]any{"rule": "value"},
+		AllowInternetAccess: &allowInternet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+		Network:        existing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, nil, store, "default")
+	denyOut := []string{"203.0.113.0/24"}
+	if err := svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+		Network: &runtimeapi.SandboxNetworkUpdateConfig{
+			DenyOut: &denyOut,
+		},
+	}); err != nil {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v", err)
+	}
+
+	var got runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(sandboxOps.updateNetworkReq.Network, &got); err != nil {
+		t.Fatalf("decode update request: %v", err)
+	}
+	if got.AllowPublicTraffic == nil || !*got.AllowPublicTraffic ||
+		got.MaskRequestHost == nil || *got.MaskRequestHost != maskRequestHost ||
+		!reflect.DeepEqual(got.DenyOut, denyOut) ||
+		len(got.AllowOut) != 0 || got.EgressProxy != nil || len(got.Rules) != 0 ||
+		got.AllowInternetAccess != nil {
+		t.Fatalf("resolved network = %#v", got)
+	}
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rec.Network) != string(sandboxOps.updateNetworkReq.Network) {
+		t.Fatalf("persisted network = %s, applied network = %s", rec.Network, sandboxOps.updateNetworkReq.Network)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigRollsBackInvalidPolicy(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	existing, err := json.Marshal(runtimeapi.SandboxNetworkConfig{AllowOut: []string{"192.0.2.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+		Network:        existing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sandboxOps := &fakeSandboxOps{updateNetworkErr: netstack.ErrInvalidSandboxNetworkPolicy}
+	svc := New(sandboxOps, nil, nil, store, "default")
+	invalid := []string{"example.com"}
+	err = svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+		Network:      &runtimeapi.SandboxNetworkUpdateConfig{AllowOut: &invalid},
+	})
+	if !errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v", err)
+	}
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rec.Network) != string(existing) {
+		t.Fatalf("Network = %s, want %s", rec.Network, existing)
+	}
+	if rec.LastError == "" {
+		t.Fatal("LastError is empty")
+	}
+}
+
+func TestUpdateSandboxNetworkConfigRestoresPolicyAfterApplyFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	existing, err := json.Marshal(runtimeapi.SandboxNetworkConfig{
+		AllowOut: []string{"192.0.2.1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+		Network:        existing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyErr := errors.New("partial iptables update")
+	sandboxOps := &rollbackNetworkUpdateOps{errs: []error{applyErr, nil}}
+	svc := New(sandboxOps, nil, nil, store, "default")
+	denyOut := []string{"198.51.100.1"}
+
+	err = svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+		Network:      &runtimeapi.SandboxNetworkUpdateConfig{DenyOut: &denyOut},
+	})
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v, want apply failure", err)
+	}
+	if len(sandboxOps.requests) != 2 {
+		t.Fatalf("UpdateNetwork calls = %d, want apply and rollback", len(sandboxOps.requests))
+	}
+	if string(sandboxOps.requests[1].Network) != string(existing) {
+		t.Fatalf("rollback network = %s, want %s", sandboxOps.requests[1].Network, existing)
+	}
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rec.Network) != string(existing) {
+		t.Fatalf("persisted network = %s, want restored %s", rec.Network, existing)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigMarksUnknownWhenRollbackFails(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyErr := errors.New("apply failed")
+	rollbackErr := errors.New("rollback failed")
+	sandboxOps := &rollbackNetworkUpdateOps{errs: []error{applyErr, rollbackErr}}
+	svc := New(sandboxOps, nil, nil, store, "default")
+
+	err := svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+		PodSandboxID: "pod-1",
+		SandboxID:    "sandbox-1",
+		Network:      &runtimeapi.SandboxNetworkUpdateConfig{},
+	})
+	if !errors.Is(err, applyErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v, want apply and rollback failures", err)
+	}
+	rec, err := store.GetSandbox(ctx, "pod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != state.SandboxUnknown {
+		t.Fatalf("sandbox state = %q, want %q", rec.State, state.SandboxUnknown)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigSerializesWithDelete(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		PodSandboxID:   "pod-1",
+		ConchSandboxID: "sandbox-1",
+		Namespace:      "default",
+		State:          state.SandboxReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sandboxOps := &serializedNetworkUpdateOps{
+		updateEntered: make(chan struct{}),
+		releaseUpdate: make(chan struct{}),
+		deleteEntered: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-sandboxOps.releaseUpdate:
+		default:
+			close(sandboxOps.releaseUpdate)
+		}
+	}()
+	svc := New(sandboxOps, nil, nil, store, "default")
+	denyOut := []string{"198.51.100.1"}
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+			PodSandboxID: "pod-1",
+			SandboxID:    "sandbox-1",
+			Network:      &runtimeapi.SandboxNetworkUpdateConfig{DenyOut: &denyOut},
+		})
+	}()
+	<-sandboxOps.updateEntered
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- svc.RemoveSandbox(ctx, "default", "pod-1")
+	}()
+	select {
+	case <-sandboxOps.deleteEntered:
+		t.Fatal("delete entered sandbox backend while network update held lifecycle lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(sandboxOps.releaseUpdate)
+	if err := <-updateDone; err != nil {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v", err)
+	}
+	select {
+	case <-sandboxOps.deleteEntered:
+	case <-time.After(time.Second):
+		t.Fatal("delete did not proceed after network update released lifecycle lock")
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 }
 

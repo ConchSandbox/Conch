@@ -93,7 +93,7 @@ type sandboxNetworkResponse struct {
 	DenyOut            []string                            `json:"denyOut"`
 	EgressProxy        runtimeapi.SandboxEgressProxyConfig `json:"egressProxy"`
 	MaskRequestHost    string                              `json:"maskRequestHost"`
-	Rules              map[string]string                   `json:"rules"`
+	Rules              map[string]any                      `json:"rules"`
 }
 
 type sandboxLifecycleResponse struct {
@@ -145,7 +145,7 @@ type getSandboxLogsResponse struct {
 	NextCursor string                    `json:"nextCursor"`
 }
 
-type updateSandboxNetworkRequest = runtimeapi.SandboxNetworkConfig
+type updateSandboxNetworkRequest = runtimeapi.SandboxNetworkUpdateConfig
 
 type sandboxLifecycleRequest struct {
 	Namespace string `json:"namespace,omitempty"`

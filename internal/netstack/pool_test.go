@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
 type fakeStorage struct {
-	released int
-	acquired int
+	released   int
+	acquired   int
+	releaseErr error
 }
 
 func (s *fakeStorage) Acquire(ctx context.Context) (*Slot, error) {
@@ -23,15 +25,16 @@ func (s *fakeStorage) Acquire(ctx context.Context) (*Slot, error) {
 
 func (s *fakeStorage) Release(slot *Slot) error {
 	s.released++
-	return nil
+	return s.releaseErr
 }
 
 type fakeNetworkSlotStore struct {
-	records   map[string]state.NetworkSlotRecord
-	upserts   []state.NetworkSlotRecord
-	deletes   []string
-	listErr   error
-	upsertErr error
+	records    map[string]state.NetworkSlotRecord
+	upserts    []state.NetworkSlotRecord
+	deletes    []string
+	listErr    error
+	upsertErr  error
+	upsertErrs []error
 }
 
 func newFakeNetworkSlotStore(records ...state.NetworkSlotRecord) *fakeNetworkSlotStore {
@@ -43,6 +46,13 @@ func newFakeNetworkSlotStore(records ...state.NetworkSlotRecord) *fakeNetworkSlo
 }
 
 func (s *fakeNetworkSlotStore) UpsertNetworkSlot(ctx context.Context, rec state.NetworkSlotRecord) error {
+	if len(s.upsertErrs) > 0 {
+		err := s.upsertErrs[0]
+		s.upsertErrs = s.upsertErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if s.upsertErr != nil {
 		return s.upsertErr
 	}
@@ -52,6 +62,14 @@ func (s *fakeNetworkSlotStore) UpsertNetworkSlot(ctx context.Context, rec state.
 	s.records[rec.SlotKey] = rec
 	s.upserts = append(s.upserts, rec)
 	return nil
+}
+
+func (s *fakeNetworkSlotStore) GetNetworkSlot(ctx context.Context, key string) (state.NetworkSlotRecord, error) {
+	rec, ok := s.records[key]
+	if !ok {
+		return state.NetworkSlotRecord{}, fmt.Errorf("network slot %q not found", key)
+	}
+	return rec, nil
 }
 
 func (s *fakeNetworkSlotStore) ListNetworkSlots(ctx context.Context) ([]state.NetworkSlotRecord, error) {
@@ -253,6 +271,10 @@ func TestEnqueueReplacementReturnsWhenWarmPoolIsAlreadyFull(t *testing.T) {
 }
 
 func TestReleaseDiscardsExcessSlotWhenWarmPoolIsAlreadyFull(t *testing.T) {
+	originalClear := clearSandboxPolicy
+	clearSandboxPolicy = func(context.Context, *Slot) error { return nil }
+	t.Cleanup(func() { clearSandboxPolicy = originalClear })
+
 	store := newFakeNetworkSlotStore()
 	storage := &fakeStorage{}
 	p := &Pool{
@@ -293,6 +315,48 @@ func TestReleaseDiscardsExcessSlotWhenWarmPoolIsAlreadyFull(t *testing.T) {
 	}
 }
 
+func TestReleaseDiscardsSlotWhenPolicyCleanupFails(t *testing.T) {
+	originalClear := clearSandboxPolicy
+	clearSandboxPolicy = func(context.Context, *Slot) error {
+		return errors.New("clear failed")
+	}
+	t.Cleanup(func() {
+		clearSandboxPolicy = originalClear
+	})
+
+	store := newFakeNetworkSlotStore()
+	storage := &fakeStorage{}
+	p := &Pool{
+		slotStorage: storage,
+		slotStore:   store,
+		newSlots:    make(chan *Slot, 1),
+		done:        make(chan struct{}),
+		inUse:       make(map[string]*Slot),
+		slotHealthCheck: func(context.Context, *Slot) error {
+			return nil
+		},
+	}
+	slot := &Slot{Key: "assigned", Idx: firstSlotIndex}
+	slot.assignSandbox("sandbox-a")
+	p.trackInUse(slot)
+
+	err := p.Release(context.Background(), slot)
+	if err == nil || !strings.Contains(err.Error(), "failed to clear sandbox network policy") {
+		t.Fatalf("Release() error = %v, want policy cleanup failure", err)
+	}
+	if storage.released != 1 || storage.acquired != 1 {
+		t.Fatalf("storage released/acquired = %d/%d, want 1/1", storage.released, storage.acquired)
+	}
+	if len(p.inUse) != 0 {
+		t.Fatalf("inUse = %#v, want contaminated slot removed", p.inUse)
+	}
+	select {
+	case got := <-p.newSlots:
+		t.Fatalf("requeued contaminated slot %#v", got)
+	default:
+	}
+}
+
 func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
 	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
@@ -307,7 +371,7 @@ func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
 	}
 	slot.setNetNSPath(t.TempDir() + "/ns-2")
 
-	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2")
+	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2", nil)
 	if err == nil || !strings.Contains(err.Error(), "namespace missing") {
 		t.Fatalf("RestoreInUse() error = %v, want namespace missing", err)
 	}
@@ -390,6 +454,10 @@ func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
 }
 
 func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
+	originalClear := clearSandboxPolicy
+	clearSandboxPolicy = func(context.Context, *Slot) error { return nil }
+	t.Cleanup(func() { clearSandboxPolicy = originalClear })
+
 	withBridgeLayout(t, 1)
 	slot, err := NewSlot("2", firstSlotIndex)
 	if err != nil {
@@ -403,7 +471,7 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 	}
 	p.newSlots <- slot
 
-	got, err := p.Get(context.Background(), "sandbox-a")
+	got, err := p.Get(context.Background(), "sandbox-a", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to record assigned network slot") {
 		t.Fatalf("Get() error = %v, want assignment record failure", err)
 	}
@@ -423,6 +491,54 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 		}
 	default:
 		t.Fatalf("slot was not requeued after assignment record failure")
+	}
+}
+
+func TestGetDiscardsSlotWhenPolicyRollbackFails(t *testing.T) {
+	originalApply := applySandboxPolicy
+	originalClear := clearSandboxPolicy
+	applySandboxPolicy = func(context.Context, *Slot, *runtimeapi.SandboxNetworkConfig) error {
+		return errors.New("apply failed")
+	}
+	clearSandboxPolicy = func(context.Context, *Slot) error {
+		return errors.New("clear failed")
+	}
+	t.Cleanup(func() {
+		applySandboxPolicy = originalApply
+		clearSandboxPolicy = originalClear
+	})
+
+	store := newFakeNetworkSlotStore()
+	storage := &fakeStorage{}
+	p := &Pool{
+		slotStorage: storage,
+		slotStore:   store,
+		newSlots:    make(chan *Slot, 1),
+		done:        make(chan struct{}),
+		inUse:       make(map[string]*Slot),
+	}
+	slot := &Slot{Key: "warm", Idx: firstSlotIndex}
+	p.newSlots <- slot
+
+	got, err := p.Get(context.Background(), "sandbox-a", &runtimeapi.SandboxNetworkConfig{
+		DenyOut: []string{"198.51.100.1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "clear failed") {
+		t.Fatalf("Get() error = %v, want rollback failure", err)
+	}
+	if got != nil {
+		t.Fatalf("Get() slot = %#v, want nil", got)
+	}
+	if storage.released != 1 || storage.acquired != 1 {
+		t.Fatalf("storage released/acquired = %d/%d, want 1/1", storage.released, storage.acquired)
+	}
+	if len(p.inUse) != 0 {
+		t.Fatalf("inUse = %#v, want contaminated slot removed", p.inUse)
+	}
+	select {
+	case requeued := <-p.newSlots:
+		t.Fatalf("requeued contaminated slot %#v", requeued)
+	default:
 	}
 }
 
@@ -483,5 +599,79 @@ func TestDiscardDuringShutdownDoesNotReplenish(t *testing.T) {
 	}
 	if len(p.inUse) != 0 {
 		t.Fatalf("inUse len = %d, want 0", len(p.inUse))
+	}
+}
+
+func TestDiscardWithoutSlotStorageReturnsError(t *testing.T) {
+	store := newFakeNetworkSlotStore()
+	p := &Pool{
+		slotStore: store,
+		inUse:     make(map[string]*Slot),
+	}
+	slot := &Slot{Key: "2", Idx: firstSlotIndex}
+	p.trackInUse(slot)
+
+	err := p.Discard(context.Background(), slot)
+	if err == nil || !strings.Contains(err.Error(), "network slot storage is not configured") {
+		t.Fatalf("Discard() error = %v, want missing storage error", err)
+	}
+	if len(p.inUse) != 0 {
+		t.Fatalf("inUse = %#v, want slot removed", p.inUse)
+	}
+}
+
+func TestDiscardContinuesWhenCleaningRecordWriteFails(t *testing.T) {
+	store := newFakeNetworkSlotStore(state.NetworkSlotRecord{
+		SlotKey: "2",
+		State:   state.NetworkSlotWarmIdle,
+	})
+	store.upsertErr = errors.New("store unavailable")
+	storage := &fakeStorage{}
+	done := make(chan struct{})
+	close(done)
+	p := &Pool{
+		slotStorage: storage,
+		slotStore:   store,
+		done:        done,
+		inUse:       make(map[string]*Slot),
+	}
+	slot := &Slot{Key: "2", Idx: firstSlotIndex}
+
+	err := p.Discard(context.Background(), slot)
+	if err == nil || !strings.Contains(err.Error(), "failed to record cleaning network slot") {
+		t.Fatalf("Discard() error = %v, want cleaning record failure", err)
+	}
+	if storage.released != 1 {
+		t.Fatalf("storage Release count = %d, want 1", storage.released)
+	}
+	if _, ok := store.records[slot.Key]; ok {
+		t.Fatalf("stale warm slot record still exists")
+	}
+}
+
+func TestDiscardPreservesSuccessfulCleaningRecordRetry(t *testing.T) {
+	store := newFakeNetworkSlotStore(state.NetworkSlotRecord{
+		SlotKey: "2",
+		State:   state.NetworkSlotWarmIdle,
+	})
+	store.upsertErrs = []error{errors.New("store unavailable"), nil}
+	storage := &fakeStorage{releaseErr: errors.New("release failed")}
+	p := &Pool{
+		slotStorage: storage,
+		slotStore:   store,
+		done:        make(chan struct{}),
+		inUse:       make(map[string]*Slot),
+	}
+	slot := &Slot{Key: "2", Idx: firstSlotIndex}
+
+	err := p.Discard(context.Background(), slot)
+	if err == nil || !strings.Contains(err.Error(), "release failed") {
+		t.Fatalf("Discard() error = %v, want release failure", err)
+	}
+	if rec := store.records[slot.Key]; rec.State != state.NetworkSlotCleaning {
+		t.Fatalf("slot record state = %s, want %s", rec.State, state.NetworkSlotCleaning)
+	}
+	if len(store.deletes) != 0 {
+		t.Fatalf("deleted successfully retried cleaning record")
 	}
 }

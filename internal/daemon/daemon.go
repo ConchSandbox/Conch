@@ -9,7 +9,6 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,6 +30,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -460,6 +460,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -665,7 +669,7 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateSandboxNetworkRequest(&req); err != nil {
+	if err := validateSandboxNetworkUpdateRequest(&req); err != nil {
 		http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -678,7 +682,19 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Sandbox not found", http.StatusNotFound)
 		return
 	}
-	// TODO: apply and persist the network update when the network backend is wired.
+	if err := s.runtimeService.UpdateSandboxNetworkConfig(r.Context(), runtimeapi.SandboxNetworkUpdateOptions{
+		Namespace:    record.Namespace,
+		PodSandboxID: record.PodSandboxID,
+		SandboxID:    record.ConchSandboxID,
+		Network:      &req,
+	}); err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "Failed to update sandbox network: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -715,17 +731,38 @@ func validateSandboxNetworkRequest(req *runtimeapi.SandboxNetworkConfig) error {
 	if req == nil {
 		return nil
 	}
-	for _, rules := range [][]string{req.AllowOut, req.DenyOut} {
+	return validateSandboxNetworkFields(req.AllowOut, req.DenyOut, req.EgressProxy, req.Rules)
+}
+
+func validateSandboxNetworkUpdateRequest(req *runtimeapi.SandboxNetworkUpdateConfig) error {
+	if req == nil {
+		return nil
+	}
+	var allowOut, denyOut []string
+	if req.AllowOut != nil {
+		allowOut = *req.AllowOut
+	}
+	if req.DenyOut != nil {
+		denyOut = *req.DenyOut
+	}
+	return validateSandboxNetworkFields(allowOut, denyOut, req.EgressProxy, req.Rules)
+}
+
+func validateSandboxNetworkFields(allowOut, denyOut []string, proxy *runtimeapi.SandboxEgressProxyConfig, rules map[string]any) error {
+	for _, rules := range [][]string{allowOut, denyOut} {
 		for _, rule := range rules {
 			if strings.TrimSpace(rule) == "" {
 				return fmt.Errorf("network rule contains an empty destination")
 			}
 		}
 	}
-	if req.EgressProxy != nil && req.EgressProxy.Address != "" {
-		if _, err := url.ParseRequestURI(req.EgressProxy.Address); err != nil {
-			return fmt.Errorf("invalid egressProxy address")
-		}
+	if proxy != nil && (strings.TrimSpace(proxy.Address) != "" ||
+		strings.TrimSpace(proxy.Username) != "" ||
+		strings.TrimSpace(proxy.Password) != "") {
+		return fmt.Errorf("egressProxy is not supported")
+	}
+	if len(rules) != 0 {
+		return fmt.Errorf("rules are not supported")
 	}
 	return nil
 }
@@ -783,12 +820,10 @@ func sandboxResponseFromRecord(record state.SandboxRecord, conchInitAccessToken 
 		response.Metadata = map[string]string{}
 	}
 	if detailed {
-		allowInternetAccess := false
 		domain := record.IP
 		response.ConchInitAccessToken = &conchInitAccessToken
-		response.AllowInternetAccess = &allowInternetAccess
 		response.Domain = &domain
-		response.Network = emptySandboxNetworkResponse()
+		response.Network, response.AllowInternetAccess = sandboxNetworkResponseFromRecord(record.Network)
 		response.Lifecycle = &sandboxLifecycleResponse{}
 	}
 	return response
@@ -810,8 +845,34 @@ func emptySandboxNetworkResponse() *sandboxNetworkResponse {
 		AllowOut:    []string{},
 		DenyOut:     []string{},
 		EgressProxy: runtimeapi.SandboxEgressProxyConfig{},
-		Rules:       map[string]string{},
+		Rules:       map[string]any{},
 	}
+}
+
+func sandboxNetworkResponseFromRecord(raw json.RawMessage) (*sandboxNetworkResponse, *bool) {
+	response := emptySandboxNetworkResponse()
+	if len(raw) == 0 {
+		return response, nil
+	}
+	var cfg runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return response, nil
+	}
+	if cfg.AllowPublicTraffic != nil {
+		response.AllowPublicTraffic = *cfg.AllowPublicTraffic
+	}
+	response.AllowOut = append([]string{}, cfg.AllowOut...)
+	response.DenyOut = append([]string{}, cfg.DenyOut...)
+	if cfg.EgressProxy != nil {
+		response.EgressProxy = *cfg.EgressProxy
+	}
+	if cfg.MaskRequestHost != nil {
+		response.MaskRequestHost = *cfg.MaskRequestHost
+	}
+	if cfg.Rules != nil {
+		response.Rules = cfg.Rules
+	}
+	return response, cfg.AllowInternetAccess
 }
 
 func formatUnixNanoRFC3339(timestamp int64) string {

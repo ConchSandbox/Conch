@@ -31,6 +31,7 @@ import (
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -46,6 +47,9 @@ var (
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
 	errPoolCleanupRequested = errors.New("network pool cleanup requested")
 	errWarmPoolFull         = errors.New("warm network pool is already full")
+	applySandboxPolicy      = ApplySandboxNetworkPolicy
+	replaceSandboxPolicy    = ReplaceSandboxNetworkPolicy
+	clearSandboxPolicy      = ClearSandboxNetworkPolicy
 )
 
 func getLogger() ulog.Logger {
@@ -54,6 +58,7 @@ func getLogger() ulog.Logger {
 
 type NetworkSlotStore interface {
 	UpsertNetworkSlot(context.Context, state.NetworkSlotRecord) error
+	GetNetworkSlot(context.Context, string) (state.NetworkSlotRecord, error)
 	ListNetworkSlots(context.Context) ([]state.NetworkSlotRecord, error)
 	DeleteNetworkSlot(context.Context, string) error
 }
@@ -346,6 +351,16 @@ func (p *Pool) discardCreatedSlot(slot *Slot) error {
 		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
 		return err
 	}
+	if p.slotStorage == nil {
+		p.untrackInUse(slot)
+		if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
+			return errors.Join(
+				fmt.Errorf("network slot storage is not configured"),
+				fmt.Errorf("failed to delete network slot record %s: %w", slot.Key, err),
+			)
+		}
+		return fmt.Errorf("network slot storage is not configured")
+	}
 	if err := p.slotStorage.Release(slot); err != nil {
 		getLogger().Warn("failed to release discarded network slot during pool stop", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
 		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
@@ -510,7 +525,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
+func (p *Pool) Get(ctx context.Context, sandboxID string, policy *runtimeapi.SandboxNetworkConfig) (*Slot, error) {
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandboxID is required")
 	}
@@ -523,16 +538,45 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		}
 		if s != nil {
 			s.assignSandbox(sandboxID)
+			if err := applySandboxPolicy(ctx, s, policy); err != nil {
+				s.clearSandboxAssignment()
+				clearErr := clearSandboxPolicy(context.Background(), s)
+				if clearErr != nil {
+					discardErr := p.Discard(context.Background(), s)
+					if discardErr != nil {
+						discardErr = fmt.Errorf("failed to discard network slot after policy cleanup failure: %w", discardErr)
+					}
+					return nil, errors.Join(fmt.Errorf("failed to apply sandbox network policy: %w", err), clearErr, discardErr)
+				}
+				if enqueueErr := p.requeueWarmSlot(s); enqueueErr != nil {
+					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, clearErr, enqueueErr))
+					return nil, errors.Join(
+						fmt.Errorf("failed to apply sandbox network policy: %w", err),
+						fmt.Errorf("failed to requeue network slot after policy failure: %w", enqueueErr),
+						clearErr,
+					)
+				}
+				return nil, errors.Join(fmt.Errorf("failed to apply sandbox network policy: %w", err), clearErr)
+			}
 			if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
 				s.clearSandboxAssignment()
+				clearErr := clearSandboxPolicy(context.Background(), s)
+				if clearErr != nil {
+					discardErr := p.Discard(context.Background(), s)
+					if discardErr != nil {
+						discardErr = fmt.Errorf("failed to discard network slot after policy cleanup failure: %w", discardErr)
+					}
+					return nil, errors.Join(fmt.Errorf("failed to record assigned network slot: %w", err), clearErr, discardErr)
+				}
 				if enqueueErr := p.requeueWarmSlot(s); enqueueErr != nil {
-					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, enqueueErr))
+					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, clearErr, enqueueErr))
 					return nil, errors.Join(
 						fmt.Errorf("failed to record assigned network slot: %w", err),
 						fmt.Errorf("failed to requeue unassigned network slot: %w", enqueueErr),
+						clearErr,
 					)
 				}
-				return nil, fmt.Errorf("failed to record assigned network slot: %w", err)
+				return nil, errors.Join(fmt.Errorf("failed to record assigned network slot: %w", err), clearErr)
 			}
 			p.trackInUse(s)
 		}
@@ -548,6 +592,34 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		)
 		return nil, fmt.Errorf("no available network slot in the pool, pool_size=%d", cap(p.newSlots))
 	}
+}
+
+func (p *Pool) UpdateSandboxNetworkPolicy(ctx context.Context, slot *Slot, sandboxID string, policy *runtimeapi.SandboxNetworkConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("pool is nil")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if strings.TrimSpace(sandboxID) == "" {
+		return fmt.Errorf("sandboxID is required")
+	}
+	if slot.SandboxID() != sandboxID {
+		return fmt.Errorf("slot %s is assigned to sandbox %q, want %q", slot.Key, slot.SandboxID(), sandboxID)
+	}
+	if err := ValidateSandboxNetworkPolicy(ctx, policy); err != nil {
+		return err
+	}
+	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+		return fmt.Errorf("failed to record assigned network slot before policy update: %w", err)
+	}
+	if err := replaceSandboxPolicy(ctx, slot, policy); err != nil {
+		return fmt.Errorf("failed to apply sandbox network policy: %w", err)
+	}
+	return nil
 }
 
 func (p *Pool) isPrefillReady() bool {
@@ -651,6 +723,18 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 			}
 			slotHealthErr := slotHealth(ctx, slot)
 			if slotHealthErr == nil {
+				if err := clearSandboxPolicy(ctx, slot); err != nil {
+					slot.assignSandbox(sandboxID)
+					clearErr := fmt.Errorf("failed to clear sandbox network policy: %w", err)
+					if !p.claimInUse(slot, sandboxID) {
+						return errors.Join(clearErr, fmt.Errorf("network slot ownership changed before discard"))
+					}
+					discardErr := p.Discard(context.Background(), slot)
+					if discardErr != nil {
+						discardErr = fmt.Errorf("failed to discard network slot after policy cleanup failure: %w", discardErr)
+					}
+					return errors.Join(clearErr, discardErr)
+				}
 				if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
 					slot.assignSandbox(sandboxID)
 					p.trackInUse(slot)
@@ -689,36 +773,58 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 
 	var errs []error
 	sandboxID := slot.SandboxID()
+	cleaningRecordFailed := false
 	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, nil); err != nil {
-		return fmt.Errorf("failed to record cleaning network slot %s: %w", slot.Key, err)
+		cleaningRecordFailed = true
+		errs = append(errs, fmt.Errorf("failed to record cleaning network slot %s: %w", slot.Key, err))
 	}
-	if err := p.teardownSlotNetwork(ctx, slot); err != nil {
+	if err := p.teardownSlotNetwork(context.WithoutCancel(ctx), slot); err != nil {
 		getLogger().Error("failed to discard network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
 		getLogger().Warn("network slot still needs cleanup after failed discard", ulog.F("slot_index", slot.Idx))
-		_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
-		return fmt.Errorf("failed to discard network slot %s: %w", slot.Key, err)
+		retryErr := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
+		errs = append(errs, fmt.Errorf("failed to discard network slot %s: %w", slot.Key, err))
+		if cleaningRecordFailed && retryErr != nil {
+			errs = append(errs, fmt.Errorf("failed to retry cleaning network slot record %s: %w", slot.Key, retryErr))
+			if deleteErr := p.deleteSlotRecord(context.Background(), slot); deleteErr != nil {
+				errs = append(errs, fmt.Errorf("failed to remove stale reusable network slot record %s: %w", slot.Key, deleteErr))
+			}
+		}
+		return errors.Join(errs...)
 	}
 
-	if err := p.slotStorage.Release(slot); err != nil {
-		getLogger().Error("failed to release discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
-		errs = append(errs, fmt.Errorf("failed to release discarded network slot %s: %w", slot.Key, err))
-	}
-	if len(errs) == 0 {
+	if p.slotStorage == nil {
 		p.untrackInUse(slot)
+		errs = append(errs, fmt.Errorf("network slot storage is not configured"))
 		if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
 			errs = append(errs, fmt.Errorf("failed to delete network slot record %s: %w", slot.Key, err))
 		}
+		return errors.Join(errs...)
+	}
+	if err := p.slotStorage.Release(slot); err != nil {
+		getLogger().Error("failed to release discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+		retryErr := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
+		errs = append(errs, fmt.Errorf("failed to release discarded network slot %s: %w", slot.Key, err))
+		if cleaningRecordFailed && retryErr != nil {
+			errs = append(errs, fmt.Errorf("failed to retry cleaning network slot record %s: %w", slot.Key, retryErr))
+			if deleteErr := p.deleteSlotRecord(context.Background(), slot); deleteErr != nil {
+				errs = append(errs, fmt.Errorf("failed to remove stale reusable network slot record %s: %w", slot.Key, deleteErr))
+			}
+		}
+		return errors.Join(errs...)
 	}
 
-	if len(errs) == 0 {
-		select {
-		case <-p.done:
-		default:
-			if err := p.replenishDroppedSlot(ctx); err != nil {
-				getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-				errs = append(errs, err)
-			}
+	p.untrackInUse(slot)
+	if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
+		errs = append(errs, fmt.Errorf("failed to delete network slot record %s: %w", slot.Key, err))
+		return errors.Join(errs...)
+	}
+
+	select {
+	case <-p.done:
+	default:
+		if err := p.replenishDroppedSlot(ctx); err != nil {
+			getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+			errs = append(errs, err)
 		}
 	}
 
@@ -948,7 +1054,17 @@ func (p *Pool) trackInUse(slot *Slot) {
 	p.inUse[slot.Key] = slot
 }
 
-func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
+func (p *Pool) claimInUse(slot *Slot, sandboxID string) bool {
+	p.inUseMu.Lock()
+	defer p.inUseMu.Unlock()
+	if p.inUse[slot.Key] != slot || slot.SandboxID() != sandboxID {
+		return false
+	}
+	delete(p.inUse, slot.Key)
+	return true
+}
+
+func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string, policy *runtimeapi.SandboxNetworkConfig) error {
 	if p == nil {
 		return fmt.Errorf("pool is nil")
 	}
@@ -987,10 +1103,43 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 	if err := p.validateHostLocalAllocationOwned(cniID, ip); err != nil {
 		return fail(fmt.Errorf("rehydrated network slot has invalid ipam state: %w", err))
 	}
+	if err := applySandboxPolicy(context.Background(), slot, policy); err != nil {
+		clearErr := clearSandboxPolicy(context.Background(), slot)
+		return fail(errors.Join(fmt.Errorf("apply rehydrated sandbox network policy: %w", err), clearErr))
+	}
 	slot.assignSandbox(sandboxID)
 	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+		rec, readErr := p.slotStore.GetNetworkSlot(context.Background(), slot.Key)
+		if readErr == nil && rec.State == state.NetworkSlotAssigned && rec.SandboxID == sandboxID {
+			getLogger().Warn("network slot assignment write failed but is durable", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+			p.trackInUse(slot)
+			return nil
+		}
+		confirmErr := readErr
+		if confirmErr != nil {
+			confirmErr = fmt.Errorf("failed to confirm rehydrated network slot assignment: %w", confirmErr)
+		} else {
+			confirmErr = fmt.Errorf("rehydrated network slot assignment is not durable")
+		}
+
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		slot.clearSandboxAssignment()
-		return fmt.Errorf("failed to record rehydrated network slot: %w", err)
+		clearErr := clearSandboxPolicy(cleanupCtx, slot)
+		if clearErr != nil {
+			slot.assignSandbox(sandboxID)
+			discardErr := p.Discard(cleanupCtx, slot)
+			return errors.Join(
+				fmt.Errorf("failed to record rehydrated network slot: %w", err),
+				confirmErr,
+				fmt.Errorf("failed to clear rehydrated sandbox network policy: %w", clearErr),
+				discardErr,
+			)
+		}
+		return fail(errors.Join(
+			fmt.Errorf("failed to record rehydrated network slot: %w", err),
+			confirmErr,
+		))
 	}
 	p.trackInUse(slot)
 	return nil

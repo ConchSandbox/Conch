@@ -274,14 +274,15 @@ sandbox.update_network(
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `allow_out` | list[str] | 允许访问的出站目标列表，对应请求字段 `allowOut`；显式传入空列表表示清空该配置 |
-| `deny_out` | list[str] | 禁止访问的出站目标列表，对应请求字段 `denyOut`；显式传入空列表表示清空该配置 |
-| `egress_proxy` | dict | 出站代理配置，对应 `egressProxy`；可包含 `address`、`username` 和 `password` |
-| `rules` | dict | 自定义网络规则，对应请求字段 `rules` |
+| `allow_out` | list[str] | 允许访问的出站目标列表，对应请求字段 `allowOut` |
+| `deny_out` | list[str] | 禁止访问的出站目标列表，对应请求字段 `denyOut` |
+| `egress_proxy` | dict | 预留的出站代理配置；当前仅接受省略、`None` 或空字典，非空值将被拒绝 |
+| `rules` | dict | 预留的自定义网络规则；当前仅接受省略、`None` 或空字典，非空值将被拒绝 |
 | `allow_internet_access` | bool | 是否允许访问互联网；`True` 表示允许，`False` 表示禁止 |
 
-所有参数均为可选项；未传入的字段不会包含在更新请求中。更新成功时 daemon 返回 HTTP `204 No Content`，SDK 返回空字典 `{}`；请求无效或沙箱不存在时抛出 `RuntimeError`。
-注：后端功能将在后续 PR 中实现。
+该接口采用完整替换语义：每次调用都会替换全部出站网络配置。未传入的 `allow_out`、`deny_out`、`egress_proxy` 和 `rules` 将被清空；未传入 `allow_internet_access` 将恢复为默认的不限制状态，因此可能扩大网络访问范围。创建时设置的入站字段 `allowPublicTraffic` 和 `maskRequestHost` 不受此接口影响。更新成功时 daemon 返回 HTTP `204 No Content`，SDK 返回空字典 `{}`；请求无效或沙箱不存在时抛出 `RuntimeError`。
+
+`egress_proxy` 和 `rules` 当前仅保持输入 schema 兼容，不提供对应的代理或规则执行功能。传入任何非空值时，create 和 update 请求都会返回 HTTP `400 Bad Request`。
 
 ---
 

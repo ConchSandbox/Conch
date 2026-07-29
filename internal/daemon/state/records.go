@@ -1,5 +1,7 @@
 package state
 
+import "encoding/json"
+
 const (
 	SandboxReady     = "READY"
 	SandboxNotReady  = "NOTREADY"
@@ -42,31 +44,32 @@ type SandboxRecord struct {
 	LeaseID        string            `json:"lease_id,omitempty"`
 	// SourceTemplateID and SourceBootIndexDigest identify the immutable boot
 	// content used to create this sandbox.
-	SourceTemplateID              string         `json:"source_template_id,omitempty"`
-	SourceBootIndexDigest         string         `json:"source_boot_index_digest,omitempty"`
-	CheckpointHeadTemplateID      string         `json:"checkpoint_head_template_id,omitempty"`
-	CheckpointHeadBootIndexDigest string         `json:"checkpoint_head_boot_index_digest,omitempty"`
-	ImageName                     string         `json:"image_name,omitempty"`
-	SnapshotID                    string         `json:"snapshot_id,omitempty"`
-	IP                            string         `json:"ip,omitempty"`
-	VMMName                       string         `json:"vmm_name,omitempty"`
-	VCPUNum                       int64          `json:"vcpu_num,omitempty"`
-	RamMB                         int64          `json:"ram_mb,omitempty"`
-	VMMPID                        int            `json:"vmm_pid,omitempty"`
-	VMMSocketPath                 string         `json:"vmm_socket_path,omitempty"`
-	VsockCID                      uint32         `json:"vsock_cid,omitempty"`
-	VsockSocketPath               string         `json:"vsock_socket_path,omitempty"`
-	NetworkSlotKey                string         `json:"network_slot_key,omitempty"`
-	NetworkNS                     string         `json:"network_ns,omitempty"`
-	RootfsKey                     string         `json:"rootfs_key,omitempty"`
-	MemKey                        string         `json:"mem_key,omitempty"`
-	RootfsMount                   string         `json:"rootfs_mount,omitempty"`
-	RootfsPmemPaths               []string       `json:"rootfs_pmem_paths,omitempty"`
-	MemMount                      string         `json:"mem_mount,omitempty"`
-	VMMount                       string         `json:"vm_mount,omitempty"`
-	SnapshotRootDir               string         `json:"snapshot_root_dir,omitempty"`
-	LastError                     string         `json:"last_error,omitempty"`
-	VolumeDevices                 []VolumeDevice `json:"volume_devices,omitempty"`
+	SourceTemplateID              string          `json:"source_template_id,omitempty"`
+	SourceBootIndexDigest         string          `json:"source_boot_index_digest,omitempty"`
+	CheckpointHeadTemplateID      string          `json:"checkpoint_head_template_id,omitempty"`
+	CheckpointHeadBootIndexDigest string          `json:"checkpoint_head_boot_index_digest,omitempty"`
+	ImageName                     string          `json:"image_name,omitempty"`
+	SnapshotID                    string          `json:"snapshot_id,omitempty"`
+	Network                       json.RawMessage `json:"network,omitempty"`
+	IP                            string          `json:"ip,omitempty"`
+	VMMName                       string          `json:"vmm_name,omitempty"`
+	VCPUNum                       int64           `json:"vcpu_num,omitempty"`
+	RamMB                         int64           `json:"ram_mb,omitempty"`
+	VMMPID                        int             `json:"vmm_pid,omitempty"`
+	VMMSocketPath                 string          `json:"vmm_socket_path,omitempty"`
+	VsockCID                      uint32          `json:"vsock_cid,omitempty"`
+	VsockSocketPath               string          `json:"vsock_socket_path,omitempty"`
+	NetworkSlotKey                string          `json:"network_slot_key,omitempty"`
+	NetworkNS                     string          `json:"network_ns,omitempty"`
+	RootfsKey                     string          `json:"rootfs_key,omitempty"`
+	MemKey                        string          `json:"mem_key,omitempty"`
+	RootfsMount                   string          `json:"rootfs_mount,omitempty"`
+	RootfsPmemPaths               []string        `json:"rootfs_pmem_paths,omitempty"`
+	MemMount                      string          `json:"mem_mount,omitempty"`
+	VMMount                       string          `json:"vm_mount,omitempty"`
+	SnapshotRootDir               string          `json:"snapshot_root_dir,omitempty"`
+	LastError                     string          `json:"last_error,omitempty"`
+	VolumeDevices                 []VolumeDevice  `json:"volume_devices,omitempty"`
 }
 
 type VolumeDevice struct {

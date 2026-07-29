@@ -13,11 +13,28 @@ type SandboxEgressProxyConfig struct {
 }
 
 type SandboxNetworkConfig struct {
+	AllowPublicTraffic  *bool                     `json:"allowPublicTraffic,omitempty"`
 	AllowOut            []string                  `json:"allowOut,omitempty"`
 	DenyOut             []string                  `json:"denyOut,omitempty"`
 	EgressProxy         *SandboxEgressProxyConfig `json:"egressProxy,omitempty"`
+	MaskRequestHost     *string                   `json:"maskRequestHost,omitempty"`
 	Rules               map[string]any            `json:"rules,omitempty"`
 	AllowInternetAccess *bool                     `json:"allow_internet_access,omitempty"`
+}
+
+type SandboxNetworkUpdateConfig struct {
+	AllowOut            *[]string                 `json:"allowOut,omitempty"`
+	DenyOut             *[]string                 `json:"denyOut,omitempty"`
+	EgressProxy         *SandboxEgressProxyConfig `json:"egressProxy,omitempty"`
+	Rules               map[string]any            `json:"rules,omitempty"`
+	AllowInternetAccess *bool                     `json:"allow_internet_access,omitempty"`
+}
+
+type SandboxNetworkUpdateOptions struct {
+	Namespace    string
+	PodSandboxID string
+	SandboxID    string
+	Network      *SandboxNetworkUpdateConfig
 }
 
 // ImageRecord.Kind values exposed by the image API. These classify the

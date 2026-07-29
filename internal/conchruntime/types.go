@@ -9,6 +9,7 @@ import (
 type SandboxCreateOptions = runtimeapi.SandboxCreateOptions
 type SandboxCreateResult = runtimeapi.SandboxCreateResult
 type SandboxDefaults = runtimeapi.SandboxDefaults
+type SandboxNetworkUpdateOptions = runtimeapi.SandboxNetworkUpdateOptions
 type SandboxLifecycleOptions = runtimeapi.SandboxLifecycleOptions
 type SandboxCheckpointOptions = runtimeapi.SandboxCheckpointOptions
 type SandboxCheckpointResult = runtimeapi.SandboxCheckpointResult

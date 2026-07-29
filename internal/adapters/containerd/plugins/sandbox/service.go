@@ -97,6 +97,10 @@ func (s *Service) Resume(req conchsandbox.LifecycleRequest) error {
 	return s.manager.Resume(req)
 }
 
+func (s *Service) UpdateNetwork(req conchsandbox.NetworkUpdateRequest) error {
+	return s.manager.UpdateNetwork(req)
+}
+
 func (s *Service) Checkpoint(req conchsandbox.CheckpointRequest) (conchsandbox.CheckpointResult, error) {
 	return s.manager.Checkpoint(req)
 }
