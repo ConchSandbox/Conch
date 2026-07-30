@@ -24,7 +24,6 @@ type PullImageOptions = runtimeapi.PullImageOptions
 type PullImageResult = runtimeapi.PullImageResult
 
 type SandboxLogEntry struct {
-	ID        uint64
 	Time      time.Time
 	Namespace string
 	SandboxID string
@@ -40,7 +39,7 @@ type SandboxLogKey struct {
 type SandboxLogsOptions struct {
 	Namespace string
 	SandboxID string
-	Cursor    string
+	Cursor    *int64
 	Limit     int
 	Direction string
 	Level     string
@@ -48,6 +47,5 @@ type SandboxLogsOptions struct {
 }
 
 type SandboxLogsResult struct {
-	Logs       []SandboxLogEntry
-	NextCursor string
+	Logs []SandboxLogEntry
 }

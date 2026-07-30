@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1197,11 +1196,6 @@ const (
 	defaultSandboxLogCleanupInterval = 8 * time.Hour
 )
 
-type sandboxLogCursor struct {
-	timestamp int64
-	id        uint64
-}
-
 func normalizeSandboxLogKey(key SandboxLogKey) SandboxLogKey {
 	key.Namespace = strings.TrimSpace(key.Namespace)
 	if key.Namespace == "" {
@@ -1211,42 +1205,25 @@ func normalizeSandboxLogKey(key SandboxLogKey) SandboxLogKey {
 	return key
 }
 
-func parseSandboxLogCursor(raw string) (sandboxLogCursor, error) {
-	if raw == "" {
-		return sandboxLogCursor{}, nil
+func sandboxLogLevelRank(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "trace":
+		return 0
+	case "debug":
+		return 1
+	case "info":
+		return 2
+	case "warn", "warning":
+		return 3
+	case "error":
+		return 4
+	case "fatal":
+		return 5
+	case "panic":
+		return 6
+	default:
+		return -1
 	}
-	timestamp, id, ok := strings.Cut(raw, ":")
-	if !ok {
-		return sandboxLogCursor{}, fmt.Errorf("cursor must have timestamp:id format")
-	}
-	timestampMillis, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil || timestampMillis < 0 {
-		return sandboxLogCursor{}, fmt.Errorf("cursor timestamp is invalid")
-	}
-	sequenceID, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return sandboxLogCursor{}, fmt.Errorf("cursor sequence id is invalid")
-	}
-	return sandboxLogCursor{timestamp: timestampMillis, id: sequenceID}, nil
-}
-
-func ValidateSandboxLogCursor(raw string) error {
-	_, err := parseSandboxLogCursor(raw)
-	return err
-}
-
-func formatSandboxLogCursor(entry SandboxLogEntry) string {
-	return fmt.Sprintf("%d:%d", entry.Time.UnixMilli(), entry.ID)
-}
-
-func sandboxLogEntryBeforeCursor(entry SandboxLogEntry, cursor sandboxLogCursor) bool {
-	timestamp := entry.Time.UnixMilli()
-	return timestamp < cursor.timestamp || timestamp == cursor.timestamp && entry.ID < cursor.id
-}
-
-func sandboxLogEntryAfterCursor(entry SandboxLogEntry, cursor sandboxLogCursor) bool {
-	timestamp := entry.Time.UnixMilli()
-	return timestamp > cursor.timestamp || timestamp == cursor.timestamp && entry.ID > cursor.id
 }
 
 type SandboxLogBuffer struct {
@@ -1254,7 +1231,6 @@ type SandboxLogBuffer struct {
 	limit     int
 	ttl       time.Duration
 	now       func() time.Time
-	nextID    map[SandboxLogKey]uint64
 	expiresAt map[SandboxLogKey]time.Time
 	entries   map[SandboxLogKey][]SandboxLogEntry
 }
@@ -1271,7 +1247,6 @@ func newSandboxLogBuffer(limit int, ttl ...time.Duration) *SandboxLogBuffer {
 		limit:     limit,
 		ttl:       logTTL,
 		now:       time.Now,
-		nextID:    make(map[SandboxLogKey]uint64),
 		expiresAt: make(map[SandboxLogKey]time.Time),
 		entries:   make(map[SandboxLogKey][]SandboxLogEntry),
 	}
@@ -1296,9 +1271,7 @@ func (b *SandboxLogBuffer) AppendKey(key SandboxLogKey, level, message string) {
 	now := b.now().UTC()
 	b.pruneExpiredLocked(now)
 	delete(b.expiresAt, key)
-	b.nextID[key]++
 	logs := append(b.entries[key], SandboxLogEntry{
-		ID:        b.nextID[key],
 		Time:      now,
 		Namespace: key.Namespace,
 		SandboxID: key.SandboxID,
@@ -1316,9 +1289,9 @@ func (b *SandboxLogBuffer) Get(opts SandboxLogsOptions) SandboxLogsResult {
 	if b == nil || key.SandboxID == "" {
 		return SandboxLogsResult{Logs: []SandboxLogEntry{}}
 	}
-	cursor, _ := parseSandboxLogCursor(opts.Cursor)
 	level := strings.ToLower(strings.TrimSpace(opts.Level))
-	search := strings.ToLower(strings.TrimSpace(opts.Search))
+	minimumLevel := sandboxLogLevelRank(level)
+	search := opts.Search
 	out := make([]SandboxLogEntry, 0)
 
 	b.mu.Lock()
@@ -1326,19 +1299,26 @@ func (b *SandboxLogBuffer) Get(opts SandboxLogsOptions) SandboxLogsResult {
 	b.pruneExpiredLocked(b.now().UTC())
 	logs := b.entries[key]
 	appendEntry := func(entry SandboxLogEntry) bool {
-		if level != "" && strings.ToLower(entry.Level) != level {
-			return false
+		if level != "" {
+			entryLevel := sandboxLogLevelRank(entry.Level)
+			if minimumLevel >= 0 {
+				if entryLevel < minimumLevel {
+					return false
+				}
+			} else if !strings.EqualFold(entry.Level, level) {
+				return false
+			}
 		}
-		if search != "" && !strings.Contains(strings.ToLower(entry.Message), search) {
+		if search != "" && !strings.Contains(entry.Message, search) {
 			return false
 		}
 		out = append(out, entry)
 		return opts.Limit > 0 && len(out) >= opts.Limit
 	}
-	if strings.EqualFold(opts.Direction, "backward") {
+	if opts.Direction == "" || strings.EqualFold(opts.Direction, "backward") {
 		for i := len(logs) - 1; i >= 0; i-- {
 			entry := logs[i]
-			if opts.Cursor != "" && !sandboxLogEntryBeforeCursor(entry, cursor) {
+			if opts.Cursor != nil && entry.Time.UnixMilli() > *opts.Cursor {
 				continue
 			}
 			if appendEntry(entry) {
@@ -1347,7 +1327,7 @@ func (b *SandboxLogBuffer) Get(opts SandboxLogsOptions) SandboxLogsResult {
 		}
 	} else {
 		for _, entry := range logs {
-			if opts.Cursor != "" && !sandboxLogEntryAfterCursor(entry, cursor) {
+			if opts.Cursor != nil && entry.Time.UnixMilli() < *opts.Cursor {
 				continue
 			}
 			if appendEntry(entry) {
@@ -1355,11 +1335,7 @@ func (b *SandboxLogBuffer) Get(opts SandboxLogsOptions) SandboxLogsResult {
 			}
 		}
 	}
-	result := SandboxLogsResult{Logs: out}
-	if len(out) > 0 {
-		result.NextCursor = formatSandboxLogCursor(out[len(out)-1])
-	}
-	return result
+	return SandboxLogsResult{Logs: out}
 }
 
 func (b *SandboxLogBuffer) Expire(sandboxID string) {
@@ -1385,7 +1361,6 @@ func (b *SandboxLogBuffer) pruneExpiredLocked(now time.Time) {
 			continue
 		}
 		delete(b.entries, key)
-		delete(b.nextID, key)
 		delete(b.expiresAt, key)
 	}
 }
@@ -1411,7 +1386,6 @@ func (b *SandboxLogBuffer) ClearKey(key SandboxLogKey) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.entries, key)
-	delete(b.nextID, key)
 	delete(b.expiresAt, key)
 }
 
@@ -1529,8 +1503,8 @@ func (s *Service) GetSandboxLogs(_ context.Context, opts SandboxLogsOptions) (Sa
 	if strings.TrimSpace(opts.SandboxID) == "" {
 		return SandboxLogsResult{}, fmt.Errorf("sandbox id is required")
 	}
-	if err := ValidateSandboxLogCursor(opts.Cursor); err != nil {
-		return SandboxLogsResult{}, err
+	if opts.Cursor != nil && *opts.Cursor < 0 {
+		return SandboxLogsResult{}, fmt.Errorf("cursor must be non-negative")
 	}
 	if s == nil || s.SandboxLogs == nil {
 		return SandboxLogsResult{Logs: []SandboxLogEntry{}}, nil

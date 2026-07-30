@@ -352,10 +352,7 @@ func TestSandboxLogsEmptyAndPerSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox"})
-	if got.Logs[0].ID != 1 || got.Logs[1].ID != 2 {
-		t.Fatalf("log IDs = %d,%d, want 1,2", got.Logs[0].ID, got.Logs[1].ID)
-	}
+	assertLogMessages(t, got.Logs, []string{"paused sandbox", "created sandbox"})
 	if got.Logs[0].SandboxID != "sandbox-a" || got.Logs[0].Level != "info" || got.Logs[0].Time.IsZero() {
 		t.Fatalf("log entry = %#v, want structured sandbox info entry with timestamp", got.Logs[0])
 	}
@@ -368,10 +365,7 @@ func TestSandboxLogBufferDropsOldestEntries(t *testing.T) {
 	buf.Append("sandbox-a", "info", "three")
 
 	got := buf.Get(SandboxLogsOptions{SandboxID: "sandbox-a"})
-	assertLogMessages(t, got.Logs, []string{"two", "three"})
-	if got.Logs[0].ID != 2 || got.Logs[1].ID != 3 {
-		t.Fatalf("log IDs = %d,%d, want 2,3", got.Logs[0].ID, got.Logs[1].ID)
-	}
+	assertLogMessages(t, got.Logs, []string{"three", "two"})
 }
 
 func TestSandboxLogCleanupLoopPrunesAndStops(t *testing.T) {
@@ -428,7 +422,7 @@ func TestClearSandboxLogsResetsReusedSandboxID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	if len(got.Logs) != 1 || got.Logs[0].ID != 1 || got.Logs[0].Message != "new" {
+	if len(got.Logs) != 1 || got.Logs[0].Message != "new" {
 		t.Fatalf("logs after ID reuse = %#v", got.Logs)
 	}
 }
@@ -446,39 +440,39 @@ func TestSandboxLogsCursorLimitLevelAndSearch(t *testing.T) {
 	svc.AppendSandboxLog("sandbox-a", "warn", "network update delayed")
 	svc.AppendSandboxLog("sandbox-a", "error", "delete failed")
 
+	cursor := int64(1004)
 	got, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
 		SandboxID: "sandbox-a",
-		Cursor:    "1001:1",
-		Limit:     1,
-		Level:     "ERROR",
-		Search:    "FAILED",
-	})
-	if err != nil {
-		t.Fatalf("GetSandboxLogs() error = %v", err)
-	}
-	assertLogMessages(t, got.Logs, []string{"network update failed"})
-
-	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
-		SandboxID: "sandbox-a",
-		Cursor:    got.NextCursor,
-		Level:     "error",
-		Search:    "failed",
-	})
-	if err != nil {
-		t.Fatalf("GetSandboxLogs() error = %v", err)
-	}
-	assertLogMessages(t, got.Logs, []string{"delete failed"})
-
-	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
-		SandboxID: "sandbox-a",
-		Cursor:    "1004:0",
+		Cursor:    &cursor,
 		Limit:     2,
-		Direction: "backward",
+		Level:     "warn",
+		Search:    "network update",
 	})
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
 	assertLogMessages(t, got.Logs, []string{"network update delayed", "network update failed"})
+
+	cursor = 1002
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Cursor:    &cursor,
+		Limit:     2,
+		Direction: "forward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, []string{"network update failed", "network update delayed"})
+
+	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+		SandboxID: "sandbox-a",
+		Search:    "FAILED",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	assertLogMessages(t, got.Logs, nil)
 }
 
 func TestSandboxLogsAreIsolatedByNamespace(t *testing.T) {
@@ -503,7 +497,7 @@ func TestSandboxLogsAreIsolatedByNamespace(t *testing.T) {
 	assertLogMessages(t, got.Logs, []string{"tenant b"})
 }
 
-func TestSandboxLogsCompoundCursorHandlesSameMillisecond(t *testing.T) {
+func TestSandboxLogsTimestampCursorIsInclusive(t *testing.T) {
 	ctx := context.Background()
 	svc := New(nil, nil, nil, nil, "default")
 	svc.SandboxLogs.now = func() time.Time { return time.UnixMilli(1000) }
@@ -511,26 +505,21 @@ func TestSandboxLogsCompoundCursorHandlesSameMillisecond(t *testing.T) {
 	svc.AppendSandboxLog("sandbox-a", "info", "two")
 	svc.AppendSandboxLog("sandbox-a", "info", "three")
 
-	first, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-a", Limit: 2})
-	if err != nil {
-		t.Fatalf("GetSandboxLogs() error = %v", err)
-	}
-	assertLogMessages(t, first.Logs, []string{"one", "two"})
-	if first.NextCursor != "1000:2" {
-		t.Fatalf("NextCursor = %q, want 1000:2", first.NextCursor)
-	}
-	second, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
+	cursor := int64(1000)
+	forward, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
 		SandboxID: "sandbox-a",
-		Cursor:    first.NextCursor,
+		Cursor:    &cursor,
 		Limit:     2,
+		Direction: "forward",
 	})
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, second.Logs, []string{"three"})
+	assertLogMessages(t, forward.Logs, []string{"one", "two"})
 
 	backward, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
 		SandboxID: "sandbox-a",
+		Cursor:    &cursor,
 		Limit:     2,
 		Direction: "backward",
 	})
@@ -538,15 +527,6 @@ func TestSandboxLogsCompoundCursorHandlesSameMillisecond(t *testing.T) {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
 	assertLogMessages(t, backward.Logs, []string{"three", "two"})
-	older, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{
-		SandboxID: "sandbox-a",
-		Cursor:    backward.NextCursor,
-		Direction: "backward",
-	})
-	if err != nil {
-		t.Fatalf("GetSandboxLogs() error = %v", err)
-	}
-	assertLogMessages(t, older.Logs, []string{"one"})
 }
 
 func TestRemoveSandboxExpiresLogsAfterTTL(t *testing.T) {
@@ -574,7 +554,7 @@ func TestRemoveSandboxExpiresLogsAfterTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, got.Logs, []string{"created sandbox", "deleted sandbox"})
+	assertLogMessages(t, got.Logs, []string{"deleted sandbox", "created sandbox"})
 
 	now = now.Add(time.Minute)
 	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
@@ -603,7 +583,7 @@ func TestSandboxLogAppendBeforeTTLCancelsExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, got.Logs, []string{"created sandbox", "reused sandbox"})
+	assertLogMessages(t, got.Logs, []string{"reused sandbox", "created sandbox"})
 }
 
 func TestSuspendSandboxExpiresLogsAfterTTL(t *testing.T) {
@@ -630,7 +610,7 @@ func TestSuspendSandboxExpiresLogsAfterTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox"})
+	assertLogMessages(t, got.Logs, []string{"paused sandbox", "created sandbox"})
 
 	now = now.Add(time.Minute)
 	got, err = svc.GetSandboxLogs(ctx, SandboxLogsOptions{SandboxID: "sandbox-1"})
@@ -672,7 +652,7 @@ func TestResumeSandboxCancelsLogExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandboxLogs() error = %v", err)
 	}
-	assertLogMessages(t, got.Logs, []string{"created sandbox", "paused sandbox", "resumed sandbox"})
+	assertLogMessages(t, got.Logs, []string{"resumed sandbox", "paused sandbox", "created sandbox"})
 }
 
 func assertLogMessages(t *testing.T, got []SandboxLogEntry, want []string) {

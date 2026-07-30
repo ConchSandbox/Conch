@@ -598,7 +598,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 	t.Run("logs", func(t *testing.T) {
 		runtimeService.AppendSandboxLog("sandbox-1", "info", "created sandbox")
 		runtimeService.AppendSandboxLog("sandbox-1", "error", "network update failed")
-		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs?limit=1&direction=backward&level=info&search=CREATED", nil)
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs?limit=1&direction=backward&level=info&search=created", nil)
 		if response.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
@@ -608,7 +608,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 		if len(result.Logs) != 1 || result.Logs[0].Message != "created sandbox" ||
 			result.Logs[0].Level != "info" || result.Logs[0].Fields["sandboxID"] != "sandbox-1" ||
-			result.Logs[0].Fields["namespace"] != "default" || result.NextCursor == "" {
+			result.Logs[0].Fields["namespace"] != "default" {
 			t.Fatalf("logs response = %#v", result)
 		}
 		wrongNamespace := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs?namespace=other", nil)

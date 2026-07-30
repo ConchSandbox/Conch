@@ -590,10 +590,14 @@ func (s *Daemon) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request, sa
 	}
 
 	query := r.URL.Query()
-	cursor := query.Get("cursor")
-	if err := conchruntime.ValidateSandboxLogCursor(cursor); err != nil {
-		http.Error(w, "Invalid cursor", http.StatusBadRequest)
-		return
+	var cursor *int64
+	if query.Get("cursor") != "" {
+		parsedCursor, parseErr := strconv.ParseInt(query.Get("cursor"), 10, 64)
+		if parseErr != nil || parsedCursor < 0 {
+			http.Error(w, "Invalid cursor", http.StatusBadRequest)
+			return
+		}
+		cursor = &parsedCursor
 	}
 	limit := defaultLogLimit
 	if query.Get("limit") != "" {
@@ -656,7 +660,7 @@ func (s *Daemon) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request, sa
 			},
 		}
 	}
-	writeJSON(w, getSandboxLogsResponse{Logs: logs, NextCursor: result.NextCursor})
+	writeJSON(w, getSandboxLogsResponse{Logs: logs})
 }
 
 func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request, sandboxID string) {

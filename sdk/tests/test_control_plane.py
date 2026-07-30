@@ -26,7 +26,7 @@ class FakeSession:
         if url.endswith("/health"):
             return FakeResponse(204)
         if url.endswith("/logs"):
-            return FakeResponse(data={"logs": [], "nextCursor": ""})
+            return FakeResponse(data={"logs": []})
         if url.endswith("/api/v1/sandboxes"):
             return FakeResponse(data=[{"sandboxID": "sandbox-1"}])
         return FakeResponse(data={
@@ -73,14 +73,14 @@ def test_control_plane_methods_use_explicit_endpoint_without_config(monkeypatch)
     with pytest.raises(RuntimeError, match="Agent credentials unavailable"):
         sandbox.health_check()
     assert sandbox.logs(
-        cursor="1000:2",
+        cursor=1000,
         limit=10,
         direction="backward",
         level="error",
         search="failed",
-    ) == {"logs": [], "nextCursor": ""}
+    ) == {"logs": []}
     assert fake_session.last_get_params == {
-        "cursor": "1000:2",
+        "cursor": 1000,
         "limit": 10,
         "direction": "backward",
         "level": "error",

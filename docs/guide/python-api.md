@@ -251,13 +251,13 @@ sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `cursor` | str | 不透明分页游标，格式由服务端管理；首次查询时省略，后续查询使用上一次响应中的 `nextCursor` |
+| `cursor` | int | 可选的 Unix 毫秒时间戳；`forward` 查询从该时间开始，`backward` 查询到该时间为止 |
 | `limit` | int | 最多返回的日志数量，默认值为 `1000`，取值范围为 `1` 至 `1000` |
-| `direction` | str | 查询方向；`forward` 返回游标之后的日志，`backward` 返回游标之前的日志；省略游标的反向查询从最新日志开始 |
-| `level` | str | 按日志级别精确筛选，例如 `info`、`warn` 或 `error`，不区分大小写 |
-| `search` | str | 对日志消息进行不区分大小写的子字符串匹配，最大长度为 `256` 个字符 |
+| `direction` | str | 查询方向；可选值为 `forward` 或 `backward`，默认值为 `backward` |
+| `level` | str | 最低日志级别；低于该级别的日志会被排除，例如 `warn` 会返回 `warn`、`error`、`fatal` 和 `panic` |
+| `search` | str | 对日志消息进行区分大小写的子字符串匹配，最大长度为 `256` 个字符 |
 
-返回格式为 `{"logs": [...], "nextCursor": "..."}`。`nextCursor` 用于继续同一方向的分页查询。每条日志包含：
+返回格式为 `{"logs": [...]}`。每条日志包含：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -266,9 +266,9 @@ sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -
 | `level` | str | 日志严重级别，例如 `info`、`warn` 或 `error` |
 | `fields` | dict[str, str] | 日志附加上下文，当前包含 `namespace` 和 `sandboxID` |
 
-如果没有找到符合条件的日志，则返回 `{"logs": [], "nextCursor": ""}`。
+如果没有找到符合条件的日志，则返回 `{"logs": []}`。游标仅精确到毫秒，因此同一毫秒内存在多条日志时，跨页查询可能重复或遗漏边界日志。
 
-审计日志仅保存在 conchd 进程内存中，不跨 daemon 重启持久化。每个沙箱最多保留 `1024` 条；沙箱删除或暂停后保留 `24` 小时。后台默认每 `8` 小时清理过期日志，读取和追加日志时也会清理已过期内容。
+该接口仅返回 conchd 控制面的沙箱生命周期审计日志，不包含沙箱内进程的 stdout 或 stderr。审计日志仅保存在 conchd 进程内存中，不跨 daemon 重启持久化。每个沙箱最多保留 `1024` 条；沙箱删除或暂停后保留 `24` 小时。后台默认每 `8` 小时清理过期日志，读取和追加日志时也会清理已过期内容。
 
 ### 更新沙箱网络策略
 
