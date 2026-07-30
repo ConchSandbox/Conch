@@ -11,6 +11,7 @@ import (
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
@@ -48,22 +49,23 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	ctx := context.Background()
-	if err := store.UpsertTemplate(ctx, state.TemplateRecord{
+	if err := store.CreateTemplate(ctx, conchtemplate.Entry{
 		ID:              "tmpl-source",
-		Origin:          state.TemplateOriginImage,
+		Origin:          conchtemplate.OriginImage,
 		Namespace:       "default",
-		State:           state.TemplateReady,
 		BootIndexDigest: sourceDigest,
-		BootMode:        state.TemplateBootModeCold,
+		BootMode:        conchtemplate.BootModeCold,
 	}); err != nil {
-		t.Fatalf("UpsertTemplate() error = %v", err)
+		t.Fatalf("CreateTemplate() error = %v", err)
 	}
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		SandboxID:             "sandbox-1",
-		Namespace:             "default",
-		State:                 state.SandboxReady,
-		SourceTemplateID:      "tmpl-source",
-		SourceBootIndexDigest: sourceDigest,
+		SandboxID:                     "sandbox-1",
+		Namespace:                     "default",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "tmpl-source",
+		SourceBootIndexDigest:         sourceDigest,
+		CheckpointHeadTemplateID:      "tmpl-source",
+		CheckpointHeadBootIndexDigest: sourceDigest,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}

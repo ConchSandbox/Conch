@@ -11,6 +11,7 @@ import (
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
 func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
@@ -67,7 +68,7 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate() error = %v", err)
 	}
-	if rec.State != state.TemplateReady || rec.Origin != state.TemplateOriginCheckpoint || rec.BootIndexDigest != digest || rec.BuildRef != reference {
+	if rec.Origin != conchtemplate.OriginCheckpoint || rec.BootIndexDigest != digest || rec.BuildRef != reference {
 		t.Fatalf("pulled template = %#v", rec)
 	}
 

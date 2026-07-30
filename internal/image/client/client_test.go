@@ -336,6 +336,11 @@ func TestTemplateRecordIncludesBootIndexDigestInJSON(t *testing.T) {
 	if !strings.Contains(string(raw), `"boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`) {
 		t.Fatalf("TemplateRecord JSON = %s", raw)
 	}
+	for _, removedField := range []string{`"state"`, `"updated_at"`, `"last_error"`} {
+		if strings.Contains(string(raw), removedField) {
+			t.Fatalf("TemplateRecord JSON still contains removed field %s: %s", removedField, raw)
+		}
+	}
 }
 
 func TestTemplateDistributionAPIMethods(t *testing.T) {

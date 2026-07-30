@@ -9,7 +9,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
-	"github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
 )
@@ -49,7 +48,7 @@ type VMStartSpec struct {
 	VirtioFS     []driver.VirtioFSDevice
 }
 
-func vmStartSpecFromBootSpec(spec template.SandboxBootSpec) VMStartSpec {
+func vmStartSpecFromBootSpec(spec BootSpec) VMStartSpec {
 	return VMStartSpec{
 		MemorySizeMB: spec.MemorySizeMB,
 		MemoryPath:   spec.MemoryPath,
@@ -61,7 +60,7 @@ func vmStartSpecFromBootSpec(spec template.SandboxBootSpec) VMStartSpec {
 }
 
 func vmStartSpecFromRecord(rec state.SandboxRecord) VMStartSpec {
-	spec := template.BootSpecFromRuntime(template.SandboxBootRuntime{
+	spec := BootSpecFromRuntime(BootRuntime{
 		RootfsMount: rec.RootfsMount,
 		MemMount:    rec.MemMount,
 		VMMount:     rec.VMMount,

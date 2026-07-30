@@ -51,15 +51,6 @@ type BootIndexInfo struct {
 	MemorySizeMB      int64              `json:"memory_size_mb,omitempty"`
 }
 
-// ResolveBootIndexResult adds the local committed snapshot keys obtained by
-// idempotently unpacking a validated Boot Index.
-type ResolveBootIndexResult struct {
-	BootIndexInfo
-	RootfsKey string `json:"rootfs_key"`
-	MemKey    string `json:"mem_key,omitempty"`
-	VMKey     string `json:"vm_key"`
-}
-
 // PublishCheckpointBootImageOptions publishes captured memory and VMM state as
 // a new Boot Index while reusing the source Boot Index's immutable rootfs and
 // sandbox components. MemRoot is a self-contained directory whose artifact

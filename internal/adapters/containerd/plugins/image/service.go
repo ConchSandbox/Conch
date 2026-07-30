@@ -31,6 +31,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
@@ -507,28 +508,31 @@ func (s *Service) InspectBootIndexReference(ctx context.Context, namespace, refe
 	return info, nil
 }
 
-// ResolveBootIndex validates a Boot Index by digest and idempotently unpacks
-// its components to the shared committed snapshots used as sandbox parents.
-func (s *Service) ResolveBootIndex(ctx context.Context, namespace, bootIndexDigest string) (conchimage.ResolveBootIndexResult, error) {
+// ResolveBoot validates a Boot Index by digest and idempotently unpacks its
+// components into the committed snapshot parents required by Sandbox.
+func (s *Service) ResolveBoot(ctx context.Context, namespace, bootIndexDigest string) (conchsandbox.ResolvedBoot, error) {
 	resolveCtx, desc, info, err := s.inspectBootIndex(ctx, namespace, bootIndexDigest)
 	if err != nil {
-		return conchimage.ResolveBootIndexResult{}, err
+		return conchsandbox.ResolvedBoot{}, err
 	}
 	snapshotMap, err := conchimage.UnpackAllSubImagesFromDescriptor(resolveCtx, s.client.Client, desc)
 	if err != nil {
-		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("unpack boot index %s: %w", desc.Digest, err)
+		return conchsandbox.ResolvedBoot{}, fmt.Errorf("unpack boot index %s: %w", desc.Digest, err)
 	}
-	result := conchimage.ResolveBootIndexResult{
-		BootIndexInfo: info,
-		RootfsKey:     snapshotMap[conchimage.KindRootfs],
-		MemKey:        snapshotMap[conchimage.KindMemSnapshot],
-		VMKey:         snapshotMap[conchimage.KindSandbox],
+	result := conchsandbox.ResolvedBoot{
+		BootIndexDigest: info.BootIndexDigest,
+		RootfsKey:       snapshotMap[conchimage.KindRootfs],
+		MemKey:          snapshotMap[conchimage.KindMemSnapshot],
+		VMKey:           snapshotMap[conchimage.KindSandbox],
+		Resume:          info.Resume,
+		VMMName:         info.VMMName,
+		MemorySizeMB:    info.MemorySizeMB,
 	}
 	if result.RootfsKey == "" || result.VMKey == "" {
-		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("boot index %s unpack returned incomplete component keys", desc.Digest)
+		return conchsandbox.ResolvedBoot{}, fmt.Errorf("boot index %s unpack returned incomplete component keys", desc.Digest)
 	}
 	if result.Resume && result.MemKey == "" {
-		return conchimage.ResolveBootIndexResult{}, fmt.Errorf("resume boot index %s unpack returned an empty mem snapshot key", desc.Digest)
+		return conchsandbox.ResolvedBoot{}, fmt.Errorf("resume boot index %s unpack returned an empty mem snapshot key", desc.Digest)
 	}
 	return result, nil
 }
