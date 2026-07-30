@@ -49,7 +49,7 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ```python
 Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
                vcpu_num=None, vcpu_max=None, ram_mb=None,
-               volume_mounts=None) -> Sandbox
+               volume_mounts=None, env=None) -> Sandbox
 ```
 
 基于 Template 创建沙箱。连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
@@ -60,6 +60,7 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
 - `namespace` (str, 可选): 沙箱命名空间
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
 - `volume_mounts` (list, 可选): 卷挂载配置
+- `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。沙箱 ID、访问令牌、协议字段和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 1024 字节；超过限制时会在虚拟机启动前拒绝创建请求。
 
 **返回：** 成功返回 `Sandbox` 对象。
 
@@ -174,6 +175,62 @@ sbx.delete()
 Sandbox.delete_sandbox("sandbox_abc")
 ```
 
+### conchd 服务进程确认
+
+```python
+Sandbox.service_health() -> bool
+```
+
+当 `conchd` 的状态存储、containerd host、daemon client 和 runtime service 等核心组件已完成初始化时返回 `True`。该检查仅确认组件已初始化，不会主动探测各依赖的实时运行状态。
+
+### 获取沙箱（ `List` 和 `Get` ）
+
+```python
+Sandbox.list(namespace=None, state=None, limit=None) -> list[dict]
+Sandbox.get(sandbox_id, namespace=None) -> Sandbox
+```
+
+`list` 的 `state` 筛选项可接受 `running` 和 `paused`，而 `limit` 需为 1-5000 的整数。未指定 `state` 时也只返回 `READY` 和 `SUSPENDED` 记录；`UNKNOWN` 等内部状态不会出现在列表中。
+
+**`Sandbox.list()` 参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `namespace` | str | 仅返回指定命名空间中的沙箱；未指定时使用 daemon 的默认命名空间 |
+| `state` | list[str] | 按状态筛选；支持 `running` 和 `paused`，其中 `READY` 表示 `running`，`SUSPENDED` 表示 `paused` |
+| `limit` | int | 最多返回的沙箱数量，默认值为 `100`，取值范围为 `1` 至 `5000` |
+
+**`Sandbox.get()` 参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sandbox_id` | str | 要获取的沙箱 ID |
+| `namespace` | str | 沙箱所属命名空间；未指定时使用 daemon 的默认命名空间 |
+
+`Sandbox.list()` 返回沙箱摘要字典列表；`Sandbox.get()` 返回已填充基础信息的 `Sandbox` 对象。沙箱响应可包含以下字段：
+
+`Sandbox.get()` 会填充 namespace、资源、domain、metadata 和 lifecycle 等可用的控制面字段。由于 daemon 当前不会恢复创建时的 conch-init 访问令牌，GET 响应会省略 `conchInitAccessToken`，该方法返回的对象仅用于控制面操作，例如读取元数据或删除沙箱。命令、文件和沙箱内 Agent 健康检查会抛出 `Agent credentials unavailable for retrieved sandbox`。`Sandbox.create()` 返回的对象不受此限制。
+
+下表使用 REST API 的 JSON 字段名。Python SDK 会将其映射为 Python 属性，例如 `sandboxID` 对应 `sandbox_id`、`templateID` 对应 `template_id`、`startedAt` 对应 `started_at`，`domain` 对应 `ip`。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `templateID` | str | 创建沙箱所使用的 Template ID |
+| `imageName` | str | 关联镜像名称；后端无法提供时为空字符串 |
+| `snapshotID` | str | 关联快照 ID；后端无法提供时为空字符串 |
+| `sandboxID` | str | 对外使用的 Conch 沙箱 ID |
+| `namespace` | str | 沙箱所属命名空间 |
+| `startedAt` | str | 沙箱创建时间，使用 RFC 3339 格式 |
+| `endAt` | str | 预留的沙箱结束时间字段；当前固定返回空字符串 |
+| `cpuCount` | int | 虚拟 CPU 数量 |
+| `memoryMB` | int | 内存大小，单位为 MB |
+| `diskSizeMB` | int | 磁盘大小，单位为 MB；后端无法提供时为 `0` |
+| `conchInitVersion` | str | 沙箱 conch-init 版本；后端无法提供时为空字符串 |
+| `alias` | str | 沙箱别名或名称 |
+| `domain` | str | 沙箱当前可用的网络地址；详细 GET 响应提供 |
+| `metadata` | dict | 沙箱元数据键值映射 |
+| `lifecycle` | dict | 生命周期配置；当前包含 `autoResume` 占位字段 |
+| `volumeMounts` | list[dict] | 预留的卷挂载列表；当前固定返回空列表 |
 ---
 
 ### 获取沙箱信息
@@ -459,7 +516,8 @@ print(result)
 
 ```python
 Sandbox(sandbox_id=None, template_id=None, namespace=None,
-        vcpu_num=None, vcpu_max=None, ram_mb=None)
+        vcpu_num=None, vcpu_max=None, ram_mb=None,
+        volume_mounts=None, env=None)
 ```
 
 **主要参数：**
@@ -472,6 +530,8 @@ Sandbox(sandbox_id=None, template_id=None, namespace=None,
 | `vcpu_num` | int | 虚拟 CPU 数量 |
 | `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |
+| `volume_mounts` | list | 创建沙箱时使用的卷挂载配置 |
+| `env` | dict | 创建沙箱时传入的环境变量 |
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。SDK 首次使用时读取配置并在进程内缓存；可通过 `CONCH_SDK_CONFIG` 指定配置文件。控制面地址不属于沙箱操作参数。请使用 `Sandbox.create()` 类方法创建沙箱。
 

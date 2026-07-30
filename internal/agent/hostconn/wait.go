@@ -2,6 +2,7 @@ package hostconn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -19,11 +20,13 @@ const (
 	expectedAgentVersion = "0.0.4"
 	vsockReadTimeout     = 2 * time.Second
 	stratovirtVMMName    = "stratovirt"
+	maxVsockInitPayload  = 1024
 )
 
 type ReadyOptions struct {
 	SandboxID       string
 	AgentToken      string
+	Env             map[string]string
 	VMMName         string
 	VsockCID        uint32
 	VsockSocketPath string
@@ -31,9 +34,17 @@ type ReadyOptions struct {
 	Timeout         time.Duration
 }
 
+func ValidateReadyOptions(opts ReadyOptions) error {
+	_, err := readyPayload(opts)
+	return err
+}
+
 func WaitReady(ctx context.Context, opts ReadyOptions) (net.Conn, error) {
 	logger := ulog.GetLogger()
-	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\nAGENT_TOKEN:%s\n", opts.SandboxID, opts.AgentToken)
+	payload, err := readyPayload(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	if opts.Retry <= 0 {
 		opts.Retry = 10 * time.Millisecond
@@ -43,6 +54,21 @@ func WaitReady(ctx context.Context, opts ReadyOptions) (net.Conn, error) {
 		return waitReadyVhostVsock(ctx, opts, payload, logger)
 	}
 	return waitReadyUnixProxy(ctx, opts, payload, logger)
+}
+
+func readyPayload(opts ReadyOptions) (string, error) {
+	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\nAGENT_TOKEN:%s\n", opts.SandboxID, opts.AgentToken)
+	if len(opts.Env) != 0 {
+		env, err := json.Marshal(opts.Env)
+		if err != nil {
+			return "", fmt.Errorf("marshal sandbox environment: %w", err)
+		}
+		payload += "ENV_JSON:" + string(env) + "\n"
+	}
+	if len(payload) > maxVsockInitPayload {
+		return "", fmt.Errorf("vsock initialization payload is %d bytes, maximum is %d", len(payload), maxVsockInitPayload)
+	}
+	return payload, nil
 }
 
 func waitReadyUnixProxy(ctx context.Context, opts ReadyOptions, payload string, logger ulog.Logger) (net.Conn, error) {

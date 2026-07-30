@@ -165,6 +165,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUMax:      opts.VCPUMax,
 		RAMMB:        opts.RamMB,
 		AgentToken:   agentToken,
+		Env:          copyMap(opts.Env),
 		VolumeMounts: opts.VolumeMounts,
 	}
 
@@ -213,6 +214,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		Namespace:  namespace,
 		IP:         createResult.IP,
 		AgentToken: createResult.AgentToken,
+		TemplateID: opts.TemplateID,
+		VCPUNum:    opts.VCPUNum,
+		RamMB:      opts.RamMB,
+		CreatedAt:  createdAt,
 	}, nil
 }
 

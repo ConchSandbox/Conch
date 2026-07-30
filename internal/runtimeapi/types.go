@@ -28,6 +28,7 @@ type SandboxCreateOptions struct {
 	VCPUMax      int64
 	RamMB        int64
 	VolumeMounts []volume.Mount
+	Env          map[string]string
 }
 
 type SandboxDefaults struct {
@@ -43,6 +44,10 @@ type SandboxCreateResult struct {
 	Namespace  string
 	IP         string
 	AgentToken string
+	TemplateID string
+	VCPUNum    int64
+	RamMB      int64
+	CreatedAt  int64
 }
 
 type SandboxCheckpointOptions struct {
