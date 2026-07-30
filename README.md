@@ -107,11 +107,10 @@ sudo conch-sdk-init-config -f     # 强制覆盖已有配置
 
 | 优先级 | 方式 | 说明 |
 |--------|------|------|
-| 1 | `Sandbox.create(config_path="...")` | 代码中直接指定，跳过自动搜索 |
-| 2 | `$CONCH_SDK_CONFIG` 环境变量 | 环境变量指定路径 |
-| 3 | `~/.config/conch/sdk-config.yaml` | 用户级配置 |
-| 4 | `/etc/conch/sdk-config.yaml` | 系统级配置 |
-| 5 | `<repo>/config/sdk-config.yaml` | 仓库内置模板 |
+| 1 | `$CONCH_SDK_CONFIG` 环境变量 | 环境变量指定路径 |
+| 2 | `~/.config/conch/sdk-config.yaml` | 用户级配置 |
+| 3 | `/etc/conch/sdk-config.yaml` | 系统级配置 |
+| 4 | `<repo>/config/sdk-config.yaml` | 仓库内置模板 |
 
 ### Python SDK 示例
 

@@ -1,11 +1,62 @@
 package guestd
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 )
+
+type fragmentedReader struct {
+	r   io.Reader
+	max int
+}
+
+func (r fragmentedReader) Read(p []byte) (int, error) {
+	if len(p) > r.max {
+		p = p[:r.max]
+	}
+	return r.r.Read(p)
+}
+
+func framedVsockTestPayload(payload []byte, size uint32) []byte {
+	var framed bytes.Buffer
+	_ = binary.Write(&framed, binary.BigEndian, size)
+	_, _ = framed.Write(payload)
+	return framed.Bytes()
+}
+
+func TestReadVsockInitPayloadHandlesLargeFragmentedPayload(t *testing.T) {
+	want := bytes.Repeat([]byte("x"), 2048)
+	framed := framedVsockTestPayload(want, uint32(len(want)))
+	got, err := readVsockInitPayload(fragmentedReader{r: bytes.NewReader(framed), max: 7})
+	if err != nil {
+		t.Fatalf("readVsockInitPayload() error = %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("payload length = %d, want %d", len(got), len(want))
+	}
+}
+
+func TestReadVsockInitPayloadRejectsTruncatedPayload(t *testing.T) {
+	framed := framedVsockTestPayload([]byte("short"), 10)
+	_, err := readVsockInitPayload(bytes.NewReader(framed))
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("readVsockInitPayload() error = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+func TestReadVsockInitPayloadRejectsOversizedPayload(t *testing.T) {
+	framed := framedVsockTestPayload(nil, maxVsockInitPayload+1)
+	_, err := readVsockInitPayload(bytes.NewReader(framed))
+	if err == nil {
+		t.Fatal("readVsockInitPayload() error = nil, want maximum-size error")
+	}
+}
 
 func TestVsockHandlerRequiresAgentToken(t *testing.T) {
 	agentAuth.SetToken("")

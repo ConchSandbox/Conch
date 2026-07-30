@@ -105,6 +105,7 @@ type CreateRequest struct {
 	VCPUMax      int64
 	RAMMB        int64
 	AgentToken   string
+	Env          map[string]string
 	VolumeMounts []volume.Mount
 }
 
@@ -200,8 +201,21 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
+	readyOpts := hostconn.ReadyOptions{
+		SandboxID:       sandboxId,
+		AgentToken:      agentToken,
+		Env:             env,
+		VMMName:         vmmName,
+		VsockCID:        vsockCID,
+		VsockSocketPath: vsockSocketPath,
+		Retry:           vsockSignalRetry,
+		Timeout:         vsockSignalTimeout,
+	}
+	if err := hostconn.ValidateReadyOptions(readyOpts); err != nil {
+		return nil, err
+	}
 
 	var sbx *Sandbox
 	var createErr error
@@ -215,15 +229,7 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, na
 	}
 
 	// WaitReady returns timeout and context cancellation errors directly.
-	conn, err := hostconn.WaitReady(ctx, hostconn.ReadyOptions{
-		SandboxID:       sandboxId,
-		AgentToken:      agentToken,
-		VMMName:         vmmName,
-		VsockCID:        vsockCID,
-		VsockSocketPath: vsockSocketPath,
-		Retry:           vsockSignalRetry,
-		Timeout:         vsockSignalTimeout,
-	})
+	conn, err := hostconn.WaitReady(ctx, readyOpts)
 	if err != nil {
 		return sbx, err
 	}
@@ -422,6 +428,7 @@ func (m *Manager) startSandbox(ctx context.Context, namespace string, req Create
 		req.VMMName,
 		req.SandboxID,
 		req.AgentToken,
+		req.Env,
 		req.VCPUNum,
 		runtimeIDs.vcpuMax,
 		m.pool,

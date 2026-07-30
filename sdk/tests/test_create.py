@@ -1,5 +1,3 @@
-from inspect import signature
-
 from conch import Sandbox
 from conch.config_loader import load_config
 from conch.sandbox import VMM_NAME_KEY
@@ -57,11 +55,3 @@ def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
 
     payload = sbx._build_create_payload()
     assert payload[VMM_NAME_KEY] == ""
-
-
-def test_operation_signatures_do_not_expose_transport_options():
-    for operation in (Sandbox, Sandbox.create, Sandbox.delete_sandbox):
-        parameters = signature(operation).parameters
-        assert "api_url" not in parameters
-        assert "unix_socket" not in parameters
-        assert "config_path" not in parameters

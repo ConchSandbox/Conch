@@ -4,7 +4,10 @@
 package guestd
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -18,10 +21,41 @@ import (
 
 const (
 	// MergeTarget is the OverlayFS merge point
-	MergeTarget      = "/mnt/conch/merge"
-	initLogPath      = "/var/log/conch-init/conch-init.log"
-	initMergeLogPath = MergeTarget + initLogPath
+	MergeTarget         = "/mnt/conch/merge"
+	initLogPath         = "/var/log/conch-init/conch-init.log"
+	initMergeLogPath    = MergeTarget + initLogPath
+	maxVsockInitPayload = 64 * 1024
 )
+
+type vsockFDReader int
+
+func (r vsockFDReader) Read(p []byte) (int, error) {
+	for {
+		n, err := unix.Read(int(r), p)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if n == 0 && err == nil {
+			return 0, io.EOF
+		}
+		return n, err
+	}
+}
+
+func readVsockInitPayload(r io.Reader) ([]byte, error) {
+	var size uint32
+	if err := binary.Read(r, binary.BigEndian, &size); err != nil {
+		return nil, fmt.Errorf("read vsock initialization payload size: %w", err)
+	}
+	if size > maxVsockInitPayload {
+		return nil, fmt.Errorf("vsock initialization payload is %d bytes, maximum is %d", size, maxVsockInitPayload)
+	}
+	payload := make([]byte, int(size))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, fmt.Errorf("read vsock initialization payload: %w", err)
+	}
+	return payload, nil
+}
 
 type initDir struct {
 	path string
@@ -272,8 +306,7 @@ func startVsockServer() {
 			continue
 		}
 
-		buf := make([]byte, 1024)
-		n, err := unix.Read(connFd, buf)
+		payload, err := readVsockInitPayload(vsockFDReader(connFd))
 		if err != nil {
 			logger.Error("vsock read error",
 				ulog.F("fd", connFd),
@@ -282,8 +315,8 @@ func startVsockServer() {
 			_ = unix.Close(connFd)
 			continue
 		}
-		if n > 0 {
-			message := string(buf[:n])
+		if len(payload) > 0 {
+			message := string(payload)
 			response := handler.HandleMessage(message)
 			if response != "" {
 				if _, err := unix.Write(connFd, []byte(response)); err != nil {

@@ -21,18 +21,18 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/sandbox/create", bytes.NewBufferString(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 
-	var response map[string]string
+	var response createSandboxResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response["sandbox_id"] == "" || response["sandbox_id"] != sandboxOps.createReq.SandboxID {
-		t.Fatalf("sandbox identity = response:%q request:%q", response["sandbox_id"], sandboxOps.createReq.SandboxID)
+	if response.SandboxID == "" || response.SandboxID != sandboxOps.createReq.SandboxID {
+		t.Fatalf("sandbox identity = response:%q request:%q", response.SandboxID, sandboxOps.createReq.SandboxID)
 	}
 }
 

@@ -1,9 +1,13 @@
 package hostconn
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -19,11 +23,13 @@ const (
 	expectedAgentVersion = "0.0.4"
 	vsockReadTimeout     = 2 * time.Second
 	stratovirtVMMName    = "stratovirt"
+	maxVsockInitPayload  = 64 * 1024
 )
 
 type ReadyOptions struct {
 	SandboxID       string
 	AgentToken      string
+	Env             map[string]string
 	VMMName         string
 	VsockCID        uint32
 	VsockSocketPath string
@@ -31,9 +37,17 @@ type ReadyOptions struct {
 	Timeout         time.Duration
 }
 
+func ValidateReadyOptions(opts ReadyOptions) error {
+	_, err := readyPayload(opts)
+	return err
+}
+
 func WaitReady(ctx context.Context, opts ReadyOptions) (net.Conn, error) {
 	logger := ulog.GetLogger()
-	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\nAGENT_TOKEN:%s\n", opts.SandboxID, opts.AgentToken)
+	payload, err := readyPayload(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	if opts.Retry <= 0 {
 		opts.Retry = 10 * time.Millisecond
@@ -43,6 +57,64 @@ func WaitReady(ctx context.Context, opts ReadyOptions) (net.Conn, error) {
 		return waitReadyVhostVsock(ctx, opts, payload, logger)
 	}
 	return waitReadyUnixProxy(ctx, opts, payload, logger)
+}
+
+func readyPayload(opts ReadyOptions) (string, error) {
+	payload := fmt.Sprintf("I AM SANDBOX_ID:%s\nAGENT_TOKEN:%s\n", opts.SandboxID, opts.AgentToken)
+	if len(opts.Env) != 0 {
+		env, err := json.Marshal(opts.Env)
+		if err != nil {
+			return "", fmt.Errorf("marshal sandbox environment: %w", err)
+		}
+		payload += "ENV_JSON:" + string(env) + "\n"
+	}
+	if len(payload) > maxVsockInitPayload {
+		return "", fmt.Errorf("vsock initialization payload is %d bytes, maximum is %d", len(payload), maxVsockInitPayload)
+	}
+	return payload, nil
+}
+
+func framedInitPayload(payload string) ([]byte, error) {
+	if len(payload) > maxVsockInitPayload {
+		return nil, fmt.Errorf("vsock initialization payload is %d bytes, maximum is %d", len(payload), maxVsockInitPayload)
+	}
+	var framed bytes.Buffer
+	if err := binary.Write(&framed, binary.BigEndian, uint32(len(payload))); err != nil {
+		return nil, err
+	}
+	_, _ = framed.WriteString(payload)
+	return framed.Bytes(), nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func writeAllFD(fd int, data []byte) error {
+	for len(data) > 0 {
+		n, err := unix.Write(fd, data)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 func waitReadyUnixProxy(ctx context.Context, opts ReadyOptions, payload string, logger ulog.Logger) (net.Conn, error) {
@@ -84,12 +156,16 @@ func tryUnixProxyReady(opts ReadyOptions, payload string, logger ulog.Logger) (n
 		}
 	}()
 
-	if _, err = conn.Write([]byte(fmt.Sprintf("CONNECT %d\n", vsockReadyPort))); err != nil {
+	if err = writeAll(conn, []byte(fmt.Sprintf("CONNECT %d\n", vsockReadyPort))); err != nil {
 		logger.Debug("failed to write CONNECT command, retrying...", ulog.F("sandboxId", opts.SandboxID), ulog.F("error", err))
 		return nil, err
 	}
 
-	if _, err = conn.Write([]byte(payload)); err != nil {
+	framed, err := framedInitPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	if err = writeAll(conn, framed); err != nil {
 		logger.Warn("failed to send payload, retrying...", ulog.F("sandboxId", opts.SandboxID), ulog.F("error", err))
 		return nil, err
 	}
@@ -162,7 +238,11 @@ func tryVhostVsockReady(opts ReadyOptions, payload string, logger ulog.Logger) (
 		}
 	}()
 
-	if _, err = unix.Write(fd, []byte(payload)); err != nil {
+	framed, err := framedInitPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	if err = writeAllFD(fd, framed); err != nil {
 		logger.Warn("failed to send payload to Stratovirt VM, retrying...", ulog.F("sandboxId", opts.SandboxID), ulog.F("error", err))
 		return nil, err
 	}
