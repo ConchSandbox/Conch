@@ -112,25 +112,24 @@ type createSandboxResponse struct {
 }
 
 type sandboxResponse struct {
-	TemplateID           string                       `json:"templateID"`
-	ImageName            string                       `json:"imageName"`
-	SnapshotID           string                       `json:"snapshotID"`
-	SandboxID            string                       `json:"sandboxID"`
-	Namespace            string                       `json:"namespace"`
-	StartedAt            string                       `json:"startedAt"`
-	EndAt                string                       `json:"endAt"`
-	CPUCount             int64                        `json:"cpuCount"`
-	MemoryMB             int64                        `json:"memoryMB"`
-	DiskSizeMB           int64                        `json:"diskSizeMB"`
-	ConchInitVersion     string                       `json:"conchInitVersion"`
-	Alias                string                       `json:"alias"`
-	ConchInitAccessToken *string                      `json:"conchInitAccessToken,omitempty"`
-	AllowInternetAccess  *bool                        `json:"allowInternetAccess,omitempty"`
-	Domain               *string                      `json:"domain,omitempty"`
-	Metadata             map[string]string            `json:"metadata"`
-	Network              *sandboxNetworkResponse      `json:"network,omitempty"`
-	Lifecycle            *sandboxLifecycleResponse    `json:"lifecycle,omitempty"`
-	VolumeMounts         []sandboxVolumeMountResponse `json:"volumeMounts"`
+	TemplateID          string                       `json:"templateID"`
+	ImageName           string                       `json:"imageName"`
+	SnapshotID          string                       `json:"snapshotID"`
+	SandboxID           string                       `json:"sandboxID"`
+	Namespace           string                       `json:"namespace"`
+	StartedAt           string                       `json:"startedAt"`
+	EndAt               string                       `json:"endAt"`
+	CPUCount            int64                        `json:"cpuCount"`
+	MemoryMB            int64                        `json:"memoryMB"`
+	DiskSizeMB          int64                        `json:"diskSizeMB"`
+	ConchInitVersion    string                       `json:"conchInitVersion"`
+	Alias               string                       `json:"alias"`
+	AllowInternetAccess *bool                        `json:"allowInternetAccess,omitempty"`
+	Domain              *string                      `json:"domain,omitempty"`
+	Metadata            map[string]string            `json:"metadata"`
+	Network             *sandboxNetworkResponse      `json:"network,omitempty"`
+	Lifecycle           *sandboxLifecycleResponse    `json:"lifecycle,omitempty"`
+	VolumeMounts        []sandboxVolumeMountResponse `json:"volumeMounts"`
 }
 
 type sandboxLogEntryResponse struct {

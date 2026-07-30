@@ -670,15 +670,40 @@ class Sandbox:
 
         self.ip = None
         self.agent_token = None
-        self.client = None
+        self._client = None
+        self.control_plane_only = False
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
+        self.image_name = None
+        self.snapshot_id = None
+        self.started_at = None
+        self.end_at = None
+        self.disk_size_mb = None
+        self.conch_init_version = None
+        self.alias = None
+        self.allow_internet_access = None
         self.commands = CommandManager(self)
         self.files = FilesManager(self)
         self.volume_mounts = volume_mounts or []
         self.env = env
         self.network = network
+        self.metadata: Dict[str, str] = {}
+        self.lifecycle: Dict[str, Any] = {}
+
+    @property
+    def client(self):
+        if self._client is None:
+            if self.control_plane_only:
+                raise RuntimeError("Agent credentials unavailable for retrieved sandbox")
+            raise RuntimeError("Sandbox agent client is not initialized")
+        return self._client
+
+    @client.setter
+    def client(self, value):
+        self._client = value
+        if value is not None:
+            self.control_plane_only = False
 
 
     def _build_control_plane_url(self, path: str) -> str:
@@ -761,16 +786,40 @@ class Sandbox:
         self.namespace = record.get(NAMESPACE_KEY) or self.namespace
         self.template_id = record.get("templateID") or self.template_id
         self.ip = record.get("domain") or self.ip
-        self.agent_token = record.get("conchInitAccessToken") or self.agent_token
+        if record.get("conchInitAccessToken"):
+            self.agent_token = record["conchInitAccessToken"]
         self.vcpu_num = record.get("cpuCount") or self.vcpu_num
         self.ram_mb = record.get("memoryMB") or self.ram_mb
+        for attribute, field_name in {
+            "image_name": "imageName",
+            "snapshot_id": "snapshotID",
+            "started_at": "startedAt",
+            "end_at": "endAt",
+            "disk_size_mb": "diskSizeMB",
+            "conch_init_version": "conchInitVersion",
+            "alias": "alias",
+            "allow_internet_access": "allowInternetAccess",
+        }.items():
+            if field_name in record:
+                setattr(self, attribute, record[field_name])
+        if "network" in record:
+            self.network = record["network"]
+        if "allowInternetAccess" in record:
+            self.network = dict(self.network or {})
+            self.network["allow_internet_access"] = record["allowInternetAccess"]
+        if "metadata" in record:
+            self.metadata = dict(record["metadata"] or {})
+        if "lifecycle" in record:
+            self.lifecycle = dict(record["lifecycle"] or {})
+        if "volumeMounts" in record:
+            self.volume_mounts = list(record["volumeMounts"] or [])
         if self.ip and self.agent_token:
-            if self.client:
+            if self._client:
                 try:
-                    self.client.close()
+                    self._client.close()
                 except Exception:
                     pass
-            self.client = AgentClient(host=self.ip, token=self.agent_token)
+            self._client = AgentClient(host=self.ip, token=self.agent_token)
 
     def _do_create(self):
         payload = self._build_create_payload()
@@ -873,6 +922,7 @@ class Sandbox:
             sbx._apply_sandbox_record(sbx._get_control_plane_requests(path, params))
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
+        sbx.control_plane_only = sbx._client is None
         return sbx
 
     @staticmethod
@@ -941,8 +991,9 @@ class Sandbox:
 
     def health_check(self) -> Dict[str, Any]:
         # Check sandbox health status
+        client = self.client
         try:
-            return self.client.health_check()
+            return client.health_check()
         except Exception as e:
             return {
                 STATUS_KEY: "ERROR",

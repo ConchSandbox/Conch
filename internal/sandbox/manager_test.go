@@ -2,12 +2,15 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/template"
 )
 
@@ -38,6 +41,63 @@ func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("reserveSandboxEntry() for different sandbox blocked behind another sandbox entry")
+	}
+}
+
+func TestUpdateNetworkRejectsInvalidPolicy(t *testing.T) {
+	m := &Manager{requestTimeout: time.Second}
+	m.sandboxes.Store(sandboxMapKey("ns", "sandbox-a"), &sandboxEntry{
+		state: sandboxReady,
+		sbx:   &Sandbox{slot: &netstack.Slot{Key: "slot-a"}},
+	})
+
+	err := m.UpdateNetwork(context.Background(), NetworkUpdateRequest{
+		Namespace: "ns",
+		SandboxID: "sandbox-a",
+		Network:   json.RawMessage(`{`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid sandbox network config") {
+		t.Fatalf("UpdateNetwork() error = %v, want invalid network config", err)
+	}
+}
+
+func TestUpdateNetworkForwardsPolicyToPool(t *testing.T) {
+	original := updateSandboxNetworkPolicy
+	defer func() { updateSandboxNetworkPolicy = original }()
+
+	slot := &netstack.Slot{Key: "slot-a"}
+	var gotSandboxID string
+	var gotPolicy *runtimeapi.SandboxNetworkConfig
+	type contextKey struct{}
+	updateCtx := context.WithValue(context.Background(), contextKey{}, "update")
+	updateSandboxNetworkPolicy = func(_ *netstack.Pool, ctx context.Context, gotSlot *netstack.Slot, sandboxID string, policy *runtimeapi.SandboxNetworkConfig) error {
+		if gotSlot != slot {
+			t.Fatalf("slot = %#v, want %#v", gotSlot, slot)
+		}
+		if ctx.Value(contextKey{}) != "update" {
+			t.Fatal("UpdateNetwork() did not forward its context")
+		}
+		gotSandboxID = sandboxID
+		gotPolicy = policy
+		return nil
+	}
+
+	m := &Manager{requestTimeout: time.Second}
+	m.sandboxes.Store(sandboxMapKey("ns", "sandbox-a"), &sandboxEntry{
+		state: sandboxReady,
+		sbx:   &Sandbox{slot: slot},
+	})
+
+	err := m.UpdateNetwork(updateCtx, NetworkUpdateRequest{
+		Namespace: "ns",
+		SandboxID: "sandbox-a",
+		Network:   json.RawMessage(`{"denyOut":["198.51.100.1"]}`),
+	})
+	if err != nil {
+		t.Fatalf("UpdateNetwork() error = %v", err)
+	}
+	if gotSandboxID != "sandbox-a" || !reflect.DeepEqual(gotPolicy.DenyOut, []string{"198.51.100.1"}) {
+		t.Fatalf("forwarded sandbox/policy = %q/%#v", gotSandboxID, gotPolicy)
 	}
 }
 

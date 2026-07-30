@@ -19,6 +19,8 @@ type fakePolicyIPTables struct {
 	activeChain string
 	switches    [][]string
 	switchErr   error
+	chainExists bool
+	clearCalls  int
 }
 
 func (f *fakePolicyIPTables) Append(table, chain string, rules ...string) error {
@@ -30,8 +32,13 @@ func (f *fakePolicyIPTables) Append(table, chain string, rules ...string) error 
 	return nil
 }
 
-func (*fakePolicyIPTables) ChainExists(string, string) (bool, error) { return false, nil }
-func (*fakePolicyIPTables) ClearChain(string, string) error          { return nil }
+func (f *fakePolicyIPTables) ChainExists(string, string) (bool, error) {
+	return f.chainExists, nil
+}
+func (f *fakePolicyIPTables) ClearChain(string, string) error {
+	f.clearCalls++
+	return nil
+}
 func (*fakePolicyIPTables) DeleteIfExists(string, string, ...string) error {
 	return nil
 }
@@ -178,5 +185,20 @@ func TestSandboxPolicyKeepsActiveChainWhenSwitchFails(t *testing.T) {
 	}
 	if tables.activeChain != sandboxPolicyA {
 		t.Fatalf("active chain = %q, want preserved %q", tables.activeChain, sandboxPolicyA)
+	}
+}
+
+func TestSandboxPolicyClearsEmptyAndExistingPolicies(t *testing.T) {
+	tables := &fakePolicyIPTables{chainExists: true}
+	useFakePolicyIPTables(t, tables)
+
+	if err := applySandboxNetworkPolicyInNS(nil, tapInterfaceName); err != nil {
+		t.Fatalf("applySandboxNetworkPolicyInNS(nil) error = %v", err)
+	}
+	if err := clearSandboxNetworkPolicyInNS(); err != nil {
+		t.Fatalf("clearSandboxNetworkPolicyInNS() error = %v", err)
+	}
+	if tables.clearCalls != 4 {
+		t.Fatalf("ClearChain calls = %d, want 4", tables.clearCalls)
 	}
 }

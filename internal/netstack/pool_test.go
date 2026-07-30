@@ -375,8 +375,8 @@ func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "namespace missing") {
 		t.Fatalf("RestoreInUse() error = %v, want namespace missing", err)
 	}
-	if slot.CNIResult() != nil {
-		t.Fatalf("CNIResult() = %#v, want nil after failed restore", slot.CNIResult())
+	if result := slot.CNIResult(); result == nil || result.IP != "10.12.0.2" {
+		t.Fatalf("CNIResult() = %#v, want retained IP 10.12.0.2 for cleanup", result)
 	}
 	if got := p.inUse["2"]; got != nil {
 		t.Fatalf("inUse[2] = %#v, want nil after failed restore", got)
@@ -491,6 +491,147 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 		}
 	default:
 		t.Fatalf("slot was not requeued after assignment record failure")
+	}
+}
+
+func TestGetAppliesCreatePolicy(t *testing.T) {
+	original := applySandboxPolicy
+	var applied *runtimeapi.SandboxNetworkConfig
+	applySandboxPolicy = func(_ context.Context, _ *Slot, policy *runtimeapi.SandboxNetworkConfig) error {
+		applied = policy
+		return nil
+	}
+	t.Cleanup(func() { applySandboxPolicy = original })
+
+	store := newFakeNetworkSlotStore()
+	p := &Pool{
+		slotStore: store,
+		newSlots:  make(chan *Slot, 1),
+		inUse:     make(map[string]*Slot),
+	}
+	slot := &Slot{Key: "warm", Idx: firstSlotIndex}
+	p.newSlots <- slot
+	policy := &runtimeapi.SandboxNetworkConfig{DenyOut: []string{"198.51.100.1"}}
+
+	got, err := p.Get(context.Background(), "sandbox-a", policy)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got != slot || applied != policy {
+		t.Fatalf("Get() slot/policy = %#v/%#v, want original values", got, applied)
+	}
+	if rec := store.records[slot.Key]; rec.State != state.NetworkSlotAssigned || rec.SandboxID != "sandbox-a" {
+		t.Fatalf("assigned slot record = %#v", rec)
+	}
+}
+
+func TestUpdateSandboxNetworkPolicyAppliesPolicy(t *testing.T) {
+	original := replaceSandboxPolicy
+	var applied *runtimeapi.SandboxNetworkConfig
+	replaceSandboxPolicy = func(_ context.Context, _ *Slot, policy *runtimeapi.SandboxNetworkConfig) error {
+		applied = policy
+		return nil
+	}
+	t.Cleanup(func() { replaceSandboxPolicy = original })
+
+	store := newFakeNetworkSlotStore()
+	p := &Pool{slotStore: store}
+	slot := &Slot{Key: "assigned", Idx: firstSlotIndex}
+	slot.assignSandbox("sandbox-a")
+	policy := &runtimeapi.SandboxNetworkConfig{AllowOut: []string{"192.0.2.1"}}
+
+	if err := p.UpdateSandboxNetworkPolicy(context.Background(), slot, "sandbox-a", policy); err != nil {
+		t.Fatalf("UpdateSandboxNetworkPolicy() error = %v", err)
+	}
+	if applied != policy {
+		t.Fatalf("applied policy = %#v, want %#v", applied, policy)
+	}
+	if rec := store.records[slot.Key]; rec.State != state.NetworkSlotAssigned || rec.SandboxID != "sandbox-a" {
+		t.Fatalf("assigned slot record = %#v", rec)
+	}
+}
+
+func TestRestoreInUseAppliesPersistedPolicy(t *testing.T) {
+	withBridgeLayout(t, 1)
+	originalApply := applySandboxPolicy
+	originalValidate := validateReusableSlot
+	originalAllocation := validateHostAllocation
+	var applied *runtimeapi.SandboxNetworkConfig
+	applySandboxPolicy = func(_ context.Context, _ *Slot, policy *runtimeapi.SandboxNetworkConfig) error {
+		applied = policy
+		return nil
+	}
+	validateReusableSlot = func(context.Context, *Slot, string, string) error { return nil }
+	validateHostAllocation = func(*Pool, string, string) error { return nil }
+	t.Cleanup(func() {
+		applySandboxPolicy = originalApply
+		validateReusableSlot = originalValidate
+		validateHostAllocation = originalAllocation
+	})
+
+	store := newFakeNetworkSlotStore()
+	p := &Pool{
+		cniManager: &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
+		slotStore:  store,
+		inUse:      make(map[string]*Slot),
+	}
+	slot, err := NewSlot("2", firstSlotIndex)
+	if err != nil {
+		t.Fatalf("NewSlot() error = %v", err)
+	}
+	slot.setNetNSPath(t.TempDir())
+	policy := &runtimeapi.SandboxNetworkConfig{DenyOut: []string{"198.51.100.1"}}
+
+	if err := p.RestoreInUse(slot, "sandbox-a", "10.12.0.2", policy); err != nil {
+		t.Fatalf("RestoreInUse() error = %v", err)
+	}
+	if applied != policy {
+		t.Fatalf("applied policy = %#v, want %#v", applied, policy)
+	}
+	if p.inUse[slot.Key] != slot {
+		t.Fatal("restored slot was not tracked in use")
+	}
+}
+
+func TestRestoreInUseFailurePreservesCNIMetadataForCleanup(t *testing.T) {
+	withBridgeLayout(t, 1)
+	originalApply := applySandboxPolicy
+	originalValidate := validateReusableSlot
+	originalAllocation := validateHostAllocation
+	applySandboxPolicy = func(context.Context, *Slot, *runtimeapi.SandboxNetworkConfig) error {
+		return errors.New("apply failed")
+	}
+	validateReusableSlot = func(context.Context, *Slot, string, string) error { return nil }
+	validateHostAllocation = func(*Pool, string, string) error { return nil }
+	t.Cleanup(func() {
+		applySandboxPolicy = originalApply
+		validateReusableSlot = originalValidate
+		validateHostAllocation = originalAllocation
+	})
+
+	p := &Pool{
+		cniManager: &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
+		slotStore:  newFakeNetworkSlotStore(),
+	}
+	slot, err := NewSlot("2", firstSlotIndex)
+	if err != nil {
+		t.Fatalf("NewSlot() error = %v", err)
+	}
+	slot.setNetNSPath(t.TempDir())
+	cniID := slot.CNIContainerID()
+
+	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2", nil)
+	if err == nil || !strings.Contains(err.Error(), "apply failed") {
+		t.Fatalf("RestoreInUse() error = %v, want policy apply failure", err)
+	}
+	if slot.CNIContainerID() != cniID {
+		t.Fatalf("CNI ID = %q, want %q", slot.CNIContainerID(), cniID)
+	}
+	if result := slot.CNIResult(); result == nil || result.IP != "10.12.0.2" {
+		t.Fatalf("CNI result = %#v, want retained IP 10.12.0.2", result)
+	}
+	if len(slot.cniOpts) == 0 {
+		t.Fatal("CNI teardown options were cleared")
 	}
 }
 

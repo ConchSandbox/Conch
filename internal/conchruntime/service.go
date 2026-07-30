@@ -33,7 +33,7 @@ type SandboxOps interface {
 	Delete(sandbox.DeleteRequest) error
 	Suspend(sandbox.LifecycleRequest) error
 	Resume(sandbox.LifecycleRequest) error
-	UpdateNetwork(sandbox.NetworkUpdateRequest) error
+	UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
@@ -79,7 +79,9 @@ type Service struct {
 	SandboxDefaults   SandboxDefaults
 	SandboxLogs       *SandboxLogBuffer
 	lifecycleLocks    sandboxLifecycleLocks
-	logCleanupOnce    sync.Once
+	logCleanupMu      sync.Mutex
+	logCleanupCancel  context.CancelFunc
+	logCleanupWG      sync.WaitGroup
 }
 
 type sandboxLifecycleLock struct {
@@ -318,7 +320,7 @@ func marshalSandboxNetworkUpdateConfig(existing json.RawMessage, update *runtime
 	return data, nil
 }
 
-func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) (retErr error) {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
@@ -328,6 +330,15 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 	if opts.PodSandboxID == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
+	logSandboxID := firstNonEmpty(opts.SandboxID, opts.PodSandboxID)
+	logNamespace := s.normalizeNamespace(opts.Namespace)
+	defer func() {
+		if retErr != nil {
+			s.AppendSandboxLogFor(logNamespace, logSandboxID, "error", "network policy update failed")
+			return
+		}
+		s.AppendSandboxLogFor(logNamespace, logSandboxID, "info", "network policy updated")
+	}()
 	unlock := s.lifecycleLocks.lock(opts.PodSandboxID)
 	defer unlock()
 
@@ -340,6 +351,8 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 	}
 	sandboxID := firstNonEmpty(opts.SandboxID, rec.ConchSandboxID, opts.PodSandboxID)
 	namespace := s.normalizeNamespace(firstNonEmpty(opts.Namespace, rec.Namespace))
+	logSandboxID = sandboxID
+	logNamespace = namespace
 
 	network, err := marshalSandboxNetworkUpdateConfig(rec.Network, opts.Network)
 	if err != nil {
@@ -351,7 +364,7 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		return err
 	}
-	if err := s.Sandbox.UpdateNetwork(sandbox.NetworkUpdateRequest{
+	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{
 		Namespace: namespace,
 		SandboxID: sandboxID,
 		Network:   network,
@@ -359,7 +372,7 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 		rec.Network = oldNetwork
 		var rollbackErr error
 		if !errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
-			rollbackErr = s.Sandbox.UpdateNetwork(sandbox.NetworkUpdateRequest{
+			rollbackErr = s.Sandbox.UpdateNetwork(context.WithoutCancel(ctx), sandbox.NetworkUpdateRequest{
 				Namespace: namespace,
 				SandboxID: sandboxID,
 				Network:   oldNetwork,
@@ -1429,8 +1442,8 @@ func (s *Service) SetSandboxLogTTL(ttl time.Duration) {
 	s.SandboxLogs.ttl = ttl
 }
 
-func (s *Service) StartSandboxLogCleanup(ctx context.Context, interval ...time.Duration) {
-	if s == nil || ctx == nil {
+func (s *Service) StartSandboxLogCleanup(interval ...time.Duration) {
+	if s == nil {
 		return
 	}
 	cleanupInterval := defaultSandboxLogCleanupInterval
@@ -1441,20 +1454,41 @@ func (s *Service) StartSandboxLogCleanup(ctx context.Context, interval ...time.D
 		s.SandboxLogs = newSandboxLogBuffer(defaultSandboxLogLimit)
 	}
 	logs := s.SandboxLogs
-	s.logCleanupOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(cleanupInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case now := <-ticker.C:
-					logs.pruneExpired(now)
-				case <-ctx.Done():
-					return
-				}
+	s.logCleanupMu.Lock()
+	defer s.logCleanupMu.Unlock()
+	if s.logCleanupCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.logCleanupCancel = cancel
+	s.logCleanupWG.Add(1)
+	go func() {
+		defer s.logCleanupWG.Done()
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				logs.pruneExpired(now)
+			case <-ctx.Done():
+				return
 			}
-		}()
-	})
+		}
+	}()
+}
+
+func (s *Service) StopSandboxLogCleanup() {
+	if s == nil {
+		return
+	}
+	s.logCleanupMu.Lock()
+	defer s.logCleanupMu.Unlock()
+	if s.logCleanupCancel == nil {
+		return
+	}
+	s.logCleanupCancel()
+	s.logCleanupWG.Wait()
+	s.logCleanupCancel = nil
 }
 
 func (s *Service) ExpireSandboxLogs(sandboxID string) {

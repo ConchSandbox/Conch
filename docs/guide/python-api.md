@@ -52,6 +52,8 @@ Sandbox.create(template_id, **kwargs) -> Sandbox
 
 基于 Template 创建沙箱。`**kwargs` 可透传其他构造函数参数（如 `vcpu_num`、`vcpu_max`、`ram_mb`、`namespace`、`config_path` 等）。
 
+`Sandbox.create()` 始终读取 SDK 配置以获得镜像和资源默认值。即使显式传入 `api_url` 或 `unix_socket`，仍需提供有效的默认配置或通过 `config_path` 指定配置文件。其他只访问控制面的类方法可在显式提供连接地址时不读取该配置。
+
 **参数：**
 - `template_id` (str): 要启动的 `tmpl_xxx`
 - `**kwargs`: 透传至构造函数，参见 [Sandbox 构造函数](#sandbox-构造函数)
@@ -178,7 +180,7 @@ Sandbox.delete_sandbox("sandbox_abc")
 Sandbox.service_health(unix_socket=None, api_url=None, config_path=None) -> bool
 ```
 
-当 `conchd` 确认其依赖的模块（`bbolt`, `containerd`, `daemon Client` 等）均就绪时返回 `True`。
+当 `conchd` 的状态存储、containerd host、daemon client 和 runtime service 等核心组件已完成初始化时返回 `True`。该检查仅确认组件已初始化，不会主动探测各依赖的实时运行状态。
 
 ### 获取沙箱（ `List` 和 `Get` ）
 
@@ -187,14 +189,14 @@ Sandbox.list(namespace=None, state=None, limit=None, **connection_options) -> li
 Sandbox.get(sandbox_id, namespace=None, **connection_options) -> Sandbox
 ```
 
-`list` 的 `state` 筛选项可接受  `running` 和 `paused`，而 `limit` 需为 1-100 的整数。
+`list` 的 `state` 筛选项可接受 `running` 和 `paused`，而 `limit` 需为 1-100 的整数。未指定 `state` 时也只返回 `READY` 和 `SUSPENDED` 记录；`UNKNOWN` 等内部状态不会出现在列表中。
 
 **`Sandbox.list()` 参数：**
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `namespace` | str | 仅返回指定命名空间中的沙箱；未指定时使用 daemon 的默认命名空间 |
-| `state` | list[str] | 按状态筛选；支持 `running` 和 `paused`，其中 `SUSPENDED` 和 `STOPPED` 均表示 `paused` |
+| `state` | list[str] | 按状态筛选；支持 `running` 和 `paused`，其中 `READY` 表示 `running`，`SUSPENDED` 表示 `paused` |
 | `limit` | int | 最多返回的沙箱数量，默认值为 `100`，取值范围为 `1` 至 `100` |
 | `unix_socket` | str | conchd Unix socket 路径 |
 | `api_url` | str | conchd HTTP API 地址；仅在未使用 Unix socket 时生效 |
@@ -212,6 +214,10 @@ Sandbox.get(sandbox_id, namespace=None, **connection_options) -> Sandbox
 
 `Sandbox.list()` 返回沙箱摘要字典列表；`Sandbox.get()` 返回已填充基础信息的 `Sandbox` 对象。沙箱响应可包含以下字段：
 
+`Sandbox.get()` 会填充 namespace、资源、domain、metadata、network 和 lifecycle 等可用的控制面字段。由于 daemon 当前不会恢复创建时的 conch-init 访问令牌，GET 响应会省略 `conchInitAccessToken`，该方法返回的对象仅用于控制面操作，例如删除沙箱、获取审计日志和更新网络策略。命令、文件和沙箱内 Agent 健康检查会抛出 `Agent credentials unavailable for retrieved sandbox`。`Sandbox.create()` 返回的对象不受此限制。
+
+下表使用 REST API 的 JSON 字段名。Python SDK 会将其映射为 Python 属性，例如 `sandboxID` 对应 `sandbox_id`、`templateID` 对应 `template_id`、`startedAt` 对应 `started_at`，`domain` 对应 `ip`。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `templateID` | str | 创建沙箱所使用的 Template ID |
@@ -220,14 +226,18 @@ Sandbox.get(sandbox_id, namespace=None, **connection_options) -> Sandbox
 | `sandboxID` | str | 对外使用的 Conch 沙箱 ID |
 | `namespace` | str | 沙箱所属命名空间 |
 | `startedAt` | str | 沙箱创建时间，使用 RFC 3339 格式 |
-| `endAt` | str | 沙箱停止时间；尚未停止时为空字符串 |
+| `endAt` | str | 预留的沙箱结束时间字段；当前固定返回空字符串 |
 | `cpuCount` | int | 虚拟 CPU 数量 |
 | `memoryMB` | int | 内存大小，单位为 MB |
 | `diskSizeMB` | int | 磁盘大小，单位为 MB；后端无法提供时为 `0` |
 | `conchInitVersion` | str | 沙箱 conch-init 版本；后端无法提供时为空字符串 |
 | `alias` | str | 沙箱别名或名称 |
+| `allowInternetAccess` | bool | 当前持久化策略是否允许未明确匹配的互联网访问；未配置时省略 |
+| `domain` | str | 沙箱当前可用的网络地址；详细 GET 响应提供 |
 | `metadata` | dict | 沙箱元数据键值映射 |
-| `volumeMounts` | list[dict] | 卷挂载列表，每项包含 `name` 和 `path` |
+| `network` | dict | 当前持久化的网络配置；`allowInternetAccess` 同时由 SDK 合并为 `network["allow_internet_access"]` |
+| `lifecycle` | dict | 生命周期配置；当前包含 `autoResume` 占位字段 |
+| `volumeMounts` | list[dict] | 预留的卷挂载列表；当前固定返回空列表 |
 
 
 
@@ -258,6 +268,8 @@ sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -
 
 如果没有找到符合条件的日志，则返回 `{"logs": [], "nextCursor": ""}`。
 
+审计日志仅保存在 conchd 进程内存中，不跨 daemon 重启持久化。每个沙箱最多保留 `1024` 条；沙箱删除或暂停后保留 `24` 小时。后台默认每 `8` 小时清理过期日志，读取和追加日志时也会清理已过期内容。
+
 ### 更新沙箱网络策略
 
 ```python
@@ -274,13 +286,15 @@ sandbox.update_network(
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `allow_out` | list[str] | 允许访问的出站目标列表，对应请求字段 `allowOut` |
-| `deny_out` | list[str] | 禁止访问的出站目标列表，对应请求字段 `denyOut` |
+| `allow_out` | list[str] | 允许访问的出站 IPv4 地址或 IPv4 CIDR 列表，对应请求字段 `allowOut` |
+| `deny_out` | list[str] | 禁止访问的出站 IPv4 地址或 IPv4 CIDR 列表，对应请求字段 `denyOut` |
 | `egress_proxy` | dict | 预留的出站代理配置；当前仅接受省略、`None` 或空字典，非空值将被拒绝 |
 | `rules` | dict | 预留的自定义网络规则；当前仅接受省略、`None` 或空字典，非空值将被拒绝 |
 | `allow_internet_access` | bool | 是否允许访问互联网；`True` 表示允许，`False` 表示禁止 |
 
-该接口采用完整替换语义：每次调用都会替换全部出站网络配置。未传入的 `allow_out`、`deny_out`、`egress_proxy` 和 `rules` 将被清空；未传入 `allow_internet_access` 将恢复为默认的不限制状态，因此可能扩大网络访问范围。创建时设置的入站字段 `allowPublicTraffic` 和 `maskRequestHost` 不受此接口影响。更新成功时 daemon 返回 HTTP `204 No Content`，SDK 返回空字典 `{}`；请求无效或沙箱不存在时抛出 `RuntimeError`。
+`allow_out` 和 `deny_out` 合计最多接受 `1024` 个目标。
+
+该接口仅允许更新处于 `READY` 状态的沙箱，并采用完整替换语义：每次调用都会替换全部出站网络配置。未传入的 `allow_out`、`deny_out`、`egress_proxy` 和 `rules` 将被清空；未传入 `allow_internet_access` 将恢复为默认的不限制状态，因此可能扩大网络访问范围。创建时设置的入站字段 `allowPublicTraffic` 和 `maskRequestHost` 会被保留且不受此接口影响，但当前尚未执行对应的入站策略。更新成功时 daemon 返回 HTTP `204 No Content`，SDK 返回空字典 `{}`；请求无效或沙箱不存在时抛出 `RuntimeError`。
 
 `egress_proxy` 和 `rules` 当前仅保持输入 schema 兼容，不提供对应的代理或规则执行功能。传入任何非空值时，create 和 update 请求都会返回 HTTP `400 Bad Request`。
 
@@ -587,7 +601,21 @@ Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
 | `ram_mb` | int | 内存大小（MB） |
 | `config_path` | str | 配置文件路径，默认按优先级自动查找 |
 | `env` | dict | 创建沙箱时传入的环境变量 |
-| `network` | dict | 创建沙箱时传入的网络配置 |
+| `network` | dict | 创建沙箱时传入的网络配置；`allowOut` 和 `denyOut` 仅接受 IPv4 地址或 IPv4 CIDR |
+
+创建时的 `network` 支持以下字段：
+
+| 字段 | 类型 | 当前行为 |
+|------|------|------|
+| `allowPublicTraffic` | bool | 接收并持久化；当前不执行对应的入站策略 |
+| `allowOut` | list[str] | 允许访问的出站 IPv4 地址或 IPv4 CIDR；非空时未匹配的出站流量默认拒绝 |
+| `denyOut` | list[str] | 拒绝访问的出站 IPv4 地址或 IPv4 CIDR；拒绝规则优先于允许规则 |
+| `egressProxy` | dict | 仅接受省略、`None` 或空对象；非空值返回 HTTP `400 Bad Request` |
+| `maskRequestHost` | str | 接收并持久化；当前不执行对应的入站主机名处理 |
+| `rules` | dict | 仅接受省略、`None` 或空对象；非空值返回 HTTP `400 Bad Request` |
+| `allow_internet_access` | bool | `False` 时拒绝未明确允许的出站流量；省略或 `True` 时不额外限制 |
+
+`allowOut` 和 `denyOut` 合计最多接受 `1024` 个目标。
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法。
 

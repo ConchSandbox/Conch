@@ -325,7 +325,7 @@ func (f *fakeSandboxOps) Resume(req sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
 	f.updateReq = req
 	return nil
 }
@@ -386,10 +386,11 @@ func TestMatchesSandboxState(t *testing.T) {
 	}{
 		{state: state.SandboxReady, want: true},
 		{state: state.SandboxSuspended, want: true},
-		{state: state.SandboxStopped, want: true},
 		{state: state.SandboxUnknown, want: false},
-		{state: state.SandboxStopped, states: map[string]bool{"paused": true}, want: true},
-		{state: state.SandboxStopped, states: map[string]bool{"running": true}, want: false},
+		{state: state.SandboxSuspended, states: map[string]bool{"paused": true}, want: true},
+		{state: state.SandboxSuspended, states: map[string]bool{"running": true}, want: false},
+		{state: state.SandboxReady, states: map[string]bool{"running": true}, want: true},
+		{state: state.SandboxReady, states: map[string]bool{"paused": true}, want: false},
 	} {
 		if got := matchesSandboxState(state.SandboxRecord{State: test.state}, test.states); got != test.want {
 			t.Fatalf("matchesSandboxState(%q, %v) = %v, want %v", test.state, test.states, got, test.want)
@@ -430,6 +431,49 @@ func TestSandboxNetworkResponseFromRecordPreservesPresence(t *testing.T) {
 
 func testBoolPointer(value bool) *bool {
 	return &value
+}
+
+func TestParseSandboxStates(t *testing.T) {
+	got, err := parseSandboxStates([]string{"running", "paused"})
+	if err != nil || !got["running"] || !got["paused"] {
+		t.Fatalf("parseSandboxStates() = %v, %v", got, err)
+	}
+	if _, err := parseSandboxStates([]string{"stopped"}); err == nil {
+		t.Fatal("parseSandboxStates() accepted unsupported state")
+	}
+	if got, err := parseSandboxStates(nil); err != nil || got != nil {
+		t.Fatalf("parseSandboxStates(nil) = %v, %v", got, err)
+	}
+}
+
+func TestParseSandboxListLimit(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want int
+		ok   bool
+	}{
+		{raw: "", want: 100, ok: true},
+		{raw: "1", want: 1, ok: true},
+		{raw: "100", want: 100, ok: true},
+		{raw: "0"},
+		{raw: "101"},
+		{raw: "invalid"},
+	} {
+		got, err := parseSandboxListLimit(test.raw)
+		if test.ok && (err != nil || got != test.want) {
+			t.Fatalf("parseSandboxListLimit(%q) = %d, %v; want %d", test.raw, got, err, test.want)
+		}
+		if !test.ok && err == nil {
+			t.Fatalf("parseSandboxListLimit(%q) unexpectedly succeeded", test.raw)
+		}
+	}
+}
+
+func TestValidateSandboxNetworkFieldsRejectsTooManyDestinations(t *testing.T) {
+	destinations := make([]string, maxSandboxNetworkDestinations+1)
+	if err := validateSandboxNetworkFields(destinations, nil, nil, nil); err == nil {
+		t.Fatal("validateSandboxNetworkFields() accepted too many destinations")
+	}
 }
 
 func TestSandboxV1Handlers(t *testing.T) {
@@ -491,6 +535,19 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects invalid list queries", func(t *testing.T) {
+		for _, path := range []string{
+			"/api/v1/sandboxes?state=stopped",
+			"/api/v1/sandboxes?limit=0",
+			"/api/v1/sandboxes?limit=101",
+		} {
+			response := serveSandboxRequest(server, http.MethodGet, path, nil)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body.String())
+			}
+		}
+	})
+
 	t.Run("get", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1", nil)
 		if response.Code != http.StatusOK {
@@ -501,7 +558,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 			t.Fatalf("decode get response: %v", err)
 		}
 		if record.SandboxID != "sandbox-1" || record.TemplateID != "tmpl-1" ||
-			record.ConchInitAccessToken == nil || record.AllowInternetAccess == nil || *record.AllowInternetAccess ||
+			record.AllowInternetAccess == nil || *record.AllowInternetAccess ||
 			record.Domain == nil || record.Network == nil ||
 			record.Network.MaskRequestHost != maskRequestHost ||
 			!reflect.DeepEqual(record.Network.AllowOut, []string{"192.0.2.1"}) {
@@ -560,6 +617,27 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects invalid log queries", func(t *testing.T) {
+		for _, path := range []string{
+			"/api/v1/sandboxes/sandbox-1/logs?cursor=-1",
+			"/api/v1/sandboxes/sandbox-1/logs?limit=1001",
+			"/api/v1/sandboxes/sandbox-1/logs?direction=sideways",
+			"/api/v1/sandboxes/sandbox-1/logs?search=" + strings.Repeat("x", 257),
+		} {
+			response := serveSandboxRequest(server, http.MethodGet, path, nil)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("rejects unknown sandbox subroute", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/unknown", nil)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
 	t.Run("network", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", bytes.NewBufferString(`{"allowOut":["192.0.2.1"]}`))
 		if response.Code != http.StatusNoContent {
@@ -589,7 +667,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
-		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0].SandboxId != "sandbox-1" {
+		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0].SandboxID != "sandbox-1" {
 			t.Fatalf("delete requests = %#v", sandboxOps.deleteReqs)
 		}
 		if _, err := store.GetSandbox(context.Background(), "pod-1"); !errors.Is(err, state.ErrNotFound) {

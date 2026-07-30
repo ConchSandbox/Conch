@@ -36,6 +36,8 @@ type Manager struct {
 	volumeManager      *volume.Manager
 }
 
+var updateSandboxNetworkPolicy = (*netstack.Pool).UpdateSandboxNetworkPolicy
+
 type sandboxLifecycleState uint8
 
 const (
@@ -844,8 +846,8 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	return nil
 }
 
-func (m *Manager) UpdateNetwork(req NetworkUpdateRequest) error {
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+func (m *Manager) UpdateNetwork(ctx context.Context, req NetworkUpdateRequest) error {
+	ctx, cancel := context.WithTimeoutCause(ctx, m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	namespace := m.resolveNamespace(req.Namespace)
@@ -870,7 +872,7 @@ func (m *Manager) UpdateNetwork(req NetworkUpdateRequest) error {
 	if err != nil {
 		return fmt.Errorf("invalid sandbox network config: %w", err)
 	}
-	return m.pool.UpdateSandboxNetworkPolicy(ctx, entry.sbx.slot, req.SandboxID, networkPolicy)
+	return updateSandboxNetworkPolicy(m.pool, ctx, entry.sbx.slot, req.SandboxID, networkPolicy)
 }
 
 func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {

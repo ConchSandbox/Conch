@@ -59,7 +59,7 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 	return errors.New("sandbox not found")
 }
 
-func (f *serializedNetworkUpdateOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+func (f *serializedNetworkUpdateOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
 	f.updateNetworkReq = req
 	close(f.updateEntered)
 	<-f.releaseUpdate
@@ -71,7 +71,7 @@ func (f *serializedNetworkUpdateOps) Delete(sandbox.DeleteRequest) error {
 	return nil
 }
 
-func (f *rollbackNetworkUpdateOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+func (f *rollbackNetworkUpdateOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
 	call := len(f.requests)
 	f.requests = append(f.requests, req)
 	if call < len(f.errs) {
@@ -110,7 +110,7 @@ func (f *fakeSandboxOps) Resume(sandbox.LifecycleRequest) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) UpdateNetwork(req sandbox.NetworkUpdateRequest) error {
+func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
 	f.updateNetworkReq = req
 	return f.updateNetworkErr
 }
@@ -371,6 +371,65 @@ func TestSandboxLogBufferDropsOldestEntries(t *testing.T) {
 	assertLogMessages(t, got.Logs, []string{"two", "three"})
 	if got.Logs[0].ID != 2 || got.Logs[1].ID != 3 {
 		t.Fatalf("log IDs = %d,%d, want 2,3", got.Logs[0].ID, got.Logs[1].ID)
+	}
+}
+
+func TestSandboxLogCleanupLoopPrunesAndStops(t *testing.T) {
+	logs := newSandboxLogBuffer(4, time.Millisecond)
+	now := time.Unix(1, 0)
+	logs.now = func() time.Time { return now }
+	logs.Append("sandbox-a", "info", "expired")
+	logs.Expire("sandbox-a")
+	now = now.Add(2 * time.Millisecond)
+
+	svc := &Service{SandboxLogs: logs}
+	svc.StartSandboxLogCleanup(time.Millisecond)
+	deadline := time.Now().Add(200 * time.Millisecond)
+	key := normalizeSandboxLogKey(SandboxLogKey{SandboxID: "sandbox-a"})
+	for {
+		logs.mu.Lock()
+		_, exists := logs.entries[key]
+		logs.mu.Unlock()
+		if !exists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("periodic cleanup did not prune expired logs")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	svc.StopSandboxLogCleanup()
+	stoppedLogs := newSandboxLogBuffer(4)
+	stoppedService := &Service{SandboxLogs: stoppedLogs}
+	stoppedService.StartSandboxLogCleanup(time.Millisecond)
+	stoppedService.StopSandboxLogCleanup()
+	key = normalizeSandboxLogKey(SandboxLogKey{SandboxID: "sandbox-b"})
+	stoppedLogs.mu.Lock()
+	stoppedLogs.entries[key] = []SandboxLogEntry{{SandboxID: "sandbox-b", Message: "retained"}}
+	stoppedLogs.expiresAt[key] = time.Now().Add(-time.Hour)
+	stoppedLogs.mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	stoppedLogs.mu.Lock()
+	_, exists := stoppedLogs.entries[key]
+	stoppedLogs.mu.Unlock()
+	if !exists {
+		t.Fatal("cleanup loop continued after StopSandboxLogCleanup")
+	}
+}
+
+func TestClearSandboxLogsResetsReusedSandboxID(t *testing.T) {
+	svc := &Service{SandboxLogs: newSandboxLogBuffer(4)}
+	svc.AppendSandboxLog("sandbox-a", "info", "old")
+	svc.ClearSandboxLogs("sandbox-a")
+	svc.AppendSandboxLog("sandbox-a", "info", "new")
+
+	got, err := svc.GetSandboxLogs(context.Background(), SandboxLogsOptions{SandboxID: "sandbox-a"})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(got.Logs) != 1 || got.Logs[0].ID != 1 || got.Logs[0].Message != "new" {
+		t.Fatalf("logs after ID reuse = %#v", got.Logs)
 	}
 }
 
@@ -853,6 +912,11 @@ func TestUpdateSandboxNetworkConfigReplacesEgressAndPreservesIngress(t *testing.
 	if string(rec.Network) != string(sandboxOps.updateNetworkReq.Network) {
 		t.Fatalf("persisted network = %s, applied network = %s", rec.Network, sandboxOps.updateNetworkReq.Network)
 	}
+	logs, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{Namespace: "default", SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLogMessages(t, logs.Logs, []string{"network policy updated"})
 }
 
 func TestUpdateSandboxNetworkConfigRollsBackInvalidPolicy(t *testing.T) {
@@ -892,6 +956,11 @@ func TestUpdateSandboxNetworkConfigRollsBackInvalidPolicy(t *testing.T) {
 	if rec.LastError == "" {
 		t.Fatal("LastError is empty")
 	}
+	logs, err := svc.GetSandboxLogs(ctx, SandboxLogsOptions{Namespace: "default", SandboxID: "sandbox-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLogMessages(t, logs.Logs, []string{"network policy update failed"})
 }
 
 func TestUpdateSandboxNetworkConfigRestoresPolicyAfterApplyFailure(t *testing.T) {

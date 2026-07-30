@@ -169,7 +169,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
-	s.runtimeService.StartSandboxLogCleanup(ctx)
 	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
 		Store:             store,
 		LeaseClient:       daemonClient,
@@ -207,6 +206,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		logger.Info("CRI server initialized", ulog.F("socket", cfg.CRI.Socket))
 	}
 
+	s.runtimeService.StartSandboxLogCleanup()
 	handleSignals(ctx, cancel, s)
 
 	logger.Info("Server initialized successfully")
@@ -369,6 +369,10 @@ func (s *Daemon) Shutdown() {
 			s.criServer.Stop()
 			finish(nil)
 			logger.Info("CRI server stopped")
+		}
+
+		if s.runtimeService != nil {
+			s.runtimeService.StopSandboxLogCleanup()
 		}
 
 		if s.containerdHost != nil {
@@ -543,7 +547,7 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 	sandboxes := make([]sandboxResponse, 0, len(records))
 	for _, record := range records {
 		if record.Namespace == namespace && matchesSandboxState(record, states) {
-			sandboxes = append(sandboxes, sandboxResponseFromRecord(record, "", false))
+			sandboxes = append(sandboxes, sandboxResponseFromRecord(record, false))
 		}
 	}
 	if len(sandboxes) > limit {
@@ -566,7 +570,7 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request, sandbo
 		http.Error(w, "Sandbox not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, sandboxResponseFromRecord(*record, "", true))
+	writeJSON(w, sandboxResponseFromRecord(*record, true))
 }
 
 func (s *Daemon) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request, sandboxID string) {
@@ -748,7 +752,12 @@ func validateSandboxNetworkUpdateRequest(req *runtimeapi.SandboxNetworkUpdateCon
 	return validateSandboxNetworkFields(allowOut, denyOut, req.EgressProxy, req.Rules)
 }
 
+const maxSandboxNetworkDestinations = 1024
+
 func validateSandboxNetworkFields(allowOut, denyOut []string, proxy *runtimeapi.SandboxEgressProxyConfig, rules map[string]any) error {
+	if len(allowOut)+len(denyOut) > maxSandboxNetworkDestinations {
+		return fmt.Errorf("allowOut and denyOut support at most %d destinations in total", maxSandboxNetworkDestinations)
+	}
 	for _, rules := range [][]string{allowOut, denyOut} {
 		for _, rule := range rules {
 			if strings.TrimSpace(rule) == "" {
@@ -794,14 +803,14 @@ func parseSandboxListLimit(raw string) (int, error) {
 
 func matchesSandboxState(record state.SandboxRecord, states map[string]bool) bool {
 	running := record.State == state.SandboxReady
-	paused := record.State == state.SandboxSuspended || record.State == state.SandboxStopped
+	paused := record.State == state.SandboxSuspended
 	if len(states) == 0 {
 		return running || paused
 	}
 	return states["running"] && running || states["paused"] && paused
 }
 
-func sandboxResponseFromRecord(record state.SandboxRecord, conchInitAccessToken string, detailed bool) sandboxResponse {
+func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandboxResponse {
 	response := sandboxResponse{
 		TemplateID:   record.SourceTemplateID,
 		ImageName:    record.ImageName,
@@ -809,7 +818,6 @@ func sandboxResponseFromRecord(record state.SandboxRecord, conchInitAccessToken 
 		SandboxID:    record.ConchSandboxID,
 		Namespace:    record.Namespace,
 		StartedAt:    formatUnixNanoRFC3339(record.CreatedAt),
-		EndAt:        formatUnixNanoRFC3339(record.StoppedAt),
 		CPUCount:     record.VCPUNum,
 		MemoryMB:     record.RamMB,
 		Alias:        record.Name,
@@ -821,7 +829,6 @@ func sandboxResponseFromRecord(record state.SandboxRecord, conchInitAccessToken 
 	}
 	if detailed {
 		domain := record.IP
-		response.ConchInitAccessToken = &conchInitAccessToken
 		response.Domain = &domain
 		response.Network, response.AllowInternetAccess = sandboxNetworkResponseFromRecord(record.Network)
 		response.Lifecycle = &sandboxLifecycleResponse{}
