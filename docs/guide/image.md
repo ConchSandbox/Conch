@@ -85,7 +85,7 @@ conch image rm localhost/conch/openeuler:latest
 conch debug snapshot ls
 ```
 
-输出只包含 containerd snapshotter 的底层字段：`KIND`、`KEY` 和 `PARENT`。Template 的 rootfs/mem/vm 关系只记录在 Template store 中，不由 snapshot labels 表达。
+输出只包含 containerd snapshotter 的底层字段：`KIND`、`KEY` 和 `PARENT`。Template store 只记录不可变的 boot index digest；创建 Sandbox 时才按 digest 解析 rootfs/mem/vm 组件，并由 Sandbox 模块直接请求 Snapshot 模块准备 boot layout。
 
 `conch debug snapshot rm` 只删除命令中指定的单个 snapshot key，不推断或级联删除其他组件：
 

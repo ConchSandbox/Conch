@@ -30,11 +30,6 @@ type Service struct {
 	server *conchsnapshot.Server
 }
 
-// ServerProvider exposes the runtime snapshot server held by the snapshot plugin.
-type ServerProvider interface {
-	SnapshotServer() *conchsnapshot.Server
-}
-
 func New(client *containerdclient.Client, workDir string) (*Service, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("snapshot work dir is required")
@@ -46,6 +41,37 @@ func New(client *containerdclient.Client, workDir string) (*Service, error) {
 	return &Service{client: client, server: server}, nil
 }
 
+func (s *Service) CreateBootLayout(
+	ctx context.Context,
+	namespace string,
+	key string,
+	req conchsnapshot.BootLayoutRequest,
+) (*conchsnapshot.BootLayout, error) {
+	if s == nil || s.server == nil {
+		return nil, fmt.Errorf("snapshot service is not configured")
+	}
+	return s.server.CreateBootLayout(ctx, namespace, key, req)
+}
+
+func (s *Service) RestoreBootLayout(
+	ctx context.Context,
+	namespace string,
+	key string,
+	req conchsnapshot.BootLayoutRequest,
+) (*conchsnapshot.BootLayout, error) {
+	if s == nil || s.server == nil {
+		return nil, fmt.Errorf("snapshot service is not configured")
+	}
+	return s.server.RestoreBootLayout(ctx, namespace, key, req)
+}
+
+func (s *Service) ReleaseBootLayout(ctx context.Context, namespace, key string) error {
+	if s == nil || s.server == nil {
+		return fmt.Errorf("snapshot service is not configured")
+	}
+	return s.server.ReleaseBootLayout(ctx, namespace, key)
+}
+
 func (s *Service) Close() error {
 	finishClose := cleanupdiag.Start("snapshot_service.close")
 	var err error
@@ -54,13 +80,6 @@ func (s *Service) Close() error {
 	}
 	finishClose(err)
 	return err
-}
-
-func (s *Service) SnapshotServer() *conchsnapshot.Server {
-	if s == nil {
-		return nil
-	}
-	return s.server
 }
 
 func (s *Service) List(ctx context.Context, opts runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error) {

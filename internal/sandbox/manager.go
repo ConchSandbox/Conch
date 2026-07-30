@@ -15,7 +15,6 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
-	"github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -25,7 +24,7 @@ type Manager struct {
 	sandboxes          sync.Map // map[string]*sandboxEntry
 	pool               *netstack.Pool
 	daemonClient       *containerdclient.Client
-	template           TemplateManager
+	boot               BootPreparer
 	checkpointCapture  CheckpointCapture
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
@@ -76,19 +75,14 @@ type sandboxEntry struct {
 	sbx   *Sandbox
 }
 
-type TemplateManager interface {
-	PrepareSandboxBoot(context.Context, template.PrepareSandboxBootRequest) (template.PreparedSandboxBoot, error)
-	ReleaseSandboxBoot(context.Context, template.ReleaseSandboxBootRequest) error
-}
-
-func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, templateManager TemplateManager, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
-	if templateManager == nil {
-		return nil, fmt.Errorf("template is required")
+func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, bootPreparer BootPreparer, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
+	if bootPreparer == nil {
+		return nil, fmt.Errorf("sandbox boot preparer is required")
 	}
 	return &Manager{
 		pool:               p,
 		daemonClient:       daemonClient,
-		template:           templateManager,
+		boot:               bootPreparer,
 		checkpointCapture:  NewFullCheckpointCapture(),
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
@@ -294,7 +288,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		if err == nil {
 			return
 		}
-		rmErr := m.template.ReleaseSandboxBoot(leaseCtx, template.ReleaseSandboxBootRequest{
+		rmErr := m.boot.Release(leaseCtx, ReleaseBootRequest{
 			Namespace: namespace,
 			SandboxID: runtimeIDs.key,
 		})
@@ -405,18 +399,18 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 	}, nil
 }
 
-func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req CreateRequest, runtimeIDs createRuntimeIDs) (template.PreparedSandboxBoot, error) {
-	if m.template == nil {
-		return template.PreparedSandboxBoot{}, fmt.Errorf("template is not configured")
+func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req CreateRequest, runtimeIDs createRuntimeIDs) (PreparedBoot, error) {
+	if m.boot == nil {
+		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
 	logger := ulog.GetLogger()
 	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
-	return m.template.PrepareSandboxBoot(ctx, template.PrepareSandboxBootRequest{
+	return m.boot.Prepare(ctx, PrepareBootRequest{
 		Namespace:  namespace,
 		TemplateID: req.TemplateID,
 		SandboxID:  runtimeIDs.key,
 		VMMName:    req.VMMName,
-		RamMB:      req.RAMMB,
+		RAMMB:      req.RAMMB,
 	})
 }
 
@@ -478,7 +472,7 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 	m.sandboxes.CompareAndDelete(mapKey, entry)
 }
 
-func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx *Sandbox, boot template.PreparedSandboxBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
+func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
 		IP:              sbx.slot.VpeerIPString(),
@@ -687,7 +681,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 		}
 	}
 	finishBootRelease := cleanupdiag.Start("sandbox.boot.release", fields...)
-	err = m.template.ReleaseSandboxBoot(bootCtx, template.ReleaseSandboxBootRequest{
+	err = m.boot.Release(bootCtx, ReleaseBootRequest{
 		Namespace: sbx.namespace,
 		SandboxID: sandboxID,
 	})

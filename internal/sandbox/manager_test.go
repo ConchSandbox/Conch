@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/openeuler/Conch/internal/template"
 )
 
 func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
@@ -42,9 +40,9 @@ func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 }
 
 func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
-	templateAdapter := &recordingTemplate{}
+	boot := &recordingBootPreparer{}
 	m := &Manager{
-		template:     templateAdapter,
+		boot:         boot,
 		cidAllocator: NewCIDAllocatorInDir(t.TempDir()),
 	}
 	sbx := &Sandbox{
@@ -61,8 +59,8 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	if _, ok := m.sandboxes.Load(mapKey); ok {
 		t.Fatal("suspended sandbox entry remains after VMM exit")
 	}
-	if len(templateAdapter.released) != 1 || templateAdapter.released[0].SandboxID != "sandbox-a" {
-		t.Fatalf("released boot layouts = %#v", templateAdapter.released)
+	if len(boot.released) != 1 || boot.released[0].SandboxID != "sandbox-a" {
+		t.Fatalf("released boot layouts = %#v", boot.released)
 	}
 }
 
@@ -171,15 +169,15 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 	return m, entry, sbx
 }
 
-type recordingTemplate struct {
-	released []template.ReleaseSandboxBootRequest
+type recordingBootPreparer struct {
+	released []ReleaseBootRequest
 }
 
-func (r *recordingTemplate) PrepareSandboxBoot(context.Context, template.PrepareSandboxBootRequest) (template.PreparedSandboxBoot, error) {
-	return template.PreparedSandboxBoot{}, nil
+func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
+	return PreparedBoot{}, nil
 }
 
-func (r *recordingTemplate) ReleaseSandboxBoot(_ context.Context, req template.ReleaseSandboxBootRequest) error {
+func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {
 	r.released = append(r.released, req)
 	return nil
 }

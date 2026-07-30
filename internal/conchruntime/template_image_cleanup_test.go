@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
 type bootIndexCall struct {
@@ -103,6 +103,16 @@ func (f *templateBuildImageOps) InspectBootIndex(_ context.Context, namespace, b
 	if result.BootIndexDigest == "" {
 		result.BootIndexDigest = bootIndexDigest
 	}
+	if len(f.checkpointCalls) != 0 {
+		checkpoint := f.checkpointCalls[len(f.checkpointCalls)-1]
+		result.Resume = true
+		if result.VMMName == "" {
+			result.VMMName = checkpoint.VMMName
+		}
+		if result.MemorySizeMB == 0 {
+			result.MemorySizeMB = checkpoint.MemorySizeMB
+		}
+	}
 	return result, f.inspectErr
 }
 
@@ -127,15 +137,15 @@ func (f *templateBuildImageOps) ConvertRootfsToErofs(context.Context, erofsconve
 	return f.convertResult, nil
 }
 
-func TestPullTemplateCreatesReadyTemplateAfterStaticValidation(t *testing.T) {
+func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		resume     bool
-		wantOrigin string
-		wantMode   string
+		wantOrigin conchtemplate.Origin
+		wantMode   conchtemplate.BootMode
 	}{
-		{name: "cold image", wantOrigin: state.TemplateOriginImage, wantMode: state.TemplateBootModeCold},
-		{name: "resume checkpoint", resume: true, wantOrigin: state.TemplateOriginCheckpoint, wantMode: state.TemplateBootModeResume},
+		{name: "cold image", wantOrigin: conchtemplate.OriginImage, wantMode: conchtemplate.BootModeCold},
+		{name: "resume checkpoint", resume: true, wantOrigin: conchtemplate.OriginCheckpoint, wantMode: conchtemplate.BootModeResume},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -185,14 +195,35 @@ func TestPullTemplateCreatesReadyTemplateAfterStaticValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetTemplate() error = %v", err)
 			}
-			if rec.State != state.TemplateReady ||
-				rec.BootIndexDigest != bootIndexDigest || rec.Origin != tt.wantOrigin || rec.BootMode != tt.wantMode {
+			if rec.BootIndexDigest != bootIndexDigest || rec.Origin != tt.wantOrigin || rec.BootMode != tt.wantMode {
 				t.Fatalf("pulled Template = %#v", rec)
 			}
 			if rec.BuildRef != reference || rec.ImageName != reference || rec.Labels["source"] != "registry" {
 				t.Fatalf("pulled Template metadata = %#v", rec)
 			}
 		})
+	}
+}
+
+func TestPullTemplateDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
+	ctx := context.Background()
+	imageOps := &templateBuildImageOps{
+		inspectReferenceErr: errors.New("invalid boot index"),
+	}
+	store := newTestStore(t)
+	svc := New(nil, imageOps, imageOps, store, "default")
+
+	if _, err := svc.PullTemplate(ctx, TemplatePullOptions{
+		Reference: "registry.example.invalid/conch/template:invalid",
+	}); err == nil {
+		t.Fatal("PullTemplate() error = nil, want validation failure")
+	}
+	items, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("templates after failed validation = %#v, want none", items)
 	}
 }
 
@@ -244,7 +275,7 @@ func TestPushTemplateUsesImmutableBootIndexDigest(t *testing.T) {
 	}
 }
 
-func TestCreateTemplateStoresStaticallyValidatedBootIndexReadyState(t *testing.T) {
+func TestCreateTemplateStoresStaticallyValidatedEntry(t *testing.T) {
 	ctx := context.Background()
 	bootIndexDigest := digest.FromString("cold-template-boot-index").String()
 	imageOps := &templateBuildImageOps{
@@ -286,12 +317,42 @@ func TestCreateTemplateStoresStaticallyValidatedBootIndexReadyState(t *testing.T
 	if err != nil {
 		t.Fatalf("GetTemplate() error = %v", err)
 	}
-	if rec.State != state.TemplateReady ||
-		rec.BootIndexDigest != bootIndexDigest || rec.BootMode != state.TemplateBootModeCold {
-		t.Fatalf("template READY state = %#v", rec)
+	if rec.BootIndexDigest != bootIndexDigest || rec.BootMode != conchtemplate.BootModeCold {
+		t.Fatalf("template entry = %#v", rec)
 	}
 	if rec.BuildRef != "localhost/conch/templates:cold" {
 		t.Fatalf("template BuildRef = %q", rec.BuildRef)
+	}
+}
+
+func TestCreateTemplateDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
+	ctx := context.Background()
+	bootIndexDigest := digest.FromString("invalid-published-template").String()
+	imageOps := &templateBuildImageOps{
+		prepareResult: conchimage.PrepareRootfsSourceResult{ImageName: "source"},
+		convertResult: erofsconvert.ConvertRootfsResult{ImageName: "converted"},
+		publishResult: conchimage.PublishBootImageResult{
+			BootIndexDigest: bootIndexDigest,
+			ImageName:       "localhost/conch/template:invalid",
+		},
+		inspectErr: errors.New("invalid published boot index"),
+	}
+	store := newTestStore(t)
+	svc := New(nil, imageOps, imageOps, store, "default")
+
+	if _, err := svc.CreateTemplate(ctx, TemplateCreateOptions{
+		Source:     "source",
+		KernelPath: "/kernel",
+		InitrdPath: "/initrd",
+	}); err == nil {
+		t.Fatal("CreateTemplate() error = nil, want validation failure")
+	}
+	items, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("templates after failed validation = %#v, want none", items)
 	}
 }
 

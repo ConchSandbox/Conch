@@ -55,16 +55,17 @@ conch template create --source docker.io/library/nginx:latest \
 2. conchd 在进程内 containerd 中查找 `source`；本地不存在时从 registry 拉取。
 3. rootfs 通过 `erofs-container-toolkit` 转换为 native EROFS layer。
 4. conchd 将转换后的 rootfs manifest、kernel/initrd 生成的 sandbox manifest 组装为同一个 boot index。
-5. conchd 直接将新增 blob 写入 containerd content store，创建用户指定 tag 的 image record，然后 unpack 完整 boot index。
-6. conchd 将 unpack 得到的 rootfs/vm/mem snapshot refs 登记为 `origin=image` 的 `tmpl_xxx` Template。没有 mem ref 时其 `boot_mode=cold`，存在 mem ref 时为 `boot_mode=resume`。
+5. conchd 直接将新增 blob 写入 containerd content store，创建用户指定 tag 的 image record，并按 digest 静态校验完整 boot index。
+6. 构建、发布和校验全部成功后，conchd 一次性登记包含不可变 boot index digest 的 `origin=image` Template；此流程不预先创建 Sandbox snapshot。
+7. 创建 Sandbox 时，Sandbox 模块读取 Template，按 digest 解析并 unpack boot index，再直接调用 Snapshot 模块创建 cold boot layout 或恢复 resume boot layout。
 
 ### 3.2 `conch sandbox checkpoint`
 
 `conch sandbox checkpoint <sandbox-id>` 捕获一个运行中或已暂停 Sandbox 的状态，并生成新的可恢复 Template。Checkpoint 是 Sandbox 动作，不是独立资源：
 
-1. conchd 创建 `origin=checkpoint`、状态为 `CREATING` 的 `tmpl_xxx` Template。
-2. Sandbox 短暂暂停并捕获内存状态，随后提交 rootfs/mem/vm refs。
-3. Template 转为 `READY`，其 `boot_mode=resume`；原 Sandbox 恢复到调用前的运行状态。
+1. Sandbox 短暂暂停并捕获内存状态，随后发布包含 rootfs/mem/vm refs 的 boot index。
+2. conchd 校验已发布 boot index 的 digest、VMM 和内存规格。
+3. 只有捕获、发布和校验全部成功后，conchd 才原子写入完整的 `origin=checkpoint`、`boot_mode=resume` Template，并推进 Sandbox 的 checkpoint head；失败时不留下半成品 Template 记录。
 4. 产物统一通过 `conch template ls/inspect/rm` 管理。
 
 ### 3.3 rootfs 到 native EROFS layer

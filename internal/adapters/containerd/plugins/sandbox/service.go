@@ -39,9 +39,17 @@ type Service struct {
 	closed   bool
 }
 
-func New(ctx context.Context, client *containerdclient.Client, templateManager conchsandbox.TemplateManager, cfg Config) (*Service, error) {
-	if templateManager == nil {
-		return nil, fmt.Errorf("template is required")
+func New(
+	ctx context.Context,
+	client *containerdclient.Client,
+	templates conchsandbox.TemplateReader,
+	snapshots conchsandbox.SnapshotBackend,
+	resolver conchsandbox.BootResolver,
+	cfg Config,
+) (*Service, error) {
+	boot, err := conchsandbox.NewBootPreparer(templates, snapshots, resolver)
+	if err != nil {
+		return nil, err
 	}
 	vsockSignalRetry, err := parseDuration(cfg.VsockSignalRetry, 10*time.Millisecond)
 	if err != nil {
@@ -66,7 +74,7 @@ func New(ctx context.Context, client *containerdclient.Client, templateManager c
 		}
 		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))
 	}
-	manager, err := conchsandbox.NewManager(pool, client, templateManager, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
+	manager, err := conchsandbox.NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +201,8 @@ func init() {
 		Requires: []plugin.Type{
 			conchplugins.HostPluginType,
 			conchplugins.TemplateServicePluginType,
+			conchplugins.ImageServicePluginType,
+			conchplugins.SnapshotServicePluginType,
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
 			cfg := ic.Config.(*Config)
@@ -208,11 +218,34 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			templateManager, ok := templateInst.(conchsandbox.TemplateManager)
+			templates, ok := templateInst.(conchsandbox.TemplateReader)
 			if !ok {
-				return nil, fmt.Errorf("%s does not provide template", conchplugins.TemplateServiceURI)
+				return nil, fmt.Errorf("%s does not provide template reads", conchplugins.TemplateServiceURI)
 			}
-			svc, err := New(ic.Context, provider.DaemonClient(), templateManager, *cfg)
+			imageInst, err := ic.GetByID(conchplugins.ImageServicePluginType, conchplugins.ImageServiceID)
+			if err != nil {
+				return nil, err
+			}
+			resolver, ok := imageInst.(conchsandbox.BootResolver)
+			if !ok {
+				return nil, fmt.Errorf("%s does not provide boot resolution", conchplugins.ImageServiceURI)
+			}
+			snapshotInst, err := ic.GetByID(conchplugins.SnapshotServicePluginType, conchplugins.SnapshotServiceID)
+			if err != nil {
+				return nil, err
+			}
+			snapshots, ok := snapshotInst.(conchsandbox.SnapshotBackend)
+			if !ok {
+				return nil, fmt.Errorf("%s does not provide snapshot boot layouts", conchplugins.SnapshotServiceURI)
+			}
+			svc, err := New(
+				ic.Context,
+				provider.DaemonClient(),
+				templates,
+				snapshots,
+				resolver,
+				*cfg,
+			)
 			if err != nil {
 				return nil, err
 			}

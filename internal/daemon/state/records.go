@@ -1,5 +1,7 @@
 package state
 
+import "github.com/openeuler/Conch/internal/template"
+
 const (
 	SandboxReady     = "READY"
 	SandboxNotReady  = "NOTREADY"
@@ -10,15 +12,6 @@ const (
 	NetworkSlotWarmIdle = "WARM_IDLE"
 	NetworkSlotAssigned = "ASSIGNED"
 	NetworkSlotCleaning = "CLEANING"
-
-	TemplateOriginImage      = "image"
-	TemplateOriginCheckpoint = "checkpoint"
-	TemplateBootModeCold     = "cold"
-	TemplateBootModeResume   = "resume"
-
-	TemplateCreating = "CREATING"
-	TemplateReady    = "READY"
-	TemplateFailed   = "FAILED"
 )
 
 type SandboxRecord struct {
@@ -80,33 +73,12 @@ type NetworkSlotRecord struct {
 	LastError string `json:"last_error,omitempty"`
 }
 
-type TemplateRecord struct {
-	ID              string `json:"id"`
-	Origin          string `json:"origin"`
-	Namespace       string `json:"namespace"`
-	State           string `json:"state"`
-	BootIndexDigest string `json:"boot_index_digest,omitempty"`
-	// BootMode is a validated capability cache. BootIndexDigest remains the
-	// sole content identity for template records.
-	BootMode         string            `json:"boot_mode,omitempty"`
-	ParentTemplateID string            `json:"parent_template_id,omitempty"`
-	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
-	ImageName        string            `json:"image_name,omitempty"`
-	BuildRef         string            `json:"build_ref,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	CreatedAt        int64             `json:"created_at"`
-	UpdatedAt        int64             `json:"updated_at"`
-	LastError        string            `json:"last_error,omitempty"`
-}
-
-// CheckpointPublication describes the single state transition that publishes
-// a checkpoint template and advances the source sandbox's logical head.
+// CheckpointPublication describes the single transaction that creates a
+// complete checkpoint Template Entry and advances the source Sandbox's
+// logical checkpoint head.
 type CheckpointPublication struct {
-	TemplateID                  string
+	Entry                       template.Entry
 	SandboxID                   string
-	BootIndexDigest             string
-	BootMode                    string
-	BuildRef                    string
 	ExpectedHeadTemplateID      string
 	ExpectedHeadBootIndexDigest string
 }

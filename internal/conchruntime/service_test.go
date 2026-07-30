@@ -100,7 +100,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, imageOps, imageOps, store, "default")
-	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
+	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, conchtemplate.BootModeCold)
 
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-a",
@@ -168,9 +168,8 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	if err != nil {
 		t.Fatalf("GetTemplate(t1) error = %v", err)
 	}
-	if t1.State != state.TemplateReady ||
-		t1.BootIndexDigest != t1Digest || t1.BootMode != state.TemplateBootModeResume {
-		t.Fatalf("t1 readiness = %#v", t1)
+	if t1.BootIndexDigest != t1Digest || t1.BootMode != conchtemplate.BootModeResume {
+		t.Fatalf("t1 entry = %#v", t1)
 	}
 	if t1.ParentTemplateID != "t0" || t1.SourceSandboxID != "sandbox-a" ||
 		t1.BuildRef != "localhost/conch/checkpoints:t1" || t1.Labels["generation"] != "t1" {
@@ -186,6 +185,61 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	wantAfter.CheckpointHeadBootIndexDigest = t1Digest
 	if !reflect.DeepEqual(after, wantAfter) {
 		t.Fatalf("sandbox record after checkpoint = %#v, want only checkpoint head changed from %#v", after, before)
+	}
+}
+
+func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
+	ctx := context.Background()
+	sourceDigest := digest.FromString("checkpoint-source").String()
+	checkpointDigest := digest.FromString("invalid-checkpoint").String()
+	memRoot := t.TempDir()
+	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{{
+		MemRootPath:  memRoot,
+		VMMName:      "cloud-hypervisor",
+		MemorySizeMB: 512,
+	}}}
+	imageOps := &templateBuildImageOps{
+		checkpointResults: []conchimage.PublishCheckpointBootImageResult{{
+			BootIndexDigest: checkpointDigest,
+			ImageName:       "localhost/conch/checkpoints:invalid",
+		}},
+		inspectErr: errors.New("invalid checkpoint boot index"),
+	}
+	store := newTestStore(t)
+	svc := New(sandboxOps, imageOps, imageOps, store, "default")
+	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", sourceDigest, conchtemplate.BootModeCold)
+	before := state.SandboxRecord{
+		SandboxID:                     "sandbox-validation-failure",
+		Namespace:                     "team-a",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "t0",
+		SourceBootIndexDigest:         sourceDigest,
+		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadBootIndexDigest: sourceDigest,
+	}
+	if err := store.UpsertSandbox(ctx, before); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+
+	if _, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
+		Namespace: "team-a",
+		SandboxID: before.SandboxID,
+	}); err == nil {
+		t.Fatal("CheckpointSandbox() error = nil, want validation failure")
+	}
+	templates, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates() error = %v", err)
+	}
+	if len(templates) != 1 || templates[0].ID != "t0" {
+		t.Fatalf("templates after failed validation = %#v, want only source template", templates)
+	}
+	after, err := store.GetSandbox(ctx, before.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("sandbox changed after failed validation: got %#v, want %#v", after, before)
 	}
 }
 
@@ -206,7 +260,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, imageOps, imageOps, store, "default")
-	seedReadyTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, state.TemplateBootModeCold)
+	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, conchtemplate.BootModeCold)
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-lineage",
 		Namespace:                     "team-a",
@@ -265,9 +319,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	if t1.ParentTemplateID != "t0" || t2.ParentTemplateID != t1.ID {
 		t.Fatalf("template lineage: t1 parent = %q, t2 parent = %q", t1.ParentTemplateID, t2.ParentTemplateID)
 	}
-	if t1.State != state.TemplateReady || t2.State != state.TemplateReady ||
-		t1.BootIndexDigest != t1Digest || t2.BootIndexDigest != t2Digest {
-		t.Fatalf("checkpoint template states = (%#v, %#v)", t1, t2)
+	if t1.BootIndexDigest != t1Digest || t2.BootIndexDigest != t2Digest {
+		t.Fatalf("checkpoint template entries = (%#v, %#v)", t1, t2)
 	}
 
 	rec, err := store.GetSandbox(ctx, "sandbox-lineage")
@@ -541,21 +594,25 @@ func TestImageRepoDigests(t *testing.T) {
 	}
 }
 
-func seedReadyTemplate(t *testing.T, ctx context.Context, templates conchtemplate.Store, id, namespace, bootIndexDigest, bootMode string) {
+func seedTemplate(
+	t *testing.T,
+	ctx context.Context,
+	templates conchtemplate.Store,
+	id string,
+	namespace string,
+	bootIndexDigest string,
+	bootMode conchtemplate.BootMode,
+) {
 	t.Helper()
-	if _, err := templates.Create(ctx, conchtemplate.CreateRequest{
-		ID:        id,
-		Origin:    state.TemplateOriginImage,
-		Namespace: namespace,
-	}); err != nil {
-		t.Fatalf("CreateTemplate(%s) error = %v", id, err)
-	}
-	if err := templates.MarkReady(ctx, id, conchtemplate.ReadyState{
-		BootIndexDigest: bootIndexDigest,
+	if _, err := templates.Create(ctx, conchtemplate.Entry{
+		ID:              id,
+		Origin:          conchtemplate.OriginImage,
 		BootMode:        bootMode,
+		BootIndexDigest: bootIndexDigest,
+		Namespace:       namespace,
 		BuildRef:        "localhost/conch/templates:" + id,
 	}); err != nil {
-		t.Fatalf("MarkReady(%s) error = %v", id, err)
+		t.Fatalf("CreateTemplate(%s) error = %v", id, err)
 	}
 }
 
