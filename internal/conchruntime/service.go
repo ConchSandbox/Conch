@@ -14,7 +14,6 @@ import (
 
 	digestpkg "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -58,10 +57,9 @@ type TemplateBootIndexOps interface {
 }
 
 type SnapshotOps interface {
-	List(context.Context, snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error)
-	Remove(context.Context, snapshotSvc.RemoveRequest) error
-	Info(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Meta, error)
-	Chain(context.Context, snapshotSvc.InfoRequest) (snapshotSvc.Chain, error)
+	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
+	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
+	Info(context.Context, runtimeapi.SnapshotInfoOptions) (runtimeapi.SnapshotRecord, error)
 }
 
 type Service struct {
@@ -908,32 +906,25 @@ func publicTemplateRecord(rec state.TemplateRecord) runtimeapi.TemplateRecord {
 	}
 }
 
-func (s *Service) ListSnapshots(ctx context.Context, req snapshotSvc.ListRequest) ([]snapshotSvc.Meta, error) {
+func (s *Service) ListSnapshots(ctx context.Context, opts runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error) {
 	if s == nil || s.Snapshot == nil {
 		return nil, fmt.Errorf("snapshot service is not configured")
 	}
-	return s.Snapshot.List(ctx, req)
+	return s.Snapshot.List(ctx, opts)
 }
 
-func (s *Service) RemoveSnapshot(ctx context.Context, req snapshotSvc.RemoveRequest) error {
+func (s *Service) RemoveSnapshot(ctx context.Context, opts runtimeapi.RemoveSnapshotOptions) error {
 	if s == nil || s.Snapshot == nil {
 		return fmt.Errorf("snapshot service is not configured")
 	}
-	return s.Snapshot.Remove(ctx, req)
+	return s.Snapshot.Remove(ctx, opts)
 }
 
-func (s *Service) SnapshotInfo(ctx context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Meta, error) {
+func (s *Service) SnapshotInfo(ctx context.Context, opts runtimeapi.SnapshotInfoOptions) (runtimeapi.SnapshotRecord, error) {
 	if s == nil || s.Snapshot == nil {
-		return snapshotSvc.Meta{}, fmt.Errorf("snapshot service is not configured")
+		return runtimeapi.SnapshotRecord{}, fmt.Errorf("snapshot service is not configured")
 	}
-	return s.Snapshot.Info(ctx, req)
-}
-
-func (s *Service) SnapshotChain(ctx context.Context, req snapshotSvc.InfoRequest) (snapshotSvc.Chain, error) {
-	if s == nil || s.Snapshot == nil {
-		return snapshotSvc.Chain{}, fmt.Errorf("snapshot service is not configured")
-	}
-	return s.Snapshot.Chain(ctx, req)
+	return s.Snapshot.Info(ctx, opts)
 }
 
 func (s *Service) CreateContainer(ctx context.Context, opts ContainerCreateOptions) (ContainerCreateResult, error) {

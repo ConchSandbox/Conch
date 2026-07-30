@@ -33,11 +33,11 @@ func TestSnapshotRemoveNotFoundIsNoop(t *testing.T) {
 	}
 }
 
-func TestSnapshotMetaPreservesContainerdMetadata(t *testing.T) {
+func TestSnapshotRecordPreservesContainerdMetadata(t *testing.T) {
 	info := snapshots.Info{Name: "snap", Parent: "parent", Kind: snapshots.KindCommitted}
-	got := snapshotMeta(info)
+	got := snapshotRecord(info)
 	if got.Key != "snap" || got.Parent != "parent" || got.Kind != "committed" {
-		t.Fatalf("snapshotMeta() = %#v", got)
+		t.Fatalf("snapshotRecord() = %#v", got)
 	}
 }
 

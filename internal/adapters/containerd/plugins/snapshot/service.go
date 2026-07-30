@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,43 +17,12 @@ import (
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 )
 
-var ErrInvalidRequest = errors.New("invalid snapshot request")
-
 type Config struct {
 	WorkDir string `toml:"work_dir" json:"workDir"`
-}
-
-type InfoRequest struct {
-	Key       string
-	Namespace string
-}
-
-type ListRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
-}
-
-type RemoveRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type Meta struct {
-	Key         string            `json:"key"`
-	Kind        string            `json:"kind,omitempty"`
-	Parent      string            `json:"parent,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	StoragePath string            `json:"storage_path,omitempty"`
-	CreatedAt   time.Time         `json:"created_at,omitempty"`
-	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
-}
-
-type Chain struct {
-	Info       Meta     `json:"info"`
-	ChainPaths []string `json:"chain_paths"`
 }
 
 type Service struct {
@@ -95,20 +63,20 @@ func (s *Service) SnapshotServer() *conchsnapshot.Server {
 	return s.server
 }
 
-func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
+func (s *Service) List(ctx context.Context, opts runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("snapshot service has no containerd client")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
 	if err != nil {
 		return nil, err
 	}
-	var out []Meta
+	var out []runtimeapi.SnapshotRecord
 	if err := snapshotter.Walk(snapshotCtx, func(_ context.Context, info snapshots.Info) error {
-		out = append(out, snapshotMeta(info))
+		out = append(out, snapshotRecord(info))
 		return nil
-	}, req.Filters...); err != nil {
+	}, opts.Filters...); err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -117,20 +85,20 @@ func (s *Service) List(ctx context.Context, req ListRequest) ([]Meta, error) {
 	return out, nil
 }
 
-func (s *Service) Remove(ctx context.Context, req RemoveRequest) error {
+func (s *Service) Remove(ctx context.Context, opts runtimeapi.RemoveSnapshotOptions) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("snapshot service has no containerd client")
 	}
-	if req.Key == "" {
-		return fmt.Errorf("%w: key is required", ErrInvalidRequest)
+	if opts.Key == "" {
+		return fmt.Errorf("key is required")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
 	if err != nil {
 		return err
 	}
-	if err := removeSnapshotKey(snapshotCtx, snapshotter, req.Key); err != nil {
-		return fmt.Errorf("remove snapshot %s: %w", req.Key, err)
+	if err := removeSnapshotKey(snapshotCtx, snapshotter, opts.Key); err != nil {
+		return fmt.Errorf("remove snapshot %s: %w", opts.Key, err)
 	}
 	return nil
 }
@@ -148,27 +116,27 @@ func removeSnapshotKey(ctx context.Context, snapshotter snapshots.Snapshotter, k
 	return nil
 }
 
-func (s *Service) Info(ctx context.Context, req InfoRequest) (Meta, error) {
-	if req.Key == "" {
-		return Meta{}, fmt.Errorf("key is required")
+func (s *Service) Info(ctx context.Context, opts runtimeapi.SnapshotInfoOptions) (runtimeapi.SnapshotRecord, error) {
+	if opts.Key == "" {
+		return runtimeapi.SnapshotRecord{}, fmt.Errorf("key is required")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, req.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
 	if err != nil {
-		return Meta{}, err
+		return runtimeapi.SnapshotRecord{}, err
 	}
 
-	stat, err := snapshotter.Stat(snapshotCtx, req.Key)
+	stat, err := snapshotter.Stat(snapshotCtx, opts.Key)
 	if err != nil {
-		return Meta{}, fmt.Errorf("stat failed for key %s: %w", req.Key, err)
+		return runtimeapi.SnapshotRecord{}, fmt.Errorf("stat failed for key %s: %w", opts.Key, err)
 	}
 
-	mounts, err := snapshotter.Mounts(snapshotCtx, req.Key)
+	mounts, err := snapshotter.Mounts(snapshotCtx, opts.Key)
 	if err != nil || len(mounts) == 0 || len(mounts[0].Options) == 0 {
-		viewID := fmt.Sprintf("tmp-v-%d-%s", time.Now().UnixNano(), req.Key)
-		mounts, err = snapshotter.View(snapshotCtx, viewID, req.Key)
+		viewID := fmt.Sprintf("tmp-v-%d-%s", time.Now().UnixNano(), opts.Key)
+		mounts, err = snapshotter.View(snapshotCtx, viewID, opts.Key)
 		if err != nil {
-			return Meta{}, fmt.Errorf("failed to resolve storage path via mounts or view: %w", err)
+			return runtimeapi.SnapshotRecord{}, fmt.Errorf("failed to resolve storage path via mounts or view: %w", err)
 		}
 		defer snapshotter.Remove(snapshotCtx, viewID)
 	}
@@ -189,39 +157,13 @@ func (s *Service) Info(ctx context.Context, req InfoRequest) (Meta, error) {
 		}
 	}
 
-	meta := snapshotMeta(stat)
-	meta.StoragePath = storagePath
-	return meta, nil
+	record := snapshotRecord(stat)
+	record.StoragePath = storagePath
+	return record, nil
 }
 
-func (s *Service) Chain(ctx context.Context, req InfoRequest) (Chain, error) {
-	var rev []string
-	var first Meta
-	cur := req.Key
-	for cur != "" {
-		info, err := s.Info(ctx, InfoRequest{Key: cur, Namespace: req.Namespace})
-		if err != nil {
-			return Chain{}, fmt.Errorf("snapshot %s: %w", cur, err)
-		}
-		if first.Key == "" {
-			first = info
-		}
-		if info.StoragePath == "" {
-			return Chain{}, fmt.Errorf("snapshot %s has empty storage path", cur)
-		}
-		rev = append(rev, info.StoragePath)
-		cur = info.Parent
-	}
-
-	out := make([]string, 0, len(rev))
-	for i := len(rev) - 1; i >= 0; i-- {
-		out = append(out, rev[i])
-	}
-	return Chain{Info: first, ChainPaths: out}, nil
-}
-
-func snapshotMeta(info snapshots.Info) Meta {
-	meta := Meta{
+func snapshotRecord(info snapshots.Info) runtimeapi.SnapshotRecord {
+	record := runtimeapi.SnapshotRecord{
 		Key:       info.Name,
 		Kind:      strings.ToLower(info.Kind.String()),
 		Parent:    info.Parent,
@@ -229,7 +171,7 @@ func snapshotMeta(info snapshots.Info) Meta {
 		CreatedAt: info.Created,
 		UpdatedAt: info.Updated,
 	}
-	return meta
+	return record
 }
 
 func snapshotNamespaceContext(ctx context.Context, client *containerdclient.Client, namespace string) (context.Context, error) {

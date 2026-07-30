@@ -19,7 +19,6 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -209,28 +208,29 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 func (s *Daemon) routes() {
-	// sandbox
 	s.router.HandleFunc("/api/sandbox/create", s.handleCreateSandbox)
 	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
+
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
 	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
 	s.router.HandleFunc("/api/template/remove", s.handleRemoveTemplate)
+
 	s.router.HandleFunc("/api/snapshot/list", s.handleListSnapshot)
 	s.router.HandleFunc("/api/snapshot/remove", s.handleRemoveSnapshot)
+	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
+
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
 	s.router.HandleFunc("/api/image/push", s.handlePushImage)
 	s.router.HandleFunc("/api/image/list", s.handleListImage)
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
-	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
-	s.router.HandleFunc("/api/snapshot/chain", s.handleSnapshotChain)
 }
 
 func (s *Daemon) Start(addr string, unixSocket string) error {
@@ -965,7 +965,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.runtimeService.SnapshotInfo(r.Context(), snapshotSvc.InfoRequest{
+	info, err := s.runtimeService.SnapshotInfo(r.Context(), runtimeapi.SnapshotInfoOptions{
 		Key:       req.Key,
 		Namespace: req.Namespace,
 	})
@@ -974,38 +974,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(info)
-}
-
-func (s *Daemon) handleSnapshotChain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req snapshotInfoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
-		return
-	}
-	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	chain, err := s.runtimeService.SnapshotChain(r.Context(), snapshotSvc.InfoRequest{
-		Key:       req.Key,
-		Namespace: req.Namespace,
-	})
-	if err != nil {
-		http.Error(w, "Failed to get snapshot chain: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(chain)
+	_ = json.NewEncoder(w).Encode(snapshotRecordHTTPResponse(info))
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1021,19 +990,22 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req snapshotSvc.ListRequest
+	var req listSnapshotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), req)
+	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), runtimeapi.ListSnapshotsOptions{
+		Namespace: req.Namespace,
+		Filters:   req.Filters,
+	})
 	if err != nil {
 		logger.Error("Failed to list snapshots", ulog.F("error", err))
 		http.Error(w, "Failed to list snapshots: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]snapshotSvc.Meta{"snapshots": snapshots})
+	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshotRecordHTTPResponses(snapshots)})
 }
 
 func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1049,23 +1021,27 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req snapshotSvc.RemoveRequest
+	var req removeSnapshotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.RemoveSnapshot(r.Context(), req); err != nil {
+	if req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	opts := runtimeapi.RemoveSnapshotOptions{
+		Key:       req.Key,
+		Namespace: req.Namespace,
+	}
+	if err := s.runtimeService.RemoveSnapshot(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove snapshot",
-			ulog.F("key", req.Key),
+			ulog.F("key", opts.Key),
 			ulog.F("error", err),
 		)
-		status := http.StatusInternalServerError
-		if errors.Is(err, snapshotSvc.ErrInvalidRequest) {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, "Failed to remove snapshot: "+err.Error(), status)
+		http.Error(w, "Failed to remove snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(removeSnapshotResponse{Status: "ok"})
 }

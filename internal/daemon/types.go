@@ -63,9 +63,37 @@ type importImageArchiveResponse struct {
 	ImageName   string `json:"image_name"`
 }
 
+type listSnapshotRequest struct {
+	Namespace string   `json:"namespace,omitempty"`
+	Filters   []string `json:"filters,omitempty"`
+}
+
+type removeSnapshotRequest struct {
+	Key       string `json:"key"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
 type snapshotInfoRequest struct {
 	Key       string `json:"key"`
 	Namespace string `json:"namespace,omitempty"`
+}
+
+type snapshotRecordResponse struct {
+	Key         string            `json:"key"`
+	Kind        string            `json:"kind,omitempty"`
+	Parent      string            `json:"parent,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	StoragePath string            `json:"storage_path,omitempty"`
+	CreatedAt   time.Time         `json:"created_at,omitempty"`
+	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
+}
+
+type listSnapshotResponse struct {
+	Snapshots []snapshotRecordResponse `json:"snapshots"`
+}
+
+type removeSnapshotResponse struct {
+	Status string `json:"status"`
 }
 
 type sandboxCreateRequest struct {
@@ -164,6 +192,29 @@ func importImageArchiveHTTPResponse(result runtimeapi.ImportImageArchiveResult) 
 		SnapshotKey: result.SnapshotKey,
 		ImageName:   result.ImageName,
 	}
+}
+
+func snapshotRecordHTTPResponse(record runtimeapi.SnapshotRecord) snapshotRecordResponse {
+	return snapshotRecordResponse{
+		Key:         record.Key,
+		Kind:        record.Kind,
+		Parent:      record.Parent,
+		Labels:      copyStringMap(record.Labels),
+		StoragePath: record.StoragePath,
+		CreatedAt:   record.CreatedAt,
+		UpdatedAt:   record.UpdatedAt,
+	}
+}
+
+func snapshotRecordHTTPResponses(records []runtimeapi.SnapshotRecord) []snapshotRecordResponse {
+	if records == nil {
+		return nil
+	}
+	out := make([]snapshotRecordResponse, 0, len(records))
+	for _, record := range records {
+		out = append(out, snapshotRecordHTTPResponse(record))
+	}
+	return out
 }
 
 func copyStringMap(in map[string]string) map[string]string {
