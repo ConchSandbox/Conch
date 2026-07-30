@@ -296,6 +296,70 @@ func TestListFilesHonorsDepth(t *testing.T) {
 	}
 }
 
+func TestListFilesFollowsDirectorySymlink(t *testing.T) {
+	server := &AgentServer{}
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "linked.txt"), []byte("linked"), FilePerm); err != nil {
+		t.Fatalf("WriteFile(linked.txt) error = %v", err)
+	}
+	link := filepath.Join(root, "linked-dir")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	resp, err := server.ListFiles(context.Background(), &pb.ListFilesRequest{Path: root, Depth: 2})
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	paths := map[string]*pb.FileEntry{}
+	for _, entry := range resp.Entries {
+		paths[entry.Path] = entry
+	}
+	if entry := paths[link]; entry == nil || !entry.IsDirectory {
+		t.Fatalf("symlink entry = %+v, want directory", entry)
+	}
+	if paths[filepath.Join(link, "linked.txt")] == nil {
+		t.Fatalf("ListFiles() entries = %+v, want file below directory symlink", resp.Entries)
+	}
+}
+
+func TestListFilesStopsDirectorySymlinkCycle(t *testing.T) {
+	server := &AgentServer{}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("data"), FilePerm); err != nil {
+		t.Fatalf("WriteFile(file.txt) error = %v", err)
+	}
+	if err := os.Symlink(root, filepath.Join(root, "cycle")); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	resp, err := server.ListFiles(context.Background(), &pb.ListFilesRequest{Path: root, Depth: 10})
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if len(resp.Entries) != 2 {
+		t.Fatalf("ListFiles() returned %d entries, want file and cycle link: %+v", len(resp.Entries), resp.Entries)
+	}
+}
+
+func TestListFilesIncludesBrokenSymlink(t *testing.T) {
+	server := &AgentServer{}
+	root := t.TempDir()
+	link := filepath.Join(root, "missing")
+	if err := os.Symlink(filepath.Join(root, "does-not-exist"), link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	resp, err := server.ListFiles(context.Background(), &pb.ListFilesRequest{Path: root, Depth: 1})
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if len(resp.Entries) != 1 || resp.Entries[0].Path != link {
+		t.Fatalf("ListFiles() entries = %+v, want broken symlink %s", resp.Entries, link)
+	}
+}
+
 func TestSearchFilesMatchesAndExcludes(t *testing.T) {
 	server := &AgentServer{}
 	root := t.TempDir()
@@ -320,5 +384,27 @@ func TestSearchFilesMatchesAndExcludes(t *testing.T) {
 	}
 	if len(resp.Entries) != 1 || resp.Entries[0].Name != "main.py" {
 		t.Fatalf("SearchFiles() entries = %+v, want only main.py", resp.Entries)
+	}
+}
+
+func TestSearchFilesFollowsDirectorySymlink(t *testing.T) {
+	server := &AgentServer{}
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "linked.py"), []byte("print('linked')"), FilePerm); err != nil {
+		t.Fatalf("WriteFile(linked.py) error = %v", err)
+	}
+	link := filepath.Join(root, "packages")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	resp, err := server.SearchFiles(context.Background(), &pb.SearchFilesRequest{Path: root, Pattern: "*.py"})
+	if err != nil {
+		t.Fatalf("SearchFiles() error = %v", err)
+	}
+	want := filepath.Join(link, "linked.py")
+	if len(resp.Entries) != 1 || resp.Entries[0].Path != want {
+		t.Fatalf("SearchFiles() entries = %+v, want %s", resp.Entries, want)
 	}
 }

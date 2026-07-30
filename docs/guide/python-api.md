@@ -27,7 +27,9 @@ True
 
 ---
 
-## 上下文管理器
+## Sandbox 生命周期
+
+### 上下文管理器
 
 Sandbox 支持 Python 上下文管理器协议，提供更简洁的资源管理方式。
 
@@ -41,8 +43,6 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ```
 
 ---
-
-## Sandbox 核心方法
 
 ### 创建沙箱
 
@@ -83,116 +83,6 @@ with Sandbox.create(template_id="tmpl_123") as sbx:
 
 ---
 
-### 执行命令
-
-```python
-sandbox.commands.run(cmd, args=[], cwd=None, env={}, content=None, background=False, tag=None, pty=None) -> CommandResult | CommandHandle
-```
-
-在沙箱中执行命令或脚本。
-
-**参数：**
-- `cmd` (str): 命令名称（如 `python3`、`ls`、`sh`）
-- `content` (str, 可选): 脚本内容，传入时自动写入临时文件并执行
-- `args` (list, 可选): 命令参数列表
-- `cwd` (str, 可选): 执行目录，不指定时使用用户家目录
-- `env` (dict, 可选): 环境变量，会追加到沙箱默认环境变量中
-- `background` (bool, 可选): 为 `True` 时启动后台进程并返回 `CommandHandle`
-- `tag` (str, 可选): 后台进程标签，可用于后续 `connect/list/kill`
-- `pty` (dict, 可选): PTY 配置，例如 `{"cols": 80, "rows": 24}`
-
-`content` 模式由 conch-init 在沙箱内创建临时脚本并执行，不能和脚本文件参数混用。需要指定脚本文件路径时，先使用 `sandbox.files.write()` 写入文件，再通过 `args` 执行该文件。
-
-**返回：** `background=False` 时返回 `CommandResult` 对象，`background=True` 时返回 `CommandHandle` 对象。前台命令非零退出时抛 `CommandExitException`，异常对象包含 `stdout`、`stderr`、`exit_code` 和 `error`。
-
-**示例：**
-```python
-# 执行 Python 脚本
-result = sbx.commands.run(cmd='python3', content='print("Hello")')
-print(result.stdout)
-print(result.exit_code)
-
-# 执行带参数的系统命令
-result = sbx.commands.run(cmd='ls', args=['-l', '/root'])
-print(result)
-
-# 指定工作目录
-result = sbx.commands.run(cmd='python3', content='import os; print(os.getcwd())', cwd='/tmp')
-
-# 指定脚本文件路径时使用文件接口
-sbx.files.write('/tmp/app.py', 'print("Hello")')
-result = sbx.commands.run(cmd='python3', args=['/tmp/app.py'])
-
-# 指定环境变量（需要通过 shell 展开，参见 FAQ）
-result = sbx.commands.run(cmd='sh', args=['-c', 'echo $MY_VAR'],
-                     env={'MY_VAR': 'conch_test'})
-```
-
-后台命令：
-
-```python
-command = sbx.commands.run(
-    cmd='python3',
-    args=['-m', 'http.server', '18080'],
-    cwd='/tmp',
-    background=True,
-    tag='http-srv',
-)
-
-# 对 http.server 这类长期服务，不要直接裸跑无限 connect 循环。
-# 推荐先用普通命令验证服务可用，再按需停止后台进程。
-result = sbx.commands.run(
-    cmd='curl',
-    args=['-sI', 'http://127.0.0.1:18080'],
-)
-print(result.stdout)
-
-command.kill(signal=15)
-```
-
----
-
-### 后台进程管理
-
-```python
-sandbox.commands.connect(pid=None, tag=None) -> CommandHandle
-sandbox.commands.list() -> list[ProcessInfo]
-sandbox.commands.kill(pid=None, tag=None, signal=15) -> bool
-command.wait() -> CommandResult
-command.kill(signal=15) -> bool
-```
-
-后台进程可通过 `pid` 或 `tag` 连接和发送信号。`list()` 返回当前由 conch-init 管理的后台进程列表，`signal` 必须是非 0 信号编号，默认 `15`。
-
-**示例：**
-```python
-# 列出当前由 conch-init 管理的后台进程
-processes = sbx.commands.list()
-
-# 直接连接输出流，返回 CommandHandle
-command = sbx.commands.connect(tag='http-srv')
-print(command)  # process handle (pid=..., tag=http-srv)
-
-try:
-    for stdout, stderr, pty in command:
-        print(stdout or stderr or pty or '', end='')
-except KeyboardInterrupt:
-    command.disconnect()
-
-# 发送信号
-sbx.commands.kill(tag='http-srv', signal=15)
-```
-
-`commands.connect()` 返回可迭代的 `CommandHandle`，用于持续读取后台进程后续输出，行为类似 `tail -f`。对于 `python -m http.server`、Web 服务、worker 等长期运行进程，`for stdout, stderr, pty in command` 会一直等待新输出，直到进程退出、连接断开或代码主动 `break`。在交互式 REPL 中查看长期服务输出时，应使用 `try/except KeyboardInterrupt` 并调用 `command.disconnect()`；如果只是验证服务是否启动，推荐另起一次 `commands.run()` 执行 `curl`/业务请求，然后用 `command.kill()` 或 `commands.kill()` 停止后台进程。
-
-直接打印 `CommandHandle` 会显示目标进程选择器，例如 `process handle (pid=42, tag=http-srv)`。目标进程不存在时，`commands.connect()` 抛出 `NotFoundError`。`commands.kill()` 成功发送信号返回 `True`，目标进程不存在时返回 `False`；请求参数错误、认证失败、网络错误或其它 conch-init 错误会映射为 SDK 错误类型后抛出。
-
-后台命令输出来自 conch-init 的流式事件。启动后台命令后，建议通过返回的 `CommandHandle.wait()` 或 `commands.connect()` 及时消费输出；如果后台进程持续大量输出而客户端长期不读取，过量输出事件可能被丢弃，但进程本身不会因此阻塞。
-
-启用 `pty` 时，流式迭代会通过第三个返回值提供 PTY 输出；调用 `CommandHandle.wait()` 时，PTY 输出会按当前 SDK 兼容行为累计到 `CommandResult.stdout`。
-
----
-
 ### Checkpoint Sandbox
 
 ```python
@@ -227,6 +117,7 @@ sbx.delete()
 - `checkpoint()` 不改变沙箱运行态
 - 使用返回的 `template_id` 创建恢复后的沙箱
 - 所有 Template 都使用 `tmpl_xxx` ID；可通过 `origin=checkpoint` 和 `boot_mode=resume` 识别其来源与启动能力
+
 ---
 
 ### 暂停、恢复和停止沙箱
@@ -283,9 +174,161 @@ Sandbox.delete_sandbox("sandbox_abc")
 
 ---
 
-## 文件操作
+### 获取沙箱信息
 
-### 上传文件
+```python
+sandbox.get_info() -> SandboxInfo
+```
+
+获取当前实例保存的沙箱 ID、IP 和源 Template ID。
+
+**示例：**
+```python
+info = sbx.get_info()
+print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_id}")
+```
+
+**返回值：** `SandboxInfo` 对象，参见 [数据类型](#sandboxinfo)。
+
+---
+
+## 业务接口
+
+### 执行命令
+
+```python
+sandbox.commands.run(cmd, args=None, cwd=None, env=None, content=None, background=False, tag=None, pty=None, stdin=None, timeout=None, on_stdout=None, on_stderr=None) -> CommandResult | CommandHandle
+```
+
+在沙箱中执行前台命令或启动后台进程。
+
+**参数：**
+- `cmd` (str): 命令名称（如 `python3`、`ls`、`sh`）
+- `content` (str, 可选): 脚本内容
+- `args` (list, 可选): 命令参数列表
+- `cwd` (str, 可选): 执行目录，不指定时使用用户家目录
+- `env` (dict, 可选): 环境变量，会追加到沙箱默认环境变量中
+- `background` (bool, 可选): 为 `True` 时启动后台进程并返回 `CommandHandle`
+- `tag` (str, 可选): 后台进程标签，可用于后续 `connect/list/kill`
+- `pty` (dict, 可选): PTY 配置，例如 `{"cols": 80, "rows": 24}`
+- `stdin` (str | bytes, 可选): 子进程启动时一次性写入标准输入的内容；写入后关闭标准输入
+- `timeout` (float, 可选): 命令最长执行时间，单位秒；SDK 向 Agent 发送 `Connect-Timeout-Ms` 请求头
+- `on_stdout` (callable, 可选): 前台命令 stdout 的增量回调
+- `on_stderr` (callable, 可选): 前台命令 stderr 的增量回调
+
+`content` 与 `args` 互斥；`stdin` 与 `pty` 互斥。
+
+前台执行返回 `CommandResult`，后台启动返回 `CommandHandle`。非零退出抛 `CommandExitException`；超时抛 `TimeoutException`；参数错误抛 `InvalidArgumentError`。
+
+**示例：**
+```python
+# 执行 Python 脚本
+result = sbx.commands.run(cmd='python3', content='print("Hello")')
+print(result.stdout)
+print(result.exit_code)
+
+# 执行带参数的系统命令
+result = sbx.commands.run(cmd='ls', args=['-l', '/root'])
+print(result)
+
+# 指定工作目录
+result = sbx.commands.run(cmd='python3', content='import os; print(os.getcwd())', cwd='/tmp')
+
+# 指定脚本文件路径时使用文件接口
+sbx.files.write('/tmp/app.py', 'print("Hello")')
+result = sbx.commands.run(cmd='python3', args=['/tmp/app.py'])
+
+# 指定环境变量（需要通过 shell 展开，参见 FAQ）
+result = sbx.commands.run(cmd='sh', args=['-c', 'echo $MY_VAR'],
+                     env={'MY_VAR': 'conch_test'})
+
+# 一次性标准输入；result.stdout 为 'hello from stdin\n'
+result = sbx.commands.run(
+    cmd='python3',
+    args=['-c', 'import sys; print(sys.stdin.read(), end="")'],
+    stdin='hello from stdin\n',
+)
+
+# 超时单位为秒；Agent 收到 Connect-Timeout-Ms: 200
+from conch import TimeoutException
+try:
+    sbx.commands.run(cmd='sleep', args=['10'], timeout=0.2)
+except TimeoutException:
+    print('timed out')
+
+# 前台流式回调
+chunks = []
+result = sbx.commands.run(
+    cmd='sh',
+    args=['-c', 'printf foo; printf bar >&2'],
+    on_stdout=lambda text: chunks.append(("stdout", text)),
+    on_stderr=lambda text: chunks.append(("stderr", text)),
+)
+```
+
+```python
+handle = sbx.commands.run(
+    cmd='python3',
+    args=['-m', 'http.server', '18080'],
+    cwd='/tmp',
+    background=True,
+    tag='http-srv',
+)
+```
+
+---
+
+### 连接后台进程
+
+```python
+sandbox.commands.connect(pid=None, tag=None) -> CommandHandle
+command.wait() -> CommandResult
+command.disconnect() -> None
+```
+
+通过 `pid` 或 `tag` 读取后台进程输出。
+
+```python
+command = sbx.commands.connect(tag='http-srv')
+result = command.wait(on_stdout=lambda text: print(text, end=''))
+```
+
+`wait()` 在进程退出后返回；`disconnect()` 只关闭本次输出流。
+
+---
+
+### 列出后台进程
+
+```python
+sandbox.commands.list() -> list[ProcessInfo]
+```
+
+```python
+for process in sbx.commands.list():
+    print(process.pid, process.tag, process.running, process.exit_code)
+```
+
+---
+
+### 终止后台进程
+
+```python
+sandbox.commands.kill(pid=None, tag=None, signal=15) -> bool
+command.kill(signal=15) -> bool
+```
+
+通过 `pid` 或 `tag` 发送非零信号，默认 `15`；目标不存在返回 `False`。
+
+```python
+sbx.commands.kill(tag='http-srv', signal=15)
+# 或：handle.kill(signal=15)
+```
+
+---
+
+### 文件操作
+
+#### 上传文件
 
 ```python
 sandbox.files.upload(local_path, remote_path) -> WriteInfo | list[WriteInfo]
@@ -294,9 +337,7 @@ sandbox.files.write(path, content) -> WriteInfo
 sandbox.files.write_files(files) -> list[WriteInfo]
 ```
 
-写入或上传文件到沙箱。返回对象包含 `name`、`path` 和 `type`，并直接使用 conch-init 返回的结果。推荐使用 `write()` / `write_files()`；`upload()` 保留用于上传本地文件路径。
-
-**方式 1：上传本地文件**
+上传本地文件，或写入字符串、字节和文件流。
 
 ```python
 # 上传单个本地文件到沙箱
@@ -304,15 +345,11 @@ result = sbx.files.upload('./local.txt', '/home/user/remote.txt')
 print(result.path)
 ```
 
-**方式 2：写入内存内容**
-
 ```python
 # 直接传入内容，无需本地文件
 result = sbx.files.write('/home/user/a.txt', b'hello')
 print(result.name)
 ```
-
-**方式 3：批量上传**
 
 ```python
 result = sbx.files.write_files([
@@ -321,11 +358,11 @@ result = sbx.files.write_files([
 ])
 ```
 
-`write_files()` 每个条目使用 `{"path": remote_path, "data": content}`。`upload()` 兼容 `{"filepath": remote_path, "content": content}` 或 `{"local_path": local_path, "remote_path": remote_path}`。
+`write_files()` 使用 `{"path": remote_path, "data": content}`；`upload()` 支持本地路径或内容规格。
 
 ---
 
-### 下载文件
+#### 下载文件
 
 ```python
 sandbox.files.download(remote_path, local_path) -> dict
@@ -334,7 +371,7 @@ sandbox.files.read(remote_path, format="bytes") -> bytes
 sandbox.files.read(remote_path, format="stream") -> Iterator[bytes]
 ```
 
-从沙箱下载文件到本地。本地父目录不存在时会自动创建。远端文件不存在、认证失败、连接失败或其它 conch-init 错误会映射为 SDK 错误类型后抛出。
+下载文件，或按文本、字节、流读取远端内容。
 
 **示例：**
 ```python
@@ -361,17 +398,20 @@ raw = sbx.files.read('/home/user/output.txt', format='bytes')
 
 ---
 
-### 列出文件
+#### 列出文件
 
 ```python
 sandbox.files.list(path, depth=1) -> list[EntryInfo]
 sandbox.files.search(path, pattern, exclude_patterns=None) -> list[EntryInfo]
 ```
 
-列出或搜索沙箱内指定目录的文件。返回对象可直接访问 `name`、`path`、`type`、`size`、`permissions` 和 `modified_time`。
+列出目录或按 glob 搜索文件。
 
 **参数：**
-- `path` (str, 可选): 目录路径，不指定时列出当前目录
+- `path` (str): 目录路径
+- `depth` (int, 可选): 列举深度，默认 `1`
+- `pattern` (str): 搜索 glob 模式
+- `exclude_patterns` (list[str], 可选): 搜索排除模式
 
 **示例：**
 ```python
@@ -385,11 +425,11 @@ for item in files:
     print(item.path, item.size)
 ```
 
-**返回值：** `list[EntryInfo]`，每个条目包含 `name`、`path`、`type`、`size`、`permissions`、`modified_time` 等字段。
+返回 `list[EntryInfo]`。
 
 ---
 
-## 健康检查
+### 健康检查
 
 ```python
 sandbox.health_check() -> dict
@@ -410,24 +450,6 @@ print(result)
 |------|------|------|
 | `status` | str | `'OK'` 正常，`'ERROR'` 异常 |
 | `message` | str | 状态描述 |
-
----
-
-## 获取沙箱信息
-
-```python
-sandbox.get_info() -> SandboxInfo
-```
-
-获取沙箱的基本信息。
-
-**示例：**
-```python
-info = sbx.get_info()
-print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_id}")
-```
-
-**返回值：** `SandboxInfo` 对象，参见 [数据类型](#sandboxinfo)。
 
 ---
 
@@ -523,9 +545,12 @@ class NotFoundError(SandboxError):
 class AuthenticationError(SandboxError):
     pass
 
+class TimeoutException(SandboxError):
+    pass
+
 ```
 
-例如 `sandbox.commands.connect(tag="missing")` 抛出 `NotFoundError`；`sandbox.commands.kill()` 不传 `pid/tag` 抛出 `InvalidArgumentError`；`sandbox.commands.kill(tag="missing")` 返回 `False`。
+例如 `sandbox.commands.connect(tag="missing")` 抛出 `NotFoundError`；`sandbox.commands.kill()` 不传 `pid/tag` 抛出 `InvalidArgumentError`；`sandbox.commands.kill(tag="missing")` 返回 `False`；`commands.run(..., timeout=...)` 超时时抛出 `TimeoutException`。
 
 ### ProcessInfo
 

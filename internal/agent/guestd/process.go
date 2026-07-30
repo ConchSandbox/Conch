@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -23,6 +25,7 @@ import (
 type managedProcess struct {
 	mu         sync.Mutex
 	cmd        *exec.Cmd
+	cancel     context.CancelFunc
 	tty        *os.File
 	info       *pb.ProcessInfo
 	dataEvents *processEventMultiplexer
@@ -32,6 +35,8 @@ type managedProcess struct {
 	outputDone chan struct{}
 	tempScript string
 }
+
+const maxProcessTimeoutMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
 
 type processEventSubscriber struct {
 	ch   chan *pb.ProcessEvent
@@ -143,9 +148,72 @@ type processOutputWriter struct {
 }
 
 func (w processOutputWriter) Write(p []byte) (int, error) {
-	text := string(append([]byte(nil), p...))
-	w.process.appendOutput(text, w.stderr, w.pty)
+	w.process.appendOutput(p, w.stderr, w.pty)
 	return len(p), nil
+}
+
+type foregroundOutputState struct {
+	started   chan struct{}
+	startOnce sync.Once
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	err       error
+}
+
+func newForegroundOutputState(cancel context.CancelFunc) *foregroundOutputState {
+	return &foregroundOutputState{started: make(chan struct{}), cancel: cancel}
+}
+
+func (s *foregroundOutputState) markStarted() {
+	s.startOnce.Do(func() {
+		close(s.started)
+	})
+}
+
+func (s *foregroundOutputState) failBeforeStart(err error) {
+	s.setErr(err)
+	s.markStarted()
+}
+
+func (s *foregroundOutputState) setErr(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err == nil {
+		s.err = err
+	}
+}
+
+type foregroundOutputWriter struct {
+	stream processConnectStream
+	state  *foregroundOutputState
+	stderr bool
+	pty    bool
+}
+
+func (w foregroundOutputWriter) Write(p []byte) (int, error) {
+	event := processDataEvent(p, w.stderr, w.pty)
+
+	<-w.state.started
+	w.state.mu.Lock()
+	defer w.state.mu.Unlock()
+	if w.state.err != nil {
+		return 0, w.state.err
+	}
+	if err := w.stream.Send(event); err != nil {
+		w.state.err = err
+		w.state.cancel()
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (s *foregroundOutputState) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
 func processStartEvent(pid int32) *pb.ProcessEvent {
@@ -156,33 +224,44 @@ func processStartEvent(pid int32) *pb.ProcessEvent {
 	}
 }
 
-func processStdoutEvent(text string) *pb.ProcessEvent {
+func processStdoutEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Stdout{Stdout: text},
+				Output: &pb.ProcessDataEvent_Stdout{Stdout: append([]byte(nil), data...)},
 			},
 		},
 	}
 }
 
-func processStderrEvent(text string) *pb.ProcessEvent {
+func processStderrEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Stderr{Stderr: text},
+				Output: &pb.ProcessDataEvent_Stderr{Stderr: append([]byte(nil), data...)},
 			},
 		},
 	}
 }
 
-func processPTYEvent(text string) *pb.ProcessEvent {
+func processPTYEvent(data []byte) *pb.ProcessEvent {
 	return &pb.ProcessEvent{
 		Event: &pb.ProcessEvent_Data{
 			Data: &pb.ProcessDataEvent{
-				Output: &pb.ProcessDataEvent_Pty{Pty: text},
+				Output: &pb.ProcessDataEvent_Pty{Pty: append([]byte(nil), data...)},
 			},
 		},
+	}
+}
+
+func processDataEvent(data []byte, stderr, isPTY bool) *pb.ProcessEvent {
+	switch {
+	case isPTY:
+		return processPTYEvent(data)
+	case stderr:
+		return processStderrEvent(data)
+	default:
+		return processStdoutEvent(data)
 	}
 }
 
@@ -203,16 +282,8 @@ func processEndEvent(exitCode int32, errMsg string) *pb.ProcessEvent {
 	}
 }
 
-func (p *managedProcess) appendOutput(text string, stderr, isPTY bool) {
-	var event *pb.ProcessEvent
-	switch {
-	case isPTY:
-		event = processPTYEvent(text)
-	case stderr:
-		event = processStderrEvent(text)
-	default:
-		event = processStdoutEvent(text)
-	}
+func (p *managedProcess) appendOutput(data []byte, stderr, isPTY bool) {
+	event := processDataEvent(data, stderr, isPTY)
 	select {
 	case p.dataEvents.Source <- event:
 	default:
@@ -359,22 +430,7 @@ func ptySize(cfg *pb.PTY) *pty.Winsize {
 	return size
 }
 
-func sendProcessError(stream processConnectStream, errMsg string) error {
-	ulog.Error("Process error", ulog.F("message", errMsg))
-	return stream.Send(processEndEvent(-1, errMsg))
-}
-
-func sendForegroundResult(stream processConnectStream, stdout, stderr string, exitCode int32, errMsg string) error {
-	if stdout != "" {
-		if err := stream.Send(processStdoutEvent(stdout)); err != nil {
-			return err
-		}
-	}
-	if stderr != "" {
-		if err := stream.Send(processStderrEvent(stderr)); err != nil {
-			return err
-		}
-	}
+func sendForegroundEnd(stream processConnectStream, exitCode int32, errMsg string) error {
 	return stream.Send(processEndEvent(exitCode, errMsg))
 }
 
@@ -466,26 +522,69 @@ func applyCommandEnvAndDir(cmd *exec.Cmd, workDir string, envMap map[string]stri
 	cmd.Env = env
 }
 
-// Execute command and return output, stderr and exit code.
-func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []string, workDir string, envMap map[string]string, ptyConfig *pb.PTY) (string, string, int, error) {
+// configureCommandProcessGroup keeps command descendants within a group that can
+// be terminated when the command context expires. PTY startup creates its own
+// session (and therefore process group), so it must not also request Setpgid.
+func configureCommandProcessGroup(cmd *exec.Cmd, usesPTY bool) {
+	if !usesPTY {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+}
+
+func terminateCommandProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+// Execute command and stream output events while it is running.
+func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []string, workDir string, envMap map[string]string, stdin []byte, ptyConfig *pb.PTY, stream processConnectStream) (int, bool, error) {
 	if cmdName == "" {
-		return "", "", -1, fmt.Errorf("command is required")
+		return -1, false, fmt.Errorf("command is required")
 	}
 
-	cmd := exec.CommandContext(ctx, cmdName, args...)
+	cmdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, cmdName, args...)
 	applyCommandEnvAndDir(cmd, workDir, envMap)
+	configureCommandProcessGroup(cmd, ptyConfig != nil)
 	if ptyConfig != nil {
-		return executePtyCmd(ctx, cmd, ptyConfig)
+		return executePtyCmd(cmdCtx, cmd, ptyConfig, stream, cancel)
 	}
+	cmd.Stdin = bytes.NewReader(stdin)
 
-	var stdoutBuf bytes.Buffer
-	var stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	outputState := newForegroundOutputState(cancel)
+	cmd.Stdout = foregroundOutputWriter{stream: stream, state: outputState}
+	cmd.Stderr = foregroundOutputWriter{stream: stream, state: outputState, stderr: true}
 
 	if err := cmd.Start(); err != nil {
-		return "", "", -1, err
+		return -1, false, err
 	}
+	if err := stream.Send(processStartEvent(int32(cmd.Process.Pid))); err != nil {
+		outputState.failBeforeStart(err)
+		_ = terminateCommandProcessGroup(cmd)
+		_ = cmd.Wait()
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		return exitCode, true, err
+	}
+	outputState.markStarted()
 
 	waitErr := cmd.Wait()
 
@@ -494,39 +593,52 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return stdoutBuf.String(), stderrBuf.String(), exitCode, ctxErr
+	if err := outputState.Err(); err != nil {
+		return exitCode, true, err
 	}
-	if err := signaledProcessError(cmd.ProcessState); err != nil {
-		return stdoutBuf.String(), stderrBuf.String(), exitCode, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return exitCode, false, ctxErr
 	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			return stdoutBuf.String(), stderrBuf.String(), exitCode, nil
+			return exitCode, false, &processExitError{cause: waitErr}
 		}
-		return stdoutBuf.String(), stderrBuf.String(), exitCode, waitErr
+		return exitCode, false, waitErr
 	}
 
-	return stdoutBuf.String(), stderrBuf.String(), exitCode, nil
+	return exitCode, false, nil
 }
 
-func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY) (string, string, int, error) {
+func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY, stream processConnectStream, cancel context.CancelFunc) (int, bool, error) {
 	tty, err := pty.StartWithSize(cmd, ptySize(ptyConfig))
 	if err != nil {
-		return "", "", -1, err
+		return -1, false, err
 	}
 	defer tty.Close()
 
-	var output bytes.Buffer
+	outputState := newForegroundOutputState(cancel)
 	readDone := make(chan error, 1)
 	go func() {
-		_, copyErr := io.Copy(&output, tty)
+		_, copyErr := io.Copy(foregroundOutputWriter{stream: stream, state: outputState, pty: true}, tty)
 		if errors.Is(copyErr, os.ErrClosed) || errors.Is(copyErr, syscall.EIO) {
 			copyErr = nil
 		}
 		readDone <- copyErr
 	}()
+
+	if err := stream.Send(processStartEvent(int32(cmd.Process.Pid))); err != nil {
+		outputState.failBeforeStart(err)
+		_ = terminateCommandProcessGroup(cmd)
+		_ = tty.Close()
+		_ = cmd.Wait()
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		return exitCode, true, err
+	}
+	outputState.markStarted()
 
 	waitErr := cmd.Wait()
 	var readErr error
@@ -541,39 +653,41 @@ func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY) (strin
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return output.String(), "", exitCode, ctxErr
+	if err := outputState.Err(); err != nil {
+		return exitCode, true, err
 	}
-	if err := signaledProcessError(cmd.ProcessState); err != nil {
-		return output.String(), "", exitCode, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return exitCode, false, ctxErr
 	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) {
-			return output.String(), "", exitCode, waitErr
+		if errors.As(waitErr, &exitErr) {
+			return exitCode, false, &processExitError{cause: waitErr}
 		}
+		return exitCode, false, waitErr
 	}
 	if readErr != nil {
-		return output.String(), "", exitCode, readErr
+		return exitCode, false, readErr
 	}
-	return output.String(), "", exitCode, nil
+	return exitCode, false, nil
 }
 
-func signaledProcessError(state *os.ProcessState) error {
-	if state == nil {
-		return nil
-	}
-	status, ok := state.Sys().(syscall.WaitStatus)
-	if !ok || !status.Signaled() {
-		return nil
-	}
-	return fmt.Errorf("process terminated by signal %s", status.Signal())
+type processExitError struct {
+	cause error
+}
+
+func (e *processExitError) Error() string {
+	return e.cause.Error()
 }
 
 // Starts a process with custom working dir, environment, and script content.
 func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequest, stream processConnectStream) error {
+	return s.startProcess(ctx, req, stream, 0)
+}
+
+func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequest, stream processConnectStream, requestTimeout time.Duration) error {
 	if req == nil {
-		return sendProcessError(stream, "start process request is required")
+		return connectError(connect.CodeInvalidArgument, "start process request is required")
 	}
 
 	ulog.Info("Received start process request",
@@ -583,21 +697,24 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 		ulog.F("has_content", req.Content != ""))
 
 	if req.Content != "" && len(req.Args) > 0 {
-		return sendProcessError(stream, "content and args cannot both be set")
+		return connectError(connect.CodeInvalidArgument, "content and args cannot both be set")
+	}
+	if req.Pty != nil && len(req.Stdin) > 0 {
+		return connectError(connect.CodeInvalidArgument, "stdin cannot be used with pty")
 	}
 
 	// Prepare work dir
 	workDir, err := s.prepareWorkDir(req.Cwd)
 	if err != nil {
 		errMsg := "failed to prepare working directory: " + err.Error()
-		return sendProcessError(stream, errMsg)
+		return connectError(connect.CodeInvalidArgument, errMsg)
 	}
 
 	// Write script file
 	scriptPath, err := s.writeScript(workDir, req.Cmd, req.Content)
 	if err != nil {
 		errMsg := "failed to write script file: " + err.Error()
-		return sendProcessError(stream, errMsg)
+		return connectError(connect.CodeInternal, errMsg)
 	}
 	if scriptPath != "" {
 		if !req.Background {
@@ -612,29 +729,48 @@ func (s *AgentServer) StartProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 
 	if req.Background {
-		return s.startBackgroundProcess(req, args, workDir, scriptPath, stream)
+		return s.startBackgroundProcess(req, args, workDir, scriptPath, stream, requestTimeout)
 	}
+
+	procCtx, cancelProc := processContext(requestTimeout)
+	defer cancelProc()
 
 	// Execute command
-	stdout, stderr, exitCode, err := s.executeCmd(ctx, req.Cmd, args, workDir, req.Env, req.Pty)
+	exitCode, streamFailed, err := s.executeCmd(procCtx, req.Cmd, args, workDir, req.Env, req.Stdin, req.Pty, stream)
 	errMsg := ""
 	if err != nil {
-		errMsg = "failed to execute process: " + err.Error()
+		if streamFailed {
+			return err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connectErrorf(connect.CodeDeadlineExceeded, "process execution timed out: %v", err)
+		}
+		var processErr *processExitError
+		if errors.As(err, &processErr) {
+			return sendForegroundEnd(stream, int32(exitCode), processErr.Error())
+		}
+		return connectErrorf(connect.CodeInvalidArgument, "failed to execute process: %v", err)
 	}
-	return sendForegroundResult(stream, stdout, stderr, int32(exitCode), errMsg)
+	return sendForegroundEnd(stream, int32(exitCode), errMsg)
 }
 
-func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream) error {
+func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream, requestTimeout time.Duration) error {
 	if req.Cmd == "" {
 		cleanupTempScript(scriptPath)
-		return sendProcessError(stream, "command is required")
+		return connectError(connect.CodeInvalidArgument, "command is required")
 	}
 
-	cmd := exec.Command(req.Cmd, args...)
+	procCtx, cancelProc := processContext(requestTimeout)
+	cmd := exec.CommandContext(procCtx, req.Cmd, args...)
 	applyCommandEnvAndDir(cmd, workDir, req.Env)
+	configureCommandProcessGroup(cmd, req.Pty != nil)
+	if req.Pty == nil {
+		cmd.Stdin = bytes.NewReader(req.Stdin)
+	}
 
 	process := &managedProcess{
-		cmd: cmd,
+		cmd:    cmd,
+		cancel: cancelProc,
 		info: &pb.ProcessInfo{
 			Tag: req.Tag,
 			Config: &pb.ProcessConfig{
@@ -668,16 +804,18 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 				s.processMu.Unlock()
 				dataCancel()
 				endCancel()
+				cancelProc()
 				cleanupTempScript(scriptPath)
-				return sendProcessError(stream, "background process tag already exists: "+req.Tag)
+				return connectError(connect.CodeAlreadyExists, "background process tag already exists: "+req.Tag)
 			}
 		}
 		if err := startManagedProcess(process, req.Pty); err != nil {
 			s.processMu.Unlock()
 			dataCancel()
 			endCancel()
+			cancelProc()
 			cleanupTempScript(scriptPath)
-			return sendProcessError(stream, "failed to start background process: "+err.Error())
+			return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 		}
 		process.info.Pid = int32(cmd.Process.Pid)
 		s.processes[process.info.Pid] = process
@@ -691,8 +829,9 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	if err := startManagedProcess(process, req.Pty); err != nil {
 		dataCancel()
 		endCancel()
+		cancelProc()
 		cleanupTempScript(scriptPath)
-		return sendProcessError(stream, "failed to start background process: "+err.Error())
+		return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 	}
 	process.info.Pid = int32(cmd.Process.Pid)
 
@@ -704,6 +843,33 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	go s.waitManagedProcess(process)
 
 	return s.streamManagedProcessEvents(process, data, dataCancel, end, endCancel, stream)
+}
+
+func determineTimeoutFromHeader(header http.Header) (time.Duration, error) {
+	timeoutHeader := header.Get("Connect-Timeout-Ms")
+	if timeoutHeader == "" {
+		return 0, nil
+	}
+
+	timeout, err := strconv.Atoi(timeoutHeader)
+	if err != nil {
+		return 0, err
+	}
+	if timeout < 0 {
+		return 0, fmt.Errorf("Connect-Timeout-Ms must not be negative")
+	}
+	if int64(timeout) > maxProcessTimeoutMilliseconds {
+		return 0, fmt.Errorf("Connect-Timeout-Ms exceeds the maximum supported duration")
+	}
+	return time.Duration(timeout) * time.Millisecond, nil
+}
+
+func processContext(requestTimeout time.Duration) (context.Context, context.CancelFunc) {
+	// Keep process lifetime independent from RPC cancellation, matching E2B behavior.
+	if requestTimeout > 0 {
+		return context.WithTimeout(context.Background(), requestTimeout)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
@@ -725,7 +891,7 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 		for {
 			n, readErr := tty.Read(buf)
 			if n > 0 {
-				process.appendOutput(string(append([]byte(nil), buf[:n]...)), false, true)
+				process.appendOutput(buf[:n], false, true)
 			}
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, os.ErrClosed) || errors.Is(readErr, syscall.EIO) {
 				return
@@ -740,6 +906,9 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 }
 
 func (s *AgentServer) waitManagedProcess(p *managedProcess) {
+	if p.cancel != nil {
+		defer p.cancel()
+	}
 	waitErr := p.cmd.Wait()
 	if p.outputDone != nil {
 		select {
@@ -763,13 +932,8 @@ func (s *AgentServer) waitManagedProcess(p *managedProcess) {
 	}
 
 	errMsg := ""
-	if err := signaledProcessError(p.cmd.ProcessState); err != nil {
-		errMsg = err.Error()
-	} else if waitErr != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) {
-			errMsg = waitErr.Error()
-		}
+	if waitErr != nil {
+		errMsg = waitErr.Error()
 	}
 	if p.tempScript != "" {
 		cleanupTempScript(p.tempScript)

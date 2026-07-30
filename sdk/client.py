@@ -1,7 +1,11 @@
+import codecs
 import os
+import secrets
+import stat
 import sys
+from itertools import chain
 from io import IOBase, TextIOBase
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import requests
 from connectrpc.code import Code
@@ -15,6 +19,17 @@ if PROJECT_ROOT not in sys.path:
 from api.py_proto import agent_connect
 from api.py_proto import agent_pb2
 from .errors import InvalidArgumentError, handle_rpc_error
+
+
+def _create_download_temp(local_dir: str) -> tuple[int, str]:
+    for _ in range(100):
+        temp_path = os.path.join(local_dir, f".conch-download-{secrets.token_hex(16)}")
+        try:
+            # os.open applies the caller's umask to 0o666, matching open(..., "wb").
+            return os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), temp_path
+        except FileExistsError:
+            continue
+    raise FileExistsError("failed to create a unique download temporary file")
 
 
 class AgentClient:
@@ -64,9 +79,69 @@ class AgentClient:
         background: bool = False,
         tag: Optional[str] = None,
         pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Dict[str, Any]:
+        request = self._build_start_process_request(
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            content=content,
+            args=args,
+            background=background,
+            tag=tag,
+            pty=pty,
+            stdin=stdin,
+        )
+        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
+        events = self._decode_process_events(self._rpc_iter(raw_events))
+        if background:
+            return self._start_background_process_response(request, events)
+        return self._aggregate_process_response(events)
+
+    def stream_process(
+        self,
+        cmd: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        content: Optional[str] = None,
+        args: Optional[list] = None,
+        background: bool = False,
+        tag: Optional[str] = None,
+        pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        request = self._build_start_process_request(
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            content=content,
+            args=args,
+            background=background,
+            tag=tag,
+            pty=pty,
+            stdin=stdin,
+        )
+        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
+        yield from self._decode_process_events(self._rpc_iter(raw_events))
+
+    def _build_start_process_request(
+        self,
+        cmd: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        content: Optional[str] = None,
+        args: Optional[list] = None,
+        background: bool = False,
+        tag: Optional[str] = None,
+        pty: Optional[Dict[str, int]] = None,
+        stdin: Optional[Union[str, bytes]] = None,
+    ) -> agent_pb2.StartProcessRequest:
         if content is not None and args:
             raise InvalidArgumentError("content cannot be used with args; write a file first and execute it via args")
+        if pty is not None and stdin is not None:
+            raise InvalidArgumentError("stdin cannot be used with pty")
         request = agent_pb2.StartProcessRequest(
             cmd=cmd,
             args=args or [],
@@ -78,20 +153,16 @@ class AgentClient:
         )
         if pty is not None:
             request.pty.CopyFrom(agent_pb2.PTY(cols=pty.get("cols", 0), rows=pty.get("rows", 0)))
-
-        raw_events = self._rpc_call(self.process_client.start_process, request)
-        events = self._rpc_iter(raw_events)
-        if background:
-            return self._start_background_process_response(request, events)
-        return self._aggregate_process_response(events)
+        if stdin is not None:
+            request.stdin = stdin.encode() if isinstance(stdin, str) else stdin
+        return request
 
     def connect_process(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
         tag: Optional[str] = None) -> Iterator[Dict[str, Any]]:
         selector = self._process_selector(process, pid=pid, tag=tag)
         request = agent_pb2.ConnectProcessRequest(process=selector)
         raw_events = self._rpc_call(self.process_client.connect, request)
-        for event in self._rpc_iter(raw_events):
-            yield self._process_event_to_dict(event)
+        yield from self._decode_process_events(self._rpc_iter(raw_events))
 
     def list_processes(self) -> List[Dict[str, Any]]:
         response = self._rpc_call(self.process_client.list, agent_pb2.ListProcessesRequest())
@@ -127,14 +198,33 @@ class AgentClient:
         }
 
     def get_file(self, remote_path: str, local_path: str) -> Dict[str, Any]:
-        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        local_dir = os.path.dirname(local_path) or "."
+        os.makedirs(local_dir, exist_ok=True)
+        try:
+            target_mode = stat.S_IMODE(os.stat(local_path).st_mode)
+        except FileNotFoundError:
+            target_mode = None
         size = 0
         request = agent_pb2.GetFileRequest(filepath=remote_path)
         chunks = self._rpc_call(self.file_client.get_file_stream, request)
-        with open(local_path, "wb") as out:
-            for chunk in self._rpc_iter(chunks):
-                out.write(chunk.content)
-                size += len(chunk.content)
+        temp_path = None
+        committed = False
+        try:
+            fd, temp_path = _create_download_temp(local_dir)
+            if target_mode is not None:
+                os.fchmod(fd, target_mode)
+            with os.fdopen(fd, "wb") as out:
+                for chunk in self._rpc_iter(chunks):
+                    out.write(chunk.content)
+                    size += len(chunk.content)
+            os.replace(temp_path, local_path)
+            committed = True
+        finally:
+            if temp_path and not committed:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
         return {"status": self.STATUS_SUCCESS, "size": size, "message": "OK"}
 
     def stream_file(self, remote_path: str) -> Iterator[bytes]:
@@ -192,9 +282,16 @@ class AgentClient:
         body_text = response.text.strip()
         return f"HTTP {response.status_code}: {body_text}" if body_text else f"HTTP {response.status_code}"
 
-    def _rpc_call(self, method, request):
+    def _rpc_call(self, method, request, timeout_ms: Optional[int] = None):
         try:
-            return method(request, headers=self._headers())
+            if timeout_ms is not None and timeout_ms < 0:
+                raise InvalidArgumentError("timeout_ms must not be negative")
+            headers = self._headers()
+            # Connect applies this deadline to its HTTP transport and emits the
+            # corresponding protocol timeout header.
+            if timeout_ms:
+                return method(request, headers=headers, timeout_ms=timeout_ms)
+            return method(request, headers=headers)
         except ConnectError as exc:
             raise handle_rpc_error(exc) from None
 
@@ -220,7 +317,7 @@ class AgentClient:
     def _start_background_process_response(
         self,
         request: agent_pb2.StartProcessRequest,
-        events: Iterator[agent_pb2.ProcessEvent],
+        events: Iterator[Dict[str, Any]],
     ) -> Dict[str, Any]:
         try:
             first_event = next(events)
@@ -235,9 +332,9 @@ class AgentClient:
                 "process": None,
             }
 
-        event = self._process_event_to_dict(first_event)
+        event = first_event
         if "start" not in event:
-            response = self._aggregate_process_response(iter([first_event]))
+            response = self._aggregate_process_response(chain([first_event], events))
             response["process"] = None
             return response
 
@@ -260,16 +357,15 @@ class AgentClient:
             "exit_code": -1,
             "error": "",
             "process": process,
-            "events": (self._process_event_to_dict(event) for event in events),
+            "events": events,
         }
 
-    def _aggregate_process_response(self, events: Iterator[agent_pb2.ProcessEvent]) -> Dict[str, Any]:
+    def _aggregate_process_response(self, events: Iterator[Dict[str, Any]]) -> Dict[str, Any]:
         stdout = ""
         stderr = ""
         exit_code = -1
         error = "process ended without an end event"
-        for raw_event in events:
-            event = self._process_event_to_dict(raw_event)
+        for event in events:
             data = event.get("data") or {}
             stdout += data.get("stdout", "")
             # Preserve the previous unary API behavior where PTY output was returned as stdout.
@@ -401,6 +497,34 @@ class AgentClient:
         if which == "keepalive":
             return {"keepalive": {}}
         return {}
+
+    @classmethod
+    def _decode_process_events(
+        cls,
+        events: Iterator[agent_pb2.ProcessEvent],
+    ) -> Iterator[Dict[str, Any]]:
+        decoders = {
+            output: codecs.getincrementaldecoder("utf-8")(errors="replace")
+            for output in ("stdout", "stderr", "pty")
+        }
+        for raw_event in events:
+            event = cls._process_event_to_dict(raw_event)
+            data = event.get("data")
+            if data is not None:
+                output, raw = next(iter(data.items()), (None, None))
+                if output is None:
+                    yield event
+                    continue
+                text = decoders[output].decode(raw, final=False)
+                if text:
+                    yield {"data": {output: text}}
+                continue
+            if "end" in event:
+                for output, decoder in decoders.items():
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        yield {"data": {output: text}}
+            yield event
 
     @staticmethod
     def _write_info_to_dict(entry: agent_pb2.WriteInfo) -> Dict[str, Any]:

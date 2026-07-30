@@ -29,6 +29,7 @@ message StartProcessRequest {
   bool background = 6;
   string tag = 7;
   PTY pty = 8;
+  bytes stdin = 9;
 }
 
 message ProcessConfig {
@@ -76,9 +77,9 @@ message ProcessStartEvent {
 
 message ProcessDataEvent {
   oneof output {
-    string stdout = 1;
-    string stderr = 2;
-    string pty = 3;
+    bytes stdout = 1;
+    bytes stderr = 2;
+    bytes pty = 3;
   }
 }
 

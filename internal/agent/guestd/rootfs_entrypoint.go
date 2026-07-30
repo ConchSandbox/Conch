@@ -26,13 +26,8 @@ func startRootfsEntrypoint() bool {
 		return false
 	}
 
-	var cmd *exec.Cmd
-	if chrootCommand.available() {
-		cmd = execChroot(MergeTarget, rootfsEntrypoint)
-	} else {
-		cmd = exec.Command(rootfsEntrypoint)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: MergeTarget}
-	}
+	cmd := exec.Command(rootfsEntrypoint)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: MergeTarget}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = "/"

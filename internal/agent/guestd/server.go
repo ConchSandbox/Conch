@@ -84,7 +84,11 @@ func (h *agentConnectHandler) StartProcess(ctx context.Context, req *connect.Req
 	if err := verifyConnectAuth(req.Header()); err != nil {
 		return err
 	}
-	return toConnectError(h.server.StartProcess(ctx, req.Msg, &connectProcessStream{ctx: ctx, stream: stream}))
+	requestTimeout, err := determineTimeoutFromHeader(req.Header())
+	if err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	return toConnectError(h.server.startProcess(ctx, req.Msg, &connectProcessStream{ctx: ctx, stream: stream}, requestTimeout))
 }
 
 func (h *agentConnectHandler) Connect(ctx context.Context, req *connect.Request[pb.ConnectProcessRequest], stream *connect.ServerStream[pb.ProcessEvent]) error {

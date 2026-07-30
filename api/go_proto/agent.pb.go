@@ -31,6 +31,7 @@ type StartProcessRequest struct {
 	Background    bool                   `protobuf:"varint,6,opt,name=background,proto3" json:"background,omitempty"`
 	Tag           string                 `protobuf:"bytes,7,opt,name=tag,proto3" json:"tag,omitempty"`
 	Pty           *PTY                   `protobuf:"bytes,8,opt,name=pty,proto3" json:"pty,omitempty"`
+	Stdin         []byte                 `protobuf:"bytes,9,opt,name=stdin,proto3" json:"stdin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -117,6 +118,13 @@ func (x *StartProcessRequest) GetTag() string {
 func (x *StartProcessRequest) GetPty() *PTY {
 	if x != nil {
 		return x.Pty
+	}
+	return nil
+}
+
+func (x *StartProcessRequest) GetStdin() []byte {
+	if x != nil {
+		return x.Stdin
 	}
 	return nil
 }
@@ -616,31 +624,31 @@ func (x *ProcessDataEvent) GetOutput() isProcessDataEvent_Output {
 	return nil
 }
 
-func (x *ProcessDataEvent) GetStdout() string {
+func (x *ProcessDataEvent) GetStdout() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Stdout); ok {
 			return x.Stdout
 		}
 	}
-	return ""
+	return nil
 }
 
-func (x *ProcessDataEvent) GetStderr() string {
+func (x *ProcessDataEvent) GetStderr() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Stderr); ok {
 			return x.Stderr
 		}
 	}
-	return ""
+	return nil
 }
 
-func (x *ProcessDataEvent) GetPty() string {
+func (x *ProcessDataEvent) GetPty() []byte {
 	if x != nil {
 		if x, ok := x.Output.(*ProcessDataEvent_Pty); ok {
 			return x.Pty
 		}
 	}
-	return ""
+	return nil
 }
 
 type isProcessDataEvent_Output interface {
@@ -648,15 +656,15 @@ type isProcessDataEvent_Output interface {
 }
 
 type ProcessDataEvent_Stdout struct {
-	Stdout string `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
+	Stdout []byte `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
 }
 
 type ProcessDataEvent_Stderr struct {
-	Stderr string `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
+	Stderr []byte `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
 }
 
 type ProcessDataEvent_Pty struct {
-	Pty string `protobuf:"bytes,3,opt,name=pty,proto3,oneof"`
+	Pty []byte `protobuf:"bytes,3,opt,name=pty,proto3,oneof"`
 }
 
 func (*ProcessDataEvent_Stdout) isProcessDataEvent_Output() {}
@@ -1503,7 +1511,7 @@ var File_agent_proto protoreflect.FileDescriptor
 
 const file_agent_proto_rawDesc = "" +
 	"\n" +
-	"\vagent.proto\x12\x02pb\"\xa0\x02\n" +
+	"\vagent.proto\x12\x02pb\"\xb6\x02\n" +
 	"\x13StartProcessRequest\x12\x10\n" +
 	"\x03cmd\x18\x01 \x01(\tR\x03cmd\x12\x12\n" +
 	"\x04args\x18\x02 \x03(\tR\x04args\x122\n" +
@@ -1514,7 +1522,8 @@ const file_agent_proto_rawDesc = "" +
 	"background\x18\x06 \x01(\bR\n" +
 	"background\x12\x10\n" +
 	"\x03tag\x18\a \x01(\tR\x03tag\x12\x19\n" +
-	"\x03pty\x18\b \x01(\v2\a.pb.PTYR\x03pty\x1a6\n" +
+	"\x03pty\x18\b \x01(\v2\a.pb.PTYR\x03pty\x12\x14\n" +
+	"\x05stdin\x18\t \x01(\fR\x05stdin\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc8\x01\n" +
@@ -1554,9 +1563,9 @@ const file_agent_proto_rawDesc = "" +
 	"\x11ProcessStartEvent\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"d\n" +
 	"\x10ProcessDataEvent\x12\x18\n" +
-	"\x06stdout\x18\x01 \x01(\tH\x00R\x06stdout\x12\x18\n" +
-	"\x06stderr\x18\x02 \x01(\tH\x00R\x06stderr\x12\x12\n" +
-	"\x03pty\x18\x03 \x01(\tH\x00R\x03ptyB\b\n" +
+	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12\x18\n" +
+	"\x06stderr\x18\x02 \x01(\fH\x00R\x06stderr\x12\x12\n" +
+	"\x03pty\x18\x03 \x01(\fH\x00R\x03ptyB\b\n" +
 	"\x06output\"t\n" +
 	"\x0fProcessEndEvent\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +

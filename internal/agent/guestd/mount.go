@@ -17,24 +17,47 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func mountFS(source, target, fstype string, flags uintptr, data string, args ...string) error {
-	var commandErr error
-	if mountCommand.available() && len(args) > 0 {
-		if err := execMount(args...).Run(); err == nil {
-			return nil
-		} else {
-			commandErr = err
-		}
-	}
+func mountFS(source, target, fstype string, flags uintptr, data string) error {
 	if err := syscall.Mount(source, target, fstype, flags, data); err != nil {
-		if commandErr != nil {
-			ulog.GetLogger().Warn("Mount command failed before syscall fallback",
-				ulog.F("target", target), ulog.F("fstype", fstype),
-				ulog.F("command_error", commandErr), ulog.F("syscall_error", err))
-		}
 		return err
 	}
 	return nil
+}
+
+func isMountPoint(target string) bool {
+	target = filepath.Clean(target)
+
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+
+	lines := splitLines(string(data))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 4 && fields[4] == target {
+			return true
+		}
+	}
+
+	return false
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			if start < i {
+				lines = append(lines, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
 }
 
 // mountEssentialFilesystems mounts /proc, /sys, /tmp, and /dev.
@@ -52,7 +75,7 @@ func mountEssentialFilesystems() {
 
 	for _, m := range mounts {
 		os.MkdirAll(m.target, 0755)
-		if err := mountFS("none", m.target, m.fstype, 0, "", "-t", m.fstype, "none", m.target); err != nil {
+		if err := mountFS("none", m.target, m.fstype, 0, ""); err != nil {
 			logger.Error("Failed to mount filesystem", ulog.F("fstype", m.fstype), ulog.F("target", m.target), ulog.F("error", err))
 		} else {
 			if m.target == "/proc" {
@@ -79,7 +102,7 @@ func mountStorageDevices() {
 	workDir := "/mnt/conch/work"
 
 	os.MkdirAll("/mnt/disk", 0755)
-	if err := mountFS("/dev/vda", "/mnt/disk", "ext4", 0, "", "-t", "ext4", "/dev/vda", "/mnt/disk"); err != nil {
+	if err := mountFS("/dev/vda", "/mnt/disk", "ext4", 0, ""); err != nil {
 		logger.Info("Using RAM for writable layer")
 		os.MkdirAll("/mnt/conch/upper", 0755)
 		os.MkdirAll("/mnt/conch/work", 0755)
@@ -130,7 +153,7 @@ func mountPmemDevices() string {
 		mountPoint := "/mnt/conch/" + devName
 		os.MkdirAll(mountPoint, 0755)
 
-		if err := mountFS(device, mountPoint, "erofs", syscall.MS_RDONLY, "", "-t", "erofs", "-o", "ro", device, mountPoint); err != nil {
+		if err := mountFS(device, mountPoint, "erofs", syscall.MS_RDONLY, ""); err != nil {
 			logger.Error("Failed to mount pmem device", ulog.F("device", device), ulog.F("target", mountPoint), ulog.F("error", err))
 			continue
 		}
@@ -150,7 +173,7 @@ func mountPmemDevices() string {
 func mountOverlayFS(lowerDirs, upperDir, workDir string) {
 	logger := ulog.GetLogger()
 	opts := "lowerdir=" + lowerDirs + ",upperdir=" + upperDir + ",workdir=" + workDir
-	if err := mountFS("overlay", MergeTarget, "overlay", 0, opts, "-t", "overlay", "overlay", "-o", opts, MergeTarget); err != nil {
+	if err := mountFS("overlay", MergeTarget, "overlay", 0, opts); err != nil {
 		logger.Error("Failed to mount OverlayFS", ulog.F("target", MergeTarget), ulog.F("error", err))
 	} else {
 		logger.Info("Mounted OverlayFS", ulog.F("target", MergeTarget))
@@ -190,7 +213,7 @@ func bindMountToMerge() {
 	for _, dir := range []string{"/proc", "/sys", "/dev", "/tmp"} {
 		target := MergeTarget + dir
 		os.MkdirAll(target, 0755)
-		if err := mountFS(dir, target, "", syscall.MS_BIND, "", "--bind", dir, target); err != nil {
+		if err := mountFS(dir, target, "", syscall.MS_BIND, ""); err != nil {
 			logger.Error("Failed to bind mount", ulog.F("source", dir), ulog.F("target", target), ulog.F("error", err))
 		} else {
 			logger.Info("Bind mounted path", ulog.F("source", dir), ulog.F("target", target))
@@ -236,8 +259,7 @@ func mountConfiguredVolumesOrAbort() {
 	}
 	// Mount the single virtiofs shared dir exported by conchd. (virtiofsd 1.13.x
 	// has no host cache flag; the guest uses the virtiofs default cache mode.)
-	if err := mountFS(conchfsTag, conchfsMountPoint, "virtiofs", 0, "",
-		"-t", "virtiofs", conchfsTag, conchfsMountPoint); err != nil {
+	if err := mountFS(conchfsTag, conchfsMountPoint, "virtiofs", 0, ""); err != nil {
 		logger.Error("Failed to mount virtiofs shared",
 			ulog.F("tag", conchfsTag), ulog.F("target", conchfsMountPoint), ulog.F("error", err))
 		os.Exit(1)
@@ -284,11 +306,11 @@ func mountConfiguredVolumesOrAbort() {
 			abort("Failed to create volume mount target", ulog.F("target", mergeTarget), ulog.F("error", err))
 		}
 		source := filepath.Join(conchfsMountPoint, strconv.Itoa(mount.Index))
-		if err := mountFS(source, mergeTarget, "", syscall.MS_BIND, "", "--bind", source, mergeTarget); err != nil {
+		if err := mountFS(source, mergeTarget, "", syscall.MS_BIND, ""); err != nil {
 			abort("Failed to bind volume", ulog.F("source", source), ulog.F("target", mergeTarget), ulog.F("error", err))
 		}
 		if mount.Readonly {
-			if err := mountFS("none", mergeTarget, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, "", "-o", "remount,bind,ro", mergeTarget); err != nil {
+			if err := mountFS("none", mergeTarget, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
 				abort("Failed to remount volume readonly", ulog.F("target", mergeTarget), ulog.F("error", err))
 			}
 		}

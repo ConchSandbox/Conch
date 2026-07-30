@@ -120,10 +120,10 @@ class ProcessDataEvent(_message.Message):
     PTY_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
-    pty: str
-    stderr: str
-    stdout: str
-    def __init__(self, stdout: _Optional[str] = ..., stderr: _Optional[str] = ..., pty: _Optional[str] = ...) -> None: ...
+    pty: bytes
+    stderr: bytes
+    stdout: bytes
+    def __init__(self, stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ..., pty: _Optional[bytes] = ...) -> None: ...
 
 class ProcessEndEvent(_message.Message):
     __slots__ = ["error", "exit_code", "exited", "status"]
@@ -218,7 +218,7 @@ class SendSignalResponse(_message.Message):
     def __init__(self) -> None: ...
 
 class StartProcessRequest(_message.Message):
-    __slots__ = ["args", "background", "cmd", "content", "cwd", "env", "pty", "tag"]
+    __slots__ = ["args", "background", "cmd", "content", "cwd", "env", "pty", "stdin", "tag"]
     class EnvEntry(_message.Message):
         __slots__ = ["key", "value"]
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -233,6 +233,7 @@ class StartProcessRequest(_message.Message):
     CWD_FIELD_NUMBER: _ClassVar[int]
     ENV_FIELD_NUMBER: _ClassVar[int]
     PTY_FIELD_NUMBER: _ClassVar[int]
+    STDIN_FIELD_NUMBER: _ClassVar[int]
     TAG_FIELD_NUMBER: _ClassVar[int]
     args: _containers.RepeatedScalarFieldContainer[str]
     background: bool
@@ -241,8 +242,9 @@ class StartProcessRequest(_message.Message):
     cwd: str
     env: _containers.ScalarMap[str, str]
     pty: PTY
+    stdin: bytes
     tag: str
-    def __init__(self, cmd: _Optional[str] = ..., args: _Optional[_Iterable[str]] = ..., env: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ..., content: _Optional[str] = ..., background: bool = ..., tag: _Optional[str] = ..., pty: _Optional[_Union[PTY, _Mapping]] = ...) -> None: ...
+    def __init__(self, cmd: _Optional[str] = ..., args: _Optional[_Iterable[str]] = ..., env: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ..., content: _Optional[str] = ..., background: bool = ..., tag: _Optional[str] = ..., pty: _Optional[_Union[PTY, _Mapping]] = ..., stdin: _Optional[bytes] = ...) -> None: ...
 
 class WriteInfo(_message.Message):
     __slots__ = ["name", "path", "type"]

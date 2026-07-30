@@ -22,7 +22,7 @@ func setupDevPts() {
 		return
 	}
 
-	if err := mountFS("devpts", devPts, "devpts", 0, "", "-t", "devpts", "devpts", devPts); err != nil {
+	if err := mountFS("devpts", devPts, "devpts", 0, ""); err != nil {
 		logger.Error("Failed to mount devpts", ulog.F("target", devPts), ulog.F("error", err))
 		return
 	}

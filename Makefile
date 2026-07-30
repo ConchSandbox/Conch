@@ -107,12 +107,12 @@ build-%: ## Build specific binary (e.g., make build-conchd)
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/$* ./cmd/$*
 
-build-conch-init-initramfs: ## Build Alpine initramfs that runs conch-init as PID 1
+build-conch-init-initramfs: ## Build minimal initramfs that runs conch-init as PID 1
 	@echo "building static conch-init for initramfs..."
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) \
 		$(GOBUILD) -tags "netgo,osusergo" \
-		-ldflags '-s -w -extldflags "-static"' \
+		-ldflags '-s -w -extldflags "-static"' -buildvcs=false \
 		-o $(BIN_DIR)/conch-init ./cmd/conch-init
 	./scripts/build-conch-init-initramfs.sh --init-bin "$(BIN_DIR)/conch-init"
 

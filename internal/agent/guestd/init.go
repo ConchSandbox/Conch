@@ -4,6 +4,7 @@
 package guestd
 
 import (
+	"errors"
 	"net"
 	"os"
 	"os/signal"
@@ -22,6 +23,18 @@ const (
 	initMergeLogPath = MergeTarget + initLogPath
 )
 
+type initDir struct {
+	path string
+	mode os.FileMode
+}
+
+type initDevice struct {
+	path  string
+	mode  uint32
+	major uint32
+	minor uint32
+}
+
 func ensureProcMounted() {
 	logger := ulog.GetLogger()
 	if isMountPoint("/proc") {
@@ -38,12 +51,60 @@ func ensureProcMounted() {
 	}
 }
 
-// createDevNull creates /dev/null device node before mounting devtmpfs
-func createDevNull() {
+func ensureInitrdRuntimeLayout() {
 	logger := ulog.GetLogger()
-	os.MkdirAll("/dev", 0755)
-	if err := syscall.Mknod("/dev/null", 0666|syscall.S_IFCHR, int(unix.Mkdev(1, 3))); err != nil {
-		logger.Warn("Failed to create /dev/null", ulog.F("error", err))
+	dirs := []initDir{
+		{"/proc", 0755},
+		{"/sys", 0755},
+		{"/dev", 0755},
+		{"/dev/pts", 0755},
+		{"/run", 0755},
+		{"/tmp", 01777},
+		{"/var", 0755},
+		{"/var/log", 0755},
+		{"/var/log/conch-init", 0755},
+		{"/mnt", 0755},
+		{"/mnt/conch", 0755},
+		{"/mnt/conch/upper", 0755},
+		{"/mnt/conch/work", 0755},
+		{MergeTarget, 0755},
+		{"/mnt/disk", 0755},
+		{"/etc", 0755},
+	}
+
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir.path, dir.mode); err != nil {
+			logger.Warn("Failed to create initrd directory", ulog.F("path", dir.path), ulog.F("error", err))
+			continue
+		}
+		if err := os.Chmod(dir.path, dir.mode); err != nil {
+			logger.Warn("Failed to chmod initrd directory", ulog.F("path", dir.path), ulog.F("error", err))
+		}
+	}
+}
+
+// createDeviceNodes creates essential device nodes before mounting devtmpfs.
+func createDeviceNodes() {
+	logger := ulog.GetLogger()
+	devices := []initDevice{
+		{"/dev/null", 0666, 1, 3},
+		{"/dev/zero", 0666, 1, 5},
+		{"/dev/full", 0666, 1, 7},
+		{"/dev/random", 0666, 1, 8},
+		{"/dev/urandom", 0666, 1, 9},
+		{"/dev/tty", 0666, 5, 0},
+		{"/dev/console", 0600, 5, 1},
+	}
+
+	if err := os.MkdirAll("/dev", 0755); err != nil {
+		logger.Warn("Failed to create /dev", ulog.F("error", err))
+		return
+	}
+	for _, dev := range devices {
+		mode := dev.mode | syscall.S_IFCHR
+		if err := syscall.Mknod(dev.path, mode, int(unix.Mkdev(dev.major, dev.minor))); err != nil && !errors.Is(err, syscall.EEXIST) {
+			logger.Warn("Failed to create device node", ulog.F("path", dev.path), ulog.F("error", err))
+		}
 	}
 }
 
@@ -70,7 +131,8 @@ func runAsInit() {
 	}
 	ulog.GetLogger().Info("Starting conch-init as init process", fields...)
 
-	createDevNull()
+	ensureInitrdRuntimeLayout()
+	createDeviceNodes()
 	mountEssentialFilesystems()
 	setupInitFileLogging()
 	mountStorageDevices()
@@ -82,6 +144,7 @@ func runAsInit() {
 	}
 
 	if mergeReady {
+		markRootfsMergeReady()
 		prepareMergeRoot()
 		bindMountToMerge()
 		mountConfiguredVolumesOrAbort()

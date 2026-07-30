@@ -4,9 +4,6 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
-ALPINE_VERSION="${ALPINE_VERSION:-3.20.3}"
-ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
-ALPINE_ARCH="${ALPINE_ARCH:-}"
 INIT_BIN="${INIT_BIN:-${REPO_ROOT}/bin/conch-init}"
 OUTPUT="${OUTPUT:-${REPO_ROOT}/build-artifacts/conch-init-initramfs.cpio.gz}"
 WORK_DIR="${WORK_DIR:-}"
@@ -18,7 +15,7 @@ usage() {
     cat <<EOF
 Usage: $0 [options]
 
-Build an Alpine initramfs that runs conch-init as PID 1.
+Build a minimal initramfs that runs static conch-init as PID 1.
 
 Options:
   --init-bin PATH        conch-init binary to install into /sbin/conch-init
@@ -29,11 +26,6 @@ Options:
   --rootfs-dir DIR       rootfs directory to create before packing
                          (default: <work-dir>/rootfs)
   --modules-dir DIR      optional kernel modules directory copied to /lib/modules
-  --alpine-version VER   Alpine minirootfs version
-                         (default: ${ALPINE_VERSION})
-  --alpine-mirror URL    Alpine mirror base URL
-                         (default: ${ALPINE_MIRROR})
-  --alpine-arch ARCH     Alpine architecture (default: detected from uname -m)
   --keep-rootfs          keep the generated rootfs directory
   -h, --help             show this help message
 EOF
@@ -48,12 +40,32 @@ require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-detect_alpine_arch() {
-    case "$(uname -m)" in
-        x86_64) echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        *) die "unsupported host architecture: $(uname -m)" ;;
-    esac
+warn() {
+    echo "warning: $*" >&2
+}
+
+create_chrdev() {
+    local path="$1"
+    local mode="$2"
+    local major="$3"
+    local minor="$4"
+
+    if ! command -v mknod >/dev/null 2>&1; then
+        warn "mknod not found; ${path} will be created by conch-init at boot"
+        return 0
+    fi
+
+    if [ -e "$ROOTFS_DIR$path" ]; then
+        return 0
+    fi
+
+    if mknod "$ROOTFS_DIR$path" c "$major" "$minor" 2>/dev/null; then
+        chmod "$mode" "$ROOTFS_DIR$path"
+        return 0
+    fi
+
+    warn "failed to create ${path}; run as root to embed device nodes, or rely on conch-init boot-time creation"
+    return 0
 }
 
 while [[ $# -gt 0 ]]; do
@@ -83,21 +95,6 @@ while [[ $# -gt 0 ]]; do
             MODULES_DIR="$2"
             shift 2
             ;;
-        --alpine-version)
-            [ $# -ge 2 ] || die "missing value for $1"
-            ALPINE_VERSION="$2"
-            shift 2
-            ;;
-        --alpine-mirror)
-            [ $# -ge 2 ] || die "missing value for $1"
-            ALPINE_MIRROR="${2%/}"
-            shift 2
-            ;;
-        --alpine-arch)
-            [ $# -ge 2 ] || die "missing value for $1"
-            ALPINE_ARCH="$2"
-            shift 2
-            ;;
         --keep-rootfs)
             KEEP_ROOTFS=1
             shift
@@ -112,17 +109,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for tool in curl tar gzip cpio find install mkdir ln rm cp ls mktemp dirname; do
+for tool in gzip cpio find install mkdir ln rm cp ls mktemp dirname chmod; do
     require_cmd "$tool"
 done
 
 [ -f "$INIT_BIN" ] || die "conch-init binary does not exist: $INIT_BIN"
 [ -z "$MODULES_DIR" ] || [ -d "$MODULES_DIR" ] || die "kernel modules directory does not exist: $MODULES_DIR"
-
-if [ -z "$ALPINE_ARCH" ]; then
-    ALPINE_ARCH="$(detect_alpine_arch)"
-fi
-ALPINE_MIRROR="${ALPINE_MIRROR%/}"
 
 created_work_dir=0
 if [ -z "$WORK_DIR" ]; then
@@ -145,27 +137,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-alpine_series="v${ALPINE_VERSION%.*}"
-alpine_tar="alpine-minirootfs-${ALPINE_VERSION}-${ALPINE_ARCH}.tar.gz"
-alpine_url="${ALPINE_MIRROR}/${alpine_series}/releases/${ALPINE_ARCH}/${alpine_tar}"
-
 mkdir -p "$WORK_DIR" "$(dirname "$OUTPUT")"
 rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"
 
-echo "Downloading Alpine minirootfs: $alpine_url"
-curl -fsSL "$alpine_url" -o "$WORK_DIR/$alpine_tar"
-tar -xzf "$WORK_DIR/$alpine_tar" -C "$ROOTFS_DIR"
+mkdir -p \
+    "$ROOTFS_DIR"/{bin,sbin,etc,proc,sys,dev/pts,run,tmp,var/log/conch-init,mnt/disk,mnt/conch/upper,mnt/conch/work,mnt/conch/merge,lib/modules}
+chmod 0755 \
+    "$ROOTFS_DIR" \
+    "$ROOTFS_DIR"/{bin,sbin,etc,proc,sys,dev,dev/pts,run,var,var/log,var/log/conch-init,mnt,mnt/disk,mnt/conch,mnt/conch/upper,mnt/conch/work,mnt/conch/merge,lib,lib/modules}
+chmod 1777 "$ROOTFS_DIR/tmp"
 
 install -m 0755 "$INIT_BIN" "$ROOTFS_DIR/sbin/conch-init"
-mkdir -p "$ROOTFS_DIR"/{proc,sys,dev,run,tmp,var/log/conch-init}
+ln -sf sbin/conch-init "$ROOTFS_DIR/init"
+
+create_chrdev /dev/null 0666 1 3
+create_chrdev /dev/zero 0666 1 5
+create_chrdev /dev/full 0666 1 7
+create_chrdev /dev/random 0666 1 8
+create_chrdev /dev/urandom 0666 1 9
+create_chrdev /dev/tty 0666 5 0
+create_chrdev /dev/console 0600 5 1
 
 if [ -n "$MODULES_DIR" ]; then
-    mkdir -p "$ROOTFS_DIR/lib/modules"
     cp -a "$MODULES_DIR"/. "$ROOTFS_DIR/lib/modules"/
 fi
-
-ln -sf sbin/conch-init "$ROOTFS_DIR/init"
 
 (
     cd "$ROOTFS_DIR"

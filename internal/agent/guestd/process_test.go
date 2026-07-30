@@ -2,23 +2,47 @@ package guestd
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 	pb "github.com/openeuler/Conch/api/go_proto"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestProcessDataEventAllowsSplitUTF8Sequence(t *testing.T) {
+	want := []byte("中")
+	events := []*pb.ProcessEvent{
+		processDataEvent(want[:1], false, false),
+		processDataEvent(want[1:], false, false),
+	}
+
+	var got []byte
+	for _, event := range events {
+		if _, err := proto.Marshal(event); err != nil {
+			t.Fatalf("proto.Marshal() error = %v", err)
+		}
+		got = append(got, event.GetData().GetStdout()...)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("streamed bytes = %x, want %x", got, want)
+	}
+}
 
 func TestStartProcessRejectsNilRequest(t *testing.T) {
 	server := &AgentServer{}
-	resp := startProcessForTest(t, server, nil)
-	if resp == nil || !strings.Contains(resp.Error, "request is required") {
-		t.Fatalf("StartProcess(nil) = %+v, want request error response", resp)
+	err := startProcessErrorForTest(t, server, nil)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "request is required") {
+		t.Fatalf("StartProcess(nil) error = %v, want InvalidArgument request error", err)
 	}
 }
 
@@ -29,8 +53,8 @@ func TestStartProcessReturnsExitCodeForNonZeroExit(t *testing.T) {
 		Args: []string{"-c", "echo out; echo err >&2; exit 7"},
 		Cwd:  t.TempDir(),
 	})
-	if resp.Error != "" {
-		t.Fatalf("StartProcess() response error = %q, want empty", resp.Error)
+	if !strings.Contains(resp.Error, "exit status 7") {
+		t.Fatalf("StartProcess() response error = %q, want exit status", resp.Error)
 	}
 	if resp.ExitCode != 7 {
 		t.Fatalf("StartProcess() exit code = %d, want 7", resp.ExitCode)
@@ -40,6 +64,313 @@ func TestStartProcessReturnsExitCodeForNonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(resp.Stderr, "err") {
 		t.Fatalf("StartProcess() stderr = %q, want err", resp.Stderr)
+	}
+}
+
+func TestStartProcessPassesStdin(t *testing.T) {
+	server := &AgentServer{}
+	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:   "sh",
+		Args:  []string{"-c", "read line; printf '<%s>' \"$line\""},
+		Cwd:   t.TempDir(),
+		Stdin: []byte("hello from stdin\n"),
+	})
+	if resp.ExitCode != 0 {
+		t.Fatalf("StartProcess() exit code = %d, want 0", resp.ExitCode)
+	}
+	if resp.Stdout != "<hello from stdin>" {
+		t.Fatalf("StartProcess() stdout = %q, want stdin content", resp.Stdout)
+	}
+}
+
+func TestStartProcessRejectsStdinWithPTY(t *testing.T) {
+	server := &AgentServer{}
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
+		Cmd:   "sh",
+		Args:  []string{"-c", "cat"},
+		Cwd:   t.TempDir(),
+		Pty:   &pb.PTY{Cols: 80, Rows: 24},
+		Stdin: []byte("input"),
+	})
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "stdin cannot be used with pty") {
+		t.Fatalf("StartProcess(stdin with pty) error = %v, want InvalidArgument", err)
+	}
+}
+
+func TestBackgroundProcessPassesStdin(t *testing.T) {
+	server := &AgentServer{}
+	bg := startBackgroundProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:        "sh",
+		Args:       []string{"-c", "read line; printf '<%s>' \"$line\""},
+		Cwd:        t.TempDir(),
+		Tag:        "stdin-bg",
+		Background: true,
+		Stdin:      []byte("background input\n"),
+	})
+
+	select {
+	case err := <-bg.done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("StartProcess(background stdin) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background process did not finish after reading stdin")
+	}
+
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{}, bg.stream.Events())
+	if resp.ExitCode != 0 {
+		t.Fatalf("background process exit code = %d, want 0", resp.ExitCode)
+	}
+	if resp.Stdout != "<background input>" {
+		t.Fatalf("background process stdout = %q, want stdin content", resp.Stdout)
+	}
+}
+
+func TestStartProcessTimeout(t *testing.T) {
+	server := &AgentServer{}
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:  "sleep",
+		Args: []string{"5"},
+		Cwd:  t.TempDir(),
+	}, stream, 50*time.Millisecond)
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("StartProcess(timeout) error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("StartProcess(timeout) ran for %s, want less than one second", elapsed)
+	}
+}
+
+func TestStartProcessTimeoutTerminatesChildProcessGroup(t *testing.T) {
+	server := &AgentServer{}
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:  "sh",
+		Args: []string{"-c", "sleep 5 & echo $! > \"$1\"; wait", "sh", childPIDPath},
+		Cwd:  t.TempDir(),
+	}, stream, 50*time.Millisecond)
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("StartProcess(timeout) error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("StartProcess(timeout) ran for %s, want less than one second", elapsed)
+	}
+
+	pidBytes, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatalf("ReadFile(child pid) error = %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("child pid = %q: %v", pidBytes, err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		err = syscall.Kill(childPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("check child pid %d: %v", childPID, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child process %d still running after command timeout", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStartProcessStreamsSignalTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pty  *pb.PTY
+	}{
+		{name: "standard"},
+		{name: "pty", pty: &pb.PTY{Cols: 80, Rows: 24}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := startProcessForTest(t, &AgentServer{}, &pb.StartProcessRequest{
+				Cmd:  "sh",
+				Args: []string{"-c", "printf signal-before-exit; kill -TERM $$"},
+				Cwd:  t.TempDir(),
+				Pty:  tc.pty,
+			})
+			if !strings.Contains(resp.Stdout, "signal-before-exit") {
+				t.Fatalf("stdout = %q, want signal output", resp.Stdout)
+			}
+			if resp.ExitCode != -1 {
+				t.Fatalf("exit code = %d, want -1 for signal termination", resp.ExitCode)
+			}
+			if !strings.Contains(resp.Error, "signal: terminated") {
+				t.Fatalf("end error = %q, want signal termination message", resp.Error)
+			}
+		})
+	}
+}
+
+func TestBackgroundProcessStreamsNonZeroExitResult(t *testing.T) {
+	server := &AgentServer{}
+	bg := startBackgroundProcessForTest(t, server, &pb.StartProcessRequest{
+		Cmd:        "sh",
+		Args:       []string{"-c", "exit 7"},
+		Cwd:        t.TempDir(),
+		Background: true,
+	})
+	select {
+	case err := <-bg.done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("StartProcess(background) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background process did not finish")
+	}
+
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{}, bg.stream.Events())
+	if resp.ExitCode != 7 {
+		t.Fatalf("background exit code = %d, want 7", resp.ExitCode)
+	}
+	if !strings.Contains(resp.Error, "exit status 7") {
+		t.Fatalf("background end error = %q, want exit status", resp.Error)
+	}
+}
+
+func TestBackgroundProcessTimeout(t *testing.T) {
+	server := &AgentServer{}
+	stream := &fakeProcessConnectStream{}
+	started := time.Now()
+	err := server.startProcess(context.Background(), &pb.StartProcessRequest{
+		Cmd:        "sleep",
+		Args:       []string{"5"},
+		Cwd:        t.TempDir(),
+		Tag:        "timeout-bg",
+		Background: true,
+	}, stream, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartProcess(background timeout) error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("background process ran for %s, want less than one second", elapsed)
+	}
+	if end := responseFromProcessEvents(&pb.StartProcessRequest{}, stream.Events()); end.ExitCode == 0 {
+		t.Fatal("background process exit code = 0, want timeout termination")
+	}
+}
+
+func TestDetermineTimeoutFromHeader(t *testing.T) {
+	header := http.Header{"Connect-Timeout-Ms": []string{"250"}}
+	got, err := determineTimeoutFromHeader(header)
+	if err != nil || got != 250*time.Millisecond {
+		t.Fatalf("determineTimeoutFromHeader() = (%s, %v), want (250ms, nil)", got, err)
+	}
+	header.Set("Connect-Timeout-Ms", "-1")
+	if _, err := determineTimeoutFromHeader(header); err == nil {
+		t.Fatal("determineTimeoutFromHeader(-1) error = nil, want error")
+	}
+	header.Set("Connect-Timeout-Ms", strconv.FormatInt(maxProcessTimeoutMilliseconds+1, 10))
+	if _, err := determineTimeoutFromHeader(header); err == nil {
+		t.Fatal("determineTimeoutFromHeader(overflow) error = nil, want error")
+	}
+}
+
+func TestStartProcessStreamsForegroundOutputBeforeExit(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream := &blockingFirstDataStream{
+		ctx:       ctx,
+		firstData: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf stream-first; while [ ! -f gate ]; do sleep 0.05; done; printf stream-second"},
+			Cwd:  workDir,
+		}, stream)
+	}()
+
+	select {
+	case <-stream.firstData:
+	case err := <-done:
+		t.Fatalf("StartProcess() returned before streaming first output: %v", err)
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not stream foreground output before command exit")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("StartProcess() returned before command was unblocked: %v", err)
+	default:
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "gate"), []byte("go"), 0o600); err != nil {
+		t.Fatalf("failed to create gate file: %v", err)
+	}
+	close(stream.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartProcess() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not finish after command was unblocked")
+	}
+
+	events := stream.Events()
+	if len(events) == 0 || events[0].GetStart() == nil {
+		t.Fatalf("StartProcess() first event = %+v, want start", events)
+	}
+	resp := responseFromProcessEvents(&pb.StartProcessRequest{Cmd: "sh"}, events)
+	if resp.ExitCode != 0 {
+		t.Fatalf("StartProcess() exit code = %d, want 0", resp.ExitCode)
+	}
+	if !strings.Contains(resp.Stdout, "stream-first") || !strings.Contains(resp.Stdout, "stream-second") {
+		t.Fatalf("StartProcess() stdout = %q, want both streamed chunks", resp.Stdout)
+	}
+}
+
+func TestStartProcessCancelsForegroundCommandWhenDataSendFails(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamErr := errors.New("stream send failed")
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf before-fail; while [ ! -f gate ]; do sleep 0.05; done"},
+			Cwd:  workDir,
+		}, &failDataStream{ctx: ctx, err: streamErr})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, streamErr) {
+			t.Fatalf("StartProcess() error = %v, want stream error", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess() did not return after foreground data send failed")
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
 	}
 }
 
@@ -72,14 +403,14 @@ func TestStartProcessRejectsContentWithArgs(t *testing.T) {
 	server := &AgentServer{}
 	workDir := t.TempDir()
 
-	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cmd:     "sh",
 		Args:    []string{"-c", "echo args-ran"},
 		Cwd:     workDir,
 		Content: "echo content-ran",
 	})
-	if resp == nil || !strings.Contains(resp.Error, "content and args cannot both be set") {
-		t.Fatalf("StartProcess(content with args) = %+v, want validation error", resp)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "content and args cannot both be set") {
+		t.Fatalf("StartProcess(content with args) error = %v, want InvalidArgument validation error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(workDir, "conch-script-*"))
@@ -127,6 +458,38 @@ func TestStartProcessSupportsPTY(t *testing.T) {
 	}
 	if !strings.Contains(resp.Stdout, "pty-ready") {
 		t.Fatalf("StartProcess(pty) stdout = %q, want pty-ready", resp.Stdout)
+	}
+}
+
+func TestStartProcessCancelsForegroundPTYCommandWhenDataSendFails(t *testing.T) {
+	server := &AgentServer{}
+	workDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamErr := errors.New("pty stream send failed")
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartProcess(ctx, &pb.StartProcessRequest{
+			Cmd:  "sh",
+			Args: []string{"-c", "printf pty-before-fail; while [ ! -f gate ]; do sleep 0.05; done"},
+			Cwd:  workDir,
+			Pty:  &pb.PTY{Cols: 80, Rows: 24},
+		}, &failDataStream{ctx: ctx, err: streamErr})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, streamErr) {
+			t.Fatalf("StartProcess(pty) error = %v, want stream error", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("StartProcess(pty) did not return after foreground data send failed")
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "gate")); !os.IsNotExist(err) {
+		t.Fatalf("gate file stat error = %v, want not exist", err)
 	}
 }
 
@@ -185,15 +548,15 @@ func TestBackgroundProcessRejectsDuplicateRunningTag(t *testing.T) {
 	})
 
 	duplicateWorkDir := t.TempDir()
-	duplicateResp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cmd:        "sh",
 		Cwd:        duplicateWorkDir,
 		Content:    "echo should-not-run",
 		Background: true,
 		Tag:        "duplicate",
 	})
-	if duplicateResp == nil || !strings.Contains(duplicateResp.Error, "tag already exists") {
-		t.Fatalf("StartProcess(duplicate tag) = %+v, want duplicate tag error", duplicateResp)
+	if connect.CodeOf(err) != connect.CodeAlreadyExists || !strings.Contains(err.Error(), "tag already exists") {
+		t.Fatalf("StartProcess(duplicate tag) error = %v, want AlreadyExists duplicate tag error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(duplicateWorkDir, "conch-script-*"))
@@ -209,13 +572,13 @@ func TestBackgroundProcessCleansTemporaryScriptWhenCommandMissing(t *testing.T) 
 	server := &AgentServer{}
 	workDir := t.TempDir()
 
-	resp := startProcessForTest(t, server, &pb.StartProcessRequest{
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
 		Cwd:        workDir,
 		Content:    "echo should-not-run",
 		Background: true,
 	})
-	if resp == nil || !strings.Contains(resp.Error, "command is required") {
-		t.Fatalf("StartProcess(background missing cmd) = %+v, want command error", resp)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("StartProcess(background missing cmd) error = %v, want InvalidArgument command error", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(workDir, "conch-script-*"))
@@ -335,10 +698,70 @@ func (s *fakeProcessConnectStream) Events() []*pb.ProcessEvent {
 	return append([]*pb.ProcessEvent(nil), s.events...)
 }
 
+type blockingFirstDataStream struct {
+	ctx       context.Context
+	mu        sync.Mutex
+	events    []*pb.ProcessEvent
+	firstData chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (s *blockingFirstDataStream) Send(event *pb.ProcessEvent) error {
+	if event.GetData() != nil {
+		s.once.Do(func() {
+			close(s.firstData)
+		})
+		select {
+		case <-s.release:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
+
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockingFirstDataStream) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+func (s *blockingFirstDataStream) Events() []*pb.ProcessEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*pb.ProcessEvent(nil), s.events...)
+}
+
+type failDataStream struct {
+	ctx context.Context
+	err error
+}
+
+func (s *failDataStream) Send(event *pb.ProcessEvent) error {
+	if event.GetData() != nil {
+		return s.err
+	}
+	return nil
+}
+
+func (s *failDataStream) Context() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
 type backgroundStart struct {
 	resp   *testProcessEventResult
 	cancel context.CancelFunc
 	done   chan error
+	stream *fakeProcessConnectStream
 }
 
 type testProcessEventResult struct {
@@ -356,6 +779,19 @@ func startProcessForTest(t *testing.T, server *AgentServer, req *pb.StartProcess
 		t.Fatalf("StartProcess() error = %v", err)
 	}
 	return responseFromProcessEvents(req, stream.Events())
+}
+
+func startProcessErrorForTest(t *testing.T, server *AgentServer, req *pb.StartProcessRequest) error {
+	t.Helper()
+	stream := &fakeProcessConnectStream{}
+	err := server.StartProcess(context.Background(), req, stream)
+	if err == nil {
+		t.Fatal("StartProcess() error = nil, want error")
+	}
+	if events := stream.Events(); len(events) != 0 {
+		t.Fatalf("StartProcess() streamed events on startup error: %+v", events)
+	}
+	return err
 }
 
 func startBackgroundProcessForTest(t *testing.T, server *AgentServer, req *pb.StartProcessRequest) *backgroundStart {
@@ -384,6 +820,7 @@ func startBackgroundProcessForTest(t *testing.T, server *AgentServer, req *pb.St
 		resp:   responseFromProcessEvents(req, stream.Events()),
 		cancel: cancel,
 		done:   done,
+		stream: stream,
 	}
 	t.Cleanup(func() {
 		cancel()
@@ -415,9 +852,9 @@ func responseFromProcessEvents(req *pb.StartProcessRequest, events []*pb.Process
 			}
 		}
 		if data := event.GetData(); data != nil {
-			resp.Stdout += data.GetStdout()
-			resp.Stdout += data.GetPty()
-			resp.Stderr += data.GetStderr()
+			resp.Stdout += string(data.GetStdout())
+			resp.Stdout += string(data.GetPty())
+			resp.Stderr += string(data.GetStderr())
 		}
 		if end := event.GetEnd(); end != nil {
 			resp.ExitCode = end.ExitCode
@@ -451,7 +888,7 @@ func TestConnectBackgroundProcessStreamsOutput(t *testing.T) {
 	exited := false
 	for _, event := range stream.events {
 		if data := event.GetData(); data != nil {
-			stdout.WriteString(data.GetStdout())
+			stdout.Write(data.GetStdout())
 		}
 		if event.GetEnd() != nil {
 			exited = true
@@ -484,7 +921,7 @@ func TestConnectStreamsEndAfterLargeOutput(t *testing.T) {
 	exited := false
 	for _, event := range stream.events {
 		if data := event.GetData(); data != nil {
-			stdout.WriteString(data.GetStdout())
+			stdout.Write(data.GetStdout())
 		}
 		if event.GetEnd() != nil {
 			exited = true
