@@ -86,7 +86,7 @@ def test_background_wait_uses_start_stream():
         def connect_process(self, **kwargs):
             raise AssertionError("wait() should not reconnect")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
 
     handle = sandbox.commands.run(cmd="sh", args=["-c", "echo fast-ok"], background=True)
@@ -114,7 +114,7 @@ def test_foreground_run_uses_stream_callbacks():
         def start_process(self, **kwargs):
             raise AssertionError("foreground callbacks should use the streaming path")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
 
     seen = []
@@ -143,7 +143,7 @@ def test_foreground_run_with_pty_keeps_output_in_stdout():
         def start_process(self, **kwargs):
             raise AssertionError("foreground callbacks should use the streaming path")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
 
     seen = []
@@ -211,7 +211,7 @@ def test_foreground_run_callbacks_propagate_start_rpc_errors():
         def start_process(self, request, headers=None):
             raise ConnectError(Code.INVALID_ARGUMENT, "failed to execute process: command not found")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = AgentClient("127.0.0.1")
     sandbox.client.process_client = FakeProcessClient()
 
@@ -228,7 +228,7 @@ def test_foreground_run_raises_timeout_exception():
 
             return events()
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = AgentClient("127.0.0.1")
     sandbox.client.process_client = FakeProcessClient()
 
@@ -245,7 +245,7 @@ def test_foreground_callback_run_raises_timeout_exception():
 
             return events()
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = AgentClient("127.0.0.1")
     sandbox.client.process_client = FakeProcessClient()
 
@@ -335,7 +335,7 @@ def test_command_manager_forwards_stdin():
                 "error": "",
             }
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeAgentClient()
 
     result = sandbox.commands.run(cmd="cat", stdin="input\n", timeout=1.5)
@@ -354,7 +354,7 @@ def test_command_manager_forwards_stdin_to_background_process():
                 "events": iter(()),
             }
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeAgentClient()
 
     handle = sandbox.commands.run(cmd="cat", background=True, stdin="input\n", timeout=1.5)
@@ -373,7 +373,7 @@ def test_command_manager_forwards_stdin_to_streamed_process():
                 {"end": {"exitCode": 0, "exited": True, "status": "exited", "error": ""}},
             ])
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeAgentClient()
     output = []
 
@@ -543,7 +543,7 @@ def test_agent_client_send_signal_returns_false_for_missing_process():
 
 
 def test_background_run_rejects_callbacks():
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
 
     with pytest.raises(InvalidArgumentError, match="callbacks are only supported"):
         sandbox.commands.run(cmd="sleep", args=["10"], background=True, on_stdout=lambda text: None)
@@ -574,7 +574,7 @@ def test_background_pty_wait_preserves_output_in_stdout():
                 ]),
             }
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
 
     handle = sandbox.commands.run(cmd="sh", args=["-c", "echo pty"], background=True, pty={"cols": 80, "rows": 24})
@@ -596,7 +596,7 @@ def test_connect_wait_uses_stream_callbacks():
                 {"end": {"exitCode": 0, "error": "", "exited": True, "status": "exited"}},
             ])
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
 
     handle = sandbox.commands.connect(tag="http-srv")
@@ -616,7 +616,7 @@ def test_command_handle_without_event_stream_does_not_reconnect():
         def connect_process(self, **kwargs):
             raise AssertionError("CommandHandle should not reconnect without an event stream")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = FakeClient()
     handle = CommandHandle(sandbox, {"pid": 123, "tag": "missing-events"})
 
@@ -629,7 +629,7 @@ def test_command_handle_iteration_propagates_stream_errors():
         yield {"data": {"stdout": "partial"}}
         raise SandboxError("stream failed")
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     handle = CommandHandle(sandbox, {"pid": 123, "tag": "broken"}, events=failing_events())
 
     iterator = iter(handle)
@@ -646,7 +646,7 @@ def test_connect_missing_process_raises_not_found_error():
                 yield
             return events()
 
-    sandbox = Sandbox(api_url="http://unused", template_id="test")
+    sandbox = Sandbox(template_id="test")
     sandbox.client = AgentClient("127.0.0.1")
     sandbox.client.process_client = FakeProcessClient()
 

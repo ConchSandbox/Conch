@@ -47,14 +47,19 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ### 创建沙箱
 
 ```python
-Sandbox.create(template_id, **kwargs) -> Sandbox
+Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
+               vcpu_num=None, vcpu_max=None, ram_mb=None,
+               volume_mounts=None) -> Sandbox
 ```
 
-基于 Template 创建沙箱。`**kwargs` 可透传其他构造函数参数（如 `vcpu_num`、`vcpu_max`、`ram_mb`、`namespace`、`config_path` 等）。
+基于 Template 创建沙箱。连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
 
 **参数：**
 - `template_id` (str): 要启动的 `tmpl_xxx`
-- `**kwargs`: 透传至构造函数，参见 [Sandbox 构造函数](#sandbox-构造函数)
+- `sandbox_id` (str, 可选): 指定沙箱 ID，默认自动生成
+- `namespace` (str, 可选): 沙箱命名空间
+- `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
+- `volume_mounts` (list, 可选): 卷挂载配置
 
 **返回：** 成功返回 `Sandbox` 对象。
 
@@ -72,9 +77,7 @@ sbx = Sandbox.create(template_id="tmpl_123")
 sbx.commands.run(cmd='python3', content='print("Restored")')
 sbx.delete()
 
-# 指定自定义配置文件
-sbx = Sandbox.create(template_id="tmpl_123",
-                     config_path="/path/to/sdk-config.yaml")
+# 自定义配置文件应在进程首次调用 SDK 前通过 CONCH_SDK_CONFIG 设置
 
 # 使用上下文管理器
 with Sandbox.create(template_id="tmpl_123") as sbx:
@@ -151,11 +154,10 @@ sandbox.delete(sandbox_id=None) -> bool
 
 **静态方法：**
 ```python
-Sandbox.delete_sandbox(sandbox_id, unix_socket=None, api_url=None,
-                       namespace=None, config_path=None) -> bool
+Sandbox.delete_sandbox(sandbox_id, namespace=None) -> bool
 ```
 
-无需创建实例即可删除指定沙箱。
+无需创建实例即可删除指定沙箱。连接地址从 SDK 配置读取，不作为删除请求参数发送。
 
 **示例：**
 ```python
@@ -456,26 +458,22 @@ print(result)
 ## Sandbox 构造函数
 
 ```python
-Sandbox(unix_socket=None, api_url=None, sandbox_id=None, template_id=None,
-        namespace=None, vcpu_num=None, vcpu_max=None, ram_mb=None,
-        config_path=None)
+Sandbox(sandbox_id=None, template_id=None, namespace=None,
+        vcpu_num=None, vcpu_max=None, ram_mb=None)
 ```
 
 **主要参数：**
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `unix_socket` | str | Unix socket 路径，默认从配置文件读取 |
-| `api_url` | str | 服务地址，仅当 `unix_socket` 为空时使用 |
 | `sandbox_id` | str | 沙箱 ID，默认自动生成 |
 | `template_id` | str | Template ID |
 | `namespace` | str | 命名空间 |
 | `vcpu_num` | int | 虚拟 CPU 数量 |
 | `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |
-| `config_path` | str | 配置文件路径，默认按优先级自动查找 |
 
-**注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法。
+**注意：** 构造函数仅初始化本地状态，不创建沙箱。SDK 首次使用时读取配置并在进程内缓存；可通过 `CONCH_SDK_CONFIG` 指定配置文件。控制面地址不属于沙箱操作参数。请使用 `Sandbox.create()` 类方法创建沙箱。
 
 ---
 

@@ -1,5 +1,7 @@
 import os
-from typing import Dict, Any, Optional, List
+from copy import deepcopy
+from functools import lru_cache
+from typing import Dict, Any, List
 
 import yaml
 
@@ -81,13 +83,9 @@ def warn_onproxy():
         print('warning: https proxy enabled')
 
 
-def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
-    """
-    load config:
-    - when config_path is explicitly provided, use it;
-    - otherwise, load the config from the default path in the order of priority.
-    """
-    resolved_path = config_path or _find_default_config_path()
+@lru_cache(maxsize=1)
+def _load_config() -> Dict[str, Any]:
+    resolved_path = _find_default_config_path()
 
     if not os.path.exists(resolved_path):
         raise FileNotFoundError(f"Configuration file not found: {resolved_path}")
@@ -105,3 +103,11 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     warn_onproxy()
     return cfg
+
+
+def load_config() -> Dict[str, Any]:
+    return deepcopy(_load_config())
+
+
+def clear_config_cache() -> None:
+    _load_config.cache_clear()

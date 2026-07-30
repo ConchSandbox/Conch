@@ -628,8 +628,6 @@ class FilesManager:
 class Sandbox:
     def __init__(
             self,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
             sandbox_id: Optional[str] = None,
             template_id: Optional[str] = None,
             namespace: Optional[str] = None,
@@ -637,15 +635,14 @@ class Sandbox:
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
-            config_path: Optional[str] = None,
     ):
-        self._config: Dict[str, Any] = load_config(config_path=config_path)
+        self._config: Dict[str, Any] = load_config()
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
 
         configured_unix_socket = sandbox_cfg.get(CFG_UNIX_SOCKET_KEY, "")
         configured_api_url = sandbox_cfg.get(CFG_API_URL_KEY, "")
-        self.unix_socket = unix_socket if unix_socket is not None else configured_unix_socket
-        self.api_url = api_url.rstrip('/') if api_url else configured_api_url.rstrip('/')
+        self.unix_socket = configured_unix_socket
+        self.api_url = configured_api_url.rstrip('/')
         self._session = requests_unixsocket.Session() if self.unix_socket else requests.Session()
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
@@ -753,17 +750,11 @@ class Sandbox:
     @staticmethod
     def delete_sandbox(
             sandbox_id: str,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
             namespace: Optional[str] = None,
-            config_path: Optional[str] = None,
     ):
         sbx = Sandbox(
             sandbox_id=sandbox_id,
-            unix_socket=unix_socket,
-            api_url=api_url,
             namespace=namespace,
-            config_path=config_path,
         )
         return sbx.delete(sandbox_id=sandbox_id)
 
@@ -803,8 +794,25 @@ class Sandbox:
             raise RuntimeError(_request_exception_message(e))
 
     @classmethod
-    def create(cls, template_id: Optional[str] = None, **kwargs) -> "Sandbox":
-        sbx = cls(template_id=template_id, **kwargs)
+    def create(
+            cls,
+            template_id: Optional[str] = None,
+            sandbox_id: Optional[str] = None,
+            namespace: Optional[str] = None,
+            vcpu_num: Optional[int] = None,
+            vcpu_max: Optional[int] = None,
+            ram_mb: Optional[int] = None,
+            volume_mounts: Optional[List[Dict[str, Any]]] = None,
+    ) -> "Sandbox":
+        sbx = cls(
+            sandbox_id=sandbox_id,
+            template_id=template_id,
+            namespace=namespace,
+            vcpu_num=vcpu_num,
+            vcpu_max=vcpu_max,
+            ram_mb=ram_mb,
+            volume_mounts=volume_mounts,
+        )
         return sbx._do_create()
 
     def get_info(self) -> SandboxInfo:
