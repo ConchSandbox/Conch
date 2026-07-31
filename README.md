@@ -15,7 +15,7 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 
 - 轻量安全隔离 -- 支持虚拟沙箱，对 Agent 任务进行安全隔离。支持完整的生命周期管理，包括创建、暂停、恢复和删除等操作。
 - 快照启动加速 -- 支持虚拟机内存和根文件系统的快照功能。通过快照机制，可以实现秒级的沙箱启动，显著提升大规模部署场景下的资源利用效率。快照采用写时复制（Copy-on-Write）技术，最小化存储开销。
-- 精简容器网络 -- 通过 CNI 插件管理沙箱网络命名空间的外层网络，同时由 Conch 保留可复用 slot、netns 生命周期、VM guest tap 和 guest NAT 的管理权，在保持网络池化低时延的同时对齐 CRI 风格运行时的外层网络边界。
+- 精简容器网络 -- 通过 CNI 插件管理沙箱网络命名空间的外层网络，同时由 Conch 保留可复用 slot、netns 生命周期、VM guest tap 和 guest NAT 的管理权，在保持网络池化低时延的同时明确外层网络边界。
 
 ## 快速开始
 
@@ -66,13 +66,14 @@ conch template create --source docker.io/library/nginx:latest \
   --initrd ./conch.initrd \
   -t localhost/conch/nginx:latest
 
-conch image push localhost/conch/nginx:latest hub.oepkgs.net/conch/nginx:latest
-conch image pull hub.oepkgs.net/conch/nginx:latest
+# registry.example.com 是占位域名，请替换为实际镜像仓库
+conch image push localhost/conch/nginx:latest registry.example.com/conch/nginx:latest
+conch image pull registry.example.com/conch/nginx:latest
 # 仅下载 OCI content，不生成 snapshot
-conch image pull --skip-unpack hub.oepkgs.net/conch/nginx:latest
+conch image pull --skip-unpack registry.example.com/conch/nginx:latest
 
 # 本地已有 Conch 镜像时可单独解包
-conch image unpack hub.oepkgs.net/conch/conch-index:v0.1
+conch image unpack registry.example.com/conch/nginx:latest
 ```
 
 其中 `conch template create` 会将标准 OCI rootfs 镜像转换为 native EROFS rootfs，并与 kernel/initrd 组件组装为 Conch boot index，同时注册为 Template；`conch image pull` 默认会在拉取后自动完成本地 unpack，`--skip-unpack` 可只下载 OCI content；`conch image unpack` 主要用于本地已有 Conch 镜像时单独解包或排障。

@@ -235,6 +235,22 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfigIgnoresRemovedCRISection(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("app:\n  name: conch-with-unused-config\ncri:\n  enabled: true\n  socket: /run/legacy-runtime.sock\n")
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.App.Name != "conch-with-unused-config" {
+		t.Fatalf("LoadConfig().App.Name = %q, want conch-with-unused-config", cfg.App.Name)
+	}
+}
+
 func TestResolveCNIPluginConfDirFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")

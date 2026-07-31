@@ -105,15 +105,12 @@ type TemplateRecord struct {
 	BootMode         string            `json:"boot_mode"`
 	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
 	Namespace        string            `json:"namespace"`
-	State            string            `json:"state"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
 	BuildRef         string            `json:"build_ref,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
 	CreatedAt        int64             `json:"created_at,omitempty"`
-	UpdatedAt        int64             `json:"updated_at,omitempty"`
-	LastError        string            `json:"last_error,omitempty"`
 }
 
 type TemplateListResponse struct {

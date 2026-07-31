@@ -2,237 +2,194 @@ package template
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opencontainers/go-digest"
-
-	"github.com/openeuler/Conch/internal/daemon/state"
 )
 
-func TestStoreCreateMarkReadyAndList(t *testing.T) {
+func TestStoreCRUDAndList(t *testing.T) {
 	ctx := context.Background()
-	raw := newTestStateStore(t)
+	raw := newMemoryStateStore()
 	store := NewStore(raw)
 	store.now = func() time.Time { return time.Unix(10, 0) }
 
-	rec, err := store.Create(ctx, CreateRequest{
-		Origin:    state.TemplateOriginImage,
-		Namespace: "team-a",
-		ImageName: "image-ref",
+	bootIndexDigest := digest.FromString("cold boot index").String()
+	entry, err := store.Create(ctx, Entry{
+		ID:              "tmpl_1",
+		Origin:          OriginImage,
+		BootMode:        BootModeCold,
+		BootIndexDigest: bootIndexDigest,
+		Namespace:       "team-a",
+		ImageName:       "image-ref",
+		Labels:          map[string]string{"purpose": "test"},
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if !strings.HasPrefix(rec.ID, "tmpl_") {
-		t.Fatalf("id = %q, want tmpl_ prefix", rec.ID)
-	}
-	if rec.State != state.TemplateCreating {
-		t.Fatalf("state = %q", rec.State)
-	}
-	if mode := BootMode(rec); mode != "" {
-		t.Fatalf("creating template boot mode = %q, want empty", mode)
+	if entry.CreatedAt != time.Unix(10, 0).UnixNano() {
+		t.Fatalf("CreatedAt = %d", entry.CreatedAt)
 	}
 
-	bootIndexDigest := digest.FromString("cold boot index").String()
-	if err := store.MarkReady(ctx, rec.ID, ReadyState{
-		BootIndexDigest: bootIndexDigest,
-		BootMode:        state.TemplateBootModeCold,
-	}); err != nil {
-		t.Fatalf("MarkReady() error = %v", err)
-	}
-	got, err := store.Get(ctx, rec.ID)
+	got, err := store.Get(ctx, entry.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if got.State != state.TemplateReady || got.BootIndexDigest != bootIndexDigest || got.BootMode != state.TemplateBootModeCold {
-		t.Fatalf("record = %#v", got)
-	}
-	if mode := BootMode(got); mode != state.TemplateBootModeCold {
-		t.Fatalf("ready template boot mode = %q, want cold", mode)
+	if got.BootIndexDigest != bootIndexDigest || got.BootMode != BootModeCold {
+		t.Fatalf("entry = %#v", got)
 	}
 
-	items, err := store.List(ctx, Filter{Origin: state.TemplateOriginImage, BootMode: state.TemplateBootModeCold, Namespace: "team-a", State: state.TemplateReady})
+	items, err := store.List(ctx, Filter{
+		Origin:    OriginImage,
+		BootMode:  BootModeCold,
+		Namespace: "team-a",
+	})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(items) != 1 || items[0].ID != rec.ID {
+	if len(items) != 1 || items[0].ID != entry.ID {
 		t.Fatalf("List() = %#v", items)
+	}
+
+	if err := store.Delete(ctx, entry.ID); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := store.Get(ctx, entry.ID); err == nil {
+		t.Fatal("Get() after Delete() error = nil")
 	}
 }
 
-func TestStoreMarkReadyValidatesDigestAndBootMode(t *testing.T) {
-	ctx := context.Background()
-	store := NewStore(newTestStateStore(t))
-	rec, err := store.Create(ctx, CreateRequest{Origin: state.TemplateOriginCheckpoint})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-
+func TestStoreCreateValidatesCompleteEntry(t *testing.T) {
+	validDigest := digest.FromString("template").String()
 	for _, tt := range []struct {
 		name  string
-		ready ReadyState
+		entry Entry
 		want  string
 	}{
 		{
-			name: "invalid digest",
-			ready: ReadyState{
-				BootIndexDigest: "sha256:not-a-content-digest",
-				BootMode:        state.TemplateBootModeResume,
+			name: "missing id",
+			entry: Entry{
+				Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: validDigest,
 			},
-			want: "invalid boot index digest",
+			want: "template id is required",
+		},
+		{
+			name: "invalid origin",
+			entry: Entry{
+				ID: "tmpl_1", Origin: "archive", BootMode: BootModeCold, BootIndexDigest: validDigest,
+			},
+			want: "unknown template origin",
 		},
 		{
 			name: "invalid boot mode",
-			ready: ReadyState{
-				BootIndexDigest: digest.FromString("resume boot index").String(),
-				BootMode:        "warm",
+			entry: Entry{
+				ID: "tmpl_1", Origin: OriginImage, BootMode: "warm", BootIndexDigest: validDigest,
 			},
 			want: "unknown template boot mode",
 		},
+		{
+			name: "invalid digest",
+			entry: Entry{
+				ID: "tmpl_1", Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: "sha256:invalid",
+			},
+			want: "invalid boot index digest",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := store.MarkReady(ctx, rec.ID, tt.ready)
+			store := NewStore(newMemoryStateStore())
+			_, err := store.Create(context.Background(), tt.entry)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("MarkReady() error = %v, want %q", err, tt.want)
+				t.Fatalf("Create() error = %v, want %q", err, tt.want)
 			}
 		})
 	}
-
-	got, err := store.Get(ctx, rec.ID)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got.State != state.TemplateCreating || got.BootIndexDigest != "" || got.BootMode != "" {
-		t.Fatalf("invalid READY publication mutated record: %#v", got)
-	}
 }
 
-func TestStoreReadyIdentityIsImmutable(t *testing.T) {
+func TestStoreDuplicateIDDoesNotOverwrite(t *testing.T) {
 	ctx := context.Background()
-	store := NewStore(newTestStateStore(t))
-	rec, err := store.Create(ctx, CreateRequest{Origin: state.TemplateOriginImage})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	firstDigest := digest.FromString("first boot index").String()
-	if err := store.MarkReady(ctx, rec.ID, ReadyState{
-		BootIndexDigest: firstDigest,
-		BootMode:        state.TemplateBootModeCold,
-	}); err != nil {
-		t.Fatalf("first MarkReady() error = %v", err)
-	}
-	err = store.MarkReady(ctx, rec.ID, ReadyState{
-		BootIndexDigest: digest.FromString("second boot index").String(),
-		BootMode:        state.TemplateBootModeResume,
-	})
-	if err == nil || !strings.Contains(err.Error(), "want "+state.TemplateCreating) {
-		t.Fatalf("second MarkReady() error = %v, want immutable READY error", err)
-	}
-	got, err := store.Get(ctx, rec.ID)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got.BootIndexDigest != firstDigest || got.BootMode != state.TemplateBootModeCold || got.State != state.TemplateReady {
-		t.Fatalf("READY identity changed: %#v", got)
-	}
-}
-
-func TestBootModeUsesCapabilityCache(t *testing.T) {
-	resume := state.TemplateRecord{
-		BootMode: state.TemplateBootModeResume,
-	}
-	if got := BootMode(resume); got != state.TemplateBootModeResume {
-		t.Fatalf("resume BootMode() = %q", got)
-	}
-	if got := BootMode(state.TemplateRecord{}); got != "" {
-		t.Fatalf("empty BootMode() = %q", got)
-	}
-}
-
-func TestStorePublishCheckpointDelegatesAtomicTransition(t *testing.T) {
-	ctx := context.Background()
-	raw := newTestStateStore(t)
+	raw := newMemoryStateStore()
 	store := NewStore(raw)
-	if err := raw.UpsertTemplate(ctx, state.TemplateRecord{
-		ID:               "t1",
-		Origin:           state.TemplateOriginCheckpoint,
-		State:            state.TemplateCreating,
-		ParentTemplateID: "t0",
-	}); err != nil {
-		t.Fatalf("UpsertTemplate() error = %v", err)
-	}
-	if err := raw.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:                  "pod-1",
-		SourceTemplateID:              "t0",
-		SourceBootIndexDigest:         digest.FromString("source boot index").String(),
-		CheckpointHeadTemplateID:      "t0",
-		CheckpointHeadBootIndexDigest: digest.FromString("source boot index").String(),
-	}); err != nil {
-		t.Fatalf("UpsertSandbox() error = %v", err)
-	}
-	checkpointDigest := digest.FromString("checkpoint boot index").String()
-	if err := store.PublishCheckpoint(ctx, state.CheckpointPublication{
-		TemplateID:                  "t1",
-		PodSandboxID:                "pod-1",
-		BootIndexDigest:             checkpointDigest,
-		BootMode:                    state.TemplateBootModeResume,
-		ExpectedHeadTemplateID:      "t0",
-		ExpectedHeadBootIndexDigest: digest.FromString("source boot index").String(),
-	}); err != nil {
-		t.Fatalf("PublishCheckpoint() error = %v", err)
+	firstDigest := digest.FromString("first").String()
+	first, err := store.Create(ctx, Entry{
+		ID:              "tmpl_same",
+		Origin:          OriginImage,
+		BootMode:        BootModeCold,
+		BootIndexDigest: firstDigest,
+	})
+	if err != nil {
+		t.Fatalf("first Create() error = %v", err)
 	}
 
-	templateRecord, err := raw.GetTemplate(ctx, "t1")
-	if err != nil {
-		t.Fatalf("GetTemplate() error = %v", err)
+	_, err = store.Create(ctx, Entry{
+		ID:              first.ID,
+		Origin:          OriginCheckpoint,
+		BootMode:        BootModeResume,
+		BootIndexDigest: digest.FromString("second").String(),
+	})
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("second Create() error = %v, want ErrAlreadyExists", err)
 	}
-	sandboxRecord, err := raw.GetSandbox(ctx, "pod-1")
-	if err != nil {
-		t.Fatalf("GetSandbox() error = %v", err)
-	}
-	if templateRecord.State != state.TemplateReady || templateRecord.BootIndexDigest != checkpointDigest || templateRecord.BootMode != state.TemplateBootModeResume {
-		t.Fatalf("published template = %#v", templateRecord)
-	}
-	if sandboxRecord.CheckpointHeadTemplateID != "t1" || sandboxRecord.CheckpointHeadBootIndexDigest != checkpointDigest {
-		t.Fatalf("published sandbox head = %#v", sandboxRecord)
-	}
-}
-
-func TestStoreMarkFailed(t *testing.T) {
-	ctx := context.Background()
-	store := NewStore(newTestStateStore(t))
-	rec, err := store.Create(ctx, CreateRequest{Origin: state.TemplateOriginCheckpoint})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	if err := store.MarkFailed(ctx, rec.ID, errBoom{}); err != nil {
-		t.Fatalf("MarkFailed() error = %v", err)
-	}
-	got, err := store.Get(ctx, rec.ID)
+	got, err := store.Get(ctx, first.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if got.State != state.TemplateFailed || got.LastError != "boom" {
-		t.Fatalf("record = %#v", got)
+	if got.BootIndexDigest != firstDigest || got.Origin != OriginImage || got.BootMode != BootModeCold {
+		t.Fatalf("first entry was overwritten: %#v", got)
 	}
 }
 
-type errBoom struct{}
-
-func (errBoom) Error() string { return "boom" }
-
-func newTestStateStore(t *testing.T) *state.BoltStore {
-	t.Helper()
-	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+func TestNewID(t *testing.T) {
+	first, err := NewID()
 	if err != nil {
-		t.Fatalf("OpenBolt() error = %v", err)
+		t.Fatalf("NewID() error = %v", err)
 	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Fatalf("Close() error = %v", err)
-		}
-	})
-	return store
+	second, err := NewID()
+	if err != nil {
+		t.Fatalf("NewID() error = %v", err)
+	}
+	if !strings.HasPrefix(first, "tmpl_") || len(first) != len("tmpl_")+24 {
+		t.Fatalf("NewID() = %q", first)
+	}
+	if first == second {
+		t.Fatalf("NewID() returned duplicate %q", first)
+	}
+}
+
+type memoryStateStore struct {
+	entries map[string]Entry
+}
+
+func newMemoryStateStore() *memoryStateStore {
+	return &memoryStateStore{entries: make(map[string]Entry)}
+}
+
+func (s *memoryStateStore) CreateTemplate(_ context.Context, entry Entry) error {
+	if _, exists := s.entries[entry.ID]; exists {
+		return ErrAlreadyExists
+	}
+	s.entries[entry.ID] = entry
+	return nil
+}
+
+func (s *memoryStateStore) GetTemplate(_ context.Context, id string) (Entry, error) {
+	entry, exists := s.entries[id]
+	if !exists {
+		return Entry{}, errors.New("not found")
+	}
+	return entry, nil
+}
+
+func (s *memoryStateStore) ListTemplates(context.Context) ([]Entry, error) {
+	out := make([]Entry, 0, len(s.entries))
+	for _, entry := range s.entries {
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func (s *memoryStateStore) DeleteTemplate(_ context.Context, id string) error {
+	delete(s.entries, id)
+	return nil
 }

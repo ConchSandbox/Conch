@@ -1,6 +1,10 @@
 package state
 
-import "context"
+import (
+	"context"
+
+	"github.com/openeuler/Conch/internal/template"
+)
 
 type Store interface {
 	Close() error
@@ -15,14 +19,9 @@ type Store interface {
 	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)
 	DeleteNetworkSlot(context.Context, string) error
 
-	UpsertContainer(context.Context, ContainerRecord) error
-	GetContainer(context.Context, string) (ContainerRecord, error)
-	ListContainers(context.Context) ([]ContainerRecord, error)
-	DeleteContainer(context.Context, string) error
-
-	UpsertTemplate(context.Context, TemplateRecord) error
-	GetTemplate(context.Context, string) (TemplateRecord, error)
-	ListTemplates(context.Context) ([]TemplateRecord, error)
+	CreateTemplate(context.Context, template.Entry) error
+	GetTemplate(context.Context, string) (template.Entry, error)
+	ListTemplates(context.Context) ([]template.Entry, error)
 	DeleteTemplate(context.Context, string) error
 	PublishCheckpoint(context.Context, CheckpointPublication) error
 }

@@ -2,7 +2,7 @@
 
 ## 快速开始
 
-创建 Sandbox 前，需要先启动 `conchd`，并准备一个处于 `READY` 状态的 Template。可以使用 `conch template ls` 查看现有 Template；如果尚未创建，参见 [Conch Image Guide](image.md#1-conch-template-create)。
+创建 Sandbox 前，需要先启动 `conchd`，并准备一个完整的 Template。如果尚未创建，参见 [Conch Image Guide](image.md#1-conch-template-create)。
 
 在终端中输入 `python3` 进入交互环境：
 

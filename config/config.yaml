@@ -79,7 +79,3 @@ volume:
 
 state:
   path: /var/lib/conch/state.db
-
-cri:
-  enabled: false
-  socket: /var/run/conchd/conch-cri.sock

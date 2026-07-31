@@ -63,7 +63,6 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 		ID:              "tmpl_ab2345da0a69b4e18aa24ad6",
 		Origin:          "image",
 		BootMode:        "cold",
-		State:           "READY",
 		BootIndexDigest: "sha256:boot",
 	}})
 
@@ -78,7 +77,6 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 	}{
 		{header: "ORIGIN", value: "image"},
 		{header: "BOOT_MODE", value: "cold"},
-		{header: "STATE", value: "READY"},
 		{header: "BOOT_INDEX_DIGEST", value: "sha256:boot"},
 	} {
 		if got, want := strings.Index(row, column.value), strings.Index(header, column.header); got != want {
@@ -86,7 +84,7 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 		}
 	}
 	fields := strings.Fields(row)
-	if len(fields) != 7 || fields[5] != "-" || fields[6] != "-" {
+	if len(fields) != 6 || fields[4] != "-" || fields[5] != "-" {
 		t.Fatalf("template row fields = %#v, want two visible empty placeholders", fields)
 	}
 }

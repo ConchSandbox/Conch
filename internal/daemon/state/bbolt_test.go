@@ -2,12 +2,16 @@ package state
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
+	bolt "go.etcd.io/bbolt"
+
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
-func TestBoltStoreSandboxAndContainerCRUD(t *testing.T) {
+func TestBoltStoreSandboxCRUD(t *testing.T) {
 	store, err := OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {
 		t.Fatalf("OpenBolt() error = %v", err)
@@ -16,46 +20,63 @@ func TestBoltStoreSandboxAndContainerCRUD(t *testing.T) {
 
 	ctx := context.Background()
 	sandbox := SandboxRecord{
-		PodSandboxID:   "pod-1",
-		ConchSandboxID: "pod-1",
-		Namespace:      "default",
-		Name:           "demo",
-		State:          SandboxReady,
-		Labels:         map[string]string{"app": "demo"},
+		SandboxID: "sandbox-1",
+		Namespace: "default",
+		State:     SandboxReady,
+		CreatedAt: 123,
+		IP:        "192.0.2.10",
+		VMMName:   "stratovirt",
 	}
 	if err := store.UpsertSandbox(ctx, sandbox); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
-	gotSandbox, err := store.GetSandbox(ctx, sandbox.PodSandboxID)
+	gotSandbox, err := store.GetSandbox(ctx, sandbox.SandboxID)
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if gotSandbox.Name != sandbox.Name || gotSandbox.Labels["app"] != "demo" {
+	if gotSandbox.SandboxID != sandbox.SandboxID || gotSandbox.IP != sandbox.IP || gotSandbox.VMMName != sandbox.VMMName {
 		t.Fatalf("GetSandbox() = %#v, want %#v", gotSandbox, sandbox)
 	}
 
-	container := ContainerRecord{
-		ContainerID:  "ctr-1",
-		PodSandboxID: sandbox.PodSandboxID,
-		Name:         "placeholder",
-		State:        ContainerCreated,
-	}
-	if err := store.UpsertContainer(ctx, container); err != nil {
-		t.Fatalf("UpsertContainer() error = %v", err)
-	}
-	containers, err := store.ListContainers(ctx)
-	if err != nil {
-		t.Fatalf("ListContainers() error = %v", err)
-	}
-	if len(containers) != 1 || containers[0].ContainerID != container.ContainerID {
-		t.Fatalf("ListContainers() = %#v, want one container", containers)
-	}
-
-	if err := store.DeleteSandbox(ctx, sandbox.PodSandboxID); err != nil {
+	if err := store.DeleteSandbox(ctx, sandbox.SandboxID); err != nil {
 		t.Fatalf("DeleteSandbox() error = %v", err)
 	}
-	if _, err := store.GetSandbox(ctx, sandbox.PodSandboxID); err == nil {
+	if _, err := store.GetSandbox(ctx, sandbox.SandboxID); err == nil {
 		t.Fatalf("GetSandbox() after delete got nil error")
+	}
+}
+
+func TestBoltStoreRejectsEmptySandboxID(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertSandbox(context.Background(), SandboxRecord{}); err == nil {
+		t.Fatal("UpsertSandbox() error = nil, want empty id rejection")
+	}
+}
+
+func TestBoltStoreInitializesCurrentBuckets(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		for _, bucket := range buckets {
+			if tx.Bucket(bucket) == nil {
+				t.Fatalf("bucket %q is missing", bucket)
+			}
+		}
+		if tx.Bucket([]byte("containers")) != nil {
+			t.Fatal("containers bucket was created")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect state schema: %v", err)
 	}
 }
 
@@ -122,17 +143,17 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	rec := TemplateRecord{
-		ID:        "tmpl_1",
-		Origin:    TemplateOriginImage,
-		Namespace: "default",
-		State:     TemplateCreating,
-		Labels:    map[string]string{"purpose": "test"},
-		CreatedAt: 1,
-		UpdatedAt: 1,
+	rec := conchtemplate.Entry{
+		ID:              "tmpl_1",
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: digest.FromString("template-1").String(),
+		Namespace:       "default",
+		Labels:          map[string]string{"purpose": "test"},
+		CreatedAt:       1,
 	}
-	if err := store.UpsertTemplate(ctx, rec); err != nil {
-		t.Fatalf("UpsertTemplate() error = %v", err)
+	if err := store.CreateTemplate(ctx, rec); err != nil {
+		t.Fatalf("CreateTemplate() error = %v", err)
 	}
 	got, err := store.GetTemplate(ctx, rec.ID)
 	if err != nil {
@@ -142,15 +163,23 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 		t.Fatalf("GetTemplate() = %#v, want %#v", got, rec)
 	}
 
-	rec.State = TemplateReady
-	if err := store.UpsertTemplate(ctx, rec); err != nil {
-		t.Fatalf("UpsertTemplate(update) error = %v", err)
+	duplicate := rec
+	duplicate.BootIndexDigest = digest.FromString("replacement").String()
+	if err := store.CreateTemplate(ctx, duplicate); !errors.Is(err, conchtemplate.ErrAlreadyExists) {
+		t.Fatalf("CreateTemplate(duplicate) error = %v, want ErrAlreadyExists", err)
+	}
+	got, err = store.GetTemplate(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetTemplate() after duplicate error = %v", err)
+	}
+	if got.BootIndexDigest != rec.BootIndexDigest {
+		t.Fatalf("duplicate CreateTemplate overwrote digest: got %q, want %q", got.BootIndexDigest, rec.BootIndexDigest)
 	}
 	items, err := store.ListTemplates(ctx)
 	if err != nil {
 		t.Fatalf("ListTemplates() error = %v", err)
 	}
-	if len(items) != 1 || items[0].State != TemplateReady {
+	if len(items) != 1 || items[0].ID != rec.ID {
 		t.Fatalf("ListTemplates() = %#v", items)
 	}
 	if err := store.DeleteTemplate(ctx, rec.ID); err != nil {
@@ -170,14 +199,9 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 
 	ctx := context.Background()
 	checkpointDigest := digest.FromString("checkpoint").String()
-	if err := store.UpsertTemplate(ctx, TemplateRecord{
-		ID: "t1", Origin: TemplateOriginCheckpoint, Namespace: "default", State: TemplateCreating,
-		ParentTemplateID: "t0", SourceSandboxID: "sb-1",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.UpsertSandbox(ctx, SandboxRecord{
-		PodSandboxID: "pod-1", ConchSandboxID: "sb-1",
+		SandboxID:        "sb-1",
+		Namespace:        "default",
 		SourceTemplateID: "t0", SourceBootIndexDigest: "sha256:source",
 		CheckpointHeadTemplateID: "t0", CheckpointHeadBootIndexDigest: "sha256:source",
 	}); err != nil {
@@ -185,8 +209,16 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 	}
 
 	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
-		TemplateID: "t1", PodSandboxID: "pod-1", BootIndexDigest: checkpointDigest,
-		BootMode: TemplateBootModeResume, ExpectedHeadTemplateID: "t0",
+		Entry: conchtemplate.Entry{
+			ID:               "t1",
+			Origin:           conchtemplate.OriginCheckpoint,
+			BootMode:         conchtemplate.BootModeResume,
+			BootIndexDigest:  checkpointDigest,
+			Namespace:        "default",
+			ParentTemplateID: "t0",
+			SourceSandboxID:  "sb-1",
+		},
+		SandboxID: "sb-1", ExpectedHeadTemplateID: "t0",
 		ExpectedHeadBootIndexDigest: "sha256:source",
 	}); err != nil {
 		t.Fatalf("PublishCheckpoint() error = %v", err)
@@ -195,10 +227,12 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if templateRecord.State != TemplateReady || templateRecord.BootIndexDigest != checkpointDigest {
+	if templateRecord.BootIndexDigest != checkpointDigest ||
+		templateRecord.Origin != conchtemplate.OriginCheckpoint ||
+		templateRecord.BootMode != conchtemplate.BootModeResume {
 		t.Fatalf("published template = %#v", templateRecord)
 	}
-	sandboxRecord, err := store.GetSandbox(ctx, "pod-1")
+	sandboxRecord, err := store.GetSandbox(ctx, "sb-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,23 +248,34 @@ func TestBoltStorePublishCheckpointCASFailureLeavesBothRecordsUnchanged(t *testi
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.UpsertTemplate(ctx, TemplateRecord{ID: "t1", Origin: TemplateOriginCheckpoint, State: TemplateCreating, ParentTemplateID: "old-head"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpsertSandbox(ctx, SandboxRecord{PodSandboxID: "pod-1", CheckpointHeadTemplateID: "new-head"}); err != nil {
+	if err := store.UpsertSandbox(ctx, SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		Namespace:                     "default",
+		CheckpointHeadTemplateID:      "new-head",
+		CheckpointHeadBootIndexDigest: "sha256:new-head",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
-		TemplateID: "t1", PodSandboxID: "pod-1", BootIndexDigest: digest.FromString("checkpoint").String(),
-		BootMode: TemplateBootModeResume, ExpectedHeadTemplateID: "old-head",
+		Entry: conchtemplate.Entry{
+			ID:               "t1",
+			Origin:           conchtemplate.OriginCheckpoint,
+			BootMode:         conchtemplate.BootModeResume,
+			BootIndexDigest:  digest.FromString("checkpoint").String(),
+			Namespace:        "default",
+			ParentTemplateID: "old-head",
+			SourceSandboxID:  "sandbox-1",
+		},
+		SandboxID:                   "sandbox-1",
+		ExpectedHeadTemplateID:      "old-head",
+		ExpectedHeadBootIndexDigest: "sha256:old-head",
 	}); err == nil {
 		t.Fatal("PublishCheckpoint() error = nil, want CAS failure")
 	}
-	templateRecord, _ := store.GetTemplate(ctx, "t1")
-	sandboxRecord, _ := store.GetSandbox(ctx, "pod-1")
-	if templateRecord.State != TemplateCreating || templateRecord.BootIndexDigest != "" {
-		t.Fatalf("template changed after failed transaction: %#v", templateRecord)
+	if _, err := store.GetTemplate(ctx, "t1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTemplate() error = %v, want ErrNotFound", err)
 	}
+	sandboxRecord, _ := store.GetSandbox(ctx, "sandbox-1")
 	if sandboxRecord.CheckpointHeadTemplateID != "new-head" {
 		t.Fatalf("sandbox changed after failed transaction: %#v", sandboxRecord)
 	}

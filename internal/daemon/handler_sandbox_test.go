@@ -11,7 +11,30 @@ import (
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
+
+func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil, nil, "default")
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/sandbox/create", bytes.NewBufferString(`{}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["sandbox_id"] == "" || response["sandbox_id"] != sandboxOps.createReq.SandboxID {
+		t.Fatalf("sandbox identity = response:%q request:%q", response["sandbox_id"], sandboxOps.createReq.SandboxID)
+	}
+}
 
 func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	const (
@@ -26,23 +49,23 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	ctx := context.Background()
-	if err := store.UpsertTemplate(ctx, state.TemplateRecord{
+	if err := store.CreateTemplate(ctx, conchtemplate.Entry{
 		ID:              "tmpl-source",
-		Origin:          state.TemplateOriginImage,
+		Origin:          conchtemplate.OriginImage,
 		Namespace:       "default",
-		State:           state.TemplateReady,
 		BootIndexDigest: sourceDigest,
-		BootMode:        state.TemplateBootModeCold,
+		BootMode:        conchtemplate.BootModeCold,
 	}); err != nil {
-		t.Fatalf("UpsertTemplate() error = %v", err)
+		t.Fatalf("CreateTemplate() error = %v", err)
 	}
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		PodSandboxID:          "pod-1",
-		ConchSandboxID:        "sandbox-1",
-		Namespace:             "default",
-		State:                 state.SandboxReady,
-		SourceTemplateID:      "tmpl-source",
-		SourceBootIndexDigest: sourceDigest,
+		SandboxID:                     "sandbox-1",
+		Namespace:                     "default",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "tmpl-source",
+		SourceBootIndexDigest:         sourceDigest,
+		CheckpointHeadTemplateID:      "tmpl-source",
+		CheckpointHeadBootIndexDigest: sourceDigest,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
@@ -57,7 +80,7 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/sandbox/checkpoint", bytes.NewBufferString(`{"sandbox_id":"pod-1"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/sandbox/checkpoint", bytes.NewBufferString(`{"sandbox_id":"sandbox-1"}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())

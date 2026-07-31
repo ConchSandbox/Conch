@@ -367,13 +367,12 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 
 func printTemplates(out io.Writer, items []client.TemplateRecord) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tORIGIN\tBOOT_MODE\tSTATE\tBOOT_INDEX_DIGEST\tSOURCE_SANDBOX\tBUILD_REF")
+	fmt.Fprintln(tw, "ID\tORIGIN\tBOOT_MODE\tBOOT_INDEX_DIGEST\tSOURCE_SANDBOX\tBUILD_REF")
 	for _, item := range items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			item.ID,
 			displayTemplateValue(item.Origin),
 			displayTemplateValue(item.BootMode),
-			displayTemplateValue(item.State),
 			displayTemplateValue(item.BootIndexDigest),
 			displayTemplateValue(item.SourceSandboxID),
 			displayTemplateValue(item.BuildRef),

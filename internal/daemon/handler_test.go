@@ -157,7 +157,20 @@ type bootIndexReferenceCall struct {
 
 func (f *fakeImageService) InspectBootIndex(_ context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
 	f.inspectReq = bootIndexCall{Namespace: namespace, BootIndexDigest: bootIndexDigest}
-	return f.inspectResp, f.inspectErr
+	result := f.inspectResp
+	if result.BootIndexDigest == "" {
+		result.BootIndexDigest = bootIndexDigest
+	}
+	if f.checkpointPublishReq.BootIndexTag != "" {
+		result.Resume = true
+		if result.VMMName == "" {
+			result.VMMName = f.checkpointPublishReq.VMMName
+		}
+		if result.MemorySizeMB == 0 {
+			result.MemorySizeMB = f.checkpointPublishReq.MemorySizeMB
+		}
+	}
+	return result, f.inspectErr
 }
 
 func (f *fakeImageService) InspectBootIndexReference(_ context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {

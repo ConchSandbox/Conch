@@ -25,7 +25,7 @@ const (
 	defaultCNIPluginConfDir     = DefaultCNIPluginConfDir
 	defaultCNIPluginBinDir      = DefaultCNIPluginBinDir
 	defaultCNIPluginMaxConf     = DefaultCNIPluginMaxConf
-	defaultCNIPodNamespace      = "conch"
+	defaultCNINamespace         = "conch"
 	defaultHostLocalIPAMDataDir = "/var/lib/cni/networks"
 	cniTeardownRetryAttempts    = 3
 	cniTeardownRetryDelay       = 100 * time.Millisecond
@@ -276,7 +276,7 @@ func buildCNIOpts(slot *Slot, cniID, netnsPath string) ([]NamespaceOpts, error) 
 	}
 	return []NamespaceOpts{
 		cni.WithLabels(map[string]string{
-			"K8S_POD_NAMESPACE":          defaultCNIPodNamespace,
+			"K8S_POD_NAMESPACE":          defaultCNINamespace,
 			"K8S_POD_NAME":               cniID,
 			"K8S_POD_INFRA_CONTAINER_ID": cniID,
 			"CONCH_NETWORK_SLOT":         slot.Key,
@@ -433,7 +433,7 @@ func ipToString(ip net.IP) string {
 	return ip.String()
 }
 
-func (m *CNIManager) SetupPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) (*CNIResult, error) {
+func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) (*CNIResult, error) {
 	if m == nil || m.plugin == nil {
 		return nil, fmt.Errorf("cni config not initialized")
 	}
@@ -501,7 +501,7 @@ func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
 	return nil
 }
 
-func (m *CNIManager) TeardownPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
+func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
 	if cniID == "" || netnsPath == "" {
 		return nil
 	}
