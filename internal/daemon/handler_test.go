@@ -437,6 +437,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil, store, "default")
+	runtimeService.SetSandboxLogDir(t.TempDir())
 	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateID: "tmpl-default",
 		VCPUNum:    4,
@@ -502,6 +503,43 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 	})
 
+	t.Run("logs", func(t *testing.T) {
+		runtimeService.AppendSandboxLog("default", "sandbox-1", "info", "created sandbox")
+		runtimeService.AppendSandboxLog("default", "sandbox-1", "error", "operation failed")
+		response := serveSandboxRequest(
+			server,
+			http.MethodGet,
+			"/api/v1/sandboxes/sandbox-1/logs?direction=backward&level=error&search=failed",
+			nil,
+		)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var result getSandboxLogsResponse
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatalf("decode logs response: %v", err)
+		}
+		if len(result.Logs) != 1 || result.Logs[0].Message != "operation failed" ||
+			result.Logs[0].Fields["sandboxID"] != "sandbox-1" ||
+			result.Logs[0].Fields["namespace"] != "default" {
+			t.Fatalf("logs response = %#v", result)
+		}
+	})
+
+	t.Run("rejects invalid log queries", func(t *testing.T) {
+		for _, path := range []string{
+			"/api/v1/sandboxes/sandbox-1/logs?cursor=-1",
+			"/api/v1/sandboxes/sandbox-1/logs?limit=1001",
+			"/api/v1/sandboxes/sandbox-1/logs?direction=sideways",
+			"/api/v1/sandboxes/sandbox-1/logs?level=erorr",
+		} {
+			response := serveSandboxRequest(server, http.MethodGet, path, nil)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body.String())
+			}
+		}
+	})
+
 	t.Run("create", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
 			"sandbox_id":"sandbox-2","template_id":"tmpl-2","env":{"SOME_RANDOM_KEY":"key123"}
@@ -539,6 +577,20 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 		if _, err := store.GetSandbox(context.Background(), "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
 			t.Fatalf("deleted sandbox lookup error = %v", err)
+		}
+	})
+
+	t.Run("retains logs after delete", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var result getSandboxLogsResponse
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatalf("decode logs response: %v", err)
+		}
+		if len(result.Logs) == 0 || result.Logs[0].Fields["sandboxID"] != "sandbox-1" {
+			t.Fatalf("retained logs response = %#v", result)
 		}
 	})
 }

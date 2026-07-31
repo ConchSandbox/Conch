@@ -1,19 +1,24 @@
 package conchruntime
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	digestpkg "github.com/opencontainers/go-digest"
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -71,6 +76,7 @@ type Service struct {
 	Templates         conchtemplate.Store
 	DefaultNamespace  string
 	SandboxDefaults   SandboxDefaults
+	SandboxLogs       *SandboxLogStore
 	lifecycleLocks    sandboxLifecycleLocks
 }
 
@@ -143,6 +149,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		}
 		opts.SandboxID = id
 	}
+	logSandboxID := opts.SandboxID
 	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
 	namespace := s.normalizeNamespace(opts.Namespace)
@@ -154,7 +161,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
-
 	req := sandbox.CreateRequest{
 		Namespace:    namespace,
 		TemplateID:   opts.TemplateID,
@@ -201,14 +207,17 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VolumeDevices:                 volumeDevicesToState(createResult.VolumeDevices),
 	}
 	if err != nil {
+		s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("create failed: %v", err))
 		rec.State = state.SandboxUnknown
 		rec.LastError = err.Error()
 		_ = s.upsertSandbox(ctx, rec)
 		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
+		s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("create state persist failed: %v", err))
 		return SandboxCreateResult{}, err
 	}
+	s.AppendSandboxLog(namespace, logSandboxID, "info", fmt.Sprintf("created sandbox namespace=%s ip=%s", namespace, createResult.IP))
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,
 		Namespace:  namespace,
@@ -275,6 +284,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string
 	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
 		return fmt.Errorf("get sandbox state: %w", recErr)
 	}
+	logSandboxID := strings.TrimSpace(sandboxID)
 	if namespace == "" {
 		namespace = rec.Namespace
 	}
@@ -289,11 +299,16 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string
 			rec.LastError = err.Error()
 			_ = s.upsertSandbox(ctx, rec)
 		}
+		s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("delete failed: %v", err))
 		return err
 	}
 	if s.Store != nil {
-		return s.Store.DeleteSandbox(ctx, sandboxID)
+		if err := s.Store.DeleteSandbox(ctx, sandboxID); err != nil {
+			s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("delete failed: %v", err))
+			return err
+		}
 	}
+	s.AppendSandboxLog(namespace, logSandboxID, "info", "deleted sandbox")
 	return nil
 }
 
@@ -304,6 +319,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, sandboxID strin
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
+	logSandboxID := strings.TrimSpace(sandboxID)
 	if namespace == "" {
 		namespace = rec.Namespace
 	}
@@ -317,6 +333,11 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, sandboxID strin
 		}
 		_ = s.upsertSandbox(ctx, rec)
 	}
+	if err != nil {
+		s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("pause failed: %v", err))
+	} else {
+		s.AppendSandboxLog(namespace, logSandboxID, "info", "paused sandbox")
+	}
 	return err
 }
 
@@ -327,6 +348,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
+	logSandboxID := strings.TrimSpace(sandboxID)
 	if namespace == "" {
 		namespace = rec.Namespace
 	}
@@ -341,6 +363,11 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string
 			rec.LastError = ""
 		}
 		_ = s.upsertSandbox(ctx, rec)
+	}
+	if err != nil {
+		s.AppendSandboxLog(namespace, logSandboxID, "error", fmt.Sprintf("resume failed: %v", err))
+	} else {
+		s.AppendSandboxLog(namespace, logSandboxID, "info", "resumed sandbox")
 	}
 	return err
 }
@@ -959,4 +986,271 @@ func copyMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+type SandboxLogEntry struct {
+	Time      time.Time `json:"timestamp"`
+	Namespace string    `json:"namespace"`
+	SandboxID string    `json:"sandboxID"`
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+}
+
+type SandboxLogKey struct {
+	Namespace string
+	SandboxID string
+}
+
+type SandboxLogsOptions struct {
+	Namespace string
+	SandboxID string
+	Cursor    *int64
+	Limit     int
+	Direction string
+	Level     string
+	Search    string
+}
+
+type SandboxLogsResult struct {
+	Logs []SandboxLogEntry
+}
+
+type SandboxLogStore struct {
+	mu   sync.Mutex
+	root string
+	now  func() time.Time
+}
+
+func normalizeSandboxLogKey(key SandboxLogKey) SandboxLogKey {
+	key.Namespace = strings.TrimSpace(key.Namespace)
+	if key.Namespace == "" {
+		key.Namespace = "default"
+	}
+	key.SandboxID = strings.TrimSpace(key.SandboxID)
+	return key
+}
+
+func sandboxLogLevelRank(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "trace":
+		return 0
+	case "debug":
+		return 1
+	case "info":
+		return 2
+	case "warn", "warning":
+		return 3
+	case "error":
+		return 4
+	case "fatal":
+		return 5
+	case "panic":
+		return 6
+	default:
+		return -1
+	}
+}
+
+func newSandboxLogStore(root string) *SandboxLogStore {
+	return &SandboxLogStore{
+		root: strings.TrimSpace(root),
+		now:  time.Now,
+	}
+}
+
+func (s *SandboxLogStore) logPath(key SandboxLogKey) (string, bool) {
+	key = normalizeSandboxLogKey(key)
+	if s == nil || s.root == "" || key.SandboxID == "" {
+		return "", false
+	}
+	namespace := base64.RawURLEncoding.EncodeToString([]byte(key.Namespace))
+	sandboxID := base64.RawURLEncoding.EncodeToString([]byte(key.SandboxID))
+	return filepath.Join(s.root, namespace, sandboxID+".jsonl"), true
+}
+
+func (s *SandboxLogStore) AppendKey(key SandboxLogKey, level, message string) error {
+	key = normalizeSandboxLogKey(key)
+	level = strings.ToLower(strings.TrimSpace(level))
+	message = strings.TrimSpace(message)
+	path, ok := s.logPath(key)
+	if !ok || message == "" {
+		return nil
+	}
+	if level == "" {
+		level = "info"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create sandbox log directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open sandbox log file: %w", err)
+	}
+	entry := SandboxLogEntry{
+		Time:      s.now().UTC(),
+		Namespace: key.Namespace,
+		SandboxID: key.SandboxID,
+		Level:     level,
+		Message:   message,
+	}
+	if err := json.NewEncoder(file).Encode(entry); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("append sandbox log: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close sandbox log file: %w", err)
+	}
+	return nil
+}
+
+func (s *SandboxLogStore) Get(opts SandboxLogsOptions) (SandboxLogsResult, error) {
+	key := normalizeSandboxLogKey(SandboxLogKey{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
+	path, ok := s.logPath(key)
+	if !ok {
+		return SandboxLogsResult{Logs: []SandboxLogEntry{}}, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return SandboxLogsResult{Logs: []SandboxLogEntry{}}, nil
+	}
+	if err != nil {
+		return SandboxLogsResult{}, fmt.Errorf("open sandbox log file: %w", err)
+	}
+	defer file.Close()
+
+	entries := make([]SandboxLogEntry, 0)
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil {
+				return SandboxLogsResult{}, fmt.Errorf("read sandbox log file: %w", readErr)
+			}
+			continue
+		}
+
+		var entry SandboxLogEntry
+		if err := json.Unmarshal(trimmed, &entry); err != nil {
+			if errors.Is(readErr, io.EOF) && line[len(line)-1] != '\n' {
+				ulog.Warn("Skipping truncated sandbox audit log record",
+					ulog.F("namespace", key.Namespace),
+					ulog.F("sandbox_id", key.SandboxID),
+				)
+				break
+			}
+			return SandboxLogsResult{}, fmt.Errorf("decode sandbox log file: %w", err)
+		}
+		entries = append(entries, entry)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return SandboxLogsResult{}, fmt.Errorf("read sandbox log file: %w", readErr)
+		}
+	}
+
+	level := strings.ToLower(strings.TrimSpace(opts.Level))
+	minimumLevel := sandboxLogLevelRank(level)
+	out := make([]SandboxLogEntry, 0)
+	appendEntry := func(entry SandboxLogEntry) bool {
+		if level != "" {
+			entryLevel := sandboxLogLevelRank(entry.Level)
+			if minimumLevel >= 0 {
+				if entryLevel < minimumLevel {
+					return false
+				}
+			} else if !strings.EqualFold(entry.Level, level) {
+				return false
+			}
+		}
+		if opts.Search != "" && !strings.Contains(entry.Message, opts.Search) {
+			return false
+		}
+		out = append(out, entry)
+		return opts.Limit > 0 && len(out) >= opts.Limit
+	}
+	if opts.Direction == "" || strings.EqualFold(opts.Direction, "backward") {
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if opts.Cursor != nil && entry.Time.UnixMilli() > *opts.Cursor {
+				continue
+			}
+			if appendEntry(entry) {
+				break
+			}
+		}
+	} else {
+		for _, entry := range entries {
+			if opts.Cursor != nil && entry.Time.UnixMilli() < *opts.Cursor {
+				continue
+			}
+			if appendEntry(entry) {
+				break
+			}
+		}
+	}
+	return SandboxLogsResult{Logs: out}, nil
+}
+
+func (s *Service) AppendSandboxLog(namespace, sandboxID, level, message string) {
+	if s == nil || s.SandboxLogs == nil {
+		return
+	}
+	if err := s.SandboxLogs.AppendKey(
+		SandboxLogKey{Namespace: namespace, SandboxID: sandboxID},
+		level,
+		message,
+	); err != nil {
+		ulog.Warn("Failed to append sandbox audit log",
+			ulog.F("namespace", namespace),
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("error", err),
+		)
+	}
+}
+
+func (s *Service) SetSandboxLogDir(root string) {
+	if s == nil {
+		return
+	}
+	s.SandboxLogs = newSandboxLogStore(root)
+}
+
+func (s *Service) HasSandboxLogs(namespace, sandboxID string) bool {
+	if s == nil || s.SandboxLogs == nil {
+		return false
+	}
+	key := normalizeSandboxLogKey(SandboxLogKey{Namespace: namespace, SandboxID: sandboxID})
+	path, ok := s.SandboxLogs.logPath(key)
+	if !ok {
+		return false
+	}
+	s.SandboxLogs.mu.Lock()
+	defer s.SandboxLogs.mu.Unlock()
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func (s *Service) GetSandboxLogs(_ context.Context, opts SandboxLogsOptions) (SandboxLogsResult, error) {
+	if strings.TrimSpace(opts.SandboxID) == "" {
+		return SandboxLogsResult{}, fmt.Errorf("sandbox id is required")
+	}
+	if opts.Cursor != nil && *opts.Cursor < 0 {
+		return SandboxLogsResult{}, fmt.Errorf("cursor must be non-negative")
+	}
+	if s == nil || s.SandboxLogs == nil {
+		return SandboxLogsResult{Logs: []SandboxLogEntry{}}, nil
+	}
+	opts.Namespace = s.normalizeNamespace(opts.Namespace)
+	return s.SandboxLogs.Get(opts)
 }

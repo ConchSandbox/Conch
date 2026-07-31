@@ -13,7 +13,7 @@ import secrets
 # Try relative imports first (when imported as a package), fall back to absolute imports
 from .client import AgentClient
 from .config_loader import load_config
-from .errors import InvalidArgumentError, NotFoundError, SandboxError
+from .errors import InvalidArgumentError, NotFoundError, SandboxError, ServiceUnavailableError
 
 
 # API keys
@@ -44,6 +44,7 @@ SANDBOX_CREATE_PATH = SANDBOX_COLLECTION_PATH
 SANDBOX_LIST_PATH = SANDBOX_COLLECTION_PATH
 SANDBOX_GET_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
 SANDBOX_DELETE_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
+SANDBOX_LOGS_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE + "/logs"
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
@@ -956,6 +957,47 @@ class Sandbox:
                 STATUS_KEY: "ERROR",
                 MESSAGE_KEY: f"Health check failed: {e}"
             }
+
+    def logs(
+            self,
+            cursor: Optional[int] = None,
+            limit: Optional[int] = None,
+            direction: Optional[str] = None,
+            level: Optional[str] = None,
+            search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.sandbox_id:
+            raise RuntimeError("Cannot get sandbox logs without sandbox_id")
+        params = {
+            key: value for key, value in {
+                "cursor": cursor,
+                "limit": limit,
+                "direction": direction,
+                "level": level,
+                "search": search,
+            }.items() if value is not None
+        }
+        if self.namespace:
+            params[NAMESPACE_KEY] = self.namespace
+        path = SANDBOX_LOGS_PATH_TEMPLATE.format(
+            sandbox_id=quote(str(self.sandbox_id), safe="")
+        )
+        try:
+            response = self._session.get(
+                self._build_control_plane_url(path),
+                params=params or None,
+            )
+            message = getattr(response, "text", "") or f"HTTP {response.status_code}"
+            if response.status_code == 400:
+                raise InvalidArgumentError(message)
+            if response.status_code == 404:
+                raise NotFoundError(message)
+            if response.status_code == 503:
+                raise ServiceUnavailableError(message)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
 
     def __enter__(self) -> 'Sandbox':
         # Context manager entry (return self)

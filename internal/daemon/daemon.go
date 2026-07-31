@@ -16,12 +16,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"golang.org/x/sys/unix"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
-	"github.com/openeuler/Conch/internal/adapters/containerd/host"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -157,6 +158,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.daemonClient = daemonClient
 
 	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
+	s.runtimeService.SetSandboxLogDir(filepath.Join(filepath.Dir(cfg.State.Path), "sandbox-logs"))
 	s.runtimeService.Snapshot = host.SnapshotService()
 	s.runtimeService.Templates = host.TemplateService()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
@@ -199,6 +201,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("GET /api/v1/sandboxes", s.handleListSandbox)
 	s.router.HandleFunc("POST /api/v1/sandboxes", s.handleCreateSandbox)
 	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}", s.handleGetSandbox)
+	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}/logs", s.handleGetSandboxLogs)
 	s.router.HandleFunc("DELETE /api/v1/sandboxes/{sandboxID}", s.handleDeleteSandbox)
 	s.router.HandleFunc("/health", s.handleHealth)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
@@ -503,6 +506,106 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, sandboxResponseFromRecord(*record, true))
+}
+
+func (s *Daemon) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("sandboxID")
+	const defaultLogLimit = 1000
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil {
+		http.Error(w, "Runtime service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if s.stateStore == nil {
+		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	var cursor *int64
+	if query.Get("cursor") != "" {
+		parsedCursor, err := strconv.ParseInt(query.Get("cursor"), 10, 64)
+		if err != nil || parsedCursor < 0 {
+			http.Error(w, "Invalid cursor", http.StatusBadRequest)
+			return
+		}
+		cursor = &parsedCursor
+	}
+	limit := defaultLogLimit
+	if query.Get("limit") != "" {
+		parsedLimit, err := strconv.Atoi(query.Get("limit"))
+		if err != nil {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsedLimit
+	}
+	if limit < 1 || limit > defaultLogLimit {
+		http.Error(w, "Invalid limit", http.StatusBadRequest)
+		return
+	}
+	direction := strings.ToLower(query.Get("direction"))
+	if direction != "" && direction != "forward" && direction != "backward" {
+		http.Error(w, "Invalid direction", http.StatusBadRequest)
+		return
+	}
+	level := strings.ToLower(strings.TrimSpace(query.Get("level")))
+	switch level {
+	case "", "debug", "info", "warn", "error", "fatal", "panic":
+	default:
+		http.Error(w, "Invalid log level: "+level, http.StatusBadRequest)
+		return
+	}
+	if utf8.RuneCountInString(query.Get("search")) > 256 {
+		http.Error(w, "Invalid search", http.StatusBadRequest)
+		return
+	}
+
+	namespace := s.resolveNamespace(query.Get("namespace"))
+	record, err := s.findSandboxRecord(r.Context(), sandboxID, namespace)
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record != nil {
+		namespace = record.Namespace
+		sandboxID = record.SandboxID
+	} else if !s.runtimeService.HasSandboxLogs(namespace, sandboxID) {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+
+	result, err := s.runtimeService.GetSandboxLogs(r.Context(), conchruntime.SandboxLogsOptions{
+		Namespace: namespace,
+		SandboxID: sandboxID,
+		Cursor:    cursor,
+		Limit:     limit,
+		Direction: direction,
+		Level:     level,
+		Search:    query.Get("search"),
+	})
+	if err != nil {
+		http.Error(w, "Failed to get sandbox logs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	logs := make([]sandboxLogEntryResponse, len(result.Logs))
+	for i, entry := range result.Logs {
+		logs[i] = sandboxLogEntryResponse{
+			Timestamp: entry.Time.UTC().Format(time.RFC3339Nano),
+			Message:   entry.Message,
+			Level:     entry.Level,
+			Fields: map[string]string{
+				"namespace": entry.Namespace,
+				"sandboxID": entry.SandboxID,
+			},
+		}
+	}
+	writeJSON(w, getSandboxLogsResponse{Logs: logs})
 }
 
 func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID, namespace string) (*state.SandboxRecord, error) {

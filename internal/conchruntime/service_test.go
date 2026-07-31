@@ -468,6 +468,8 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	svc := New(sandboxOps, nil, nil, nil, "default")
+	svc.SetSandboxLogDir(t.TempDir())
+	svc.AppendSandboxLog("default", "sandbox-1", "info", "old sandbox instance")
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: "tmpl_default",
 		VMMName:    "cloud-hypervisor",
@@ -504,6 +506,16 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 	if result.SandboxID != "sandbox-1" || sandboxOps.req.SandboxID != "sandbox-1" {
 		t.Fatalf("sandbox identity = result:%q request:%q", result.SandboxID, sandboxOps.req.SandboxID)
+	}
+	logs, err := svc.GetSandboxLogs(context.Background(), SandboxLogsOptions{
+		SandboxID: "sandbox-1",
+		Direction: "forward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(logs.Logs) != 2 || logs.Logs[0].Message != "old sandbox instance" {
+		t.Fatalf("create logs = %#v", logs.Logs)
 	}
 }
 
@@ -634,4 +646,137 @@ func newTestStore(t *testing.T) *state.BoltStore {
 		}
 	})
 	return store
+}
+
+func TestSandboxLogsFilteringAndNamespaceIsolation(t *testing.T) {
+	svc := &Service{DefaultNamespace: "default", SandboxLogs: newSandboxLogStore(t.TempDir())}
+	now := time.UnixMilli(1000)
+	svc.SandboxLogs.now = func() time.Time { return now }
+	svc.AppendSandboxLog("tenant-a", "sandbox-1", "info", "created sandbox")
+	now = time.UnixMilli(2000)
+	svc.AppendSandboxLog("tenant-a", "sandbox-1", "error", "network update failed")
+	svc.AppendSandboxLog("tenant-b", "sandbox-1", "error", "other tenant")
+
+	cursor := int64(2000)
+	result, err := svc.GetSandboxLogs(context.Background(), SandboxLogsOptions{
+		Namespace: "tenant-a",
+		SandboxID: "sandbox-1",
+		Cursor:    &cursor,
+		Limit:     1,
+		Direction: "backward",
+		Level:     "warn",
+		Search:    "failed",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(result.Logs) != 1 || result.Logs[0].Message != "network update failed" {
+		t.Fatalf("GetSandboxLogs() = %#v", result.Logs)
+	}
+
+	other, err := svc.GetSandboxLogs(context.Background(), SandboxLogsOptions{
+		Namespace: "tenant-b",
+		SandboxID: "sandbox-1",
+		Direction: "forward",
+	})
+	if err != nil {
+		t.Fatalf("GetSandboxLogs() error = %v", err)
+	}
+	if len(other.Logs) != 1 || other.Logs[0].Message != "other tenant" {
+		t.Fatalf("tenant-b logs = %#v", other.Logs)
+	}
+}
+
+func TestSandboxLogStorePersistsSynchronousAppends(t *testing.T) {
+	root := t.TempDir()
+	store := newSandboxLogStore(root)
+	key := SandboxLogKey{Namespace: "default", SandboxID: "sandbox-1"}
+	if err := store.AppendKey(key, "info", "created"); err != nil {
+		t.Fatalf("AppendKey() error = %v", err)
+	}
+
+	reopened := newSandboxLogStore(root)
+	result, err := reopened.Get(SandboxLogsOptions{
+		Namespace: "default",
+		SandboxID: "sandbox-1",
+		Direction: "forward",
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(result.Logs) != 1 || result.Logs[0].Message != "created" {
+		t.Fatalf("persisted logs = %#v", result.Logs)
+	}
+}
+
+func TestSandboxLogStoreSkipsTruncatedFinalRecord(t *testing.T) {
+	store := newSandboxLogStore(t.TempDir())
+	key := SandboxLogKey{Namespace: "default", SandboxID: "sandbox-1"}
+	if err := store.AppendKey(key, "info", "created"); err != nil {
+		t.Fatalf("AppendKey() error = %v", err)
+	}
+	path, _ := store.logPath(key)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if _, err := file.WriteString(`{"timestamp":`); err != nil {
+		_ = file.Close()
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	result, err := store.Get(SandboxLogsOptions{
+		Namespace: "default",
+		SandboxID: "sandbox-1",
+		Direction: "forward",
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(result.Logs) != 1 || result.Logs[0].Message != "created" {
+		t.Fatalf("Get() = %#v, want earlier valid entry", result.Logs)
+	}
+}
+
+func TestSandboxLogStoreUsesNamespaceInPath(t *testing.T) {
+	store := newSandboxLogStore(t.TempDir())
+	if err := store.AppendKey(SandboxLogKey{Namespace: "tenant-a", SandboxID: "same-id"}, "info", "tenant a"); err != nil {
+		t.Fatalf("AppendKey() error = %v", err)
+	}
+	if err := store.AppendKey(SandboxLogKey{Namespace: "tenant-b", SandboxID: "same-id"}, "info", "tenant b"); err != nil {
+		t.Fatalf("AppendKey() error = %v", err)
+	}
+	result, err := store.Get(SandboxLogsOptions{Namespace: "tenant-a", SandboxID: "same-id"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(result.Logs) != 1 || result.Logs[0].Message != "tenant a" {
+		t.Fatalf("tenant-a logs = %#v", result.Logs)
+	}
+}
+
+func TestSandboxLogAppendFailureDoesNotFailCreate(t *testing.T) {
+	blockedRoot := t.TempDir() + "/not-a-directory"
+	if err := os.WriteFile(blockedRoot, []byte("blocked"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	svc := New(&fakeSandboxOps{}, nil, nil, nil, "default")
+	svc.SetSandboxLogDir(blockedRoot)
+	if err := svc.SandboxLogs.AppendKey(
+		SandboxLogKey{Namespace: "default", SandboxID: "sandbox-1"},
+		"info",
+		"should fail",
+	); err == nil {
+		t.Fatal("AppendKey() error = nil, want invalid log root error")
+	}
+
+	if _, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+		SandboxID: "sandbox-1",
+	}); err != nil {
+		t.Fatalf("CreateSandbox() error = %v, want audit log failure ignored", err)
+	}
 }

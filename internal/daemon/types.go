@@ -147,6 +147,17 @@ type sandboxInspectResponse struct {
 	VolumeMounts     []sandboxVolumeMountResponse `json:"volumeMounts"`
 }
 
+type sandboxLogEntryResponse struct {
+	Timestamp string            `json:"timestamp"`
+	Message   string            `json:"message"`
+	Level     string            `json:"level"`
+	Fields    map[string]string `json:"fields"`
+}
+
+type getSandboxLogsResponse struct {
+	Logs []sandboxLogEntryResponse `json:"logs"`
+}
+
 type sandboxLifecycleRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	SandboxID string `json:"sandbox_id"`

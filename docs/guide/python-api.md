@@ -231,6 +231,36 @@ Sandbox.get(sandbox_id, namespace=None) -> Sandbox
 | `metadata` | dict | 沙箱元数据键值映射 |
 | `lifecycle` | dict | 生命周期配置；当前包含 `autoResume` 占位字段 |
 | `volumeMounts` | list[dict] | 预留的卷挂载列表；当前固定返回空列表 |
+
+### 获取沙箱审计日志
+
+```python
+sandbox.logs(cursor=None, limit=None, direction=None, level=None, search=None) -> dict
+```
+
+**筛选参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `cursor` | int | 可选的 Unix 毫秒时间戳；`forward` 查询从该时间开始，`backward` 查询到该时间为止 |
+| `limit` | int | 最多返回的日志数量，默认值为 `1000`，取值范围为 `1` 至 `1000` |
+| `direction` | str | 查询方向；可选值为 `forward` 或 `backward`，默认值为 `backward` |
+| `level` | str | 最低日志级别；例如 `warn` 会返回 `warn`、`error`、`fatal` 和 `panic` |
+| `search` | str | 对日志消息进行区分大小写的子字符串匹配，最大长度为 `256` 个字符 |
+
+返回格式为 `{"logs": [...]}`。每条日志包含：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `timestamp` | str | 日志产生时间，使用 RFC 3339 格式 |
+| `message` | str | 日志正文 |
+| `level` | str | 日志严重级别，例如 `info`、`warn` 或 `error` |
+| `fields` | dict[str, str] | 日志附加上下文，当前包含 `namespace` 和 `sandboxID` |
+
+如果没有找到符合条件的日志，则返回 `{"logs": []}`。游标仅精确到毫秒，因此同一毫秒内存在多条日志时，跨页查询可能重复或遗漏边界日志。
+
+该接口仅返回 conchd 控制面的沙箱生命周期审计日志，不包含沙箱内进程的 stdout 或 stderr。日志按 `(namespace, sandboxID)` 隔离，并以 JSON Lines 文件保存在 state 数据库同级的 `sandbox-logs` 目录中。每次记录都会同步追加到对应沙箱的文件，读取时再应用筛选条件。删除或暂停沙箱不会删除日志文件；当前也不自动执行过期清理或文件轮转。
+
 ---
 
 ### 获取沙箱信息

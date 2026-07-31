@@ -14,6 +14,10 @@ class NotFoundError(SandboxError):
     pass
 
 
+class ServiceUnavailableError(SandboxError):
+    pass
+
+
 class AuthenticationError(SandboxError):
     pass
 
@@ -29,6 +33,8 @@ def handle_rpc_error(exc: ConnectError) -> Exception:
         return AuthenticationError(exc.message)
     if exc.code == Code.NOT_FOUND:
         return NotFoundError(exc.message)
+    if exc.code == Code.UNAVAILABLE:
+        return ServiceUnavailableError(exc.message)
     if exc.code == Code.DEADLINE_EXCEEDED:
         return TimeoutException(exc.message)
     return SandboxError(f"{exc.code}: {exc.message}")
