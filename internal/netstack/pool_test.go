@@ -90,7 +90,7 @@ func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
 	}
 	p := &Pool{
 		slotStorage:        storage,
-		newSlots:           make(chan *Slot, 1),
+		warmSlots:          newWarmSlotQueue(1),
 		dynamicReservation: true,
 		prefillReady:       make(chan struct{}),
 	}
@@ -325,24 +325,41 @@ func TestPoolInUseTracking(t *testing.T) {
 	}
 }
 
-func TestEnqueueReplacementReturnsWhenWarmPoolIsAlreadyFull(t *testing.T) {
+func TestPoolCloseRejectsGetWithBufferedSlots(t *testing.T) {
 	p := &Pool{
-		newSlots: make(chan *Slot, 1),
+		warmSlots:    newWarmSlotQueue(1),
+		inUse:        make(map[string]*Slot),
+		prefillReady: make(chan struct{}),
 	}
-	p.newSlots <- &Slot{Key: "idle"}
+	if err := p.warmSlots.push(&Slot{Key: "buffered"}); err != nil {
+		t.Fatalf("push buffered slot: %v", err)
+	}
 
-	result := make(chan error, 1)
-	go func() {
-		result <- p.enqueueReplacement(context.Background(), &Slot{Key: "released"})
-	}()
+	p.Close()
 
-	select {
-	case err := <-result:
-		if err == nil || !strings.Contains(err.Error(), "already full") {
-			t.Fatalf("enqueueReplacement() error = %v, want pool already full", err)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("enqueueReplacement() blocked when the warm pool was already full")
+	if _, err := p.Get(context.Background(), "sandbox-a"); !errors.Is(err, errWarmPoolClosed) {
+		t.Fatalf("Get() after Close() error = %v, want errWarmPoolClosed", err)
+	}
+	size, _ := p.warmSlots.usage()
+	closed := p.warmSlots.isClosed()
+	if size != 1 || !closed {
+		t.Fatalf("warm queue after Close() = (size=%d, closed=%v), want buffered slot preserved in closed queue", size, closed)
+	}
+}
+
+func TestReplenishDroppedSlotSkipsClosedPool(t *testing.T) {
+	storage := &fakeStorage{}
+	p := &Pool{
+		slotStorage: storage,
+		warmSlots:   newWarmSlotQueue(1),
+	}
+	p.warmSlots.close()
+
+	if err := p.replenishDroppedSlot(context.Background()); err != nil {
+		t.Fatalf("replenishDroppedSlot() after close: %v", err)
+	}
+	if storage.acquired != 0 {
+		t.Fatalf("Acquire count = %d, want 0", storage.acquired)
 	}
 }
 
@@ -391,7 +408,7 @@ func TestAdoptWarmIdleCleansCreatingAndCleaningRecords(t *testing.T) {
 	p := &Pool{
 		slotStorage: storage,
 		slotStore:   store,
-		newSlots:    make(chan *Slot, 2),
+		warmSlots:   newWarmSlotQueue(2),
 		inUse:       make(map[string]*Slot),
 	}
 
@@ -420,7 +437,7 @@ func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
 		slotStorage: storage,
 		slotStore:   store,
 		cniManager:  &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
-		newSlots:    make(chan *Slot, 1),
+		warmSlots:   newWarmSlotQueue(1),
 		inUse:       make(map[string]*Slot),
 	}
 
@@ -447,10 +464,12 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 	storeErr := errors.New("store unavailable")
 	p := &Pool{
 		slotStore: storeErrNetworkSlotStore(storeErr),
-		newSlots:  make(chan *Slot, 1),
+		warmSlots: newWarmSlotQueue(1),
 		inUse:     make(map[string]*Slot),
 	}
-	p.newSlots <- slot
+	if err := p.warmSlots.push(slot); err != nil {
+		t.Fatalf("push slot: %v", err)
+	}
 
 	got, err := p.Get(context.Background(), "sandbox-a")
 	if err == nil || !strings.Contains(err.Error(), "failed to record assigned network slot") {
@@ -465,13 +484,12 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 	if len(p.inUse) != 0 {
 		t.Fatalf("inUse len = %d, want 0", len(p.inUse))
 	}
-	select {
-	case requeued := <-p.newSlots:
-		if requeued != slot {
-			t.Fatalf("requeued slot = %#v, want original slot", requeued)
-		}
-	default:
-		t.Fatalf("slot was not requeued after assignment record failure")
+	requeued, popErr := p.warmSlots.pop()
+	if popErr != nil {
+		t.Fatalf("slot was not requeued after assignment record failure: %v", popErr)
+	}
+	if requeued != slot {
+		t.Fatalf("requeued slot = %#v, want original slot", requeued)
 	}
 }
 

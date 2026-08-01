@@ -45,6 +45,8 @@ var (
 	ErrNetworkSlotStoreRead = errors.New("network slot store read failed")
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
 	ErrNetworkSlotCapacity  = errors.New("network slot capacity is below persisted usage")
+	errWarmPoolClosed       = errors.New("warm network pool is closed")
+	errWarmPoolEmpty        = errors.New("warm network pool is empty")
 	errWarmPoolFull         = errors.New("warm network pool is already full")
 )
 
@@ -66,7 +68,7 @@ func withPreserveOnCancel(ctx context.Context) context.Context {
 
 type Pool struct {
 	slotStorage        Storage
-	newSlots           chan *Slot
+	warmSlots          *warmSlotQueue
 	warmSlotNeeded     chan struct{}
 	populateCancel     context.CancelFunc
 	populateDone       <-chan struct{}
@@ -100,8 +102,6 @@ func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask in
 	if err := configureTapNetwork(tapIP, tapMask); err != nil {
 		return nil, fmt.Errorf("invalid tap network config: %w", err)
 	}
-	newSlots := make(chan *Slot, warmPoolSize)
-
 	slotStorage, err := NewStorage(maxSlots)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new storage: %w", err)
@@ -114,7 +114,7 @@ func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask in
 
 	p := &Pool{
 		slotStorage:        slotStorage,
-		newSlots:           newSlots,
+		warmSlots:          newWarmSlotQueue(warmPoolSize),
 		warmSlotNeeded:     make(chan struct{}, 1),
 		dynamicReservation: dynamicReservation,
 		cniManager:         cniManager,
@@ -270,10 +270,17 @@ func (p *Pool) Start(ctx context.Context) {
 	}()
 }
 
-// Close stops the population loop, waits for it to exit, and preserves slots
-// for recovery by the next daemon instance.
+// Close prevents further queue access, stops the population loop, and waits
+// for it to exit. Slots already buffered remain persisted for recovery by the
+// next daemon instance.
 func (p *Pool) Close() {
-	if p == nil || p.populateCancel == nil || p.populateDone == nil {
+	if p == nil {
+		return
+	}
+	if p.warmSlots != nil {
+		p.warmSlots.close()
+	}
+	if p.populateCancel == nil || p.populateDone == nil {
 		return
 	}
 	p.populateCancel()
@@ -281,10 +288,8 @@ func (p *Pool) Close() {
 }
 
 func (p *Pool) populate(ctx context.Context) {
-	defer close(p.newSlots)
-
 	if !p.dynamicReservation {
-		if err := p.populateStatic(ctx); err != nil {
+		if err := p.populateStatic(ctx); err != nil && !errors.Is(err, errWarmPoolClosed) {
 			getLogger().Warn("pool: static reservation exited with error", ulog.F("error", err))
 		}
 		p.prefillReadyOnce.Do(func() {
@@ -296,7 +301,8 @@ func (p *Pool) populate(ctx context.Context) {
 
 	retryDelay := populateRetryMinDelay
 	for {
-		if len(p.newSlots) >= cap(p.newSlots) {
+		warmSlots, warmPoolSize := p.warmSlots.usage()
+		if warmSlots >= warmPoolSize {
 			if !p.waitForWarmSlotNeed(ctx) {
 				return
 			}
@@ -315,8 +321,8 @@ func (p *Pool) populate(ctx context.Context) {
 					"pool: failed to replenish warm network slots; retrying",
 					ulog.F("error", err),
 					ulog.F("retry_delay", retryDelay),
-					ulog.F("warm_slots", len(p.newSlots)),
-					ulog.F("warm_pool_size", cap(p.newSlots)),
+					ulog.F("warm_slots", warmSlots),
+					ulog.F("warm_pool_size", warmPoolSize),
 				)
 				if !p.waitForPopulateRetry(ctx, retryDelay) {
 					return
@@ -325,15 +331,14 @@ func (p *Pool) populate(ctx context.Context) {
 				continue
 			}
 			retryDelay = populateRetryMinDelay
-			select {
-			case <-ctx.Done():
-				p.handleCreatedSlotAfterCancel(ctx, slot)
-				return
-			case p.newSlots <- slot:
-			default:
-				if err := p.discardCreatedSlot(slot); err != nil {
-					getLogger().Warn("pool: failed to discard excess warm slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+			enqueueErr := p.warmSlots.push(slot)
+			if enqueueErr != nil {
+				if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
+					getLogger().Warn("pool: failed to discard unqueued warm slot", ulog.F("slot_index", slot.Idx), ulog.F("error", discardErr))
 				}
+			}
+			if errors.Is(enqueueErr, errWarmPoolClosed) || ctx.Err() != nil {
+				return
 			}
 		}
 	}
@@ -369,7 +374,7 @@ func (p *Pool) waitForPopulateRetry(ctx context.Context, delay time.Duration) bo
 	}
 }
 
-func (p *Pool) discardCreatedSlot(slot *Slot) error {
+func (p *Pool) discardSlotWithoutReplacement(slot *Slot) error {
 	if slot == nil {
 		return nil
 	}
@@ -377,12 +382,12 @@ func (p *Pool) discardCreatedSlot(slot *Slot) error {
 		getLogger().Warn("failed to record network slot cleanup", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
 	}
 	if err := p.teardownSlotNetwork(context.Background(), slot); err != nil {
-		getLogger().Warn("failed to discard network slot during pool stop; slot left acquired", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+		getLogger().Warn("failed to discard unqueued network slot; slot left acquired", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
 		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
 		return err
 	}
 	if err := p.slotStorage.Release(slot); err != nil {
-		getLogger().Warn("failed to release discarded network slot during pool stop", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+		getLogger().Warn("failed to release discarded unqueued network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
 		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
 		return err
 	}
@@ -403,13 +408,17 @@ func (p *Pool) handleCreatedSlotAfterCancel(ctx context.Context, slot *Slot) {
 		p.preserveCreatedSlot(slot)
 		return
 	}
-	_ = p.discardCreatedSlot(slot)
+	_ = p.discardSlotWithoutReplacement(slot)
 }
 
 func (p *Pool) populateStatic(ctx context.Context) error {
-	target := cap(p.newSlots) - len(p.newSlots)
+	if p.warmSlots.isClosed() {
+		return errWarmPoolClosed
+	}
+	inPool, warmPoolSize := p.warmSlots.usage()
+	target := warmPoolSize - inPool
 	if target <= 0 {
-		getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", cap(p.newSlots)))
+		getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", inPool), ulog.F("in_pool", inPool), ulog.F("target", warmPoolSize))
 		return nil
 	}
 
@@ -477,6 +486,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 
 	var firstErr error
 	preserving := false
+	queueClosed := false
 	for r := range results {
 		if r.err != nil {
 			if firstErr == nil {
@@ -484,30 +494,45 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 			}
 			continue
 		}
-		if preserving || ctx.Err() != nil {
-			preserving = true
+		if queueClosed {
+			if err := p.discardSlotWithoutReplacement(r.slot); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if preserving {
 			p.handleCreatedSlotAfterCancel(ctx, r.slot)
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			preserving = true
-			p.handleCreatedSlotAfterCancel(ctx, r.slot)
-		case p.newSlots <- r.slot:
+		enqueueErr := p.warmSlots.push(r.slot)
+		if enqueueErr != nil {
+			if errors.Is(enqueueErr, errWarmPoolClosed) {
+				queueClosed = true
+			}
+			if discardErr := p.discardSlotWithoutReplacement(r.slot); discardErr != nil && firstErr == nil {
+				firstErr = discardErr
+			}
 		}
+		if ctx.Err() != nil {
+			preserving = true
+		}
+	}
+	if queueClosed {
+		return errWarmPoolClosed
 	}
 	if preserving {
 		return ctx.Err()
 	}
 
+	inPool, _ = p.warmSlots.usage()
 	if firstErr != nil {
 		return fmt.Errorf(
 			"static reservation stopped before reaching target: current=%d target=%d: %w",
-			len(p.newSlots), target, firstErr,
+			inPool, target, firstErr,
 		)
 	}
 
-	getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", len(p.newSlots)), ulog.F("in_pool", len(p.newSlots)), ulog.F("target", cap(p.newSlots)))
+	getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", inPool), ulog.F("in_pool", inPool), ulog.F("target", warmPoolSize))
 	return nil
 }
 
@@ -515,41 +540,52 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandboxID is required")
 	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case s, ok := <-p.newSlots:
-		if !ok {
-			return nil, fmt.Errorf("network channel has been closed")
-		}
-		if s != nil {
-			p.signalWarmSlotNeeded()
-			s.assignSandbox(sandboxID)
-			if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
-				s.clearSandboxAssignment()
-				if enqueueErr := p.requeueWarmSlot(s); enqueueErr != nil {
-					p.markSlotCleaning(context.Background(), s, s.SandboxID(), errors.Join(err, enqueueErr))
-					return nil, errors.Join(
-						fmt.Errorf("failed to record assigned network slot: %w", err),
-						fmt.Errorf("failed to requeue unassigned network slot: %w", enqueueErr),
-					)
-				}
-				return nil, fmt.Errorf("failed to record assigned network slot: %w", err)
-			}
-			p.trackInUse(s)
-		}
-		return s, nil
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s, err := p.warmSlots.pop()
+	if errors.Is(err, errWarmPoolClosed) {
+		return nil, err
+	}
+	if errors.Is(err, errWarmPoolEmpty) {
+		available, capacity := p.warmSlots.usage()
 		getLogger().Warn(
 			"no available network slot in the pool",
-			ulog.F("capacity", cap(p.newSlots)),
+			ulog.F("capacity", capacity),
 			ulog.F("in_use", p.inUseCount()),
-			ulog.F("available", len(p.newSlots)),
+			ulog.F("available", available),
 			ulog.F("prefill_ready", p.isPrefillReady()),
 			ulog.F("dynamic_reservation", p.dynamicReservation),
 		)
-		return nil, fmt.Errorf("no available network slot in the pool, warm_pool_size=%d", cap(p.newSlots))
+		return nil, fmt.Errorf("no available network slot in the pool, warm_pool_size=%d: %w", capacity, err)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	p.signalWarmSlotNeeded()
+	if s == nil {
+		return nil, nil
+	}
+	s.assignSandbox(sandboxID)
+	if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+		s.clearSandboxAssignment()
+		if enqueueErr := p.warmSlots.push(s); enqueueErr != nil {
+			discardErr := p.discardSlotWithoutReplacement(s)
+			joinedErr := errors.Join(
+				fmt.Errorf("failed to record assigned network slot: %w", err),
+				fmt.Errorf("failed to requeue unassigned network slot: %w", enqueueErr),
+			)
+			if discardErr != nil {
+				joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to discard unqueued network slot: %w", discardErr))
+			}
+			return nil, joinedErr
+		}
+		return nil, fmt.Errorf("failed to record assigned network slot: %w", err)
+	}
+	p.trackInUse(s)
+	return s, nil
 }
 
 func (p *Pool) isPrefillReady() bool {
@@ -565,20 +601,6 @@ func (p *Pool) inUseCount() int {
 	p.inUseMu.Lock()
 	defer p.inUseMu.Unlock()
 	return len(p.inUse)
-}
-
-func (p *Pool) requeueWarmSlot(slot *Slot) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("network channel has been closed")
-		}
-	}()
-	select {
-	case p.newSlots <- slot:
-		return nil
-	default:
-		return fmt.Errorf("network channel is full")
-	}
 }
 
 func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
@@ -617,24 +639,6 @@ func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
 	return nil
 }
 
-func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Populate closes newSlots during shutdown; Release may race with that close.
-			err = fmt.Errorf("network channel has been closed")
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case p.newSlots <- slot:
-		return nil
-	default:
-		return errWarmPoolFull
-	}
-}
-
 func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 	select {
 	case <-ctx.Done():
@@ -651,18 +655,15 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 					return fmt.Errorf("failed to record released network slot: %w", err)
 				}
 				p.untrackInUse(slot)
-				if err := p.enqueueReplacement(ctx, slot); err != nil {
-					if errors.Is(err, errWarmPoolFull) {
-						if discardErr := p.discardCreatedSlot(slot); discardErr != nil {
-							return fmt.Errorf("failed to discard excess released network slot: %w", discardErr)
-						}
-						getLogger().Info("discarded released slot because warm pool is full", ulog.F("slot_index", slot.Idx))
-						return nil
+				if err := p.warmSlots.push(slot); err != nil {
+					if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
+						return errors.Join(
+							fmt.Errorf("failed to enqueue released network slot: %w", err),
+							fmt.Errorf("failed to discard unqueued released network slot: %w", discardErr),
+						)
 					}
-					slot.assignSandbox(sandboxID)
-					p.trackInUse(slot)
-					_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, err)
-					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
+					getLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_index", slot.Idx), ulog.F("reason", err))
+					return nil
 				}
 				getLogger().Info("slot released back to pool", ulog.F("slot_index", slot.Idx))
 			} else {
@@ -715,29 +716,28 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 	return errors.Join(errs...)
 }
 
-func (p *Pool) replenishDroppedSlot(ctx context.Context) (err error) {
-	var slot *Slot
-	defer func() {
-		if r := recover(); r != nil {
-			p.discardCreatedSlot(slot)
-			err = fmt.Errorf("network channel has been closed")
-		}
-	}()
+func (p *Pool) replenishDroppedSlot(ctx context.Context) error {
+	if p.warmSlots.isClosed() {
+		return nil
+	}
 
-	slot, err = p.createNetworkSlot(ctx)
+	slot, err := p.createNetworkSlot(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create replacement network slot: %w", err)
 	}
-	select {
-	case <-ctx.Done():
-		p.discardCreatedSlot(slot)
-		return ctx.Err()
-	case p.newSlots <- slot:
-		return nil
-	default:
-		p.discardCreatedSlot(slot)
+	if err := ctx.Err(); err != nil {
+		if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
+			return errors.Join(err, fmt.Errorf("failed to discard canceled replacement network slot: %w", discardErr))
+		}
+		return err
+	}
+	if err := p.warmSlots.push(slot); err == nil {
 		return nil
 	}
+	if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
+		return fmt.Errorf("failed to discard unqueued replacement network slot: %w", discardErr)
+	}
+	return nil
 }
 
 func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
@@ -1054,13 +1054,18 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			return adopted, ctx.Err()
-		case p.newSlots <- slot:
+		if err := ctx.Err(); err != nil {
+			return adopted, err
+		}
+		if enqueueErr := p.warmSlots.push(slot); enqueueErr == nil {
 			adopted++
-		default:
-			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm queue full"); cleanupErr != nil {
+		} else {
+			reason := "startup warm queue full"
+			if errors.Is(enqueueErr, errWarmPoolClosed) {
+				reason = "startup warm queue closed"
+				errs = append(errs, enqueueErr)
+			}
+			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, reason); cleanupErr != nil {
 				errs = append(errs, fmt.Errorf("%w: cleanup overflow warm slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
 			}
 		}
