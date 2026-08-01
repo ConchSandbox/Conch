@@ -91,13 +91,10 @@ func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
 	p := &Pool{
 		slotStorage:        storage,
 		newSlots:           make(chan *Slot, 1),
-		done:               make(chan struct{}),
 		dynamicReservation: true,
 		prefillReady:       make(chan struct{}),
-		populateDone:       make(chan struct{}),
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go p.Populate(ctx)
+	p.Start(context.Background())
 
 	select {
 	case <-storage.attempts:
@@ -110,8 +107,17 @@ func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	cancel()
-	p.WaitPopulateStopped()
+	closeDone := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not stop the populate loop")
+	}
+	p.Close()
 }
 
 func TestAdoptWarmIdleRejectsAssignedSlotsOverCapacity(t *testing.T) {
@@ -179,10 +185,8 @@ func TestIsExpectedShutdownError(t *testing.T) {
 	activeCtx := context.Background()
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	preserveCtx, preserveCancel := context.WithCancel(WithPreserveOnCancel(context.Background()))
+	preserveCtx, preserveCancel := context.WithCancel(withPreserveOnCancel(context.Background()))
 	preserveCancel()
-	cleanupCtx, cleanupCancel := context.WithCancelCause(WithPreserveOnCancel(context.Background()))
-	cleanupCancel(errPoolCleanupRequested)
 
 	tests := []struct {
 		name string
@@ -197,7 +201,6 @@ func TestIsExpectedShutdownError(t *testing.T) {
 		{name: "preserve typed canceled", ctx: preserveCtx, err: context.Canceled, want: true},
 		{name: "preserve typed deadline", ctx: preserveCtx, err: context.DeadlineExceeded, want: true},
 		{name: "preserve interrupt text", ctx: preserveCtx, err: fmt.Errorf("command failed: signal: interrupt"), want: true},
-		{name: "explicit cleanup cancel", ctx: cleanupCtx, err: context.Canceled, want: false},
 		{name: "non shutdown", ctx: canceledCtx, err: errors.New("permission denied"), want: false},
 	}
 	for _, tt := range tests {
@@ -246,7 +249,7 @@ func TestHandleCreatedSlotAfterPreserveCancelRecordsWarmIdle(t *testing.T) {
 	}
 	slot.setNetNSPath(t.TempDir() + "/ns-2")
 
-	ctx, cancel := context.WithCancel(WithPreserveOnCancel(context.Background()))
+	ctx, cancel := context.WithCancel(withPreserveOnCancel(context.Background()))
 	cancel()
 	p.handleCreatedSlotAfterCancel(ctx, slot)
 
@@ -320,21 +323,11 @@ func TestPoolInUseTracking(t *testing.T) {
 	if _, ok := p.inUse["2"]; ok {
 		t.Fatalf("untrackInUse did not remove slot")
 	}
-
-	p.trackInUse(slot)
-	drained := p.drainInUse()
-	if len(drained) != 1 || drained[0] != slot {
-		t.Fatalf("drainInUse() = %#v, want tracked slot", drained)
-	}
-	if len(p.inUse) != 0 {
-		t.Fatalf("inUse len after drain = %d, want 0", len(p.inUse))
-	}
 }
 
 func TestEnqueueReplacementReturnsWhenWarmPoolIsAlreadyFull(t *testing.T) {
 	p := &Pool{
 		newSlots: make(chan *Slot, 1),
-		done:     make(chan struct{}),
 	}
 	p.newSlots <- &Slot{Key: "idle"}
 
@@ -512,31 +505,4 @@ func TestCleanupAssignedWithoutReadySandbox(t *testing.T) {
 
 func storeErrNetworkSlotStore(err error) *fakeNetworkSlotStore {
 	return &fakeNetworkSlotStore{records: make(map[string]state.NetworkSlotRecord), upsertErr: err}
-}
-
-func TestDiscardDuringShutdownDoesNotReplenish(t *testing.T) {
-	storage := &fakeStorage{}
-	p := &Pool{
-		slotStorage: storage,
-		newSlots:    make(chan *Slot, 1),
-		done:        make(chan struct{}),
-		inUse:       make(map[string]*Slot),
-	}
-	slot := &Slot{Key: "2", Idx: 2}
-	slot.setNetNSPath(t.TempDir() + "/missing-netns")
-	p.trackInUse(slot)
-
-	close(p.done)
-	if err := p.Discard(context.Background(), slot); err != nil {
-		t.Fatalf("Discard() error = %v", err)
-	}
-	if storage.released != 1 {
-		t.Fatalf("Release count = %d, want 1", storage.released)
-	}
-	if storage.acquired != 0 {
-		t.Fatalf("Acquire count = %d, want 0", storage.acquired)
-	}
-	if len(p.inUse) != 0 {
-		t.Fatalf("inUse len = %d, want 0", len(p.inUse))
-	}
 }

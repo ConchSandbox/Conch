@@ -856,23 +856,11 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	return captured, nil
 }
 
-func (m *Manager) CleanupPool() error {
-	logger := ulog.GetLogger()
-	logger.Debug("cleanup pool begin")
-	err := m.pool.Cleanup()
-	if err != nil {
-		return fmt.Errorf("failed to cleanup pool: %v", err)
-	}
-	logger.Debug("cleanup pool finish")
-
-	return nil
-}
-
-func (m *Manager) WaitPoolPopulateStopped() {
+func (m *Manager) Close() {
 	if m == nil || m.pool == nil {
 		return
 	}
-	m.pool.WaitPopulateStopped()
+	m.pool.Close()
 }
 
 func (m *Manager) AllocateUniqueCID(sandboxId string) (uint32, error) {

@@ -29,26 +29,22 @@ import (
 	"time"
 
 	"github.com/coreos/go-iptables/iptables"
-	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
-	DefaultWarmPoolSize     = 250
-	maxSlots                = 4000
-	prefillWorkers          = 16
-	populateRetryMinDelay   = time.Second
-	populateRetryMaxDelay   = 30 * time.Second
-	cniBridgeCleanupRetries = 300
-	cniBridgeCleanupDelay   = 100 * time.Millisecond
+	DefaultWarmPoolSize   = 250
+	maxSlots              = 4000
+	prefillWorkers        = 16
+	populateRetryMinDelay = time.Second
+	populateRetryMaxDelay = 30 * time.Second
 )
 
 var (
 	ErrNetworkSlotStoreRead = errors.New("network slot store read failed")
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
 	ErrNetworkSlotCapacity  = errors.New("network slot capacity is below persisted usage")
-	errPoolCleanupRequested = errors.New("network pool cleanup requested")
 	errWarmPoolFull         = errors.New("warm network pool is already full")
 )
 
@@ -64,7 +60,7 @@ type NetworkSlotStore interface {
 
 type preserveOnCancelContextKey struct{}
 
-func WithPreserveOnCancel(ctx context.Context) context.Context {
+func withPreserveOnCancel(ctx context.Context) context.Context {
 	return context.WithValue(ctx, preserveOnCancelContextKey{}, true)
 }
 
@@ -72,20 +68,15 @@ type Pool struct {
 	slotStorage        Storage
 	newSlots           chan *Slot
 	warmSlotNeeded     chan struct{}
-	done               chan struct{}
+	populateCancel     context.CancelFunc
+	populateDone       <-chan struct{}
 	dynamicReservation bool
 	cniManager         *CNIManager
 	slotStore          NetworkSlotStore
 	inUse              map[string]*Slot
 	inUseMu            sync.Mutex
-	stopOnce           sync.Once
 	prefillReady       chan struct{}
 	prefillReadyOnce   sync.Once
-	populateMu         sync.Mutex
-	populateStarted    bool
-	populateCtx        context.Context
-	populateCancel     context.CancelCauseFunc
-	populateDone       chan struct{}
 }
 
 func normalizeAndValidateWarmPoolSize(warmPoolSize int) (int, error) {
@@ -125,13 +116,11 @@ func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask in
 		slotStorage:        slotStorage,
 		newSlots:           newSlots,
 		warmSlotNeeded:     make(chan struct{}, 1),
-		done:               make(chan struct{}),
 		dynamicReservation: dynamicReservation,
 		cniManager:         cniManager,
 		slotStore:          slotStore,
 		inUse:              make(map[string]*Slot),
 		prefillReady:       make(chan struct{}),
-		populateDone:       make(chan struct{}),
 	}
 
 	return p, nil
@@ -216,9 +205,6 @@ func shouldPreserveAfterCancel(ctx context.Context) bool {
 	if ctx == nil || ctx.Err() == nil {
 		return false
 	}
-	if errors.Is(context.Cause(ctx), errPoolCleanupRequested) {
-		return false
-	}
 	preserve, _ := ctx.Value(preserveOnCancelContextKey{}).(bool)
 	return preserve
 }
@@ -272,25 +258,29 @@ func (p *Pool) markSlotCleaning(ctx context.Context, slot *Slot, sandboxID strin
 	}
 }
 
-func (p *Pool) Populate(ctx context.Context) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	p.populateMu.Lock()
-	if p.populateStarted {
-		p.populateMu.Unlock()
-		cancel(nil)
+// Start launches the pool's population loop. It must be called exactly once.
+func (p *Pool) Start(ctx context.Context) {
+	populateCtx, populateCancel := context.WithCancel(withPreserveOnCancel(ctx))
+	populateDone := make(chan struct{})
+	p.populateCancel = populateCancel
+	p.populateDone = populateDone
+	go func() {
+		defer close(populateDone)
+		p.populate(populateCtx)
+	}()
+}
+
+// Close stops the population loop, waits for it to exit, and preserves slots
+// for recovery by the next daemon instance.
+func (p *Pool) Close() {
+	if p == nil || p.populateCancel == nil || p.populateDone == nil {
 		return
 	}
-	if p.populateDone == nil {
-		p.populateDone = make(chan struct{})
-	}
-	p.populateStarted = true
-	p.populateCtx = ctx
-	p.populateCancel = cancel
-	populateDone := p.populateDone
-	p.populateMu.Unlock()
+	p.populateCancel()
+	<-p.populateDone
+}
 
-	defer cancel(nil)
-	defer close(populateDone)
+func (p *Pool) populate(ctx context.Context) {
 	defer close(p.newSlots)
 
 	if !p.dynamicReservation {
@@ -300,12 +290,8 @@ func (p *Pool) Populate(ctx context.Context) {
 		p.prefillReadyOnce.Do(func() {
 			close(p.prefillReady)
 		})
-		select {
-		case <-p.done:
-			return
-		case <-ctx.Done():
-			return
-		}
+		<-ctx.Done()
+		return
 	}
 
 	retryDelay := populateRetryMinDelay
@@ -317,8 +303,6 @@ func (p *Pool) Populate(ctx context.Context) {
 			continue
 		}
 		select {
-		case <-p.done:
-			return
 		case <-ctx.Done():
 			return
 		default:
@@ -342,9 +326,6 @@ func (p *Pool) Populate(ctx context.Context) {
 			}
 			retryDelay = populateRetryMinDelay
 			select {
-			case <-p.done:
-				_ = p.discardCreatedSlot(slot)
-				return
 			case <-ctx.Done():
 				p.handleCreatedSlotAfterCancel(ctx, slot)
 				return
@@ -360,8 +341,6 @@ func (p *Pool) Populate(ctx context.Context) {
 
 func (p *Pool) waitForWarmSlotNeed(ctx context.Context) bool {
 	select {
-	case <-p.done:
-		return false
 	case <-ctx.Done():
 		return false
 	case <-p.warmSlotNeeded:
@@ -383,8 +362,6 @@ func (p *Pool) waitForPopulateRetry(ctx context.Context, delay time.Duration) bo
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
-	case <-p.done:
-		return false
 	case <-ctx.Done():
 		return false
 	case <-timer.C:
@@ -429,15 +406,6 @@ func (p *Pool) handleCreatedSlotAfterCancel(ctx context.Context, slot *Slot) {
 	_ = p.discardCreatedSlot(slot)
 }
 
-func (p *Pool) isStopping() bool {
-	select {
-	case <-p.done:
-		return true
-	default:
-		return false
-	}
-}
-
 func (p *Pool) populateStatic(ctx context.Context) error {
 	target := cap(p.newSlots) - len(p.newSlots)
 	if target <= 0 {
@@ -470,8 +438,6 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 				select {
 				case <-ctx.Done():
 					return
-				case <-p.done:
-					return
 				case _, ok := <-jobs:
 					if !ok {
 						return
@@ -481,9 +447,6 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 					select {
 					case <-ctx.Done():
 						p.handleCreatedSlotAfterCancel(ctx, slot)
-						return
-					case <-p.done:
-						_ = p.discardCreatedSlot(slot)
 						return
 					case results <- result{slot: slot, err: err}:
 					}
@@ -499,14 +462,6 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 	// Submit one prefill task per target slot; static reservation is one-shot.
 	for i := 0; i < target; i++ {
 		select {
-		case <-p.done:
-			close(jobs)
-			for r := range results {
-				if r.err == nil {
-					_ = p.discardCreatedSlot(r.slot)
-				}
-			}
-			return nil
 		case <-ctx.Done():
 			close(jobs)
 			for r := range results {
@@ -521,7 +476,6 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 	close(jobs)
 
 	var firstErr error
-	stopping := false
 	preserving := false
 	for r := range results {
 		if r.err != nil {
@@ -530,28 +484,17 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 			}
 			continue
 		}
-		if stopping || p.isStopping() {
-			stopping = true
-			_ = p.discardCreatedSlot(r.slot)
-			continue
-		}
 		if preserving || ctx.Err() != nil {
 			preserving = true
 			p.handleCreatedSlotAfterCancel(ctx, r.slot)
 			continue
 		}
 		select {
-		case <-p.done:
-			stopping = true
-			_ = p.discardCreatedSlot(r.slot)
 		case <-ctx.Done():
 			preserving = true
 			p.handleCreatedSlotAfterCancel(ctx, r.slot)
 		case p.newSlots <- r.slot:
 		}
-	}
-	if stopping {
-		return nil
 	}
 	if preserving {
 		return ctx.Err()
@@ -631,8 +574,6 @@ func (p *Pool) requeueWarmSlot(slot *Slot) (err error) {
 		}
 	}()
 	select {
-	case <-p.done:
-		return fmt.Errorf("pool is stopping")
 	case p.newSlots <- slot:
 		return nil
 	default:
@@ -685,8 +626,6 @@ func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
 	}()
 
 	select {
-	case <-p.done:
-		return fmt.Errorf("pool is stopping")
 	case <-ctx.Done():
 		return ctx.Err()
 	case p.newSlots <- slot:
@@ -767,13 +706,9 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 	}
 
 	if len(errs) == 0 {
-		select {
-		case <-p.done:
-		default:
-			if err := p.replenishDroppedSlot(ctx); err != nil {
-				getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-				errs = append(errs, err)
-			}
+		if err := p.replenishDroppedSlot(ctx); err != nil {
+			getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+			errs = append(errs, err)
 		}
 	}
 
@@ -797,9 +732,6 @@ func (p *Pool) replenishDroppedSlot(ctx context.Context) (err error) {
 	case <-ctx.Done():
 		p.discardCreatedSlot(slot)
 		return ctx.Err()
-	case <-p.done:
-		p.discardCreatedSlot(slot)
-		return nil
 	case p.newSlots <- slot:
 		return nil
 	default:
@@ -1231,17 +1163,6 @@ func (p *Pool) untrackInUse(slot *Slot) {
 	delete(p.inUse, slot.Key)
 }
 
-func (p *Pool) drainInUse() []*Slot {
-	p.inUseMu.Lock()
-	defer p.inUseMu.Unlock()
-	slots := make([]*Slot, 0, len(p.inUse))
-	for key, slot := range p.inUse {
-		slots = append(slots, slot)
-		delete(p.inUse, key)
-	}
-	return slots
-}
-
 func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return fmt.Errorf("slot is nil")
@@ -1265,165 +1186,4 @@ func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 		return err
 	}
 	return nil
-}
-
-func (p *Pool) stopPopulate() {
-	p.stopOnce.Do(func() {
-		if p.done == nil {
-			return
-		}
-		p.populateMu.Lock()
-		cancel := p.populateCancel
-		p.populateMu.Unlock()
-		if cancel != nil {
-			cancel(errPoolCleanupRequested)
-		}
-		close(p.done)
-	})
-}
-
-func (p *Pool) WaitPopulateStopped() {
-	p.waitPopulateStopped(true)
-}
-
-func (p *Pool) waitPopulateStopped(requireCanceled bool) {
-	p.populateMu.Lock()
-	started := p.populateStarted
-	ctx := p.populateCtx
-	done := p.populateDone
-	p.populateMu.Unlock()
-
-	if !started || done == nil {
-		return
-	}
-	if requireCanceled && (ctx == nil || ctx.Err() == nil) {
-		return
-	}
-	<-done
-}
-
-func (p *Pool) Cleanup() error {
-	p.stopPopulate()
-	p.waitPopulateStopped(false)
-
-	var errs []error
-	cleaned := 0
-	failed := 0
-	cleanupSlot := func(slot *Slot, category string) {
-		if slot == nil {
-			failed++
-			return
-		}
-		sandboxID := slot.SandboxID()
-		if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, nil); err != nil {
-			getLogger().Error("cleanup slot failed when recording cleaning state", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
-			errs = append(errs, fmt.Errorf("cleanup slot %s record cleaning failed, %w", slot.Key, err))
-			failed++
-			return
-		}
-		err := p.teardownSlotNetwork(context.Background(), slot)
-		if err != nil {
-			getLogger().Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
-			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
-			p.markSlotCleaning(context.Background(), slot, sandboxID, err)
-			p.trackInUse(slot)
-			failed++
-			return
-		}
-		err = p.slotStorage.Release(slot)
-		if err != nil {
-			getLogger().Error("cleanup slot failed when releasing", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
-			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
-			p.markSlotCleaning(context.Background(), slot, sandboxID, err)
-			p.trackInUse(slot)
-			failed++
-			return
-		}
-		if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
-			getLogger().Error("cleanup slot failed when deleting record", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
-			errs = append(errs, fmt.Errorf("cleanup slot %s record failed, %w", slot.Key, err))
-			failed++
-			return
-		}
-		cleaned++
-	}
-
-	finishInUse := cleanupdiag.Start("network_pool.cleanup_in_use")
-	inUseSlots := p.drainInUse()
-	for _, slot := range inUseSlots {
-		cleanupSlot(slot, "in_use")
-	}
-	finishInUse(nil)
-
-	finishQueue := cleanupdiag.Start("network_pool.cleanup_queue", ulog.F("queued_slots", len(p.newSlots)), ulog.F("queue_capacity", cap(p.newSlots)))
-	queueCleaned := 0
-	draining := true
-	for draining {
-		select {
-		case slot, ok := <-p.newSlots:
-			if !ok {
-				draining = false
-				continue
-			}
-			cleanupSlot(slot, "queue")
-			queueCleaned++
-		default:
-			draining = false
-		}
-	}
-	finishQueue(nil)
-
-	finishRecords := cleanupdiag.Start("network_pool.cleanup_recorded")
-	if p.slotStore != nil {
-		records, err := p.slotStore.ListNetworkSlots(context.Background())
-		if err != nil {
-			errs = append(errs, fmt.Errorf("list recorded network slots: %w", err))
-			failed++
-		} else {
-			for _, rec := range records {
-				slot, err := slotFromNetworkSlotRecord(rec)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("restore recorded network slot %s: %w", rec.SlotKey, err))
-					failed++
-					continue
-				}
-				cleanupSlot(slot, "record")
-			}
-		}
-	}
-	finishRecords(nil)
-
-	if failed == 0 {
-		if err := p.cleanupCNIHostArtifacts(context.Background()); err != nil {
-			getLogger().Error("cleanup cni host artifacts failed", ulog.F("error", err))
-			errs = append(errs, err)
-		}
-	} else {
-		getLogger().Warn("skipping cni host artifact cleanup because slot cleanup failed", ulog.F("failed_slots", failed))
-	}
-
-	getLogger().Info("pool cleanup summary",
-		ulog.F("cleaned_slots", cleaned),
-		ulog.F("failed_slots", failed),
-		ulog.F("in_use_slots", len(inUseSlots)),
-		ulog.F("queue_slots", queueCleaned),
-	)
-	return errors.Join(errs...)
-}
-
-func (p *Pool) cleanupCNIHostArtifacts(ctx context.Context) error {
-	if p == nil || p.cniManager == nil {
-		return nil
-	}
-	bridges, err := p.cniManager.SelectedBridgeNames()
-	if err != nil {
-		return fmt.Errorf("finding cni bridge artifacts: %w", err)
-	}
-	var errs []error
-	for _, bridgeName := range bridges {
-		if err := deleteEmptyCNIHostBridge(ctx, bridgeName, cniBridgeCleanupRetries, cniBridgeCleanupDelay); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }

@@ -77,7 +77,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	go pool.Populate(netstack.WithPreserveOnCancel(ctx))
+	pool.Start(ctx)
 	return &Service{manager: manager}, nil
 }
 
@@ -123,7 +123,7 @@ func (s *Service) CleanupAssignedWithoutReadySandbox(restoredSandboxIDs map[stri
 }
 
 func (s *Service) Close() error {
-	if s == nil || s.manager == nil {
+	if s == nil {
 		return nil
 	}
 	s.closeMu.Lock()
@@ -133,7 +133,9 @@ func (s *Service) Close() error {
 	}
 	s.closed = true
 	finish := cleanupdiag.Start("sandbox_service.close_preserve")
-	s.manager.WaitPoolPopulateStopped()
+	if s.manager != nil {
+		s.manager.Close()
+	}
 	finish(nil)
 	return s.closeErr
 }
