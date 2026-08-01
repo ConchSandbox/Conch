@@ -19,19 +19,23 @@ package netstack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
 const netNamespacesDir = "/var/run/netns"
 
+var ErrNoAvailableNetworkSlots = errors.New("network slot capacity reached")
+
 type Storage interface {
 	Acquire(ctx context.Context) (*Slot, error)
+	Claim(s *Slot) error
 	Release(s *Slot) error
 }
 
 func NewStorage(maxSlotsSize int) (Storage, error) {
-	if maxSlotsSize == invaildSlotSize {
-		return nil, fmt.Errorf("get invaild slotsize")
+	if maxSlotsSize <= 0 {
+		return nil, fmt.Errorf("invalid max slots size %d", maxSlotsSize)
 	}
 	return NewStorageLocal(maxSlotsSize)
 }

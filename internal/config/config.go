@@ -53,7 +53,7 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int       `yaml:"pool_size"`
+	WarmPoolSize       int       `yaml:"warm_pool_size"`
 	DynamicReservation bool      `yaml:"dynamic_reservation"`
 	TapIP              string    `yaml:"tap_ip"`
 	TapMask            int       `yaml:"tap_mask"`
@@ -131,7 +131,7 @@ func DefaultConfig() *Config {
 			WorkDir:    defaultWorkDir,
 		},
 		Network: NetworkConfig{
-			PoolSize:           250,
+			WarmPoolSize:       netstack.DefaultWarmPoolSize,
 			DynamicReservation: false,
 			TapIP:              "192.168.100.2",
 			TapMask:            24,
@@ -250,8 +250,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.WorkDir == "" {
 		cfg.Server.WorkDir = defaultCfg.Server.WorkDir
 	}
-	if cfg.Network.PoolSize == 0 {
-		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
+	if cfg.Network.WarmPoolSize == 0 {
+		cfg.Network.WarmPoolSize = defaultCfg.Network.WarmPoolSize
 	}
 	if cfg.Network.TapIP == "" {
 		cfg.Network.TapIP = defaultCfg.Network.TapIP

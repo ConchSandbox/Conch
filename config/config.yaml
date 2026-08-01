@@ -17,9 +17,9 @@ server:
   port: 4063
 
 network:
-  # With the current single-bridge CNI config, CIDR capacity is at most 4093 slots; practical max depends on host/kernel/network setup. Default: 250
-  pool_size: 250
-  # If setting dynamic reservation to true, then there is a background thread keep filling the pool till it reaches the max size set above
+  # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250
+  warm_pool_size: 250
+  # Keep replenishing the warm pool in the background. Allocation failures are retried with backoff.
   dynamic_reservation: false
   # Tap interface address inside the sandbox network namespace
   tap_ip: 192.168.100.2

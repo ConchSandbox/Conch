@@ -133,7 +133,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			WorkDir: cfg.Server.WorkDir,
 		},
 		Sandbox: &containerdhost.SandboxConfig{
-			PoolSize:           cfg.Network.PoolSize,
+			WarmPoolSize:       cfg.Network.WarmPoolSize,
 			DynamicReservation: cfg.Network.DynamicReservation,
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,

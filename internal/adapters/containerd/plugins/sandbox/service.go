@@ -21,7 +21,7 @@ import (
 )
 
 type Config struct {
-	PoolSize           int                       `toml:"pool_size" json:"poolSize"`
+	WarmPoolSize       int                       `toml:"warm_pool_size" json:"warmPoolSize"`
 	DynamicReservation bool                      `toml:"dynamic_reservation" json:"dynamicReservation"`
 	TapIP              string                    `toml:"tap_ip" json:"tapIP"`
 	TapMask            int                       `toml:"tap_mask" json:"tapMask"`
@@ -63,12 +63,12 @@ func New(
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := netstack.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.TapIP, cfg.TapMask, cfg.CNI, currentNetworkSlotStore())
+	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.DynamicReservation, cfg.TapIP, cfg.TapMask, cfg.CNI, currentNetworkSlotStore())
 	if err != nil {
 		return nil, err
 	}
 	if _, err := pool.AdoptWarmIdle(ctx); err != nil {
-		if errors.Is(err, netstack.ErrNetworkSlotStoreRead) || errors.Is(err, netstack.ErrNetworkSlotCleanup) {
+		if errors.Is(err, netstack.ErrNetworkSlotStoreRead) || errors.Is(err, netstack.ErrNetworkSlotCleanup) || errors.Is(err, netstack.ErrNetworkSlotCapacity) {
 			return nil, err
 		}
 		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))

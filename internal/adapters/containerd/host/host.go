@@ -62,7 +62,7 @@ type SnapshotConfig struct {
 }
 
 type SandboxConfig struct {
-	PoolSize           int
+	WarmPoolSize       int
 	DynamicReservation bool
 	TapIP              string
 	TapMask            int
@@ -296,7 +296,7 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"pool_size":            cfg.PoolSize,
+		"warm_pool_size":       cfg.WarmPoolSize,
 		"dynamic_reservation":  cfg.DynamicReservation,
 		"tap_ip":               cfg.TapIP,
 		"tap_mask":             cfg.TapMask,

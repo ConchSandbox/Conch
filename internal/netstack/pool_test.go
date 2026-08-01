@@ -14,16 +14,120 @@ import (
 type fakeStorage struct {
 	released int
 	acquired int
+	claimed  int
+	claimErr error
 }
+
+type failingStorage struct {
+	attempts chan struct{}
+	err      error
+}
+
+func (s *failingStorage) Acquire(context.Context) (*Slot, error) {
+	select {
+	case s.attempts <- struct{}{}:
+	default:
+	}
+	return nil, s.err
+}
+
+func (s *failingStorage) Claim(*Slot) error { return nil }
+
+func (s *failingStorage) Release(*Slot) error { return nil }
 
 func (s *fakeStorage) Acquire(ctx context.Context) (*Slot, error) {
 	s.acquired++
 	return nil, errors.New("unexpected acquire")
 }
 
+func (s *fakeStorage) Claim(slot *Slot) error {
+	s.claimed++
+	return s.claimErr
+}
+
 func (s *fakeStorage) Release(slot *Slot) error {
 	s.released++
 	return nil
+}
+
+func TestNormalizeAndValidateWarmPoolSize(t *testing.T) {
+	tests := []struct {
+		name       string
+		warm       int
+		wantWarm   int
+		wantErrSub string
+	}{
+		{name: "defaults", wantWarm: DefaultWarmPoolSize},
+		{name: "explicit", warm: 100, wantWarm: 100},
+		{name: "maximum", warm: maxSlots, wantWarm: maxSlots},
+		{name: "exceeds maximum", warm: maxSlots + 1, wantErrSub: "maximum supported slots"},
+		{name: "negative", warm: -1, wantErrSub: "warm_pool_size"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotWarm, err := normalizeAndValidateWarmPoolSize(tt.warm)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("normalizeAndValidateWarmPoolSize() error = %v, want containing %q", err, tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeAndValidateWarmPoolSize() error = %v", err)
+			}
+			if gotWarm != tt.wantWarm {
+				t.Fatalf("normalizeAndValidateWarmPoolSize() = %d, want %d", gotWarm, tt.wantWarm)
+			}
+		})
+	}
+}
+
+func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
+	storage := &failingStorage{
+		attempts: make(chan struct{}, 2),
+		err:      errors.New("cni address pool exhausted"),
+	}
+	p := &Pool{
+		slotStorage:        storage,
+		newSlots:           make(chan *Slot, 1),
+		done:               make(chan struct{}),
+		dynamicReservation: true,
+		prefillReady:       make(chan struct{}),
+		populateDone:       make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Populate(ctx)
+
+	select {
+	case <-storage.attempts:
+	case <-time.After(time.Second):
+		t.Fatal("Populate() did not attempt slot allocation")
+	}
+	select {
+	case <-storage.attempts:
+		t.Fatal("Populate() retried without backoff")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	p.WaitPopulateStopped()
+}
+
+func TestAdoptWarmIdleRejectsAssignedSlotsOverCapacity(t *testing.T) {
+	store := newFakeNetworkSlotStore(
+		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotAssigned, SandboxID: "sandbox-a"},
+	)
+	storage := &fakeStorage{claimErr: ErrNoAvailableNetworkSlots}
+	p := &Pool{slotStorage: storage, slotStore: store}
+
+	_, err := p.AdoptWarmIdle(context.Background())
+	if !errors.Is(err, ErrNetworkSlotCapacity) {
+		t.Fatalf("AdoptWarmIdle() error = %v, want ErrNetworkSlotCapacity", err)
+	}
+	if storage.claimed != 1 {
+		t.Fatalf("Claim count = %d, want 1", storage.claimed)
+	}
 }
 
 type fakeNetworkSlotStore struct {

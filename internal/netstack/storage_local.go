@@ -90,7 +90,7 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 			return nil, fmt.Errorf("failed to acquire IP slot: %w", acquireTimeoutCtx.Err())
 		default:
 			if len(s.acquiredNs) >= s.maxSlotSize {
-				return nil, fmt.Errorf("failed to acquire IP slot: no empty slots found")
+				return nil, fmt.Errorf("failed to acquire network slot: %w", ErrNoAvailableNetworkSlots)
 			}
 
 			slotIdx++
@@ -125,6 +125,26 @@ func (s *StorageLocal) Acquire(ctx context.Context) (*Slot, error) {
 	}
 }
 
+func (s *StorageLocal) Claim(slot *Slot) error {
+	if slot == nil {
+		return fmt.Errorf("cannot claim nil network slot")
+	}
+
+	s.acquiredNsMu.Lock()
+	defer s.acquiredNsMu.Unlock()
+
+	slotName := getSlotName(slot.Idx)
+	if _, ok := s.acquiredNs[slotName]; ok {
+		return nil
+	}
+	if len(s.acquiredNs) >= s.maxSlotSize {
+		return fmt.Errorf("cannot claim network slot %s: %w", slot.Key, ErrNoAvailableNetworkSlots)
+	}
+	s.acquiredNs[slotName] = struct{}{}
+	delete(s.hostNs, slotName)
+	return nil
+}
+
 func getSlotName(slotIdx int) string {
 	slotIdxStr := strconv.Itoa(slotIdx)
 	return fmt.Sprintf("ns-%s", slotIdxStr)
@@ -150,10 +170,13 @@ func isNamespaceAvailable(name string) (bool, error) {
 	return false, nil
 }
 
-func (s *StorageLocal) Release(ips *Slot) error {
+func (s *StorageLocal) Release(slot *Slot) error {
+	if slot == nil {
+		return nil
+	}
 	s.acquiredNsMu.Lock()
 	defer s.acquiredNsMu.Unlock()
-	slotName := getSlotName(ips.Idx)
+	slotName := getSlotName(slot.Idx)
 	delete(s.acquiredNs, slotName)
 	delete(s.hostNs, slotName)
 

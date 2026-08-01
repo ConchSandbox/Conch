@@ -35,9 +35,11 @@ import (
 )
 
 const (
-	defaultPoolSize         = 250
-	legacyMaxSlots          = 4093
+	DefaultWarmPoolSize     = 250
+	maxSlots                = 4000
 	prefillWorkers          = 16
+	populateRetryMinDelay   = time.Second
+	populateRetryMaxDelay   = 30 * time.Second
 	cniBridgeCleanupRetries = 300
 	cniBridgeCleanupDelay   = 100 * time.Millisecond
 )
@@ -45,6 +47,7 @@ const (
 var (
 	ErrNetworkSlotStoreRead = errors.New("network slot store read failed")
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
+	ErrNetworkSlotCapacity  = errors.New("network slot capacity is below persisted usage")
 	errPoolCleanupRequested = errors.New("network pool cleanup requested")
 	errWarmPoolFull         = errors.New("warm network pool is already full")
 )
@@ -68,6 +71,7 @@ func WithPreserveOnCancel(ctx context.Context) context.Context {
 type Pool struct {
 	slotStorage        Storage
 	newSlots           chan *Slot
+	warmSlotNeeded     chan struct{}
 	done               chan struct{}
 	dynamicReservation bool
 	cniManager         *CNIManager
@@ -85,27 +89,30 @@ type Pool struct {
 	slotHealthCheck    func(context.Context, *Slot) error
 }
 
-func normalizeAndValidatePoolSize(poolSize int) (int, error) {
-	if poolSize <= 0 {
-		poolSize = defaultPoolSize
+func normalizeAndValidateWarmPoolSize(warmPoolSize int) (int, error) {
+	if warmPoolSize == 0 {
+		warmPoolSize = DefaultWarmPoolSize
 	}
-	if poolSize > legacyMaxSlots {
-		return 0, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, legacyMaxSlots)
+	if warmPoolSize < 1 {
+		return 0, fmt.Errorf("invalid network.warm_pool_size=%d, must be positive", warmPoolSize)
 	}
-	return poolSize, nil
+	if warmPoolSize > maxSlots {
+		return 0, fmt.Errorf("invalid network.warm_pool_size=%d, exceeds maximum supported slots=%d", warmPoolSize, maxSlots)
+	}
+	return warmPoolSize, nil
 }
 
-func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int, cniCfg CNIManagerConfig, slotStore NetworkSlotStore) (*Pool, error) {
-	poolSize, err := normalizeAndValidatePoolSize(poolSize)
+func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask int, cniCfg CNIManagerConfig, slotStore NetworkSlotStore) (*Pool, error) {
+	warmPoolSize, err := normalizeAndValidateWarmPoolSize(warmPoolSize)
 	if err != nil {
 		return nil, err
 	}
 	if err := configureTapNetwork(tapIP, tapMask); err != nil {
 		return nil, fmt.Errorf("invalid tap network config: %w", err)
 	}
-	newSlots := make(chan *Slot, poolSize)
+	newSlots := make(chan *Slot, warmPoolSize)
 
-	slotStorage, err := NewStorage(legacyMaxSlots)
+	slotStorage, err := NewStorage(maxSlots)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new storage: %w", err)
 	}
@@ -118,6 +125,7 @@ func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int, c
 	p := &Pool{
 		slotStorage:        slotStorage,
 		newSlots:           newSlots,
+		warmSlotNeeded:     make(chan struct{}, 1),
 		done:               make(chan struct{}),
 		dynamicReservation: dynamicReservation,
 		cniManager:         cniManager,
@@ -301,7 +309,14 @@ func (p *Pool) Populate(ctx context.Context) {
 		}
 	}
 
+	retryDelay := populateRetryMinDelay
 	for {
+		if len(p.newSlots) >= cap(p.newSlots) {
+			if !p.waitForWarmSlotNeed(ctx) {
+				return
+			}
+			continue
+		}
 		select {
 		case <-p.done:
 			return
@@ -313,9 +328,20 @@ func (p *Pool) Populate(ctx context.Context) {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
-				getLogger().Debug("pool: failed to create network", ulog.F("error", err))
+				getLogger().Warn(
+					"pool: failed to replenish warm network slots; retrying",
+					ulog.F("error", err),
+					ulog.F("retry_delay", retryDelay),
+					ulog.F("warm_slots", len(p.newSlots)),
+					ulog.F("warm_pool_size", cap(p.newSlots)),
+				)
+				if !p.waitForPopulateRetry(ctx, retryDelay) {
+					return
+				}
+				retryDelay = min(retryDelay*2, populateRetryMaxDelay)
 				continue
 			}
+			retryDelay = populateRetryMinDelay
 			select {
 			case <-p.done:
 				_ = p.discardCreatedSlot(slot)
@@ -324,8 +350,46 @@ func (p *Pool) Populate(ctx context.Context) {
 				p.handleCreatedSlotAfterCancel(ctx, slot)
 				return
 			case p.newSlots <- slot:
+			default:
+				if err := p.discardCreatedSlot(slot); err != nil {
+					getLogger().Warn("pool: failed to discard excess warm slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+				}
 			}
 		}
+	}
+}
+
+func (p *Pool) waitForWarmSlotNeed(ctx context.Context) bool {
+	select {
+	case <-p.done:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-p.warmSlotNeeded:
+		return true
+	}
+}
+
+func (p *Pool) signalWarmSlotNeeded() {
+	if p.warmSlotNeeded == nil {
+		return
+	}
+	select {
+	case p.warmSlotNeeded <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Pool) waitForPopulateRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -517,6 +581,7 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 			return nil, fmt.Errorf("network channel has been closed")
 		}
 		if s != nil {
+			p.signalWarmSlotNeeded()
 			s.assignSandbox(sandboxID)
 			if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
 				s.clearSandboxAssignment()
@@ -541,7 +606,7 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 			ulog.F("prefill_ready", p.isPrefillReady()),
 			ulog.F("dynamic_reservation", p.dynamicReservation),
 		)
-		return nil, fmt.Errorf("no available network slot in the pool, pool_size=%d", cap(p.newSlots))
+		return nil, fmt.Errorf("no available network slot in the pool, warm_pool_size=%d", cap(p.newSlots))
 	}
 }
 
@@ -956,6 +1021,11 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 	if strings.TrimSpace(ip) == "" {
 		return fmt.Errorf("cni ip is required")
 	}
+	if p.slotStorage != nil {
+		if err := p.slotStorage.Claim(slot); err != nil {
+			return fmt.Errorf("claim restored network slot %s: %w", slot.Key, err)
+		}
+	}
 	cniID := slot.CNIContainerID()
 	slot.setSlotNetwork(cniID, &CNIResult{IP: ip}, nil)
 	fail := func(err error) error {
@@ -1001,6 +1071,16 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 	}
 	adopted := 0
 	var errs []error
+	// Reserve assigned slots before warm slots so persisted assignments never
+	// displace a network that may still belong to a running sandbox.
+	for _, rec := range records {
+		if rec.State != state.NetworkSlotAssigned {
+			continue
+		}
+		if err := p.slotStorage.Claim(recordSlotFromState(rec)); err != nil {
+			return 0, fmt.Errorf("%w: claim assigned slot %s: %v", ErrNetworkSlotCapacity, rec.SlotKey, err)
+		}
+	}
 	for _, rec := range records {
 		switch rec.State {
 		case state.NetworkSlotCreating:
@@ -1019,12 +1099,20 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 			}
 			continue
 		case state.NetworkSlotWarmIdle:
+		case state.NetworkSlotAssigned:
+			continue
 		default:
 			continue
 		}
 		slot, err := slotFromNetworkSlotRecord(rec)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("restore warm slot %s: %w", rec.SlotKey, err))
+			continue
+		}
+		if err := p.slotStorage.Claim(slot); err != nil {
+			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm slot exceeds capacity"); cleanupErr != nil {
+				errs = append(errs, fmt.Errorf("%w: cleanup overflow warm slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
+			}
 			continue
 		}
 		if err := ValidateReusableSlotNetwork(ctx, slot, slot.NetNSPath(), p.cniManager.config.IfName); err != nil {
