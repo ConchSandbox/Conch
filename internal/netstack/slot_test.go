@@ -5,78 +5,7 @@ import (
 	"testing"
 )
 
-func withBridgeLayout(t *testing.T, bridgeCount int) {
-	t.Helper()
-	oldConfiguredBridgeCount := configuredBridgeCount
-	oldEffectiveBridgeCount := effectiveBridgeCount
-	oldMaxVrtSlotsSize := maxVrtSlotsSize
-	oldMaxVrtSlotIndex := maxVrtSlotIndex
-	oldBridgeLayoutReady := bridgeLayoutReady
-	t.Cleanup(func() {
-		configuredBridgeCount = oldConfiguredBridgeCount
-		effectiveBridgeCount = oldEffectiveBridgeCount
-		maxVrtSlotsSize = oldMaxVrtSlotsSize
-		maxVrtSlotIndex = oldMaxVrtSlotIndex
-		bridgeLayoutReady = oldBridgeLayoutReady
-	})
-	if err := initConfigureBridgeLayout(bridgeCount); err != nil {
-		t.Fatalf("initConfigureBridgeLayout(%d): %v", bridgeCount, err)
-	}
-}
-
-func TestRoundUpToPowerOfTwo(t *testing.T) {
-	tests := map[int]int{
-		0: 1,
-		1: 1,
-		2: 2,
-		3: 4,
-		4: 4,
-		5: 8,
-	}
-	for in, want := range tests {
-		if got := roundUpToPowerOfTwo(in); got != want {
-			t.Fatalf("roundUpToPowerOfTwo(%d) = %d, want %d", in, got, want)
-		}
-	}
-}
-
-func TestBridgeLayoutMath(t *testing.T) {
-	withBridgeLayout(t, 3)
-
-	if configuredBridgeCount != 3 {
-		t.Fatalf("configuredBridgeCount = %d, want 3", configuredBridgeCount)
-	}
-	if effectiveBridgeCount != 4 {
-		t.Fatalf("effectiveBridgeCount = %d, want 4", effectiveBridgeCount)
-	}
-	if got := getBridgeName(0); got != "conch_bridge_0" {
-		t.Fatalf("getBridgeName(0) = %q, want conch_bridge_0", got)
-	}
-	if got := getBridgePrefix(); got != 22 {
-		t.Fatalf("getBridgePrefix() = %d, want 22", got)
-	}
-	if got := getSlotsPerBridge(); got != 1021 {
-		t.Fatalf("getSlotsPerBridge() = %d, want 1021", got)
-	}
-	subnet, err := getBridgeSubnet(1)
-	if err != nil {
-		t.Fatalf("getBridgeSubnet(1): %v", err)
-	}
-	if subnet.String() != "10.12.4.0/22" {
-		t.Fatalf("getBridgeSubnet(1) = %s, want 10.12.4.0/22", subnet.String())
-	}
-}
-
-func TestSingleBridgeUsesLegacyName(t *testing.T) {
-	withBridgeLayout(t, 1)
-
-	if got := getBridgeName(0); got != legacyBridgeName {
-		t.Fatalf("getBridgeName(0) = %q, want %q", got, legacyBridgeName)
-	}
-}
-
 func TestNewSlotAndCNIState(t *testing.T) {
-	withBridgeLayout(t, 1)
 	oldTapIP := configuredTapIP
 	oldTapMask := configuredTapMask
 	t.Cleanup(func() {

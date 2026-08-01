@@ -48,7 +48,6 @@
 network:
   pool_size: 250
   dynamic_reservation: false
-  # bridge_count: 1 # deprecated for the current CNI path
   tap_ip: 192.168.100.2
   tap_mask: 24
   cni:

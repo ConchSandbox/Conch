@@ -30,7 +30,7 @@ const (
 	defaultTapIP    = "192.168.100.2"
 	defaultTapMask  = 24
 	invaildSlotSize = 0
-	// Index 1 is reserved for the bridge IP, so sandbox slots start from index 2.
+	// Keep the historical first index to preserve namespace and slot identities.
 	firstSlotIndex    = 2
 	tapInterfaceName  = "tap0"
 	loopbackInterface = "lo"
@@ -52,25 +52,15 @@ type Slot struct {
 	cniResult *CNIResult
 	cniOpts   []NamespaceOpts
 
-	bridgeOrdinal int
-
 	tapIp       net.IP
 	tapMask     net.IPMask
 	namespaceIP net.IP
 }
 
 func NewSlot(key string, idx int) (*Slot, error) {
-	if !bridgeLayoutReady {
-		return nil, fmt.Errorf("bridge layout is not configured")
+	if idx < firstSlotIndex {
+		return nil, fmt.Errorf("slot index %d is below first slot index %d", idx, firstSlotIndex)
 	}
-
-	if idx < firstSlotIndex || idx > maxVrtSlotIndex {
-		return nil, fmt.Errorf("slot index %d is out of range [%d, %d]", idx, firstSlotIndex, maxVrtSlotIndex)
-	}
-
-	slotNumber := idx - firstSlotIndex
-	// Assign slots across the configured bridge shards in round-robin order.
-	bridgeOrdinal := slotNumber % configuredBridgeCount
 
 	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
 	tapIP, tapNet, err := net.ParseCIDR(tapCIDR)
@@ -83,9 +73,8 @@ func NewSlot(key string, idx int) (*Slot, error) {
 	}
 
 	slot := &Slot{
-		Key:           key,
-		Idx:           idx,
-		bridgeOrdinal: bridgeOrdinal,
+		Key: key,
+		Idx: idx,
 
 		tapIp:       tapIP,
 		tapMask:     tapNet.Mask,
@@ -174,10 +163,6 @@ func (s *Slot) VpeerName() string {
 	return fmt.Sprintf("ns-veth-%d", s.Idx)
 }
 
-func (s *Slot) BridgeName() string {
-	return getBridgeName(s.bridgeOrdinal)
-}
-
 func (s *Slot) CNIIP() string {
 	if s.cniResult == nil {
 		return ""
@@ -199,8 +184,4 @@ func (s *Slot) TapCIDR() net.IPMask {
 
 func (s *Slot) NamespaceIP() string {
 	return s.namespaceIP.String()
-}
-
-func (s *Slot) VrtNetworkCIDRString() string {
-	return vrtNetworkCIDR.String()
 }

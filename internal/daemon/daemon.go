@@ -135,7 +135,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		Sandbox: &containerdhost.SandboxConfig{
 			PoolSize:           cfg.Network.PoolSize,
 			DynamicReservation: cfg.Network.DynamicReservation,
-			BridgeCount:        cfg.Network.BridgeCount,
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
 			CNI:                cfg.Network.CNI,

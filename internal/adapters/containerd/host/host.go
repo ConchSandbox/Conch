@@ -64,7 +64,6 @@ type SnapshotConfig struct {
 type SandboxConfig struct {
 	PoolSize           int
 	DynamicReservation bool
-	BridgeCount        int
 	TapIP              string
 	TapMask            int
 	CNI                netstack.CNIManagerConfig
@@ -299,7 +298,6 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 	return map[string]any{
 		"pool_size":            cfg.PoolSize,
 		"dynamic_reservation":  cfg.DynamicReservation,
-		"bridge_count":         cfg.BridgeCount,
 		"tap_ip":               cfg.TapIP,
 		"tap_mask":             cfg.TapMask,
 		"cni":                  cfg.CNI,

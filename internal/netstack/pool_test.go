@@ -106,7 +106,6 @@ func TestIsExpectedShutdownError(t *testing.T) {
 }
 
 func TestUpsertSlotRecordPersistsCNIIDOnlyWithResult(t *testing.T) {
-	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
 	p := &Pool{slotStore: store}
 	slot, err := NewSlot("2", firstSlotIndex)
@@ -133,7 +132,6 @@ func TestUpsertSlotRecordPersistsCNIIDOnlyWithResult(t *testing.T) {
 }
 
 func TestHandleCreatedSlotAfterPreserveCancelRecordsWarmIdle(t *testing.T) {
-	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
 	p := &Pool{
 		slotStore: store,
@@ -161,7 +159,6 @@ func TestHandleCreatedSlotAfterPreserveCancelRecordsWarmIdle(t *testing.T) {
 }
 
 func TestHandleCreatedSlotAfterPlainCancelDiscardsSlot(t *testing.T) {
-	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
 	storage := &fakeStorage{}
 	p := &Pool{
@@ -294,7 +291,6 @@ func TestReleaseDiscardsExcessSlotWhenWarmPoolIsAlreadyFull(t *testing.T) {
 }
 
 func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
-	withBridgeLayout(t, 1)
 	store := newFakeNetworkSlotStore()
 	p := &Pool{
 		cniManager: &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
@@ -330,7 +326,6 @@ func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
 }
 
 func TestAdoptWarmIdleCleansCreatingAndCleaningRecords(t *testing.T) {
-	withBridgeLayout(t, 1)
 	netnsDir := t.TempDir()
 	store := newFakeNetworkSlotStore(
 		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotCreating, NetNSPath: netnsDir + "/ns-2"},
@@ -360,7 +355,6 @@ func TestAdoptWarmIdleCleansCreatingAndCleaningRecords(t *testing.T) {
 }
 
 func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
-	withBridgeLayout(t, 1)
 	netnsDir := t.TempDir()
 	store := newFakeNetworkSlotStore(
 		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotWarmIdle, NetNSPath: netnsDir + "/ns-2"},
@@ -390,7 +384,6 @@ func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
 }
 
 func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
-	withBridgeLayout(t, 1)
 	slot, err := NewSlot("2", firstSlotIndex)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
@@ -427,7 +420,6 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 }
 
 func TestCleanupAssignedWithoutReadySandbox(t *testing.T) {
-	withBridgeLayout(t, 1)
 	netnsDir := t.TempDir()
 	store := newFakeNetworkSlotStore(
 		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotAssigned, SandboxID: "sandbox-gone", NetNSPath: netnsDir + "/ns-2"},

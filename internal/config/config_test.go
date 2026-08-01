@@ -130,7 +130,7 @@ func TestLoadConfig(t *testing.T) {
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n  default_kernel_plain_http: true\n  default_kernel_registry_username: kernel-user\n  default_kernel_registry_password: kernel-pass\n" +
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
-			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
@@ -171,9 +171,6 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if !cfg.Network.DynamicReservation {
 		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
-	}
-	if cfg.Network.BridgeCount != 7 {
-		t.Errorf("LoadConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 7)
 	}
 	if cfg.Network.TapIP != "192.168.100.10" {
 		t.Errorf("LoadConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.10")
@@ -410,9 +407,6 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 
 	if cfg.Network.TapIP != "192.168.100.2" {
 		t.Errorf("DefaultConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.2")
-	}
-	if cfg.Network.BridgeCount != 1 {
-		t.Errorf("DefaultConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 1)
 	}
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)

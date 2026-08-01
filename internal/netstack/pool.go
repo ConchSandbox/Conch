@@ -36,6 +36,7 @@ import (
 
 const (
 	defaultPoolSize         = 250
+	legacyMaxSlots          = 4093
 	prefillWorkers          = 16
 	cniBridgeCleanupRetries = 300
 	cniBridgeCleanupDelay   = 100 * time.Millisecond
@@ -88,19 +89,13 @@ func normalizeAndValidatePoolSize(poolSize int) (int, error) {
 	if poolSize <= 0 {
 		poolSize = defaultPoolSize
 	}
-	if !bridgeLayoutReady || maxVrtSlotsSize == invaildSlotSize {
-		return 0, fmt.Errorf("bridge layout capacity is not initialized")
-	}
-	if poolSize > maxVrtSlotsSize {
-		return 0, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, maxVrtSlotsSize)
+	if poolSize > legacyMaxSlots {
+		return 0, fmt.Errorf("invalid network.pool_size=%d, exceeds max available slots=%d", poolSize, legacyMaxSlots)
 	}
 	return poolSize, nil
 }
 
-func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP string, tapMask int, cniCfg CNIManagerConfig, slotStore NetworkSlotStore) (*Pool, error) {
-	if err := initConfigureBridgeLayout(bridgeCount); err != nil {
-		return nil, fmt.Errorf("invalid bridge layout: %w", err)
-	}
+func NewPool(poolSize int, dynamicReservation bool, tapIP string, tapMask int, cniCfg CNIManagerConfig, slotStore NetworkSlotStore) (*Pool, error) {
 	poolSize, err := normalizeAndValidatePoolSize(poolSize)
 	if err != nil {
 		return nil, err
@@ -110,7 +105,7 @@ func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP strin
 	}
 	newSlots := make(chan *Slot, poolSize)
 
-	slotStorage, err := NewStorage(maxVrtSlotsSize)
+	slotStorage, err := NewStorage(legacyMaxSlots)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new storage: %w", err)
 	}

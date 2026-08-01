@@ -280,7 +280,6 @@ func buildCNIOpts(slot *Slot, cniID, netnsPath string) ([]NamespaceOpts, error) 
 			"K8S_POD_NAME":               cniID,
 			"K8S_POD_INFRA_CONTAINER_ID": cniID,
 			"CONCH_NETWORK_SLOT":         slot.Key,
-			"CONCH_BRIDGE_SHARD":         slot.BridgeName(),
 			"IgnoreUnknown":              "1",
 		}),
 	}, nil
