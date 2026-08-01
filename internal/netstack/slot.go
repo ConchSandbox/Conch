@@ -27,11 +27,9 @@ import (
 )
 
 const (
-	defaultTapIP      = "192.168.100.2"
-	defaultTapMask    = 24
-	vrtMask           = 20
-	invaildSlotSize   = 0
-	vrtAddressPerSlot = 1
+	defaultTapIP    = "192.168.100.2"
+	defaultTapMask  = 24
+	invaildSlotSize = 0
 	// Index 1 is reserved for the bridge IP, so sandbox slots start from index 2.
 	firstSlotIndex    = 2
 	tapInterfaceName  = "tap0"
@@ -56,8 +54,6 @@ type Slot struct {
 
 	bridgeOrdinal int
 	vPeerIp       net.IP
-	vrtMask       net.IPMask
-	bridgeIp      net.IP
 
 	tapIp       net.IP
 	tapMask     net.IPMask
@@ -98,12 +94,6 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		return nil, fmt.Errorf("failed to get vpeer indexed IP: %w", err)
 	}
 
-	vrtCIDR := fmt.Sprintf("%s/%d", vPeerIp.String(), vrtMask)
-	_, vrtNet, err := net.ParseCIDR(vrtCIDR)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse vrt CIDR: %w", err)
-	}
-
 	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
 	tapIP, tapNet, err := net.ParseCIDR(tapCIDR)
 	if err != nil {
@@ -114,19 +104,12 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		return nil, fmt.Errorf("failed to derive namespace IP from tap CIDR: %w", err)
 	}
 
-	bridgeIP, err := netutils.GetIndexedIP(bridgeNet, vrtAddressPerSlot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get bridge IP: %w", err)
-	}
-
 	slot := &Slot{
 		Key:           key,
 		Idx:           idx,
 		bridgeOrdinal: bridgeOrdinal,
 
-		vPeerIp:  vPeerIp,
-		vrtMask:  vrtNet.Mask,
-		bridgeIp: bridgeIP,
+		vPeerIp: vPeerIp,
 
 		tapIp:       tapIP,
 		tapMask:     tapNet.Mask,
@@ -226,16 +209,8 @@ func (s *Slot) VpeerIP() net.IP {
 	return s.vPeerIp
 }
 
-func (s *Slot) BridgeIP() net.IP {
-	return s.bridgeIp
-}
-
 func (s *Slot) VpeerIPString() string {
 	return s.VpeerIP().String()
-}
-
-func (s *Slot) VrtMask() net.IPMask {
-	return s.vrtMask
 }
 
 func (s *Slot) TapName() string {
