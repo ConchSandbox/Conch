@@ -1,7 +1,6 @@
 package netstack
 
 import (
-	"net"
 	"path/filepath"
 	"testing"
 )
@@ -101,6 +100,9 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.CNIContainerID() != "conch-slot-2" {
 		t.Fatalf("CNIContainerID() = %q, want conch-slot-2", slot.CNIContainerID())
 	}
+	if slot.CNIIP() != "" {
+		t.Fatalf("CNIIP() = %q before setup, want empty", slot.CNIIP())
+	}
 	slot.setNetNSPath("/tmp/ns-2")
 	if slot.NetNSPath() != "/tmp/ns-2" {
 		t.Fatalf("NetNSPath() after set = %q, want /tmp/ns-2", slot.NetNSPath())
@@ -114,12 +116,12 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.CNIResult() != result {
 		t.Fatalf("CNIResult() did not return stored result")
 	}
-	if !slot.VpeerIP().Equal(net.ParseIP("10.12.0.2")) {
-		t.Fatalf("VpeerIP() = %v, want 10.12.0.2", slot.VpeerIP())
+	if slot.CNIIP() != "10.12.0.2" {
+		t.Fatalf("CNIIP() = %q, want 10.12.0.2", slot.CNIIP())
 	}
 	slot.setSlotNetwork("custom-cni-id", &CNIResult{IP: "10.12.0.3/20"}, nil)
-	if !slot.VpeerIP().Equal(net.ParseIP("10.12.0.3")) {
-		t.Fatalf("VpeerIP() = %v, want 10.12.0.3", slot.VpeerIP())
+	if slot.CNIIP() != "10.12.0.3/20" {
+		t.Fatalf("CNIIP() = %q, want 10.12.0.3/20", slot.CNIIP())
 	}
 
 	slot.assignSandbox("sandbox-a")
@@ -133,6 +135,9 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	slot.clearSlotNetwork()
 	if slot.CNIResult() != nil {
 		t.Fatalf("CNIResult() after clear = %#v, want nil", slot.CNIResult())
+	}
+	if slot.CNIIP() != "" {
+		t.Fatalf("CNIIP() after clear = %q, want empty", slot.CNIIP())
 	}
 	if slot.CNIContainerID() != "conch-slot-2" {
 		t.Fatalf("CNIContainerID() after clear = %q, want conch-slot-2", slot.CNIContainerID())

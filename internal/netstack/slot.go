@@ -53,7 +53,6 @@ type Slot struct {
 	cniOpts   []NamespaceOpts
 
 	bridgeOrdinal int
-	vPeerIp       net.IP
 
 	tapIp       net.IP
 	tapMask     net.IPMask
@@ -69,30 +68,9 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		return nil, fmt.Errorf("slot index %d is out of range [%d, %d]", idx, firstSlotIndex, maxVrtSlotIndex)
 	}
 
-	if vrtNetworkCIDR == nil {
-		return nil, fmt.Errorf("invaild vrt network CIDR IP")
-	}
-
 	slotNumber := idx - firstSlotIndex
-	slotsPerBridge := getSlotsPerBridge()
-	if slotsPerBridge == invaildSlotSize {
-		return nil, fmt.Errorf("invalid bridge slot size")
-	}
-
-	// Round-robin bridges first, then advance the host offset inside that bridge.
+	// Assign slots across the configured bridge shards in round-robin order.
 	bridgeOrdinal := slotNumber % configuredBridgeCount
-	bridgeLocalIndex := slotNumber / configuredBridgeCount
-	hostOffset := bridgeHostOffset(bridgeLocalIndex)
-
-	bridgeNet, err := getBridgeSubnet(bridgeOrdinal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get bridge subnet: %w", err)
-	}
-
-	vPeerIp, err := netutils.GetIndexedIP(bridgeNet, hostOffset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get vpeer indexed IP: %w", err)
-	}
 
 	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
 	tapIP, tapNet, err := net.ParseCIDR(tapCIDR)
@@ -108,8 +86,6 @@ func NewSlot(key string, idx int) (*Slot, error) {
 		Key:           key,
 		Idx:           idx,
 		bridgeOrdinal: bridgeOrdinal,
-
-		vPeerIp: vPeerIp,
 
 		tapIp:       tapIP,
 		tapMask:     tapNet.Mask,
@@ -166,9 +142,6 @@ func (s *Slot) setSlotNetwork(cniID string, cniResult *CNIResult, cniOpts []Name
 	s.cniID = cniID
 	s.cniResult = cniResult
 	s.cniOpts = cniOpts
-	if cniResult != nil && cniResult.IP != "" {
-		s.vPeerIp = parseCNIResultIP(cniResult.IP)
-	}
 }
 
 func (s *Slot) assignSandbox(sandboxID string) {
@@ -205,12 +178,11 @@ func (s *Slot) BridgeName() string {
 	return getBridgeName(s.bridgeOrdinal)
 }
 
-func (s *Slot) VpeerIP() net.IP {
-	return s.vPeerIp
-}
-
-func (s *Slot) VpeerIPString() string {
-	return s.VpeerIP().String()
+func (s *Slot) CNIIP() string {
+	if s.cniResult == nil {
+		return ""
+	}
+	return s.cniResult.IP
 }
 
 func (s *Slot) TapName() string {
@@ -231,10 +203,4 @@ func (s *Slot) NamespaceIP() string {
 
 func (s *Slot) VrtNetworkCIDRString() string {
 	return vrtNetworkCIDR.String()
-}
-
-func bridgeHostOffset(bridgeLocalIndex int) int {
-	// Offset 0 is the subnet address, 1 is reserved for the bridge IP, so slot
-	// addresses start at host offset 2 inside each bridge-local subnet.
-	return bridgeLocalIndex + 2
 }

@@ -482,7 +482,7 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
-		IP:              sbx.slot.VpeerIPString(),
+		IP:              sbx.slot.CNIIP(),
 		AgentToken:      req.AgentToken,
 		Namespace:       namespace,
 		SandboxID:       req.SandboxID,
