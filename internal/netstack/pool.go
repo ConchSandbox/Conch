@@ -86,7 +86,6 @@ type Pool struct {
 	populateCtx        context.Context
 	populateCancel     context.CancelCauseFunc
 	populateDone       chan struct{}
-	slotHealthCheck    func(context.Context, *Slot) error
 }
 
 func normalizeAndValidateWarmPoolSize(warmPoolSize int) (int, error) {
@@ -705,11 +704,7 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		if slot != nil {
 			sandboxID := slot.SandboxID()
 			slot.clearSandboxAssignment()
-			slotHealth := p.slotHealth
-			if p.slotHealthCheck != nil {
-				slotHealth = p.slotHealthCheck
-			}
-			slotHealthErr := slotHealth(ctx, slot)
+			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {
 				if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
 					slot.assignSandbox(sandboxID)
