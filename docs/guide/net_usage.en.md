@@ -13,7 +13,7 @@ This guide describes how to configure and verify the current Conch network desig
 ## Host Setup
 
 - Run `conchd` as root, or provide equivalent `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` capabilities.
-- Install the CNI plugin binaries under `/opt/cni/bin`, or under the path configured by `network.cni.plugin_bin_dirs`: `bridge`, `host-local`, and `loopback`.
+- Install the CNI plugin binaries under `/usr/libexec/cni`, or under the path configured by `network.cni.plugin_bin_dirs`: `bridge`, `host-local`, and `loopback`.
 - Put Conch CNI configs in a Conch-only config directory. The default directory is `/etc/conch/cni/net.d`.
 
 The repository provides an example config at `config/cni/net.d/10-conch.conf`. If `network.cni.plugin_conf_dir` keeps the default value and `/etc/conch/cni/net.d` has no CNI config files, Conch falls back to `cni/net.d` next to the loaded Conch config file. When using the repository `config/config.yaml`, that fallback path is `config/cni/net.d`.
@@ -53,7 +53,7 @@ network:
   tap_mask: 24
   cni:
     plugin_bin_dirs:
-      - /opt/cni/bin
+      - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
     plugin_max_conf: 1
     if_name: eth0

@@ -18,7 +18,7 @@ import (
 const (
 	DefaultCNIIfName            = "eth0"
 	DefaultCNIPluginConfDir     = "/etc/conch/cni/net.d"
-	DefaultCNIPluginBinDir      = "/opt/cni/bin"
+	DefaultCNIPluginBinDir      = "/usr/libexec/cni"
 	DefaultCNIPluginMaxConf     = 1
 	defaultCNIIfName            = DefaultCNIIfName
 	defaultCNIInterfacePrefix   = "eth"

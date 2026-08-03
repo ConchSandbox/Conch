@@ -26,7 +26,7 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 - erofs-utils 1.9+（需要 `mkfs.erofs --fsalignblks`）
 - Linux 5.10+
 - root 权限，或等价的 `CAP_SYS_ADMIN` 与 `CAP_NET_ADMIN` 能力，用于 network namespace、tap 设备、路由和 NAT 规则
-- 主机已安装 CNI 插件二进制文件，默认路径为 `/opt/cni/bin`；默认 bridge 模式至少需要 `bridge`、`host-local` 和 `loopback`
+- 主机已安装 CNI 插件二进制文件，默认路径为 `/usr/libexec/cni`；默认 bridge 模式至少需要 `bridge`、`host-local` 和 `loopback`
 - 存在至少一个 Conch CNI `.conf` 或 `.conflist` 配置文件。默认路径为 `/etc/conch/cni/net.d`；如果该默认路径没有配置，Conch 会回退到已加载配置文件旁边的 `cni/net.d`，例如 `config/cni/net.d`。
 - CNI 子网不能与主机网络、集群网络或 VM guest tap 子网重叠
 - Iptables 网络配置工具。Conch 仍会为 VM guest tap 路径配置 namespace 内 NAT；所选 CNI 插件也可能依赖 iptables 或 nftables。
