@@ -19,29 +19,32 @@ import (
 
 const (
 	// DefaultConchAPIURL is the default conchd HTTP base URL.
-	DefaultConchAPIURL = "http://localhost:4063"
-	defaultUnixAPIURL  = "http://conchd-unix"
-	defaultVmmName     = "cloud-hypervisor"
-	DefaultRamMB       = 256
-	defaultRamMB       = DefaultRamMB
-	createSandbox      = "/api/sandbox/create"
-	suspendSandbox     = "/api/sandbox/suspend"
-	resumeSandbox      = "/api/sandbox/resume"
-	checkpointSandbox  = "/api/sandbox/checkpoint"
-	createTemplate     = "/api/template/create"
-	pullTemplate       = "/api/template/pull"
-	pushTemplate       = "/api/template/push"
-	listTemplates      = "/api/template/list"
-	inspectTemplate    = "/api/template/inspect"
-	removeTemplate     = "/api/template/remove"
-	pullImage          = "/api/image/pull"
-	pushImage          = "/api/image/push"
-	listImages         = "/api/image/list"
-	removeImage        = "/api/image/remove"
-	unpackImage        = "/api/image/unpack"
-	listSnapshots      = "/api/snapshot/list"
-	removeSnapshot     = "/api/snapshot/remove"
-	defaultHTTPTimeout = 120 * time.Second
+	DefaultConchAPIURL   = "http://localhost:4063"
+	defaultUnixAPIURL    = "http://conchd-unix"
+	defaultVmmName       = "cloud-hypervisor"
+	DefaultRamMB         = 256
+	defaultRamMB         = DefaultRamMB
+	createSandbox        = "/api/sandbox/create"
+	suspendSandbox       = "/api/sandbox/suspend"
+	resumeSandbox        = "/api/sandbox/resume"
+	checkpointSandbox    = "/api/sandbox/checkpoint"
+	createTemplate       = "/api/template/create"
+	pullTemplate         = "/api/template/pull"
+	pullTemplateStream   = "/api/template/pull/stream"
+	pushTemplate         = "/api/template/push"
+	listTemplates        = "/api/template/list"
+	inspectTemplate      = "/api/template/inspect"
+	removeTemplate       = "/api/template/remove"
+	pullImage            = "/api/image/pull"
+	pullImageStream      = "/api/image/pull/stream"
+	pushImage            = "/api/image/push"
+	listImages           = "/api/image/list"
+	removeImage          = "/api/image/remove"
+	unpackImage          = "/api/image/unpack"
+	listSnapshots        = "/api/snapshot/list"
+	removeSnapshot       = "/api/snapshot/remove"
+	defaultHTTPTimeout   = 120 * time.Second
+	defaultUnpackTimeout = 30 * time.Minute
 )
 
 // ResolveBaseURL returns conchd base URL: CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
@@ -163,6 +166,16 @@ type ImageResponse struct {
 	Results map[string]string `json:"results"`
 }
 
+type PullProgressEvent struct {
+	Status    string                `json:"status"`
+	Message   string                `json:"message,omitempty"`
+	Component string                `json:"component,omitempty"`
+	Progress  int64                 `json:"progress,omitempty"`
+	Total     int64                 `json:"total,omitempty"`
+	Results   map[string]string     `json:"results,omitempty"`
+	Template  *TemplatePullResponse `json:"template,omitempty"`
+}
+
 type ListImagesRequest struct {
 	Namespace string   `json:"namespace,omitempty"`
 	Filters   []string `json:"filters,omitempty"`
@@ -244,8 +257,9 @@ type RemoveSnapshotRequest struct {
 
 // Client communicates with Conch conchd HTTP API
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL           string
+	httpClient        *http.Client
+	pullUnpackTimeout time.Duration
 }
 
 // NewClient creates a Conch API client. baseURL defaults to DefaultConchAPIURL if empty.
@@ -257,8 +271,9 @@ func NewClient(baseURL string) *Client {
 func NewClientWithConfig(baseURL, configPath string) *Client {
 	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, 0)
 	return &Client{
-		baseURL:    resolvedURL,
-		httpClient: httpClient,
+		baseURL:           resolvedURL,
+		httpClient:        httpClient,
+		pullUnpackTimeout: defaultUnpackTimeout,
 	}
 }
 
@@ -267,8 +282,9 @@ func NewClientWithConfig(baseURL, configPath string) *Client {
 func NewClientWithConfigAndTimeout(baseURL, configPath string, timeoutOverride time.Duration) *Client {
 	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, timeoutOverride)
 	return &Client{
-		baseURL:    resolvedURL,
-		httpClient: httpClient,
+		baseURL:           resolvedURL,
+		httpClient:        httpClient,
+		pullUnpackTimeout: defaultUnpackTimeout,
 	}
 }
 
@@ -436,6 +452,17 @@ func (c *Client) PullTemplate(ctx context.Context, req TemplatePullRequest) (Tem
 	return resp, nil
 }
 
+func (c *Client) PullTemplateWithProgress(ctx context.Context, req TemplatePullRequest, onProgress func(PullProgressEvent)) (TemplatePullResponse, error) {
+	event, err := c.pullWithProgress(ctx, pullTemplateStream, req, onProgress)
+	if err != nil {
+		return TemplatePullResponse{}, err
+	}
+	if event.Template == nil {
+		return TemplatePullResponse{}, fmt.Errorf("%s completed without template result", pullTemplateStream)
+	}
+	return *event.Template, nil
+}
+
 func (c *Client) PushTemplate(ctx context.Context, req TemplatePushRequest) error {
 	var resp map[string]string
 	return c.postJSON(ctx, pushTemplate, req, &resp)
@@ -448,6 +475,165 @@ func (c *Client) PullImage(ctx context.Context, req PullImageRequest) (map[strin
 		return nil, err
 	}
 	return resp.Results, nil
+}
+
+func (c *Client) PullImageWithProgress(ctx context.Context, req PullImageRequest, onProgress func(PullProgressEvent)) (map[string]string, error) {
+	event, err := c.pullWithProgress(ctx, pullImageStream, req, onProgress)
+	if err != nil {
+		return nil, err
+	}
+	if event.Results == nil {
+		return map[string]string{}, nil
+	}
+	return event.Results, nil
+}
+
+func (c *Client) pullWithProgress(ctx context.Context, path string, req any, onProgress func(PullProgressEvent)) (PullProgressEvent, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return PullProgressEvent{}, fmt.Errorf("marshaling request: %w", err)
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return PullProgressEvent{}, fmt.Errorf("create request %s: %w", path, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.streamingHTTPClient().Do(httpReq)
+	if err != nil {
+		return PullProgressEvent{}, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return PullProgressEvent{}, fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+	}
+	dec := json.NewDecoder(resp.Body)
+	type decodeResult struct {
+		event PullProgressEvent
+		err   error
+	}
+	results := make(chan decodeResult)
+	go func() {
+		for {
+			var event PullProgressEvent
+			err := dec.Decode(&event)
+			select {
+			case results <- decodeResult{event: event, err: err}:
+			case <-streamCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	downloadIdleTimeout := c.streamIdleTimeout()
+	unpackTimeout := c.streamUnpackTimeout()
+	timer := time.NewTimer(downloadIdleTimeout)
+	defer timer.Stop()
+	timerCh := timer.C
+	timerPhase := "download"
+	resetTimer := func(timeout time.Duration, phase string) {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(timeout)
+		timerCh = timer.C
+		timerPhase = phase
+	}
+	for {
+		select {
+		case result := <-results:
+			event := result.event
+			err = result.err
+			if err != nil {
+				if err == io.EOF {
+					return PullProgressEvent{}, fmt.Errorf("%s ended without completed event", path)
+				}
+				return PullProgressEvent{}, fmt.Errorf("decoding %s stream: %w", path, err)
+			}
+			switch event.Status {
+			case "unpacking":
+				if timerPhase != "unpack" {
+					resetTimer(unpackTimeout, "unpack")
+				}
+			case "completed", "error":
+				timerCh = nil
+			default:
+				if timerPhase == "download" {
+					resetTimer(downloadIdleTimeout, "download")
+				}
+			}
+			if onProgress != nil {
+				onProgress(event)
+			}
+			switch event.Status {
+			case "completed":
+				return event, nil
+			case "error":
+				if event.Message == "" {
+					event.Message = "pull failed"
+				}
+				return PullProgressEvent{}, fmt.Errorf("%s", event.Message)
+			}
+		case <-timerCh:
+			cancel()
+			_ = resp.Body.Close()
+			if timerPhase == "unpack" {
+				return PullProgressEvent{}, fmt.Errorf("%s stream unpack timeout after %s", path, unpackTimeout)
+			}
+			return PullProgressEvent{}, fmt.Errorf("%s stream idle timeout after %s", path, downloadIdleTimeout)
+		case <-ctx.Done():
+			cancel()
+			_ = resp.Body.Close()
+			return PullProgressEvent{}, ctx.Err()
+		}
+	}
+}
+
+func (c *Client) streamIdleTimeout() time.Duration {
+	if c != nil && c.httpClient != nil && c.httpClient.Timeout > 0 {
+		return c.httpClient.Timeout
+	}
+	return defaultHTTPTimeout
+}
+
+func (c *Client) streamUnpackTimeout() time.Duration {
+	if c != nil && c.pullUnpackTimeout > 0 {
+		return c.pullUnpackTimeout
+	}
+	return defaultUnpackTimeout
+}
+
+func (c *Client) streamingHTTPClient() *http.Client {
+	if c.httpClient == nil {
+		return &http.Client{Transport: streamingTransport(http.DefaultTransport, defaultHTTPTimeout)}
+	}
+	return &http.Client{
+		Transport:     streamingTransport(c.httpClient.Transport, c.streamIdleTimeout()),
+		CheckRedirect: c.httpClient.CheckRedirect,
+		Jar:           c.httpClient.Jar,
+	}
+}
+
+func streamingTransport(roundTripper http.RoundTripper, responseHeaderTimeout time.Duration) http.RoundTripper {
+	if roundTripper == nil {
+		roundTripper = http.DefaultTransport
+	}
+	transport, ok := roundTripper.(*http.Transport)
+	if !ok {
+		return roundTripper
+	}
+	clone := transport.Clone()
+	if clone.ResponseHeaderTimeout <= 0 {
+		clone.ResponseHeaderTimeout = responseHeaderTimeout
+	}
+	return clone
 }
 
 func (c *Client) PushImage(ctx context.Context, req PushImageRequest) error {

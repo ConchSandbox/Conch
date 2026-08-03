@@ -159,6 +159,7 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 			store := newTestStore(t)
 			svc := New(nil, imageOps, imageOps, store, "default")
 
+			var forwardedProgress runtimeapi.PullProgress
 			result, err := svc.PullTemplate(ctx, TemplatePullOptions{
 				Reference: reference,
 				Namespace: "team-a",
@@ -166,6 +167,9 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 				Username:  "registry-user",
 				Password:  "registry-pass",
 				Labels:    map[string]string{"source": "registry"},
+				Progress: func(progress runtimeapi.PullProgress) {
+					forwardedProgress = progress
+				},
 			})
 			if err != nil {
 				t.Fatalf("PullTemplate() error = %v", err)
@@ -180,6 +184,13 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 			if pull.ImageName != reference || pull.Namespace != "team-a" || !pull.SkipUnpack ||
 				!pull.PlainHTTP || pull.Username != "registry-user" || pull.Password != "registry-pass" {
 				t.Fatalf("Pull() request = %#v", pull)
+			}
+			if pull.Progress == nil {
+				t.Fatal("PullTemplate() did not forward the progress callback")
+			}
+			pull.Progress(runtimeapi.PullProgress{Status: "downloading", Component: "rootfs", Progress: 1, Total: 2})
+			if forwardedProgress.Component != "rootfs" || forwardedProgress.Progress != 1 {
+				t.Fatalf("forwarded progress = %#v", forwardedProgress)
 			}
 			if len(imageOps.unpackCalls) != 0 {
 				t.Fatalf("PullTemplate unpacked content during static validation: %#v", imageOps.unpackCalls)

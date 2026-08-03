@@ -200,6 +200,7 @@ func (s *Daemon) routes() {
 
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
+	s.router.HandleFunc("/api/template/pull/stream", s.handlePullTemplateStream)
 	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
@@ -210,6 +211,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/snapshot/info", s.handleSnapshotInfo)
 
 	s.router.HandleFunc("/api/image/pull", s.handlePullImage)
+	s.router.HandleFunc("/api/image/pull/stream", s.handlePullImageStream)
 	s.router.HandleFunc("/api/image/push", s.handlePushImage)
 	s.router.HandleFunc("/api/image/list", s.handleListImage)
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
@@ -580,6 +582,43 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Daemon) handlePullTemplateStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Image == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req templatePullRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	opts := runtimeapi.TemplatePullOptions{
+		Reference: req.Reference,
+		Namespace: req.Namespace,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
+		Labels:    req.Labels,
+	}
+	servePullProgressStream(w, r, func(ctx context.Context, progress runtimeapi.PullProgressFunc) (pullProgressEvent, error) {
+		opts.Progress = progress
+		result, err := s.runtimeService.PullTemplate(ctx, opts)
+		if err != nil {
+			return pullProgressEvent{}, fmt.Errorf("Failed to pull template: %w", err)
+		}
+		return pullProgressEvent{Template: &templatePullProgressResult{
+			Status:          "ok",
+			TemplateID:      result.TemplateID,
+			BootIndexDigest: result.BootIndexDigest,
+			BuildRef:        result.BuildRef,
+		}}, nil
+	})
+}
+
 func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 	var req templatePushRequest
 	if !decodePostJSON(w, r, &req) {
@@ -682,6 +721,120 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("Image pulled successfully", ulog.F("image_name", opts.ImageName))
 	writeImageResults(w, result.Refs)
+}
+
+type pullProgressEvent struct {
+	Status    string                      `json:"status"`
+	Message   string                      `json:"message,omitempty"`
+	Component string                      `json:"component,omitempty"`
+	Progress  int64                       `json:"progress,omitempty"`
+	Total     int64                       `json:"total,omitempty"`
+	Results   map[string]string           `json:"results,omitempty"`
+	Template  *templatePullProgressResult `json:"template,omitempty"`
+}
+
+type templatePullProgressResult struct {
+	Status          string `json:"status"`
+	TemplateID      string `json:"template_id"`
+	BootIndexDigest string `json:"boot_index_digest"`
+	BuildRef        string `json:"build_ref"`
+}
+
+func (s *Daemon) handlePullImageStream(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling pull image stream request")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Image == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req pullImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Warn("Invalid request body", ulog.F("error", err))
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	opts := runtimeapi.PullImageOptions{
+		ImageName:  req.ImageName,
+		Namespace:  req.Namespace,
+		PlainHTTP:  req.PlainHTTP,
+		Username:   req.Username,
+		Password:   req.Password,
+		SkipUnpack: req.SkipUnpack,
+	}
+	servePullProgressStream(w, r, func(ctx context.Context, progress runtimeapi.PullProgressFunc) (pullProgressEvent, error) {
+		opts.Progress = progress
+		result, err := s.runtimeService.PullImage(ctx, opts)
+		if err != nil {
+			logger.Error("Failed to pull image", ulog.F("image_name", opts.ImageName), ulog.F("error", err))
+			return pullProgressEvent{}, fmt.Errorf("Failed to pull image: %w", err)
+		}
+		logger.Info("Image pulled successfully", ulog.F("image_name", opts.ImageName))
+		return pullProgressEvent{Results: result.Refs}, nil
+	})
+}
+
+type pullProgressOperation func(context.Context, runtimeapi.PullProgressFunc) (pullProgressEvent, error)
+
+func servePullProgressStream(w http.ResponseWriter, r *http.Request, operation pullProgressOperation) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	type pullUpdate struct {
+		progress  runtimeapi.PullProgress
+		completed pullProgressEvent
+		err       error
+		done      bool
+	}
+	updates := make(chan pullUpdate, 32)
+	onProgress := func(progress runtimeapi.PullProgress) {
+		select {
+		case updates <- pullUpdate{progress: progress}:
+		case <-r.Context().Done():
+		}
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	writePullProgressEvent(w, flusher, pullProgressEvent{Status: "started"})
+	go func() {
+		completed, err := operation(r.Context(), onProgress)
+		select {
+		case updates <- pullUpdate{completed: completed, err: err, done: true}:
+		case <-r.Context().Done():
+		}
+	}()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case update := <-updates:
+			if !update.done {
+				writePullProgressEvent(w, flusher, pullProgressEvent{
+					Status: update.progress.Status, Component: update.progress.Component,
+					Progress: update.progress.Progress, Total: update.progress.Total,
+				})
+				continue
+			}
+			if update.err != nil {
+				writePullProgressEvent(w, flusher, pullProgressEvent{Status: "error", Message: update.err.Error()})
+				return
+			}
+			update.completed.Status = "completed"
+			writePullProgressEvent(w, flusher, update.completed)
+			return
+		}
+	}
+}
+
+func writePullProgressEvent(w io.Writer, flusher http.Flusher, event pullProgressEvent) {
+	_ = json.NewEncoder(w).Encode(event)
+	flusher.Flush()
 }
 
 func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {

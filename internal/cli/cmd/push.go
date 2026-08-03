@@ -35,7 +35,7 @@ func PrintImagePushHelp(out io.Writer) {
 	fmt.Fprintln(out, "  --username string")
 	fmt.Fprintln(out, "        registry username")
 	fmt.Fprintln(out, "  --password string")
-	fmt.Fprintln(out, "        registry password")
+	fmt.Fprintln(out, "        registry password (omit to use an interactive no-echo prompt when authentication is required)")
 	fmt.Fprintln(out, "  --timeout duration")
 	fmt.Fprintln(out, "        timeout for this push operation")
 	fmt.Fprintln(out, "  -n, --namespace string")
@@ -67,14 +67,16 @@ func RunImagePush(ctx context.Context, args []string) error {
 	}
 	ns := ResolveConchNamespace(cfg, opts.Namespace)
 	conchClient := client.NewClientWithConfigAndTimeout("", opts.ConfigPath, apiTimeout)
-	if err := conchClient.PushImage(ctx, client.PushImageRequest{
-		LocalImage:      opts.LocalImage,
-		RemoteImage:     opts.RemoteImage,
-		Namespace:       ns,
-		PlainHTTP:       opts.PlainHTTP,
-		Username:        opts.Username,
-		Password:        opts.Password,
-		RegistryTimeout: opts.Timeout,
+	if err := pushWithRegistryAuth(ctx, opts.RemoteImage, opts.Username, opts.Password, func(username, password string) error {
+		return conchClient.PushImage(ctx, client.PushImageRequest{
+			LocalImage:      opts.LocalImage,
+			RemoteImage:     opts.RemoteImage,
+			Namespace:       ns,
+			PlainHTTP:       opts.PlainHTTP,
+			Username:        username,
+			Password:        password,
+			RegistryTimeout: opts.Timeout,
+		})
 	}); err != nil {
 		return fmt.Errorf("conch image push: %w", err)
 	}

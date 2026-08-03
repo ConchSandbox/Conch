@@ -50,6 +50,9 @@ type fakeImageService struct {
 	inspectResp           conchimage.BootIndexInfo
 	inspectReferenceResp  conchimage.BootIndexInfo
 	checkpointPublishResp conchimage.PublishCheckpointBootImageResult
+	progress              []runtimeapi.PullProgress
+	pullStarted           chan struct{}
+	pullCanceled          chan struct{}
 }
 
 type fakeSnapshotService struct {
@@ -75,8 +78,21 @@ type fakeSandboxOps struct {
 	checkpointResp sandbox.CheckpointResult
 }
 
-func (f *fakeImageService) Pull(_ context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
+func (f *fakeImageService) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
 	f.pullReq = req
+	if f.pullStarted != nil {
+		close(f.pullStarted)
+	}
+	if f.pullCanceled != nil {
+		<-ctx.Done()
+		close(f.pullCanceled)
+		return runtimeapi.PullImageResult{}, ctx.Err()
+	}
+	for _, progress := range f.progress {
+		if req.Progress != nil {
+			req.Progress(progress)
+		}
+	}
 	if f.pullErr != nil {
 		return runtimeapi.PullImageResult{}, f.pullErr
 	}

@@ -17,12 +17,15 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/core/transfer"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -91,26 +94,58 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 			return req.Username, req.Password, nil
 		},
 	})
-	pullOpts := []containerd.RemoteOpt{
-		containerd.WithResolver(resolver),
+	progress := newPullProgressTracker(pullCtx, s.client.ContentStore(), req.Progress)
+	pinnedResolver := newPullPinnedResolver(resolver)
+	pullResolver := pinnedResolver
+	if req.Progress != nil {
+		progress.SetDescriptors(s.componentProgressDescriptorsFromRemote(pullCtx, pinnedResolver, req.ImageName, ""))
+		pullResolver = newPullProgressResolver(pinnedResolver, progress, "overall")
 	}
+	pullOpts := []containerd.RemoteOpt{
+		containerd.WithResolver(pullResolver),
+	}
+	unpackingEmitted := false
+	emitUnpacking := func() {
+		if unpackingEmitted {
+			return
+		}
+		progress.Emit()
+		if req.Progress != nil {
+			req.Progress(runtimeapi.PullProgress{Status: "unpacking"})
+		}
+		unpackingEmitted = true
+	}
+
 	if _, err := s.client.Pull(pullCtx, req.ImageName, pullOpts...); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("pull image %s: %w", req.ImageName, err)
 	}
+	if req.Progress != nil {
+		progress.SetDescriptors(s.componentProgressDescriptors(pullCtx, req.ImageName, ""))
+	}
 
-	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
+	if _, err := s.client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(pullResolver)); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
 	}
 	if req.SkipUnpack {
+		progress.Emit()
 		return runtimeapi.PullImageResult{}, nil
 	}
 
-	results, err := conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
-	if err == nil {
-		return runtimeapi.PullImageResult{Refs: results}, nil
-	}
-	if !errors.Is(err, conchimage.ErrMissingSandbox) || s.cfg.DefaultKernelImage == "" {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
+	hasSandbox, knownIndex := s.imageIndexHasSandbox(pullCtx, req.ImageName)
+	var results map[string]string
+	var err error
+	if !knownIndex || hasSandbox || s.cfg.DefaultKernelImage == "" {
+		if knownIndex || s.cfg.DefaultKernelImage == "" {
+			emitUnpacking()
+		}
+		results, err = conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
+		if err == nil {
+			emitUnpacking()
+			return runtimeapi.PullImageResult{Refs: results}, nil
+		}
+		if !errors.Is(err, conchimage.ErrMissingSandbox) || s.cfg.DefaultKernelImage == "" {
+			return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
+		}
 	}
 
 	kernelResolver := docker.NewResolver(docker.ResolverOptions{
@@ -119,12 +154,19 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 			return s.cfg.DefaultKernelRegistryUsername, s.cfg.DefaultKernelRegistryPassword, nil
 		},
 	})
-	if _, err := s.client.Pull(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
+	pinnedKernelResolver := newPullPinnedResolver(kernelResolver)
+	pullKernelResolver := pinnedKernelResolver
+	if req.Progress != nil {
+		progress.SetDescriptors(s.componentProgressDescriptorsFromRemote(pullCtx, pinnedKernelResolver, s.cfg.DefaultKernelImage, "kernel"))
+		pullKernelResolver = newPullProgressResolver(pinnedKernelResolver, progress, "kernel")
+	}
+	if _, err := s.client.Pull(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(pullKernelResolver)); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("pull default kernel image %s: %w", s.cfg.DefaultKernelImage, err)
 	}
-	if _, err := s.client.Fetch(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
+	if _, err := s.client.Fetch(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(pullKernelResolver)); err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch default kernel image %s content: %w", s.cfg.DefaultKernelImage, err)
 	}
+	emitUnpacking()
 	results, err = conchimage.UnpackAllSubImagesWithDefaultSandbox(pullCtx, s.client.Client, req.ImageName, s.cfg.DefaultKernelImage)
 	if err != nil {
 		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image with default kernel image %s: %w", s.cfg.DefaultKernelImage, err)
@@ -928,6 +970,466 @@ func publishReady(svc *Service) {
 	case ch <- svc:
 	default:
 	}
+}
+
+type pullProgressDescriptor struct {
+	component string
+	digest    string
+	size      int64
+}
+
+const pullProgressEmitInterval = 500 * time.Millisecond
+
+type pullProgressTracker struct {
+	ctx        context.Context
+	store      content.Store
+	onProgress runtimeapi.PullProgressFunc
+	emitMu     sync.Mutex
+	mu         sync.Mutex
+	descs      map[string]pullProgressDescriptor
+	readOffset map[string]int64
+	lastEmit   map[string]pullProgressValue
+	lastEmitAt time.Time
+}
+
+type pullProgressValue struct {
+	progress int64
+	total    int64
+}
+
+func newPullProgressTracker(ctx context.Context, store content.Store, onProgress runtimeapi.PullProgressFunc) *pullProgressTracker {
+	return &pullProgressTracker{
+		ctx:        ctx,
+		store:      store,
+		onProgress: onProgress,
+		descs:      make(map[string]pullProgressDescriptor),
+		readOffset: make(map[string]int64),
+		lastEmit:   make(map[string]pullProgressValue),
+	}
+}
+
+func (t *pullProgressTracker) SetDescriptors(descs []pullProgressDescriptor) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, desc := range descs {
+		if desc.digest == "" || desc.component == "" || desc.size <= 0 {
+			continue
+		}
+		t.descs[desc.digest] = desc
+	}
+}
+
+func (t *pullProgressTracker) ensureDescriptor(desc ocispec.Descriptor, component string) {
+	if t == nil || desc.Digest == "" || desc.Size <= 0 {
+		return
+	}
+	if component == "" {
+		component = "overall"
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := desc.Digest.String()
+	if _, ok := t.descs[key]; ok {
+		return
+	}
+	t.descs[key] = componentDescriptor(component, desc)
+}
+
+func (t *pullProgressTracker) recordReadOffset(desc ocispec.Descriptor, offset int64) {
+	if t == nil || desc.Digest == "" || offset <= 0 {
+		return
+	}
+	t.mu.Lock()
+	key := desc.Digest.String()
+	if offset <= t.readOffset[key] {
+		t.mu.Unlock()
+		return
+	}
+	t.readOffset[key] = offset
+	now := time.Now()
+	shouldEmit := t.lastEmitAt.IsZero() || now.Sub(t.lastEmitAt) >= pullProgressEmitInterval
+	if shouldEmit {
+		t.lastEmitAt = now
+	}
+	t.mu.Unlock()
+	if shouldEmit {
+		t.Emit()
+	}
+}
+
+func (t *pullProgressTracker) Emit() {
+	if t == nil || t.onProgress == nil || t.store == nil {
+		return
+	}
+	t.emitMu.Lock()
+	defer t.emitMu.Unlock()
+	t.mu.Lock()
+	descs := make([]pullProgressDescriptor, 0, len(t.descs))
+	for _, desc := range t.descs {
+		descs = append(descs, desc)
+	}
+	readOffsets := make(map[string]int64, len(t.readOffset))
+	for dgst, offset := range t.readOffset {
+		readOffsets[dgst] = offset
+	}
+	t.mu.Unlock()
+
+	type aggregate struct {
+		progress int64
+		total    int64
+	}
+	components := map[string]aggregate{}
+	for _, desc := range descs {
+		agg := components[desc.component]
+		agg.total += desc.size
+		descProgress := readOffsets[desc.digest]
+		if _, err := t.store.Info(t.ctx, digest.Digest(desc.digest)); err == nil {
+			descProgress = desc.size
+		}
+		if descProgress > desc.size {
+			descProgress = desc.size
+		}
+		agg.progress += descProgress
+		components[desc.component] = agg
+	}
+
+	for _, component := range []string{"rootfs", "kernel", "mem-snapshot", "overall"} {
+		agg, ok := components[component]
+		if !ok || agg.total <= 0 {
+			continue
+		}
+		if agg.progress > agg.total {
+			agg.progress = agg.total
+		}
+		t.emitIfChanged(runtimeapi.PullProgress{
+			Status:    "downloading",
+			Component: component,
+			Progress:  agg.progress,
+			Total:     agg.total,
+		})
+	}
+}
+
+func (t *pullProgressTracker) emitIfChanged(progress runtimeapi.PullProgress) {
+	if t == nil || t.onProgress == nil {
+		return
+	}
+	value := pullProgressValue{progress: progress.Progress, total: progress.Total}
+	t.mu.Lock()
+	if previous, ok := t.lastEmit[progress.Component]; ok && previous == value {
+		t.mu.Unlock()
+		return
+	}
+	t.lastEmit[progress.Component] = value
+	t.mu.Unlock()
+	t.onProgress(progress)
+}
+
+type pullProgressResolver struct {
+	remotes.Resolver
+	tracker          *pullProgressTracker
+	defaultComponent string
+}
+
+type pullPinnedResolver struct {
+	remotes.Resolver
+	resolveMu sync.Mutex
+	resolved  map[string]resolvedPullReference
+}
+
+type resolvedPullReference struct {
+	name   string
+	target ocispec.Descriptor
+}
+
+func newPullProgressResolver(resolver remotes.Resolver, tracker *pullProgressTracker, defaultComponent string) remotes.Resolver {
+	return &pullProgressResolver{
+		Resolver:         resolver,
+		tracker:          tracker,
+		defaultComponent: defaultComponent,
+	}
+}
+
+func newPullPinnedResolver(resolver remotes.Resolver) remotes.Resolver {
+	return &pullPinnedResolver{
+		Resolver: resolver,
+		resolved: make(map[string]resolvedPullReference),
+	}
+}
+
+func (r *pullPinnedResolver) Resolve(ctx context.Context, ref string) (string, ocispec.Descriptor, error) {
+	r.resolveMu.Lock()
+	defer r.resolveMu.Unlock()
+	if resolved, ok := r.resolved[ref]; ok {
+		return resolved.name, resolved.target, nil
+	}
+	name, target, err := r.Resolver.Resolve(ctx, ref)
+	if err != nil {
+		return "", ocispec.Descriptor{}, err
+	}
+	r.resolved[ref] = resolvedPullReference{name: name, target: target}
+	return name, target, nil
+}
+
+func (r *pullPinnedResolver) SetOptions(options ...transfer.ImageResolverOption) {
+	if resolver, ok := r.Resolver.(remotes.ResolverWithOptions); ok {
+		resolver.SetOptions(options...)
+	}
+}
+
+func (r *pullProgressResolver) Fetcher(ctx context.Context, ref string) (remotes.Fetcher, error) {
+	fetcher, err := r.Resolver.Fetcher(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return newPullProgressFetcher(fetcher, r.tracker, r.defaultComponent), nil
+}
+
+func (r *pullProgressResolver) SetOptions(options ...transfer.ImageResolverOption) {
+	if resolver, ok := r.Resolver.(remotes.ResolverWithOptions); ok {
+		resolver.SetOptions(options...)
+	}
+}
+
+type pullProgressFetcher struct {
+	remotes.Fetcher
+	tracker          *pullProgressTracker
+	defaultComponent string
+}
+
+func newPullProgressFetcher(fetcher remotes.Fetcher, tracker *pullProgressTracker, defaultComponent string) remotes.Fetcher {
+	return &pullProgressFetcher{
+		Fetcher:          fetcher,
+		tracker:          tracker,
+		defaultComponent: defaultComponent,
+	}
+}
+
+func (f *pullProgressFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	f.tracker.ensureDescriptor(desc, f.defaultComponent)
+	rc, err := f.Fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return nil, err
+	}
+	return newPullProgressReadCloser(rc, desc, f.tracker), nil
+}
+
+type pullProgressReadCloser struct {
+	io.ReadCloser
+	desc    ocispec.Descriptor
+	tracker *pullProgressTracker
+	offset  int64
+}
+
+func newPullProgressReadCloser(rc io.ReadCloser, desc ocispec.Descriptor, tracker *pullProgressTracker) io.ReadCloser {
+	reader := &pullProgressReadCloser{ReadCloser: rc, desc: desc, tracker: tracker}
+	if seeker, ok := rc.(io.Seeker); ok {
+		return &pullProgressReadSeekCloser{pullProgressReadCloser: reader, seeker: seeker}
+	}
+	if readerAt, ok := rc.(io.ReaderAt); ok {
+		return &pullProgressReadAtCloser{pullProgressReadCloser: reader, readerAt: readerAt}
+	}
+	return reader
+}
+
+func (r *pullProgressReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 {
+		r.offset += int64(n)
+		r.tracker.recordReadOffset(r.desc, r.offset)
+	}
+	return n, err
+}
+
+type pullProgressReadSeekCloser struct {
+	*pullProgressReadCloser
+	seeker io.Seeker
+}
+
+func (r *pullProgressReadSeekCloser) Seek(offset int64, whence int) (int64, error) {
+	absolute, err := r.seeker.Seek(offset, whence)
+	if err != nil {
+		return absolute, err
+	}
+	r.offset = absolute
+	r.tracker.recordReadOffset(r.desc, absolute)
+	return absolute, nil
+}
+
+type pullProgressReadAtCloser struct {
+	*pullProgressReadCloser
+	readerAt io.ReaderAt
+}
+
+func (r *pullProgressReadAtCloser) ReadAt(p []byte, offset int64) (int, error) {
+	n, err := r.readerAt.ReadAt(p, offset)
+	if n > 0 {
+		r.tracker.recordReadOffset(r.desc, offset+int64(n))
+	}
+	return n, err
+}
+
+func (s *Service) componentProgressDescriptors(ctx context.Context, imageName, overrideComponent string) []pullProgressDescriptor {
+	img, err := s.client.GetImage(ctx, imageName)
+	if err != nil {
+		return nil
+	}
+	return s.componentProgressDescriptorsFromTarget(ctx, img.Target(), overrideComponent)
+}
+
+func (s *Service) componentProgressDescriptorsFromRemote(ctx context.Context, resolver remotes.Resolver, imageName, overrideComponent string) []pullProgressDescriptor {
+	name, target, err := resolver.Resolve(ctx, imageName)
+	if err != nil {
+		return nil
+	}
+	fetcher, err := resolver.Fetcher(ctx, name)
+	if err != nil {
+		return []pullProgressDescriptor{componentDescriptor(fallbackProgressComponent(overrideComponent), target)}
+	}
+	return componentProgressDescriptorsFromRemoteTarget(ctx, fetcher, target, overrideComponent)
+}
+
+func (s *Service) componentProgressDescriptorsFromTarget(ctx context.Context, target ocispec.Descriptor, overrideComponent string) []pullProgressDescriptor {
+	return walkProgressDescriptors(ctx, target, overrideComponent, func(ctx context.Context, desc ocispec.Descriptor, out any) error {
+		return readContentJSON(ctx, s.client.ContentStore(), desc, out)
+	})
+}
+
+func componentProgressDescriptorsFromRemoteTarget(ctx context.Context, fetcher remotes.Fetcher, target ocispec.Descriptor, overrideComponent string) []pullProgressDescriptor {
+	return walkProgressDescriptors(ctx, target, overrideComponent, func(ctx context.Context, desc ocispec.Descriptor, out any) error {
+		return readRemoteContentJSON(ctx, fetcher, desc, out)
+	})
+}
+
+type progressDescriptorReader func(context.Context, ocispec.Descriptor, any) error
+
+func walkProgressDescriptors(ctx context.Context, target ocispec.Descriptor, overrideComponent string, readJSON progressDescriptorReader) []pullProgressDescriptor {
+	return walkProgressDescriptorsVisited(ctx, target, overrideComponent, readJSON, make(map[string]struct{}))
+}
+
+func walkProgressDescriptorsVisited(ctx context.Context, target ocispec.Descriptor, overrideComponent string, readJSON progressDescriptorReader, visited map[string]struct{}) []pullProgressDescriptor {
+	key := target.Digest.String()
+	if _, ok := visited[key]; key != "" && ok {
+		return nil
+	}
+	if key != "" {
+		visited[key] = struct{}{}
+	}
+	var out []pullProgressDescriptor
+	switch target.MediaType {
+	case ocispec.MediaTypeImageIndex, images.MediaTypeDockerSchema2ManifestList:
+		var index ocispec.Index
+		if err := readJSON(ctx, target, &index); err != nil {
+			return []pullProgressDescriptor{componentDescriptor(fallbackProgressComponent(overrideComponent), target)}
+		}
+		if includeOverallIndexProgress(index.Manifests, overrideComponent) {
+			out = append(out, componentDescriptor("overall", target))
+		}
+		for _, manifestDesc := range index.Manifests {
+			component := overrideComponent
+			if component == "" {
+				component = progressComponentFromKind(manifestDesc.Annotations["io.conch.kind"])
+			}
+			out = append(out, walkProgressDescriptorsVisited(ctx, manifestDesc, fallbackProgressComponent(component), readJSON, visited)...)
+		}
+	case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
+		component := fallbackProgressComponent(overrideComponent)
+		var manifest ocispec.Manifest
+		if err := readJSON(ctx, target, &manifest); err != nil {
+			return []pullProgressDescriptor{componentDescriptor(component, target)}
+		}
+		out = append(out, componentDescriptor(component, target))
+		out = append(out, componentDescriptor(component, manifest.Config))
+		for _, layer := range manifest.Layers {
+			out = append(out, componentDescriptor(component, layer))
+		}
+	default:
+		out = append(out, componentDescriptor(fallbackProgressComponent(overrideComponent), target))
+	}
+	return out
+}
+
+func includeOverallIndexProgress(manifests []ocispec.Descriptor, overrideComponent string) bool {
+	if overrideComponent != "" {
+		return false
+	}
+	for _, manifestDesc := range manifests {
+		if progressComponentFromKind(manifestDesc.Annotations["io.conch.kind"]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func fallbackProgressComponent(overrideComponent string) string {
+	if overrideComponent != "" {
+		return overrideComponent
+	}
+	return "overall"
+}
+
+func (s *Service) imageIndexHasSandbox(ctx context.Context, imageName string) (bool, bool) {
+	img, err := s.client.GetImage(ctx, imageName)
+	if err != nil {
+		return false, false
+	}
+	target := img.Target()
+	switch target.MediaType {
+	case ocispec.MediaTypeImageIndex, images.MediaTypeDockerSchema2ManifestList:
+	default:
+		return false, false
+	}
+	var index ocispec.Index
+	if err := readContentJSON(ctx, s.client.ContentStore(), target, &index); err != nil {
+		return false, false
+	}
+	for _, manifestDesc := range index.Manifests {
+		if manifestDesc.Annotations["io.conch.kind"] == conchimage.KindSandbox {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func componentDescriptor(component string, desc ocispec.Descriptor) pullProgressDescriptor {
+	return pullProgressDescriptor{
+		component: component,
+		digest:    desc.Digest.String(),
+		size:      desc.Size,
+	}
+}
+
+func progressComponentFromKind(kind string) string {
+	switch kind {
+	case conchimage.KindRootfs:
+		return "rootfs"
+	case conchimage.KindSandbox:
+		return "kernel"
+	case conchimage.KindMemSnapshot:
+		return "mem-snapshot"
+	default:
+		return ""
+	}
+}
+
+func readContentJSON(ctx context.Context, store content.Store, desc ocispec.Descriptor, out any) error {
+	raw, err := content.ReadBlob(ctx, store, desc)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func readRemoteContentJSON(ctx context.Context, fetcher remotes.Fetcher, desc ocispec.Descriptor, out any) error {
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	return json.NewDecoder(rc).Decode(out)
 }
 
 type daemonClientProvider interface {

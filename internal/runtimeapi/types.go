@@ -81,6 +81,7 @@ type TemplatePullOptions struct {
 	Username  string
 	Password  string
 	Labels    map[string]string
+	Progress  PullProgressFunc
 }
 
 type TemplatePullResult struct {
@@ -126,10 +127,20 @@ type PullImageOptions struct {
 	Username   string
 	Password   string
 	SkipUnpack bool
+	Progress   PullProgressFunc
 }
 
 type PullImageResult struct {
 	Refs map[string]string
+}
+
+type PullProgressFunc func(PullProgress)
+
+type PullProgress struct {
+	Status    string
+	Component string
+	Progress  int64
+	Total     int64
 }
 
 type PushImageOptions struct {
