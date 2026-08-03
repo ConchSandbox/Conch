@@ -41,6 +41,94 @@ func (s *fakeGetFileStream) Send(chunk *pb.FileChunk) error {
 	return nil
 }
 
+func TestCleanAgentFilepathRequiresNormalizedAbsoluteGuestPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		want      string
+		wantError bool
+	}{
+		{
+			name: "guest root",
+			path: "/",
+			want: "/",
+		},
+		{
+			name: "absolute guest file",
+			path: "/etc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "volume-visible guest file",
+			path: "/workspace/project/data.txt",
+			want: "/workspace/project/data.txt",
+		},
+		{
+			name:      "empty",
+			path:      "",
+			wantError: true,
+		},
+		{
+			name:      "relative",
+			path:      "etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "parent-relative",
+			path:      "../etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "absolute parent traversal",
+			path:      "/workspace/../etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "parent traversal above root",
+			path:      "/../etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "dot segment",
+			path:      "/etc/./passwd",
+			wantError: true,
+		},
+		{
+			name:      "repeated separator",
+			path:      "/etc//passwd",
+			wantError: true,
+		},
+		{
+			name:      "trailing separator",
+			path:      "/etc/passwd/",
+			wantError: true,
+		},
+		{
+			name:      "NUL byte",
+			path:      "/etc/passwd\x00ignored",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, errMsg := cleanAgentFilepath(tt.path, "test")
+			if tt.wantError {
+				if errMsg == "" {
+					t.Errorf("cleanAgentFilepath(%q) accepted path as %q, want validation error", tt.path, got)
+				}
+				return
+			}
+			if errMsg != "" {
+				t.Fatalf("cleanAgentFilepath(%q) error = %q", tt.path, errMsg)
+			}
+			if got != tt.want {
+				t.Fatalf("cleanAgentFilepath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFileAccessCodeMapsPermissionDenied(t *testing.T) {
 	if got := fileAccessCode(os.ErrPermission); got != connect.CodePermissionDenied {
 		t.Fatalf("fileAccessCode(os.ErrPermission) = %v, want %v", got, connect.CodePermissionDenied)
@@ -143,6 +231,42 @@ func TestPostFileStreamFailureDoesNotOverwriteTarget(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary upload files remain after failed stream: %v", matches)
+	}
+}
+
+func TestPostFileStreamRejectsAmbiguousRepeatedFilepath(t *testing.T) {
+	server := &AgentServer{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(path, []byte("original"), FilePerm); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	separator := string(os.PathSeparator)
+	ambiguousPath := dir + separator + "." + separator + filepath.Base(path)
+	stream := &fakePostFileStream{
+		chunks: []*pb.FileChunk{
+			{Filepath: path, Content: []byte("partial")},
+			{Filepath: ambiguousPath, Content: []byte("should-fail")},
+		},
+	}
+
+	err := server.PostFileStream(stream)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("PostFileStream() error = %v, want code %v", err, connect.CodeInvalidArgument)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	if string(content) != "original" {
+		t.Fatalf("target content = %q, want original", content)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".conch-upload-*"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary upload files remain after rejected path: %v", matches)
 	}
 }
 
@@ -261,6 +385,66 @@ func TestGetFileStreamReturnsStatusErrors(t *testing.T) {
 			err := server.GetFileStream(tt.req, &fakeGetFileStream{})
 			if connect.CodeOf(err) != tt.want {
 				t.Fatalf("GetFileStream() error = %v, want code %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileEntryPointsRejectInvalidGuestPaths(t *testing.T) {
+	server := &AgentServer{}
+	entryPoints := []struct {
+		name string
+		call func(string) error
+	}{
+		{
+			name: "PostFileStream",
+			call: func(path string) error {
+				return server.PostFileStream(&fakePostFileStream{chunks: []*pb.FileChunk{
+					{Filepath: path, Content: []byte("data")},
+				}})
+			},
+		},
+		{
+			name: "GetFileStream",
+			call: func(path string) error {
+				return server.GetFileStream(&pb.GetFileRequest{Filepath: path}, &fakeGetFileStream{})
+			},
+		},
+		{
+			name: "ListFiles",
+			call: func(path string) error {
+				_, err := server.ListFiles(context.Background(), &pb.ListFilesRequest{Path: path})
+				return err
+			},
+		},
+		{
+			name: "SearchFiles",
+			call: func(path string) error {
+				_, err := server.SearchFiles(context.Background(), &pb.SearchFilesRequest{Path: path, Pattern: "*"})
+				return err
+			},
+		},
+	}
+	invalidPaths := []struct {
+		name string
+		path string
+	}{
+		{name: "relative", path: "relative/file.txt"},
+		{name: "parent-relative", path: "../etc/passwd"},
+		{name: "parent traversal", path: "/workspace/../etc/passwd"},
+		{name: "ambiguous cleaned form", path: "/workspace//data.txt"},
+		{name: "NUL byte", path: "/workspace/data\x00.txt"},
+	}
+
+	for _, entryPoint := range entryPoints {
+		t.Run(entryPoint.name, func(t *testing.T) {
+			for _, invalidPath := range invalidPaths {
+				t.Run(invalidPath.name, func(t *testing.T) {
+					err := entryPoint.call(invalidPath.path)
+					if connect.CodeOf(err) != connect.CodeInvalidArgument {
+						t.Fatalf("entry point accepted path %q: error = %v, want code %v", invalidPath.path, err, connect.CodeInvalidArgument)
+					}
+				})
 			}
 		})
 	}

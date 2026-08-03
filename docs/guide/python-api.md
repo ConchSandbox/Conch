@@ -387,6 +387,13 @@ sbx.commands.kill(tag='http-srv', signal=15)
 
 ### 文件操作
 
+所有文件接口的远端路径（`path`、`remote_path` 和上传规格中的 `filepath`）必须是已规范化的
+guest 绝对路径，例如 `/home/user/a.txt` 或卷在 guest 内可见的 `/workspace/data.txt`。
+相对路径、`..` 或 `.` 路径段、重复或多余的分隔符以及 NUL 字节都会在文件访问前被拒绝；
+根路径 `/` 本身有效。`guestd` 在 chroot 到 sandbox merge root 后提供这些接口，因此 `/`
+表示 guest 根目录，已配置的卷仍可通过其 guest 挂载目标访问。该校验定义的是 guest API 的
+路径语义，不表示此前存在越过 chroot 边界的 host 文件系统逃逸。
+
 #### 上传文件
 
 ```python
