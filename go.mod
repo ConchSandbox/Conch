@@ -11,6 +11,7 @@ require (
 	github.com/containerd/plugin v1.1.0
 	github.com/containernetworking/cni v1.3.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/creack/pty v1.1.24
 	github.com/erofs/erofs-container-toolkit v0.0.0-20260123120957-823f29fa15cb
 	github.com/moby/sys/mountinfo v0.7.2
@@ -46,7 +47,6 @@ require (
 	github.com/containerd/otelttrpc v0.1.0 // indirect
 	github.com/containerd/ttrpc v1.2.8 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
-	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
 	github.com/docker/go-metrics v0.0.1 // indirect

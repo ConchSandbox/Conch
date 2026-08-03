@@ -13,7 +13,7 @@
 ## 宿主机准备
 
 - 需要以 root 权限运行 `conchd`，或提供等价的 `CAP_SYS_ADMIN` 与 `CAP_NET_ADMIN` 能力。
-- 在 `/opt/cni/bin` 或设置的 `network.cni.plugin_bin_dirs`下安装 CNI 插件二进制文件： `bridge`、`host-local` 和 `loopback` 。
+- 在 `/usr/libexec/cni` 或设置的 `network.cni.plugin_bin_dirs`下安装 CNI 插件二进制文件： `bridge`、`host-local` 和 `loopback` 。
 - 将 Conch CNI 配置放在 Conch 专用配置目录中。默认目录为 `/etc/conch/cni/net.d`。
 
 仓库内提供了示例配置 `config/cni/net.d/10-conch.conf`。如果 `network.cni.plugin_conf_dir` 保持默认值，且 `/etc/conch/cni/net.d` 中没有 CNI 配置文件，Conch 会回退到已加载 Conch 配置文件旁边的 `cni/net.d`。使用仓库内的 `config/config.yaml` 时，该回退路径即为 `config/cni/net.d`。
@@ -53,7 +53,7 @@ network:
   tap_mask: 24
   cni:
     plugin_bin_dirs:
-      - /opt/cni/bin
+      - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
     plugin_max_conf: 1
     if_name: eth0

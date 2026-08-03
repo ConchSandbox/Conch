@@ -32,7 +32,7 @@ network:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; the Go CNI library does not install them.
     plugin_bin_dirs:
-      - /opt/cni/bin
+      - /usr/libexec/cni
     # Directory containing the CNI .conf/.conflist Conch should load for sandbox networking.
     # Change this if your Conch CNI configs live somewhere else.
     # If this default directory has no config, Conch falls back to cni/net.d next to this config file.
@@ -48,14 +48,6 @@ containerd:
   root_dir: /var/lib/conch/containerd
   state_dir: /run/conch/containerd
   default_namespace: default
-
-image:
-  # Default multi-arch kernel image used when converting a standard OCI image via `conch image pull`
-  default_kernel_image: hub.oepkgs.net/conch/kernel:6.6.0
-  default_kernel_plain_http: false
-  # Optional credentials for the default kernel registry. Protect this config file if set.
-  default_kernel_registry_username: ""
-  default_kernel_registry_password: ""
 
 sandbox:
   vsock_signal_retry: 10ms

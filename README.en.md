@@ -26,7 +26,7 @@ The project is developed around the following new sandbox requirements of Agents
 - erofs-utils 1.9+ (`mkfs.erofs --fsalignblks` is required)
 - Linux 5.10+
 - Root privileges or equivalent `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` capabilities for network namespaces, tap devices, routes, and NAT rules
-- CNI plugin binaries installed on the host, by default under `/opt/cni/bin` (`bridge`, `host-local`, and `loopback` are required for the default bridge-style setup)
+- CNI plugin binaries installed on the host, by default under `/usr/libexec/cni` (`bridge`, `host-local`, and `loopback` are required for the default bridge-style setup)
 - At least one Conch CNI `.conf` or `.conflist` file. The default path is `/etc/conch/cni/net.d`; if that default path is empty, Conch falls back to `cni/net.d` next to the loaded config file, such as `config/cni/net.d`.
 - A CNI subnet that does not overlap with the host network, cluster network, or VM guest tap subnet
 - Iptables network configuration tool. Conch still uses namespace-local NAT for the VM guest tap path; the selected CNI plugins may also require iptables or nftables depending on their configuration.

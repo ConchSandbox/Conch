@@ -1,0 +1,41 @@
+[Unit]
+Description=Conch Agent Sandbox Engine
+Documentation=https://atomgit.com/openeuler/Conch
+After=network-online.target
+Wants=network-online.target
+# RestartSec=2 never fills the default 10s window, so a permanent failure would
+# retry forever instead of reporting `failed`.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Override CONCHD_CONFIG / CONCHD_OPTS here instead of editing this unit.
+Environment=CONCHD_CONFIG=/etc/conch/config.yaml
+EnvironmentFile=-/etc/sysconfig/conchd
+EnvironmentFile=-/etc/default/conchd
+ExecStartPre=-/sbin/modprobe erofs
+ExecStartPre=-/sbin/modprobe vhost_vsock
+ExecStart=/usr/bin/conchd --config ${CONCHD_CONFIG} $CONCHD_OPTS
+
+Type=notify
+Delegate=yes
+# Sandbox VMM processes outlive conchd and are re-adopted on the next start.
+KillMode=process
+Restart=on-failure
+RestartSec=2
+
+# Startup initializes containerd and prefills the network pool; shutdown budgets
+# 30s internally.
+TimeoutStartSec=300
+TimeoutStopSec=60
+
+# VMM children inherit these, and each sandbox holds several fds.
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+
+TasksMax=infinity
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

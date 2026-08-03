@@ -4,16 +4,15 @@
 
 ## 1. conch template create
 
-`conch template create` 用于把已有 OCI rootfs 镜像与本地 kernel/initrd 文件转换为可启动 Template，并返回 `tmpl_xxx`。
+`conch template create` 用于把已有 OCI rootfs 镜像与本地 kernel/initrd 文件转换为可启动 Template，并返回 `tmpl_xxx`。使用conch的rpm包安装conch，rpm包中包含kernel及conch.initrd文件，对应的指令如下。
 
-```bash
+```
 conch template create \
   --source docker.io/openeuler/openeuler:24.03-lts-sp2 \
-  --kernel ./bzImage \
-  --initrd ./conch.initrd \
+  --kernel /var/lib/conch/kernel \
+  --initrd /var/lib/conch/conch.initrd \
   -t localhost/conch/openeuler:latest
 ```
-
 所有 Template（包括 `conch sandbox checkpoint` 产生的可恢复 Template）统一通过以下命令管理：
 
 ```bash
