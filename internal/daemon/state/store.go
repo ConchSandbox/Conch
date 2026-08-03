@@ -14,10 +14,11 @@ type Store interface {
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
-	UpsertNetworkSlot(context.Context, NetworkSlotRecord) error
-	GetNetworkSlot(context.Context, string) (NetworkSlotRecord, error)
+	CreateNetworkSlot(context.Context, NetworkSlotRecord) error
+	UpdateNetworkSlot(context.Context, NetworkSlotRecord) error
+	GetNetworkSlot(context.Context, int) (NetworkSlotRecord, error)
 	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)
-	DeleteNetworkSlot(context.Context, string) error
+	DeleteNetworkSlot(context.Context, int) error
 
 	CreateTemplate(context.Context, template.Entry) error
 	GetTemplate(context.Context, string) (template.Entry, error)

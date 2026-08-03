@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
@@ -103,21 +102,17 @@ type Sandbox struct {
 	vsockConn   net.Conn
 }
 
-func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*Sandbox, error) {
+func attachSandboxFromRecord(rec state.SandboxRecord) (*Sandbox, error) {
 	if rec.VMMName == "" {
 		return nil, fmt.Errorf("missing vmm name")
 	}
 	if rec.VMMSocketPath == "" {
 		return nil, fmt.Errorf("missing vmm socket path")
 	}
-	if rec.NetworkSlotKey == "" {
-		return nil, fmt.Errorf("missing network slot key")
+	if rec.NetworkSlotID == 0 {
+		return nil, fmt.Errorf("missing network slot ID")
 	}
-	slotIdx, err := strconv.Atoi(rec.NetworkSlotKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid network slot key %q: %w", rec.NetworkSlotKey, err)
-	}
-	slot, err := netstack.NewSlot(rec.NetworkSlotKey, slotIdx)
+	slot, err := netstack.NewSlot(rec.NetworkSlotID)
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +133,6 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 		slot:        slot,
 	}
 	cleanup.Add(func(ctx context.Context) error {
-		if pool == nil || slot == nil {
-			return nil
-		}
-		return pool.Release(ctx, slot)
-	})
-	cleanup.Add(func(ctx context.Context) error {
 		if err := cleanupFiles(process.VmmSocketPath, process.VsockSocketPath); err != nil {
 			return fmt.Errorf("failed to cleanup files: %w", err)
 		}
@@ -153,6 +142,16 @@ func attachSandboxFromRecord(rec state.SandboxRecord, pool *netstack.Pool) (*San
 		return sb.Stop(ctx)
 	})
 	return sb, nil
+}
+
+func registerRehydratedNetworkCleanup(sb *Sandbox, pool *netstack.Pool) {
+	if sb == nil || sb.cleanup == nil || pool == nil || sb.slot == nil {
+		return
+	}
+	slot := sb.slot
+	sb.cleanup.Add(func(ctx context.Context) error {
+		return pool.Release(ctx, slot)
+	})
 }
 
 func ResumeSandbox(
@@ -181,7 +180,7 @@ func ResumeSandbox(
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
 		if err != nil {
-			return fmt.Errorf("failed to release network slot %s: %w", slot.Key, err)
+			return fmt.Errorf("failed to release network slot %d: %w", slot.ID, err)
 		}
 		return nil
 	})
@@ -191,7 +190,7 @@ func ResumeSandbox(
 		CPUMax:          vcpuMax,
 		MemorySize:      vmStartSpec.MemorySizeMB,
 		MemoryPath:      vmStartSpec.MemoryPath,
-		NamespaceID:     slot.NamespaceID(),
+		NetNSPath:       slot.NetNSPath(),
 		TapName:         slot.TapName(),
 		KernelPath:      vmStartSpec.KernelPath,
 		SnapfilePath:    vmStartSpec.SnapfilePath,
@@ -267,7 +266,7 @@ func CreateSandbox(
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
 		if err != nil {
-			return fmt.Errorf("failed to release network slot %s: %w", slot.Key, err)
+			return fmt.Errorf("failed to release network slot %d: %w", slot.ID, err)
 		}
 		return nil
 	})
@@ -277,7 +276,7 @@ func CreateSandbox(
 		CPUMax:          vcpuMax,
 		MemorySize:      vmStartSpec.MemorySizeMB,
 		MemoryPath:      vmStartSpec.MemoryPath,
-		NamespaceID:     slot.NamespaceID(),
+		NetNSPath:       slot.NetNSPath(),
 		TapName:         slot.TapName(),
 		KernelPath:      vmStartSpec.KernelPath,
 		InitrdPath:      vmStartSpec.InitrdPath,

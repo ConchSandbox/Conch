@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -279,7 +280,7 @@ func buildCNIOpts(slot *Slot, cniID, netnsPath string) ([]NamespaceOpts, error) 
 			"K8S_POD_NAMESPACE":          defaultCNINamespace,
 			"K8S_POD_NAME":               cniID,
 			"K8S_POD_INFRA_CONTAINER_ID": cniID,
-			"CONCH_NETWORK_SLOT":         slot.Key,
+			"CONCH_NETWORK_SLOT":         strconv.Itoa(slot.ID),
 			"IgnoreUnknown":              "1",
 		}),
 	}, nil
@@ -432,6 +433,8 @@ func ipToString(ip net.IP) string {
 	return ip.String()
 }
 
+// SetupSandboxNetwork performs CNI ADD and converts its result. The caller owns
+// rollback on every error because ADD may have taken effect before failing.
 func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) (*CNIResult, error) {
 	if m == nil || m.plugin == nil {
 		return nil, fmt.Errorf("cni config not initialized")
@@ -449,28 +452,31 @@ func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netn
 		if isExpectedShutdownError(ctx, err) {
 			return nil, errors.Join(err, ctx.Err())
 		}
-		return nil, m.rollbackCNISetup(ctx, cniID, netnsPath, fmt.Errorf("failed to setup cni network: %w", err), opts...)
+		return nil, fmt.Errorf("failed to setup cni network: %w", err)
 	}
 	converted, err := convertCNIResult(result, m.config.IfName)
 	if err != nil {
 		if shouldPreserveAfterCancel(ctx) {
 			return nil, errors.Join(err, ctx.Err())
 		}
-		return nil, m.rollbackCNISetup(ctx, cniID, netnsPath, fmt.Errorf("failed to convert cni result: %w", err), opts...)
+		return nil, fmt.Errorf("failed to convert cni result: %w", err)
 	}
 	return converted, nil
 }
 
-func (m *CNIManager) rollbackCNISetup(ctx context.Context, cniID, netnsPath string, cause error, opts ...NamespaceOpts) error {
-	removeErr := m.plugin.Remove(context.WithoutCancel(ctx), cniID, netnsPath, opts...)
-	allocErr := m.validateHostLocalAllocationReleased(cniID)
-	if removeErr != nil {
-		return errors.Join(cause, fmt.Errorf("failed to rollback cni setup: %w", removeErr), allocErr)
+func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
+	if cniID == "" {
+		return nil
 	}
-	if allocErr != nil {
-		return errors.Join(cause, fmt.Errorf("cni rollback left host-local allocation: %w", allocErr))
+	if m == nil || m.plugin == nil {
+		return fmt.Errorf("cni config not initialized")
 	}
-	return cause
+	removeErr := m.plugin.Remove(ctx, cniID, netnsPath, opts...)
+	allocationErr := m.validateHostLocalAllocationReleased(cniID)
+	if allocationErr != nil {
+		allocationErr = fmt.Errorf("cni teardown left host-local allocation: %w", allocationErr)
+	}
+	return errors.Join(removeErr, allocationErr)
 }
 
 func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
@@ -498,14 +504,4 @@ func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
 		}
 	}
 	return nil
-}
-
-func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
-	if cniID == "" || netnsPath == "" {
-		return nil
-	}
-	if m == nil || m.plugin == nil {
-		return fmt.Errorf("cni config not initialized")
-	}
-	return m.plugin.Remove(ctx, cniID, netnsPath, opts...)
 }

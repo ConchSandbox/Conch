@@ -22,23 +22,23 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 
 	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
-		CPUBoot:     2,
-		CPUMax:      4,
-		MemorySize:  1024,
-		MemoryPath:  "/must/not/be/used/mem.img",
-		NamespaceID: "ns-test",
-		TapName:     "tap0",
-		KernelPath:  "/tmp/kernel",
-		InitrdPath:  "/tmp/initrd",
-		VsockCID:    42,
-		SandboxId:   "sandbox-test",
+		CPUBoot:    2,
+		CPUMax:     4,
+		MemorySize: 1024,
+		MemoryPath: "/must/not/be/used/mem.img",
+		NetNSPath:  "/run/conch/netns/slot-2",
+		TapName:    "tap0",
+		KernelPath: "/tmp/kernel",
+		InitrdPath: "/tmp/initrd",
+		VsockCID:   42,
+		SandboxId:  "sandbox-test",
 	}, false)
 	if err != nil {
 		t.Fatalf("BuildStartCmd() error = %v", err)
 	}
 
 	for _, want := range []string{
-		"ip netns exec ns-test",
+		"nsenter --net=/run/conch/netns/slot-2 --",
 		binPath,
 		"-qmp unix:/tmp/conch-qmp.sock,server,nowait",
 		"-device vhost-vsock-pci,id=vsock0,guest-cid=42",
@@ -69,7 +69,7 @@ func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
 		CPUBoot:      1,
 		CPUMax:       1,
 		MemorySize:   256,
-		NamespaceID:  "ns-test",
+		NetNSPath:    "/run/conch/netns/slot-2",
 		TapName:      "tap0",
 		KernelPath:   "/tmp/kernel",
 		InitrdPath:   "/tmp/initrd",
@@ -90,6 +90,21 @@ func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
 	}
 	if strings.Contains(script, "/must/not/be/used/mem.img") {
 		t.Fatalf("resume script consumed MemoryPath:\n%s", script)
+	}
+}
+
+func TestStratovirtBuildStartCmdRequiresNSenter(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "stratovirt")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	_, err := client.BuildStartCmd(&driver.ResourceArgs{}, false)
+	if err == nil || !strings.Contains(err.Error(), "resolve nsenter binary") {
+		t.Fatalf("BuildStartCmd() error = %v, want missing nsenter error", err)
 	}
 }
 

@@ -136,8 +136,7 @@ type CreateResult struct {
 	VMMSocketPath   string
 	VsockCID        uint32
 	VsockSocketPath string
-	NetworkSlotKey  string
-	NetworkNS       string
+	NetworkSlotID   int
 	RootfsKey       string
 	MemKey          string
 	RootfsMount     string
@@ -491,8 +490,7 @@ func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx 
 		VMMSocketPath:   sbx.process.VmmSocketPath,
 		VsockCID:        runtimeIDs.vsockCID,
 		VsockSocketPath: runtimeIDs.vsockSocketPath,
-		NetworkSlotKey:  sbx.slot.Key,
-		NetworkNS:       sbx.slot.NamespaceID(),
+		NetworkSlotID:   sbx.slot.ID,
 		RootfsKey:       runtime.RootfsKey,
 		MemKey:          runtime.MemKey,
 		RootfsMount:     runtime.RootfsMount,
@@ -521,7 +519,7 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 		if rec.SandboxID == "" {
 			continue
 		}
-		sb, err := attachSandboxFromRecord(rec, m.pool)
+		sb, err := attachSandboxFromRecord(rec)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("attach sandbox %s: %w", rec.SandboxID, err))
 			continue
@@ -537,13 +535,14 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 			}
 		}
 		if sb.slot != nil && m.pool != nil {
-			if err := m.pool.RestoreInUse(sb.slot, rec.SandboxID, rec.IP); err != nil {
+			if err := m.pool.RestoreAssigned(sb.slot, rec.SandboxID, rec.IP); err != nil {
 				if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 				}
 				errs = append(errs, fmt.Errorf("restore network slot for %s: %w", rec.SandboxID, err))
 				continue
 			}
+			registerRehydratedNetworkCleanup(sb, m.pool)
 		}
 		volumeDevices := volumeDevicesFromState(rec.VolumeDevices)
 		if len(volumeDevices) > 0 && m.volumeManager == nil {

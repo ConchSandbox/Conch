@@ -8,8 +8,49 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openeuler/Conch/internal/vmm/driver"
 	"golang.org/x/sys/unix"
 )
+
+func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "cloud-hypervisor")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := NewCLHClient(1, "/tmp/conch-clh.sock")
+	script, err := client.BuildStartCmd(&driver.ResourceArgs{
+		CPUBoot:         2,
+		CPUMax:          4,
+		MemorySize:      1024,
+		MemoryPath:      "/tmp/memory",
+		NetNSPath:       "/run/conch/netns/slot-2",
+		TapName:         "tap0",
+		KernelPath:      "/tmp/kernel",
+		InitrdPath:      "/tmp/initrd",
+		VsockCID:        42,
+		VsockSocketPath: "/tmp/vsock.sock",
+		SandboxId:       "sandbox-test",
+		EventMonitorFd:  10,
+		ApiSocketFd:     11,
+	}, false)
+	if err != nil {
+		t.Fatalf("BuildStartCmd() error = %v", err)
+	}
+
+	for _, want := range []string{
+		"nsenter --net=/run/conch/netns/slot-2 --",
+		binPath,
+		`--net "tap=tap0"`,
+		"conch.sandbox_id=sandbox-test",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
 
 func TestBuildPmemArgsCloudHypervisorOption(t *testing.T) {
 	got := buildPmemArgs([]string{

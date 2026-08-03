@@ -62,7 +62,7 @@ network:
 Pay attention to the following network config items:
 
 - `warm_pool_size` sets the number of ready-to-use idle network slots to pre-create and maintain and cannot exceed the code-defined total capacity of 4000 slots.
-- Conch fixes the total number of idle and assigned slots at a maximum of 4000. CNI/IPAM address capacity may impose a lower effective limit.
+- At startup, Conch rebuilds its in-memory ID allocator from all BoltDB Slot records—including transient, idle, and assigned slots. Those records share the fixed total capacity of 4000; CNI/IPAM address capacity may impose a lower effective limit.
 - With `dynamic_reservation` enabled, a CNI allocation failure rolls back the attempted slot and is retried with exponential backoff. Sandbox creation reports an unavailable resource when the pool is empty.
 - `tap_ip` and `tap_mask` define the VM-facing `tap` subnet inside each sandbox.
 - `plugin_bin_dirs` points to the CNI plugin directory, and `plugin_conf_dir` points to the Conch CNI config directory.
@@ -74,19 +74,19 @@ Start `conchd` as root and verify network pool prefill:
 
 ```bash
 sudo ./bin/conchd -config config/config.yaml
-ip netns list
+sudo ls -1 /run/conch/netns
 ```
 
-- Expected result: namespaces for prefilling slots are visible, such as `ns-2`.
+- Expected result: namespace handles for prefilled slots are visible, such as `slot-2`. Conch owns this directory exclusively, so these handles do not appear in `ip netns list`, which scans `/run/netns`.
 
 Inspect one namespace:
 
 ```bash
-sudo ip netns exec ns-2 ip addr show eth0
-sudo ip netns exec ns-2 ip route
-sudo ip netns exec ns-2 ip addr show tap0
-sudo ip netns exec ns-2 sysctl net.ipv4.ip_forward
-sudo ip netns exec ns-2 iptables -t nat -S
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show eth0
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip route
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show tap0
+sudo nsenter --net=/run/conch/netns/slot-2 -- sysctl net.ipv4.ip_forward
+sudo nsenter --net=/run/conch/netns/slot-2 -- iptables -t nat -S
 ```
 
 - Expected result:
@@ -108,7 +108,7 @@ ls /var/lib/cni/networks/conch-bridge
 After normal `conchd` shutdown:
 
 ```bash
-ip netns list
+sudo ls -1 /run/conch/netns
 ip link show cni-conch0
 ip route show table main | grep 10.12
 ip neigh show | grep 10.12
@@ -122,7 +122,14 @@ ls /var/lib/cni/networks/conch-bridge
 Normal `conchd` exit preserves all network resources. If a full reset is needed, meaning no sandbox, snapshot, network, or other state should be kept, stop `conchd`, delete data record `/var/lib/conch/state.db`, and manually remove the namespace, bridge, and IPAM directory:
 
 ```bash
-sudo ip netns delete ns-X
+sudo sh -c '
+for ns in /run/conch/netns/slot-*; do
+  [ -e "$ns" ] || continue
+  umount -l "$ns"
+  rm -f "$ns"
+done
+rmdir /run/conch/netns 2>/dev/null || true
+'
 sudo ip link delete cni-conch0 2>/dev/null || true
 sudo rm -rf /var/lib/cni/networks/conch-bridge
 ```

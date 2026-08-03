@@ -1,6 +1,8 @@
 package netstack
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -169,7 +171,7 @@ func TestConvertCNIResult(t *testing.T) {
 		Interfaces: map[string]*cni.Config{
 			"eth0": {
 				Mac:     "02:00:00:00:00:01",
-				Sandbox: "/var/run/netns/ns-2",
+				Sandbox: "/run/conch/netns/slot-2",
 				IPConfigs: []*cni.IPConfig{
 					{IP: net.ParseIP("fd00::2"), Gateway: net.ParseIP("fd00::1")},
 					{IP: net.ParseIP("10.12.0.2"), Gateway: net.ParseIP("10.12.0.1")},
@@ -226,5 +228,48 @@ func TestConvertCNIResultFallbackAndErrors(t *testing.T) {
 	}
 	if _, err := convertCNIResult(&cni.Result{Interfaces: map[string]*cni.Config{"eth0": {}}}, "eth0"); err == nil {
 		t.Fatalf("convertCNIResult(empty interface) error = nil, want error")
+	}
+}
+
+func TestTeardownSandboxNetworkValidatesAllocationAfterRemoveError(t *testing.T) {
+	allocationDir := t.TempDir()
+	cniID := "conch-slot-2"
+	if err := os.WriteFile(filepath.Join(allocationDir, "10.12.0.2"), []byte(cniID+"\n"), 0o600); err != nil {
+		t.Fatalf("write host-local allocation: %v", err)
+	}
+	removeErr := errors.New("cni del failed")
+	manager := &CNIManager{
+		plugin: &fakeCNIPlugin{remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
+			return removeErr
+		}},
+		selectedHostLocalAllocDir: allocationDir,
+	}
+
+	err := manager.TeardownSandboxNetwork(context.Background(), cniID, "/run/conch/netns/slot-2")
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("TeardownSandboxNetwork() error = %v, want Remove error", err)
+	}
+	if !strings.Contains(err.Error(), "host-local allocation") {
+		t.Fatalf("TeardownSandboxNetwork() error = %v, want host-local validation error", err)
+	}
+}
+
+func TestTeardownSandboxNetworkAllowsEmptyNamespacePath(t *testing.T) {
+	removeCalls := 0
+	manager := &CNIManager{plugin: &fakeCNIPlugin{
+		remove: func(_ context.Context, id, path string, _ ...cni.NamespaceOpts) error {
+			removeCalls++
+			if id != "conch-slot-2" || path != "" {
+				t.Fatalf("Remove(%q, %q), want (conch-slot-2, empty)", id, path)
+			}
+			return nil
+		},
+	}}
+
+	if err := manager.TeardownSandboxNetwork(context.Background(), "conch-slot-2", ""); err != nil {
+		t.Fatalf("TeardownSandboxNetwork() error = %v", err)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
 	}
 }

@@ -24,73 +24,113 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 const ipv4ForwardingSysctlPath = "/proc/sys/net/ipv4/ip_forward"
 
-func CreateSandboxNetworkNamespace(slot *Slot) (netnsPath string, retErr error) {
-	if slot == nil {
-		return "", fmt.Errorf("slot is nil")
+func prepareNetworkNamespaceDirectory() error {
+	if err := os.MkdirAll(netNamespacesDir, 0o700); err != nil {
+		return fmt.Errorf("create Conch network namespace directory: %w", err)
 	}
-	netnsPath = slot.NetNSPath()
-	if _, err := os.Stat(netnsPath); err == nil {
-		return netnsPath, nil
-	} else if err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("error checking network namespace %s: %w", netnsPath, err)
+	if err := os.Chmod(netNamespacesDir, 0o700); err != nil {
+		return fmt.Errorf("secure Conch network namespace directory: %w", err)
+	}
+	return nil
+}
+
+func createNetworkNamespace(slotID int) (retErr error) {
+	if err := validateSlotID(slotID); err != nil {
+		return err
+	}
+	netnsPath := networkNamespacePath(slotID)
+	target, err := os.OpenFile(netnsPath, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o444)
+	if err != nil {
+		return fmt.Errorf("reserve network namespace path %s: %w", netnsPath, err)
+	}
+	if err := target.Close(); err != nil {
+		_ = os.Remove(netnsPath)
+		return fmt.Errorf("close network namespace path %s: %w", netnsPath, err)
 	}
 
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
 	hostNS, err := netns.Get()
 	if err != nil {
-		return "", fmt.Errorf("cannot get current (host) namespace: %w", err)
+		runtime.UnlockOSThread()
+		_ = os.Remove(netnsPath)
+		return fmt.Errorf("cannot get current (host) namespace: %w", err)
 	}
+	newNS := netns.None()
+	mounted := false
 	defer func() {
 		if err := netns.Set(hostNS); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace: %w", err))
 		}
+		if newNS.IsOpen() {
+			if err := newNS.Close(); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("error closing new network namespace: %w", err))
+			}
+		}
 		if err := hostNS.Close(); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
 		}
+		runtime.UnlockOSThread()
+		if retErr != nil {
+			if mounted {
+				_ = unix.Unmount(netnsPath, unix.MNT_DETACH)
+			}
+			_ = os.Remove(netnsPath)
+		}
 	}()
 
-	ns, err := netns.NewNamed(slot.NamespaceID())
+	newNS, err = netns.New()
 	if err != nil {
-		return "", fmt.Errorf("cannot create new namespace: %w", err)
+		return fmt.Errorf("cannot create new namespace: %w", err)
 	}
-	defer ns.Close()
+	nsPath := fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid())
+	if err := unix.Mount(nsPath, netnsPath, "bind", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("bind mount network namespace at %s: %w", netnsPath, err)
+	}
+	mounted = true
 
-	return netnsPath, nil
+	return nil
 }
 
-func DeleteSandboxNetworkNamespace(netnsPath string) error {
-	if netnsPath == "" {
-		return nil
+// cniNetworkNamespacePath returns an empty path when the Slot namespace is
+// absent or was only reserved but never bind-mounted. CNI DEL accepts an empty
+// namespace path for best-effort cleanup such as releasing host-local IPAM.
+func cniNetworkNamespacePath(netnsPath string) string {
+	var stat unix.Statfs_t
+	if err := unix.Statfs(netnsPath, &stat); err != nil {
+		return ""
 	}
+	if stat.Type != unix.NSFS_MAGIC && stat.Type != unix.PROC_SUPER_MAGIC {
+		return ""
+	}
+	return netnsPath
+}
+
+func DeleteSandboxNetworkNamespace(slotID int) error {
+	if err := validateSlotID(slotID); err != nil {
+		return err
+	}
+	netnsPath := networkNamespacePath(slotID)
 	if _, err := os.Stat(netnsPath); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("error checking namespace %s: %w", netnsPath, err)
 	}
-	if err := netns.DeleteNamed(filepath.Base(netnsPath)); err != nil {
+	if err := unix.Unmount(netnsPath, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("error deleting namespace %s: %w", netnsPath, err)
 	}
-	return nil
-}
-
-func (s *Slot) CreateNetwork() error {
-	netnsPath, err := CreateSandboxNetworkNamespace(s)
-	if err != nil {
-		return fmt.Errorf("failed to create network for slot index %d: %w", s.Idx, err)
+	if err := os.Remove(netnsPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove namespace path %s: %w", netnsPath, err)
 	}
-	s.setNetNSPath(netnsPath)
 	return nil
 }
 

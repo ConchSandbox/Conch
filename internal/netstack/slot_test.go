@@ -1,6 +1,7 @@
 package netstack
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -16,14 +17,17 @@ func TestNewSlotAndCNIState(t *testing.T) {
 		t.Fatalf("configureTapNetwork(): %v", err)
 	}
 
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
-	if slot.NamespaceID() != "ns-2" {
-		t.Fatalf("NamespaceID() = %q, want ns-2", slot.NamespaceID())
+	if slot.NamespaceID() != "slot-2" {
+		t.Fatalf("NamespaceID() = %q, want slot-2", slot.NamespaceID())
 	}
-	if slot.NetNSPath() != filepath.Join(netNamespacesDir, "ns-2") {
+	if slot.ID != 2 {
+		t.Fatalf("ID = %d, want 2", slot.ID)
+	}
+	if slot.NetNSPath() != filepath.Join(netNamespacesDir, "slot-2") {
 		t.Fatalf("NetNSPath() = %q", slot.NetNSPath())
 	}
 	if slot.CNIContainerID() != "conch-slot-2" {
@@ -32,23 +36,15 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.CNIIP() != "" {
 		t.Fatalf("CNIIP() = %q before setup, want empty", slot.CNIIP())
 	}
-	slot.setNetNSPath("/tmp/ns-2")
-	if slot.NetNSPath() != "/tmp/ns-2" {
-		t.Fatalf("NetNSPath() after set = %q, want /tmp/ns-2", slot.NetNSPath())
-	}
-
 	result := &CNIResult{IP: "10.12.0.2"}
-	slot.setSlotNetwork("custom-cni-id", result, nil)
-	if slot.CNIContainerID() != "custom-cni-id" {
-		t.Fatalf("CNIContainerID() = %q, want custom-cni-id", slot.CNIContainerID())
-	}
+	slot.setCNIResult(result)
 	if slot.CNIResult() != result {
 		t.Fatalf("CNIResult() did not return stored result")
 	}
 	if slot.CNIIP() != "10.12.0.2" {
 		t.Fatalf("CNIIP() = %q, want 10.12.0.2", slot.CNIIP())
 	}
-	slot.setSlotNetwork("custom-cni-id", &CNIResult{IP: "10.12.0.3/20"}, nil)
+	slot.setCNIResult(&CNIResult{IP: "10.12.0.3/20"})
 	if slot.CNIIP() != "10.12.0.3/20" {
 		t.Fatalf("CNIIP() = %q, want 10.12.0.3/20", slot.CNIIP())
 	}
@@ -61,7 +57,7 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.SandboxID() != "" {
 		t.Fatalf("SandboxID() after clear = %q, want empty", slot.SandboxID())
 	}
-	slot.clearSlotNetwork()
+	slot.clearCNIResult()
 	if slot.CNIResult() != nil {
 		t.Fatalf("CNIResult() after clear = %#v, want nil", slot.CNIResult())
 	}
@@ -70,5 +66,15 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	}
 	if slot.CNIContainerID() != "conch-slot-2" {
 		t.Fatalf("CNIContainerID() after clear = %q, want conch-slot-2", slot.CNIContainerID())
+	}
+}
+
+func TestNewSlotRejectsOutOfRangeID(t *testing.T) {
+	for _, id := range []int{firstSlotID - 1, firstSlotID + maxSlots} {
+		t.Run(fmt.Sprintf("id_%d", id), func(t *testing.T) {
+			if _, err := NewSlot(id); err == nil {
+				t.Fatalf("NewSlot(%d) error = nil", id)
+			}
+		})
 	}
 }

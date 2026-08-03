@@ -5,50 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	cni "github.com/containerd/go-cni"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 )
-
-type fakeStorage struct {
-	released int
-	acquired int
-	claimed  int
-	claimErr error
-}
-
-type failingStorage struct {
-	attempts chan struct{}
-	err      error
-}
-
-func (s *failingStorage) Acquire(context.Context) (*Slot, error) {
-	select {
-	case s.attempts <- struct{}{}:
-	default:
-	}
-	return nil, s.err
-}
-
-func (s *failingStorage) Claim(*Slot) error { return nil }
-
-func (s *failingStorage) Release(*Slot) error { return nil }
-
-func (s *fakeStorage) Acquire(ctx context.Context) (*Slot, error) {
-	s.acquired++
-	return nil, errors.New("unexpected acquire")
-}
-
-func (s *fakeStorage) Claim(slot *Slot) error {
-	s.claimed++
-	return s.claimErr
-}
-
-func (s *fakeStorage) Release(slot *Slot) error {
-	s.released++
-	return nil
-}
 
 func TestNormalizeAndValidateWarmPoolSize(t *testing.T) {
 	tests := []struct {
@@ -84,25 +48,25 @@ func TestNormalizeAndValidateWarmPoolSize(t *testing.T) {
 }
 
 func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
-	storage := &failingStorage{
-		attempts: make(chan struct{}, 2),
-		err:      errors.New("cni address pool exhausted"),
-	}
+	store := newFakeNetworkSlotStore()
+	store.createAttempts = make(chan struct{}, 2)
+	store.createErr = errors.New("state store unavailable")
 	p := &Pool{
-		slotStorage:        storage,
-		warmSlots:          newWarmSlotQueue(1),
+		warmSlots:          slotstate.NewQueue[*Slot](1),
 		dynamicReservation: true,
 		prefillReady:       make(chan struct{}),
+		slotStore:          store,
+		slotIDs:            slotstate.NewAllocator(firstSlotID, maxSlots),
 	}
 	p.Start(context.Background())
 
 	select {
-	case <-storage.attempts:
+	case <-store.createAttempts:
 	case <-time.After(time.Second):
 		t.Fatal("Populate() did not attempt slot allocation")
 	}
 	select {
-	case <-storage.attempts:
+	case <-store.createAttempts:
 		t.Fatal("Populate() retried without backoff")
 	case <-time.After(100 * time.Millisecond):
 	}
@@ -120,54 +84,124 @@ func TestDynamicPopulateBacksOffAfterAllocationFailure(t *testing.T) {
 	p.Close()
 }
 
-func TestAdoptWarmIdleRejectsAssignedSlotsOverCapacity(t *testing.T) {
-	store := newFakeNetworkSlotStore(
-		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotAssigned, SandboxID: "sandbox-a"},
-	)
-	storage := &fakeStorage{claimErr: ErrNoAvailableNetworkSlots}
-	p := &Pool{slotStorage: storage, slotStore: store}
-
-	_, err := p.AdoptWarmIdle(context.Background())
-	if !errors.Is(err, ErrNetworkSlotCapacity) {
-		t.Fatalf("AdoptWarmIdle() error = %v, want ErrNetworkSlotCapacity", err)
-	}
-	if storage.claimed != 1 {
-		t.Fatalf("Claim count = %d, want 1", storage.claimed)
-	}
-}
-
 type fakeNetworkSlotStore struct {
-	records   map[string]state.NetworkSlotRecord
-	upserts   []state.NetworkSlotRecord
-	deletes   []string
-	listErr   error
-	upsertErr error
+	mu             sync.Mutex
+	records        map[int]state.NetworkSlotRecord
+	updates        []state.NetworkSlotRecord
+	deletes        []int
+	listErr        error
+	getErr         error
+	createErr      error
+	updateErr      error
+	deleteErr      error
+	createAttempts chan struct{}
 }
+
+type fakeCNIPlugin struct {
+	setup  func(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
+	remove func(context.Context, string, string, ...cni.NamespaceOpts) error
+}
+
+func (f *fakeCNIPlugin) Setup(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
+	if f.setup == nil {
+		return nil, nil
+	}
+	return f.setup(ctx, id, path, opts...)
+}
+
+func (f *fakeCNIPlugin) SetupSerially(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
+	return f.Setup(ctx, id, path, opts...)
+}
+
+func (f *fakeCNIPlugin) Remove(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) error {
+	if f.remove == nil {
+		return nil
+	}
+	return f.remove(ctx, id, path, opts...)
+}
+
+func (*fakeCNIPlugin) Check(context.Context, string, string, ...cni.NamespaceOpts) error {
+	return nil
+}
+
+func (*fakeCNIPlugin) Load(...cni.Opt) error { return nil }
+
+func (*fakeCNIPlugin) Status() error { return nil }
+
+func (*fakeCNIPlugin) GetConfig() *cni.ConfigResult { return nil }
 
 func newFakeNetworkSlotStore(records ...state.NetworkSlotRecord) *fakeNetworkSlotStore {
-	store := &fakeNetworkSlotStore{records: make(map[string]state.NetworkSlotRecord)}
+	store := &fakeNetworkSlotStore{records: make(map[int]state.NetworkSlotRecord)}
 	for _, rec := range records {
-		store.records[rec.SlotKey] = rec
+		store.records[rec.SlotID] = rec
 	}
 	return store
 }
 
-func (s *fakeNetworkSlotStore) UpsertNetworkSlot(ctx context.Context, rec state.NetworkSlotRecord) error {
-	if s.upsertErr != nil {
-		return s.upsertErr
+func testSlotIDAllocator(t *testing.T, usedIDs ...int) *slotstate.Allocator {
+	t.Helper()
+	allocator := slotstate.NewAllocator(firstSlotID, maxSlots)
+	if err := allocator.Rebuild(usedIDs); err != nil {
+		t.Fatalf("rebuild slot ID allocator: %v", err)
 	}
+	return allocator
+}
+
+func (s *fakeNetworkSlotStore) CreateNetworkSlot(ctx context.Context, rec state.NetworkSlotRecord) error {
+	if s.createAttempts != nil {
+		select {
+		case s.createAttempts <- struct{}{}:
+		default:
+		}
+	}
+	if s.createErr != nil {
+		return s.createErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.records == nil {
-		s.records = make(map[string]state.NetworkSlotRecord)
+		s.records = make(map[int]state.NetworkSlotRecord)
 	}
-	s.records[rec.SlotKey] = rec
-	s.upserts = append(s.upserts, rec)
+	if _, ok := s.records[rec.SlotID]; ok {
+		return state.ErrAlreadyExists
+	}
+	s.records[rec.SlotID] = rec
 	return nil
+}
+
+func (s *fakeNetworkSlotStore) UpdateNetworkSlot(ctx context.Context, rec state.NetworkSlotRecord) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.records[rec.SlotID]; !ok {
+		return state.ErrNotFound
+	}
+	s.records[rec.SlotID] = rec
+	s.updates = append(s.updates, rec)
+	return nil
+}
+
+func (s *fakeNetworkSlotStore) GetNetworkSlot(ctx context.Context, id int) (state.NetworkSlotRecord, error) {
+	if s.getErr != nil {
+		return state.NetworkSlotRecord{}, s.getErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return state.NetworkSlotRecord{}, state.ErrNotFound
+	}
+	return rec, nil
 }
 
 func (s *fakeNetworkSlotStore) ListNetworkSlots(ctx context.Context) ([]state.NetworkSlotRecord, error) {
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	records := make([]state.NetworkSlotRecord, 0, len(s.records))
 	for _, rec := range s.records {
 		records = append(records, rec)
@@ -175,9 +209,14 @@ func (s *fakeNetworkSlotStore) ListNetworkSlots(ctx context.Context) ([]state.Ne
 	return records, nil
 }
 
-func (s *fakeNetworkSlotStore) DeleteNetworkSlot(ctx context.Context, key string) error {
-	delete(s.records, key)
-	s.deletes = append(s.deletes, key)
+func (s *fakeNetworkSlotStore) DeleteNetworkSlot(ctx context.Context, id int) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.records, id)
+	s.deletes = append(s.deletes, id)
 	return nil
 }
 
@@ -212,81 +251,156 @@ func TestIsExpectedShutdownError(t *testing.T) {
 	}
 }
 
-func TestUpsertSlotRecordPersistsCNIIDOnlyWithResult(t *testing.T) {
+func TestUpdateSlotRecordPersistsCNIResult(t *testing.T) {
 	store := newFakeNetworkSlotStore()
 	p := &Pool{slotStore: store}
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
+	if err != nil {
+		t.Fatalf("NewSlot(): %v", err)
+	}
+	store.records[slot.ID] = state.NetworkSlotRecord{SlotID: slot.ID, State: state.NetworkSlotTransient}
+
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, "", nil); err != nil {
+		t.Fatalf("updateSlotRecord() before cni result: %v", err)
+	}
+	rec := store.records[slot.ID]
+	if rec.CNIIP != "" {
+		t.Fatalf("record before cni result has CNIIP=%q, want empty", rec.CNIIP)
+	}
+
+	slot.setCNIResult(&CNIResult{IP: "10.12.0.2"})
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, "", nil); err != nil {
+		t.Fatalf("updateSlotRecord() after cni result: %v", err)
+	}
+	rec = store.records[slot.ID]
+	if rec.CNIIP != "10.12.0.2" {
+		t.Fatalf("record after cni result has CNIIP=%q, want 10.12.0.2", rec.CNIIP)
+	}
+}
+
+func TestSetupSlotNetworkDoesNotPersistBeforeAdd(t *testing.T) {
+	store := newFakeNetworkSlotStore()
+	slot, err := NewSlot(firstSlotID)
+	if err != nil {
+		t.Fatalf("NewSlot(): %v", err)
+	}
+	store.records[slot.ID] = state.NetworkSlotRecord{
+		SlotID: slot.ID,
+		State:  state.NetworkSlotTransient,
+	}
+
+	setupErr := errors.New("cni add failed")
+	removeCalls := 0
+	plugin := &fakeCNIPlugin{
+		setup: func(ctx context.Context, _ string, _ string, _ ...cni.NamespaceOpts) (*cni.Result, error) {
+			rec, getErr := store.GetNetworkSlot(ctx, slot.ID)
+			if getErr != nil {
+				t.Fatalf("GetNetworkSlot() during ADD: %v", getErr)
+			}
+			if rec.CNIIP != "" {
+				t.Fatalf("record during ADD has CNIIP=%q, want empty", rec.CNIIP)
+			}
+			if len(store.updates) != 0 {
+				t.Fatalf("record was updated %d times before ADD", len(store.updates))
+			}
+			return nil, setupErr
+		},
+		remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
+			removeCalls++
+			return nil
+		},
+	}
+	p := &Pool{
+		slotStore: store,
+		cniManager: &CNIManager{
+			plugin: plugin,
+			config: CNIManagerConfig{IfName: defaultCNIIfName},
+		},
+	}
+
+	err = p.setupSlotNetwork(context.Background(), slot)
+	if !errors.Is(err, setupErr) {
+		t.Fatalf("setupSlotNetwork() error = %v, want %v", err, setupErr)
+	}
+	if removeCalls != 0 {
+		t.Fatalf("CNI Remove calls during setup = %d, want 0; Pool cleanup owns DEL", removeCalls)
+	}
+	if slot.CNIResult() != nil {
+		t.Fatalf("slot CNI result after failed ADD = %#v, want nil", slot.CNIResult())
+	}
+}
+
+func TestTeardownDerivesCNIIdentityWithoutPersistedIntent(t *testing.T) {
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
 
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
-		t.Fatalf("upsertSlotRecord() before cni result: %v", err)
+	removeCalls := 0
+	p := &Pool{cniManager: &CNIManager{plugin: &fakeCNIPlugin{
+		remove: func(_ context.Context, id, path string, _ ...cni.NamespaceOpts) error {
+			removeCalls++
+			if id != slot.CNIContainerID() || path != "" {
+				t.Fatalf("Remove(%q, %q), want (%q, empty)", id, path, slot.CNIContainerID())
+			}
+			return nil
+		},
+	}}}
+	if err := p.teardownSandboxNetworkWithRetry(context.Background(), slot, t.TempDir()+"/missing"); err != nil {
+		t.Fatalf("teardownSandboxNetworkWithRetry(): %v", err)
 	}
-	rec := store.records[slot.Key]
-	if rec.CNIID != "" || rec.CNIIP != "" {
-		t.Fatalf("record before cni result has CNIID=%q CNIIP=%q, want empty", rec.CNIID, rec.CNIIP)
-	}
-
-	slot.setSlotNetwork(slot.CNIContainerID(), &CNIResult{IP: "10.12.0.2"}, nil)
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
-		t.Fatalf("upsertSlotRecord() after cni result: %v", err)
-	}
-	rec = store.records[slot.Key]
-	if rec.CNIID != slot.CNIContainerID() || rec.CNIIP != "10.12.0.2" {
-		t.Fatalf("record after cni result has CNIID=%q CNIIP=%q, want %q/10.12.0.2", rec.CNIID, rec.CNIIP, slot.CNIContainerID())
+	if removeCalls != 1 {
+		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
 	}
 }
 
-func TestHandleCreatedSlotAfterPreserveCancelRecordsWarmIdle(t *testing.T) {
+func TestHandleCreatedSlotAfterPreserveCancelRecordsIdle(t *testing.T) {
 	store := newFakeNetworkSlotStore()
 	p := &Pool{
 		slotStore: store,
 	}
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
-	slot.setNetNSPath(t.TempDir() + "/ns-2")
+	store.records[slot.ID] = state.NetworkSlotRecord{SlotID: slot.ID, State: state.NetworkSlotTransient}
 
 	ctx, cancel := context.WithCancel(withPreserveOnCancel(context.Background()))
 	cancel()
 	p.handleCreatedSlotAfterCancel(ctx, slot)
 
-	rec, ok := store.records[slot.Key]
+	rec, ok := store.records[slot.ID]
 	if !ok {
 		t.Fatalf("slot record missing")
 	}
-	if rec.State != state.NetworkSlotWarmIdle {
-		t.Fatalf("slot record state = %q, want %q", rec.State, state.NetworkSlotWarmIdle)
-	}
-	if rec.NetNSPath != slot.NetNSPath() {
-		t.Fatalf("slot record NetNSPath = %q, want %q", rec.NetNSPath, slot.NetNSPath())
+	if rec.State != state.NetworkSlotIdle {
+		t.Fatalf("slot record state = %q, want %q", rec.State, state.NetworkSlotIdle)
 	}
 }
 
 func TestHandleCreatedSlotAfterPlainCancelDiscardsSlot(t *testing.T) {
 	store := newFakeNetworkSlotStore()
-	storage := &fakeStorage{}
-	p := &Pool{
-		slotStorage: storage,
-		slotStore:   store,
-	}
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
-	slot.setNetNSPath(t.TempDir() + "/ns-2")
+	store.records[slot.ID] = state.NetworkSlotRecord{SlotID: slot.ID, State: state.NetworkSlotTransient}
+	p := &Pool{
+		slotStore:  store,
+		slotIDs:    testSlotIDAllocator(t, slot.ID),
+		cniManager: &CNIManager{plugin: &fakeCNIPlugin{}},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	p.handleCreatedSlotAfterCancel(ctx, slot)
 
-	if storage.released != 1 {
-		t.Fatalf("Release count = %d, want 1", storage.released)
-	}
-	if _, ok := store.records[slot.Key]; ok {
+	if _, ok := store.records[slot.ID]; ok {
 		t.Fatalf("slot record still exists after discard")
+	}
+	reused, err := p.slotIDs.Acquire()
+	if err != nil || reused != slot.ID {
+		t.Fatalf("acquire after discard = (%d, %v), want (%d, nil)", reused, err, slot.ID)
 	}
 }
 
@@ -311,27 +425,12 @@ func TestCNIBusyErrorDetectionAndChainParsing(t *testing.T) {
 	}
 }
 
-func TestPoolInUseTracking(t *testing.T) {
-	p := &Pool{inUse: make(map[string]*Slot)}
-	slot := &Slot{Key: "2"}
-
-	p.trackInUse(slot)
-	if got := p.inUse["2"]; got != slot {
-		t.Fatalf("trackInUse did not store slot")
-	}
-	p.untrackInUse(slot)
-	if _, ok := p.inUse["2"]; ok {
-		t.Fatalf("untrackInUse did not remove slot")
-	}
-}
-
 func TestPoolCloseRejectsGetWithBufferedSlots(t *testing.T) {
 	p := &Pool{
-		warmSlots:    newWarmSlotQueue(1),
-		inUse:        make(map[string]*Slot),
+		warmSlots:    slotstate.NewQueue[*Slot](1),
 		prefillReady: make(chan struct{}),
 	}
-	if err := p.warmSlots.push(&Slot{Key: "buffered"}); err != nil {
+	if err := p.warmSlots.Push(&Slot{ID: firstSlotID}); err != nil {
 		t.Fatalf("push buffered slot: %v", err)
 	}
 
@@ -340,116 +439,120 @@ func TestPoolCloseRejectsGetWithBufferedSlots(t *testing.T) {
 	if _, err := p.Get(context.Background(), "sandbox-a"); !errors.Is(err, errWarmPoolClosed) {
 		t.Fatalf("Get() after Close() error = %v, want errWarmPoolClosed", err)
 	}
-	size, _ := p.warmSlots.usage()
-	closed := p.warmSlots.isClosed()
+	size, _ := p.warmSlots.Usage()
+	closed := p.warmSlots.IsClosed()
 	if size != 1 || !closed {
 		t.Fatalf("warm queue after Close() = (size=%d, closed=%v), want buffered slot preserved in closed queue", size, closed)
 	}
 }
 
 func TestReplenishDroppedSlotSkipsClosedPool(t *testing.T) {
-	storage := &fakeStorage{}
+	store := newFakeNetworkSlotStore()
+	store.createAttempts = make(chan struct{}, 1)
 	p := &Pool{
-		slotStorage: storage,
-		warmSlots:   newWarmSlotQueue(1),
+		warmSlots: slotstate.NewQueue[*Slot](1),
+		slotStore: store,
 	}
-	p.warmSlots.close()
+	p.warmSlots.Close()
 
 	if err := p.replenishDroppedSlot(context.Background()); err != nil {
 		t.Fatalf("replenishDroppedSlot() after close: %v", err)
 	}
-	if storage.acquired != 0 {
-		t.Fatalf("Acquire count = %d, want 0", storage.acquired)
+	select {
+	case <-store.createAttempts:
+		t.Fatal("CreateNetworkSlot called for a closed pool")
+	default:
 	}
 }
 
-func TestRestoreInUseRejectsMissingNamespace(t *testing.T) {
-	store := newFakeNetworkSlotStore()
+func TestRestoreAssignedRejectsMissingNamespace(t *testing.T) {
+	store := newFakeNetworkSlotStore(state.NetworkSlotRecord{
+		SlotID:    firstSlotID,
+		State:     state.NetworkSlotAssigned,
+		SandboxID: "sandbox-a",
+		CNIIP:     "10.12.0.2",
+	})
 	p := &Pool{
 		cniManager: &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
 		slotStore:  store,
-		inUse:      make(map[string]*Slot),
 	}
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
-	slot.setNetNSPath(t.TempDir() + "/ns-2")
-
-	err = p.RestoreInUse(slot, "sandbox-a", "10.12.0.2")
+	err = p.RestoreAssigned(slot, "sandbox-a", "10.12.0.2")
 	if err == nil || !strings.Contains(err.Error(), "namespace missing") {
-		t.Fatalf("RestoreInUse() error = %v, want namespace missing", err)
+		t.Fatalf("RestoreAssigned() error = %v, want namespace missing", err)
 	}
 	if slot.CNIResult() != nil {
 		t.Fatalf("CNIResult() = %#v, want nil after failed restore", slot.CNIResult())
 	}
-	if got := p.inUse["2"]; got != nil {
-		t.Fatalf("inUse[2] = %#v, want nil after failed restore", got)
-	}
-	rec := store.records[slot.Key]
-	if rec.State != state.NetworkSlotCleaning {
-		t.Fatalf("slot record state = %q, want %q", rec.State, state.NetworkSlotCleaning)
+	rec := store.records[slot.ID]
+	if rec.State != state.NetworkSlotAssigned {
+		t.Fatalf("slot record state = %q, want %q until recovery cleanup runs", rec.State, state.NetworkSlotAssigned)
 	}
 	if rec.SandboxID != "sandbox-a" {
 		t.Fatalf("slot record SandboxID = %q, want sandbox-a", rec.SandboxID)
 	}
-	if !strings.Contains(rec.LastError, "namespace missing") {
-		t.Fatalf("slot record LastError = %q, want namespace missing", rec.LastError)
+	if rec.LastError != "" {
+		t.Fatalf("slot record LastError = %q, want unchanged record", rec.LastError)
 	}
 }
 
-func TestAdoptWarmIdleCleansCreatingAndCleaningRecords(t *testing.T) {
-	netnsDir := t.TempDir()
+func TestAdoptIdleCleansTransientRecords(t *testing.T) {
 	store := newFakeNetworkSlotStore(
-		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotCreating, NetNSPath: netnsDir + "/ns-2"},
-		state.NetworkSlotRecord{SlotKey: "3", SlotIndex: firstSlotIndex + 1, State: state.NetworkSlotCleaning, NetNSPath: netnsDir + "/ns-3"},
+		state.NetworkSlotRecord{SlotID: firstSlotID, State: state.NetworkSlotTransient},
+		state.NetworkSlotRecord{SlotID: firstSlotID + 1, State: state.NetworkSlotTransient},
 	)
-	storage := &fakeStorage{}
+	removeCalls := 0
 	p := &Pool{
-		slotStorage: storage,
-		slotStore:   store,
-		warmSlots:   newWarmSlotQueue(2),
-		inUse:       make(map[string]*Slot),
+		slotStore: store,
+		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
+			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
+				removeCalls++
+				return nil
+			},
+		}},
+		warmSlots: slotstate.NewQueue[*Slot](2),
 	}
 
-	adopted, err := p.AdoptWarmIdle(context.Background())
+	adopted, err := p.AdoptIdle(context.Background())
 	if err != nil {
-		t.Fatalf("AdoptWarmIdle() error = %v", err)
+		t.Fatalf("AdoptIdle() error = %v", err)
 	}
 	if adopted != 0 {
-		t.Fatalf("AdoptWarmIdle() adopted = %d, want 0", adopted)
-	}
-	if storage.released != 2 {
-		t.Fatalf("Release count = %d, want 2", storage.released)
+		t.Fatalf("AdoptIdle() adopted = %d, want 0", adopted)
 	}
 	if len(store.records) != 0 {
 		t.Fatalf("remaining slot records = %#v, want none", store.records)
 	}
+	if removeCalls != 2 {
+		t.Fatalf("CNI Remove calls = %d, want 2", removeCalls)
+	}
+	for _, want := range []int{firstSlotID, firstSlotID + 1} {
+		got, acquireErr := p.slotIDs.Acquire()
+		if acquireErr != nil || got != want {
+			t.Fatalf("acquire cleaned slot ID = (%d, %v), want (%d, nil)", got, acquireErr, want)
+		}
+	}
 }
 
-func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
-	netnsDir := t.TempDir()
+func TestAdoptIdleCleansInvalidIdleRecord(t *testing.T) {
 	store := newFakeNetworkSlotStore(
-		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotWarmIdle, NetNSPath: netnsDir + "/ns-2"},
+		state.NetworkSlotRecord{SlotID: firstSlotID, State: state.NetworkSlotIdle},
 	)
-	storage := &fakeStorage{}
 	p := &Pool{
-		slotStorage: storage,
-		slotStore:   store,
-		cniManager:  &CNIManager{config: CNIManagerConfig{IfName: defaultCNIIfName}},
-		warmSlots:   newWarmSlotQueue(1),
-		inUse:       make(map[string]*Slot),
+		slotStore:  store,
+		cniManager: &CNIManager{plugin: &fakeCNIPlugin{}, config: CNIManagerConfig{IfName: defaultCNIIfName}},
+		warmSlots:  slotstate.NewQueue[*Slot](1),
 	}
 
-	adopted, err := p.AdoptWarmIdle(context.Background())
+	adopted, err := p.AdoptIdle(context.Background())
 	if err != nil {
-		t.Fatalf("AdoptWarmIdle() error = %v", err)
+		t.Fatalf("AdoptIdle() error = %v", err)
 	}
 	if adopted != 0 {
-		t.Fatalf("AdoptWarmIdle() adopted = %d, want 0", adopted)
-	}
-	if storage.released != 1 {
-		t.Fatalf("Release count = %d, want 1", storage.released)
+		t.Fatalf("AdoptIdle() adopted = %d, want 0", adopted)
 	}
 	if len(store.records) != 0 {
 		t.Fatalf("remaining slot records = %#v, want none", store.records)
@@ -457,17 +560,16 @@ func TestAdoptWarmIdleCleansInvalidWarmRecord(t *testing.T) {
 }
 
 func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
-	slot, err := NewSlot("2", firstSlotIndex)
+	slot, err := NewSlot(firstSlotID)
 	if err != nil {
 		t.Fatalf("NewSlot(): %v", err)
 	}
 	storeErr := errors.New("store unavailable")
 	p := &Pool{
 		slotStore: storeErrNetworkSlotStore(storeErr),
-		warmSlots: newWarmSlotQueue(1),
-		inUse:     make(map[string]*Slot),
+		warmSlots: slotstate.NewQueue[*Slot](1),
 	}
-	if err := p.warmSlots.push(slot); err != nil {
+	if err := p.warmSlots.Push(slot); err != nil {
 		t.Fatalf("push slot: %v", err)
 	}
 
@@ -481,10 +583,7 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 	if slot.SandboxID() != "" {
 		t.Fatalf("slot SandboxID = %q, want cleared", slot.SandboxID())
 	}
-	if len(p.inUse) != 0 {
-		t.Fatalf("inUse len = %d, want 0", len(p.inUse))
-	}
-	requeued, popErr := p.warmSlots.pop()
+	requeued, popErr := p.warmSlots.Pop()
 	if popErr != nil {
 		t.Fatalf("slot was not requeued after assignment record failure: %v", popErr)
 	}
@@ -494,33 +593,32 @@ func TestGetRequeuesSlotWhenAssignmentRecordFails(t *testing.T) {
 }
 
 func TestCleanupAssignedWithoutReadySandbox(t *testing.T) {
-	netnsDir := t.TempDir()
 	store := newFakeNetworkSlotStore(
-		state.NetworkSlotRecord{SlotKey: "2", SlotIndex: firstSlotIndex, State: state.NetworkSlotAssigned, SandboxID: "sandbox-gone", NetNSPath: netnsDir + "/ns-2"},
-		state.NetworkSlotRecord{SlotKey: "3", SlotIndex: firstSlotIndex + 1, State: state.NetworkSlotAssigned, SandboxID: "sandbox-ready", NetNSPath: netnsDir + "/ns-3"},
+		state.NetworkSlotRecord{SlotID: firstSlotID, State: state.NetworkSlotAssigned, SandboxID: "sandbox-gone"},
+		state.NetworkSlotRecord{SlotID: firstSlotID + 1, State: state.NetworkSlotAssigned, SandboxID: "sandbox-ready"},
 	)
-	storage := &fakeStorage{}
 	p := &Pool{
-		slotStorage: storage,
-		slotStore:   store,
-		inUse:       make(map[string]*Slot),
+		slotStore:  store,
+		slotIDs:    testSlotIDAllocator(t, firstSlotID, firstSlotID+1),
+		cniManager: &CNIManager{plugin: &fakeCNIPlugin{}},
 	}
 
 	err := p.CleanupAssignedWithoutReadySandbox(map[string]struct{}{"sandbox-ready": {}})
 	if err != nil {
 		t.Fatalf("CleanupAssignedWithoutReadySandbox() error = %v", err)
 	}
-	if storage.released != 1 {
-		t.Fatalf("Release count = %d, want 1", storage.released)
-	}
-	if _, ok := store.records["2"]; ok {
+	if _, ok := store.records[firstSlotID]; ok {
 		t.Fatalf("stale assigned slot record still exists")
 	}
-	if rec, ok := store.records["3"]; !ok || rec.SandboxID != "sandbox-ready" {
+	if rec, ok := store.records[firstSlotID+1]; !ok || rec.SandboxID != "sandbox-ready" {
 		t.Fatalf("ready assigned slot record = %#v, ok=%v; want preserved", rec, ok)
+	}
+	reused, acquireErr := p.slotIDs.Acquire()
+	if acquireErr != nil || reused != firstSlotID {
+		t.Fatalf("acquire cleaned assigned slot ID = (%d, %v), want (%d, nil)", reused, acquireErr, firstSlotID)
 	}
 }
 
 func storeErrNetworkSlotStore(err error) *fakeNetworkSlotStore {
-	return &fakeNetworkSlotStore{records: make(map[string]state.NetworkSlotRecord), upsertErr: err}
+	return &fakeNetworkSlotStore{records: make(map[int]state.NetworkSlotRecord), updateErr: err}
 }

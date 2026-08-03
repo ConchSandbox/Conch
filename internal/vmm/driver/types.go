@@ -12,8 +12,8 @@ type ResourceArgs struct {
 	MemoryPath string
 
 	// Net
-	NamespaceID string
-	TapName     string
+	NetNSPath string
+	TapName   string
 
 	// Kernel
 	KernelPath string

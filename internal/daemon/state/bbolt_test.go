@@ -2,7 +2,9 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -10,6 +12,47 @@ import (
 
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
+
+func TestNetworkSlotJSONUsesSingleNumericIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		value      any
+		idField    string
+		legacyKeys []string
+	}{
+		{
+			name:       "slot record",
+			value:      NetworkSlotRecord{SlotID: 2},
+			idField:    "slot_id",
+			legacyKeys: []string{"slot_key", "slot_index", "netns_path", "cni_id"},
+		},
+		{
+			name:       "sandbox record",
+			value:      SandboxRecord{NetworkSlotID: 2},
+			idField:    "network_slot_id",
+			legacyKeys: []string{"network_slot_key", "network_ns"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if got := string(fields[tc.idField]); got != "2" {
+				t.Fatalf("%s = %s, want numeric 2", tc.idField, got)
+			}
+			for _, legacyKey := range tc.legacyKeys {
+				if _, ok := fields[legacyKey]; ok {
+					t.Fatalf("legacy identity field %q is still serialized", legacyKey)
+				}
+			}
+		})
+	}
+}
 
 func TestBoltStoreSandboxCRUD(t *testing.T) {
 	store, err := OpenBolt(t.TempDir() + "/state.db")
@@ -89,49 +132,133 @@ func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
 
 	ctx := context.Background()
 	slot := NetworkSlotRecord{
-		SlotKey:   "2",
-		SlotIndex: 2,
-		State:     NetworkSlotWarmIdle,
+		SlotID:    2,
+		State:     NetworkSlotIdle,
 		SandboxID: "sandbox-a",
-		NetNSPath: "/var/run/netns/ns-2",
-		CNIID:     "conch-slot-2",
 		CNIIP:     "10.12.0.2",
 		LastError: "initial error",
 	}
-	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
-		t.Fatalf("UpsertNetworkSlot() error = %v", err)
+	if err := store.CreateNetworkSlot(ctx, slot); err != nil {
+		t.Fatalf("CreateNetworkSlot() error = %v", err)
 	}
-	got, err := store.GetNetworkSlot(ctx, slot.SlotKey)
+	got, err := store.GetNetworkSlot(ctx, slot.SlotID)
 	if err != nil {
 		t.Fatalf("GetNetworkSlot() error = %v", err)
 	}
-	if got.State != NetworkSlotWarmIdle || got.CNIID != slot.CNIID || got.SandboxID != slot.SandboxID || got.LastError != slot.LastError {
+	if got.State != NetworkSlotIdle || got.CNIIP != slot.CNIIP || got.SandboxID != slot.SandboxID || got.LastError != slot.LastError {
 		t.Fatalf("GetNetworkSlot() = %#v, want %#v", got, slot)
 	}
-	slot.State = NetworkSlotCleaning
+	slot.State = NetworkSlotTransient
 	slot.LastError = "cleanup pending"
-	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
-		t.Fatalf("UpsertNetworkSlot(update) error = %v", err)
+	if err := store.UpdateNetworkSlot(ctx, slot); err != nil {
+		t.Fatalf("UpdateNetworkSlot(update) error = %v", err)
 	}
-	got, err = store.GetNetworkSlot(ctx, slot.SlotKey)
+	got, err = store.GetNetworkSlot(ctx, slot.SlotID)
 	if err != nil {
 		t.Fatalf("GetNetworkSlot() after update error = %v", err)
 	}
-	if got.State != NetworkSlotCleaning || got.LastError != "cleanup pending" || got.SandboxID != slot.SandboxID {
-		t.Fatalf("GetNetworkSlot() after update = %#v, want cleaning slot", got)
+	if got.State != NetworkSlotTransient || got.LastError != "cleanup pending" || got.SandboxID != slot.SandboxID {
+		t.Fatalf("GetNetworkSlot() after update = %#v, want transient slot", got)
 	}
 	slots, err := store.ListNetworkSlots(ctx)
 	if err != nil {
 		t.Fatalf("ListNetworkSlots() error = %v", err)
 	}
-	if len(slots) != 1 || slots[0].SlotKey != slot.SlotKey {
+	if len(slots) != 1 || slots[0].SlotID != slot.SlotID {
 		t.Fatalf("ListNetworkSlots() = %#v, want one slot", slots)
 	}
-	if err := store.DeleteNetworkSlot(ctx, slot.SlotKey); err != nil {
+	if err := store.DeleteNetworkSlot(ctx, slot.SlotID); err != nil {
 		t.Fatalf("DeleteNetworkSlot() error = %v", err)
 	}
-	if _, err := store.GetNetworkSlot(ctx, slot.SlotKey); err == nil {
+	if _, err := store.GetNetworkSlot(ctx, slot.SlotID); err == nil {
 		t.Fatalf("GetNetworkSlot() after delete got nil error")
+	}
+}
+
+func TestBoltStoreCreatesNetworkSlotInsertOnly(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	rec := NetworkSlotRecord{SlotID: 2, State: NetworkSlotTransient, UpdatedAt: 1}
+	const workers = 8
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- store.CreateNetworkSlot(ctx, rec)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	succeeded := 0
+	alreadyExists := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrAlreadyExists):
+			alreadyExists++
+		default:
+			t.Fatalf("CreateNetworkSlot() error = %v", err)
+		}
+	}
+	if succeeded != 1 || alreadyExists != workers-1 {
+		t.Fatalf("concurrent creates = (success=%d, already_exists=%d), want (1, %d)", succeeded, alreadyExists, workers-1)
+	}
+	if err := store.CreateNetworkSlot(ctx, NetworkSlotRecord{SlotID: 2, State: NetworkSlotIdle}); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("CreateNetworkSlot() overwrite error = %v, want ErrAlreadyExists", err)
+	}
+	stored, err := store.GetNetworkSlot(ctx, 2)
+	if err != nil {
+		t.Fatalf("GetNetworkSlot() error = %v", err)
+	}
+	if stored.State != NetworkSlotTransient || stored.UpdatedAt != 1 {
+		t.Fatalf("stored slot = %#v, want original transient record", stored)
+	}
+}
+
+func TestBoltStoreUpdateNetworkSlotRequiresAllocation(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	err = store.UpdateNetworkSlot(context.Background(), NetworkSlotRecord{SlotID: 2, State: NetworkSlotIdle})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UpdateNetworkSlot() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBoltStoreUpdateNetworkSlotCannotMoveRecordToAnotherID(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	rec := NetworkSlotRecord{SlotID: 2, State: NetworkSlotTransient}
+	if err := store.CreateNetworkSlot(ctx, rec); err != nil {
+		t.Fatalf("CreateNetworkSlot() error = %v", err)
+	}
+	rec.SlotID = 3
+	if err := store.UpdateNetworkSlot(ctx, rec); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UpdateNetworkSlot() error = %v, want ErrNotFound", err)
+	}
+
+	stored, err := store.GetNetworkSlot(ctx, 2)
+	if err != nil {
+		t.Fatalf("GetNetworkSlot() error = %v", err)
+	}
+	if stored.SlotID != 2 || stored.State != NetworkSlotTransient {
+		t.Fatalf("stored slot identity changed: %#v", stored)
 	}
 }
 

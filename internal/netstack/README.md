@@ -4,10 +4,12 @@ Conch 网络模块的核心设计是以**槽位（slot）**为单元的网络池
 
 - 每个槽位（slot）包括一整套可复用及提前预备好的网络状态：
   - 预设好的槽位ID，不跟随沙箱变动，如： `conch-slot-2`
-  - 预留的网络命名空间，如： `/var/run/netns/ns-2`
+  - Conch 专属的网络命名空间句柄，如： `/run/conch/netns/slot-2`
   - CNI 创建的沙箱外侧接口（对外IP地址、路由、IPAM 分配等），如： `eth0`
   - 虚拟机内侧 `tap` 接口及子网和IP地址
   - CNI IP 及虚拟机 tap IP 之间的转发规则
+
+数值 Slot ID 是槽位的唯一身份来源；Pool 使用内存最小堆和占用位图分配 ID，并在启动时根据 BoltDB Slot 记录重建分配状态。BoltDB bucket key、CNI ID、netns 路径和 veth 名称均由 ID 派生，不再分别保存可独立变化的 key/index。
 
 网络资源的管理范围按照如下方案划分：
 - Conch 负责槽位分配、沙箱生命周期、虚拟机 `tap0`、同命名空间内转发，以及 CNI 返回的外层 IP 与 tap 子网内 guest IP 之间的 NAT等。

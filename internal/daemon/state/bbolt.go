@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
-var ErrNotFound = errors.New("state record not found")
+var (
+	ErrNotFound      = errors.New("state record not found")
+	ErrAlreadyExists = errors.New("state record already exists")
+)
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
@@ -151,14 +155,70 @@ func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
 }
 
-func (s *BoltStore) UpsertNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
-	return s.upsert(ctx, []byte("network_slots"), rec.SlotKey, rec)
+func (s *BoltStore) CreateNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := networkSlotBucketKey(rec.SlotID)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("marshal network slot %d: %w", rec.SlotID, err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		slots := tx.Bucket([]byte("network_slots"))
+		if slots.Get([]byte(key)) != nil {
+			return fmt.Errorf("%w: network slot %d", ErrAlreadyExists, rec.SlotID)
+		}
+		return slots.Put([]byte(key), data)
+	})
 }
 
-func (s *BoltStore) GetNetworkSlot(ctx context.Context, slotKey string) (NetworkSlotRecord, error) {
+func networkSlotBucketKey(slotID int) string {
+	return strconv.Itoa(slotID)
+}
+
+func (s *BoltStore) UpdateNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := networkSlotBucketKey(rec.SlotID)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("marshal state record: %w", err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		slots := tx.Bucket([]byte("network_slots"))
+		existingData := slots.Get([]byte(key))
+		if existingData == nil {
+			return fmt.Errorf("%w: network slot %d", ErrNotFound, rec.SlotID)
+		}
+		var existing NetworkSlotRecord
+		if err := json.Unmarshal(existingData, &existing); err != nil {
+			return fmt.Errorf("unmarshal network slot %d: %w", rec.SlotID, err)
+		}
+		if rec.SlotID != existing.SlotID {
+			return fmt.Errorf("network slot %d identity is immutable: stored slot ID is %d", rec.SlotID, existing.SlotID)
+		}
+		return slots.Put([]byte(key), data)
+	})
+}
+
+func (s *BoltStore) GetNetworkSlot(ctx context.Context, slotID int) (NetworkSlotRecord, error) {
 	var rec NetworkSlotRecord
-	err := s.get(ctx, []byte("network_slots"), slotKey, &rec)
-	return rec, err
+	key := networkSlotBucketKey(slotID)
+	if err := s.get(ctx, []byte("network_slots"), key, &rec); err != nil {
+		return rec, err
+	}
+	if rec.SlotID != slotID {
+		return NetworkSlotRecord{}, fmt.Errorf("network slot bucket key %d contains slot ID %d", slotID, rec.SlotID)
+	}
+	return rec, nil
 }
 
 func (s *BoltStore) ListNetworkSlots(ctx context.Context) ([]NetworkSlotRecord, error) {
@@ -174,8 +234,8 @@ func (s *BoltStore) ListNetworkSlots(ctx context.Context) ([]NetworkSlotRecord, 
 	return out, err
 }
 
-func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotKey string) error {
-	return s.delete(ctx, []byte("network_slots"), slotKey)
+func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotID int) error {
+	return s.delete(ctx, []byte("network_slots"), networkSlotBucketKey(slotID))
 }
 
 func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry) error {

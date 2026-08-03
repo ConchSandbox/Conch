@@ -153,7 +153,6 @@ func TestReconcileReturnsSandboxRehydrateError(t *testing.T) {
 		SandboxID:       "sandbox-1",
 		Namespace:       "default",
 		State:           state.SandboxReady,
-		NetworkNS:       nsPath,
 		VsockSocketPath: vsockPath,
 		IP:              "10.12.0.2",
 	}); err != nil {
@@ -199,7 +198,6 @@ func TestReconcileCleansStaleAssignedNetworkSlotsAfterRehydrate(t *testing.T) {
 		SandboxID:       "sandbox-ready",
 		Namespace:       "default",
 		State:           state.SandboxReady,
-		NetworkNS:       nsPath,
 		VsockSocketPath: vsockPath,
 		IP:              "10.12.0.2",
 	}); err != nil {

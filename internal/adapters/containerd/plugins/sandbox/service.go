@@ -67,7 +67,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pool.AdoptWarmIdle(ctx); err != nil {
+	if _, err := pool.AdoptIdle(ctx); err != nil {
 		if errors.Is(err, netstack.ErrNetworkSlotStoreRead) || errors.Is(err, netstack.ErrNetworkSlotCleanup) || errors.Is(err, netstack.ErrNetworkSlotCapacity) {
 			return nil, err
 		}

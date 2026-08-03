@@ -61,7 +61,7 @@ network:
 
 Conch 网络配置需要注意如下事项：
 - `warm_pool_size` 给定了预先创建并保持可用的空闲网络 Slot 数量，不能超过代码内置的 4000 Slot 总容量上限。
-- Conch 将空闲和已分配 Slot 的总数上限固定为 4000；实际可用数量还会受到 CNI/IPAM 地址容量限制。
+- Conch 启动时根据 BoltDB 中所有 Slot 记录（暂态、空闲和已分配）重建内存 ID 分配器，这些记录共同占用固定的 4000 Slot 总容量；实际可用数量还会受到 CNI/IPAM 地址容量限制。
 - 开启 `dynamic_reservation` 后，CNI 分配失败不会破坏已有 Slot；Conch 会回滚本次创建并以指数退避方式重试。池为空时，新建沙箱会返回资源不可用错误。
 - `tap_ip` 和 `tap_mask` 给定了每个沙箱内部面向虚拟机的 `tap` 子网。
 - `plugin_bin_dirs` 指向 CNI 插件目录, `plugin_conf_dir` 指向 Conch CNI 配置目录。
@@ -74,19 +74,19 @@ Conch 网络配置需要注意如下事项：
 
 ```bash
 sudo ./bin/conchd -config config/config.yaml
-ip netns list
+sudo ls -1 /run/conch/netns
 ```
 
-- 预期结果：可以看到用于预填充 slot 的 namespace，例如 `ns-2`。
+- 预期结果：可以看到用于预填充 slot 的 namespace 句柄，例如 `slot-2`。这些句柄由 Conch 独占管理，不会出现在默认扫描 `/run/netns` 的 `ip netns list` 中。
 
 检查其中一个 namespace：
 
 ```bash
-sudo ip netns exec ns-2 ip addr show eth0
-sudo ip netns exec ns-2 ip route
-sudo ip netns exec ns-2 ip addr show tap0
-sudo ip netns exec ns-2 sysctl net.ipv4.ip_forward
-sudo ip netns exec ns-2 iptables -t nat -S
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show eth0
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip route
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show tap0
+sudo nsenter --net=/run/conch/netns/slot-2 -- sysctl net.ipv4.ip_forward
+sudo nsenter --net=/run/conch/netns/slot-2 -- iptables -t nat -S
 ```
 
 - 预期结果：
@@ -110,7 +110,7 @@ ls /var/lib/cni/networks/conch-bridge
 conchd 正常关闭后：
 
 ```bash
-ip netns list
+sudo ls -1 /run/conch/netns
 ip link show cni-conch0
 ip route show table main | grep 10.12
 ip neigh show | grep 10.12
@@ -125,7 +125,14 @@ ls /var/lib/cni/networks/conch-bridge
 正常退出 `conchd` 会保留所有的网络资源，如果需要完全重置（即不保留任何沙箱、快照、网络等记录），可在退出 `conchd` 后删除数据记录 `/var/lib/conch/state.db`，并使用如下指令手动删除命名空间、网桥以及 IPAM 目录：
 
 ```bash
-sudo ip netns delete ns-X
+sudo sh -c '
+for ns in /run/conch/netns/slot-*; do
+  [ -e "$ns" ] || continue
+  umount -l "$ns"
+  rm -f "$ns"
+done
+rmdir /run/conch/netns 2>/dev/null || true
+'
 sudo ip link delete cni-conch0 2>/dev/null || true
 sudo rm -rf /var/lib/cni/networks/conch-bridge
 ```

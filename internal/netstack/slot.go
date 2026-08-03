@@ -30,11 +30,13 @@ const (
 	defaultTapIP    = "192.168.100.2"
 	defaultTapMask  = 24
 	invaildSlotSize = 0
-	// Keep the historical first index to preserve namespace and slot identities.
-	firstSlotIndex    = 2
-	tapInterfaceName  = "tap0"
-	loopbackInterface = "lo"
-	namespaceIPIndex  = 21
+	// Slot IDs occupy the fixed range [firstSlotID, firstSlotID+maxSlots).
+	firstSlotID            = 2
+	netNamespacesDir       = "/run/conch/netns"
+	networkNamespacePrefix = "slot-"
+	tapInterfaceName       = "tap0"
+	loopbackInterface      = "lo"
+	namespaceIPIndex       = 21
 )
 
 var (
@@ -43,23 +45,19 @@ var (
 )
 
 type Slot struct {
-	Key string
-	Idx int
+	ID int
 
 	sandboxID string
-	cniID     string
-	netnsPath string
 	cniResult *CNIResult
-	cniOpts   []NamespaceOpts
 
 	tapIp       net.IP
 	tapMask     net.IPMask
 	namespaceIP net.IP
 }
 
-func NewSlot(key string, idx int) (*Slot, error) {
-	if idx < firstSlotIndex {
-		return nil, fmt.Errorf("slot index %d is below first slot index %d", idx, firstSlotIndex)
+func NewSlot(id int) (*Slot, error) {
+	if err := validateSlotID(id); err != nil {
+		return nil, err
 	}
 
 	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
@@ -73,8 +71,7 @@ func NewSlot(key string, idx int) (*Slot, error) {
 	}
 
 	slot := &Slot{
-		Key: key,
-		Idx: idx,
+		ID: id,
 
 		tapIp:       tapIP,
 		tapMask:     tapNet.Mask,
@@ -105,32 +102,31 @@ func configureTapNetwork(tapIP string, tapMask int) error {
 	return nil
 }
 
+func validateSlotID(id int) error {
+	if id < firstSlotID || id >= firstSlotID+maxSlots {
+		return fmt.Errorf("slot ID %d is outside supported range [%d, %d)", id, firstSlotID, firstSlotID+maxSlots)
+	}
+	return nil
+}
+
+func networkNamespacePath(slotID int) string {
+	return filepath.Join(netNamespacesDir, fmt.Sprintf("%s%d", networkNamespacePrefix, slotID))
+}
+
 func (s *Slot) NamespaceID() string {
-	return fmt.Sprintf("ns-%d", s.Idx)
+	return fmt.Sprintf("%s%d", networkNamespacePrefix, s.ID)
 }
 
 func (s *Slot) NetNSPath() string {
-	if s.netnsPath != "" {
-		return s.netnsPath
-	}
-	return filepath.Join(netNamespacesDir, s.NamespaceID())
-}
-
-func (s *Slot) setNetNSPath(netnsPath string) {
-	s.netnsPath = netnsPath
+	return networkNamespacePath(s.ID)
 }
 
 func (s *Slot) CNIContainerID() string {
-	if s.cniID != "" {
-		return s.cniID
-	}
-	return fmt.Sprintf("conch-slot-%s", s.Key)
+	return fmt.Sprintf("conch-slot-%d", s.ID)
 }
 
-func (s *Slot) setSlotNetwork(cniID string, cniResult *CNIResult, cniOpts []NamespaceOpts) {
-	s.cniID = cniID
+func (s *Slot) setCNIResult(cniResult *CNIResult) {
 	s.cniResult = cniResult
-	s.cniOpts = cniOpts
 }
 
 func (s *Slot) assignSandbox(sandboxID string) {
@@ -141,10 +137,8 @@ func (s *Slot) clearSandboxAssignment() {
 	s.sandboxID = ""
 }
 
-func (s *Slot) clearSlotNetwork() {
-	s.cniID = ""
+func (s *Slot) clearCNIResult() {
 	s.cniResult = nil
-	s.cniOpts = nil
 }
 
 func (s *Slot) SandboxID() string {
@@ -156,11 +150,11 @@ func (s *Slot) CNIResult() *CNIResult {
 }
 
 func (s *Slot) VethName() string {
-	return fmt.Sprintf("veth-%d", s.Idx)
+	return fmt.Sprintf("veth-%d", s.ID)
 }
 
 func (s *Slot) VpeerName() string {
-	return fmt.Sprintf("ns-veth-%d", s.Idx)
+	return fmt.Sprintf("ns-veth-%d", s.ID)
 }
 
 func (s *Slot) CNIIP() string {

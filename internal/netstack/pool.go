@@ -30,6 +30,7 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -44,10 +45,9 @@ const (
 var (
 	ErrNetworkSlotStoreRead = errors.New("network slot store read failed")
 	ErrNetworkSlotCleanup   = errors.New("network slot cleanup failed")
-	ErrNetworkSlotCapacity  = errors.New("network slot capacity is below persisted usage")
-	errWarmPoolClosed       = errors.New("warm network pool is closed")
-	errWarmPoolEmpty        = errors.New("warm network pool is empty")
-	errWarmPoolFull         = errors.New("warm network pool is already full")
+	ErrNetworkSlotCapacity  = slotstate.ErrCapacity
+	errWarmPoolClosed       = slotstate.ErrClosed
+	errWarmPoolEmpty        = slotstate.ErrEmpty
 )
 
 func getLogger() ulog.Logger {
@@ -55,9 +55,11 @@ func getLogger() ulog.Logger {
 }
 
 type NetworkSlotStore interface {
-	UpsertNetworkSlot(context.Context, state.NetworkSlotRecord) error
+	CreateNetworkSlot(context.Context, state.NetworkSlotRecord) error
+	UpdateNetworkSlot(context.Context, state.NetworkSlotRecord) error
+	GetNetworkSlot(context.Context, int) (state.NetworkSlotRecord, error)
 	ListNetworkSlots(context.Context) ([]state.NetworkSlotRecord, error)
-	DeleteNetworkSlot(context.Context, string) error
+	DeleteNetworkSlot(context.Context, int) error
 }
 
 type preserveOnCancelContextKey struct{}
@@ -67,16 +69,14 @@ func withPreserveOnCancel(ctx context.Context) context.Context {
 }
 
 type Pool struct {
-	slotStorage        Storage
-	warmSlots          *warmSlotQueue
+	warmSlots          *slotstate.Queue[*Slot]
 	warmSlotNeeded     chan struct{}
 	populateCancel     context.CancelFunc
 	populateDone       <-chan struct{}
 	dynamicReservation bool
 	cniManager         *CNIManager
 	slotStore          NetworkSlotStore
-	inUse              map[string]*Slot
-	inUseMu            sync.Mutex
+	slotIDs            *slotstate.Allocator
 	prefillReady       chan struct{}
 	prefillReadyOnce   sync.Once
 }
@@ -95,6 +95,9 @@ func normalizeAndValidateWarmPoolSize(warmPoolSize int) (int, error) {
 }
 
 func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask int, cniCfg CNIManagerConfig, slotStore NetworkSlotStore) (*Pool, error) {
+	if slotStore == nil {
+		return nil, fmt.Errorf("network slot store is required")
+	}
 	warmPoolSize, err := normalizeAndValidateWarmPoolSize(warmPoolSize)
 	if err != nil {
 		return nil, err
@@ -102,24 +105,20 @@ func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask in
 	if err := configureTapNetwork(tapIP, tapMask); err != nil {
 		return nil, fmt.Errorf("invalid tap network config: %w", err)
 	}
-	slotStorage, err := NewStorage(maxSlots)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create new storage: %w", err)
+	if err := prepareNetworkNamespaceDirectory(); err != nil {
+		return nil, fmt.Errorf("prepare network namespace directory: %w", err)
 	}
-
 	cniManager, err := NewCNIManager(cniCfg)
 	if err != nil {
 		return nil, err
 	}
 
 	p := &Pool{
-		slotStorage:        slotStorage,
-		warmSlots:          newWarmSlotQueue(warmPoolSize),
+		warmSlots:          slotstate.NewQueue[*Slot](warmPoolSize),
 		warmSlotNeeded:     make(chan struct{}, 1),
 		dynamicReservation: dynamicReservation,
 		cniManager:         cniManager,
 		slotStore:          slotStore,
-		inUse:              make(map[string]*Slot),
 		prefillReady:       make(chan struct{}),
 	}
 
@@ -127,78 +126,104 @@ func NewPool(warmPoolSize int, dynamicReservation bool, tapIP string, tapMask in
 }
 
 func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
-	slot, err := p.slotStorage.Acquire(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p == nil || p.slotIDs == nil {
+		return nil, fmt.Errorf("network slot ID allocator is not initialized")
+	}
+	id, err := p.slotIDs.Acquire()
 	if err != nil {
 		if isExpectedShutdownError(ctx, err) {
 			return nil, context.Canceled
 		}
-		getLogger().Error("failed to acquire network slot", ulog.F("error", err))
-		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
+		return nil, fmt.Errorf("acquire network slot ID: %w", err)
 	}
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
-		_ = p.slotStorage.Release(slot)
-		return nil, fmt.Errorf("failed to record creating network slot: %w", err)
-	}
-
-	err = slot.CreateNetwork()
+	slot, err := NewSlot(id)
 	if err != nil {
-		if isExpectedShutdownError(ctx, err) {
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
-			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
-			return nil, context.Canceled
+		releaseErr := p.slotIDs.Release(id)
+		return nil, errors.Join(fmt.Errorf("construct allocated network slot: %w", err), releaseErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, p.slotIDs.Release(id))
+	}
+	rec := state.NetworkSlotRecord{
+		SlotID:    id,
+		State:     state.NetworkSlotTransient,
+		UpdatedAt: time.Now().UnixNano(),
+	}
+	if err := p.slotStore.CreateNetworkSlot(ctx, rec); err != nil {
+		if errors.Is(err, state.ErrAlreadyExists) {
+			return nil, fmt.Errorf("persist network slot %d: allocator and store are out of sync: %w", id, err)
 		}
-		cleanupErr := DeleteSandboxNetworkNamespace(slot.NetNSPath())
-		if cleanupErr == nil {
-			err = errors.Join(err, p.slotStorage.Release(slot), p.deleteSlotRecord(context.Background(), slot))
-		} else {
-			err = errors.Join(err, fmt.Errorf("failed to rollback namespace creation; slot left acquired: %w", cleanupErr))
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
-		}
-		getLogger().Error("failed to create network", ulog.F("error", err))
-		return nil, fmt.Errorf("failed to create network: %w", err)
+		return nil, errors.Join(fmt.Errorf("persist network slot %d: %w", id, err), p.slotIDs.Release(id))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, p.deleteSlotRecord(context.Background(), slot))
 	}
 
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
-		rollbackErr := errors.Join(DeleteSandboxNetworkNamespace(slot.NetNSPath()), p.slotStorage.Release(slot), p.deleteSlotRecord(context.Background(), slot))
-		if rollbackErr != nil {
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), errors.Join(err, rollbackErr))
-			return nil, errors.Join(
-				fmt.Errorf("failed to record network namespace creation: %w", err),
-				fmt.Errorf("failed to rollback unrecorded network namespace; slot left acquired: %w", rollbackErr),
+	handleCreationFailure := func(cause error) error {
+		if isExpectedShutdownError(ctx, cause) {
+			p.markSlotTransient(context.Background(), slot, slot.SandboxID(), cause)
+			getLogger().Debug(
+				"network slot creation interrupted during shutdown",
+				ulog.F("slot_id", slot.ID),
+				ulog.F("error", cause),
+			)
+			return errors.Join(context.Canceled, cause)
+		}
+
+		if cleanupErr := p.cleanupSlotAllocation(slot, cause); cleanupErr != nil {
+			return errors.Join(
+				cause,
+				fmt.Errorf("clean up network slot %d: %w", slot.ID, cleanupErr),
 			)
 		}
-		return nil, fmt.Errorf("failed to record network namespace creation: %w", err)
+		return cause
 	}
 
-	if err := p.setupSlotNetwork(ctx, slot); err != nil {
-		if isExpectedShutdownError(ctx, err) {
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
-			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
-			return nil, context.Canceled
-		}
-		teardownErr := p.teardownSlotNetwork(context.WithoutCancel(ctx), slot)
-		if teardownErr == nil {
-			err = errors.Join(err, p.slotStorage.Release(slot), p.deleteSlotRecord(context.Background(), slot))
-		} else {
-			err = errors.Join(err, fmt.Errorf("failed to rollback slot network setup; slot left acquired: %w", teardownErr))
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
-		}
-		getLogger().Error("failed to setup slot network", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		return nil, fmt.Errorf("failed to setup slot network for slot index %d: %w", slot.Idx, err)
-	}
-
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
-		rollbackErr := errors.Join(p.teardownSlotNetwork(context.WithoutCancel(ctx), slot), p.slotStorage.Release(slot), p.deleteSlotRecord(context.Background(), slot))
-		if rollbackErr != nil {
-			p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), errors.Join(err, rollbackErr))
-			return nil, errors.Join(
-				fmt.Errorf("failed to record warm network slot: %w", err),
-				fmt.Errorf("failed to rollback unrecorded warm network slot; slot left acquired: %w", rollbackErr),
-			)
-		}
-		return nil, fmt.Errorf("failed to record warm network slot: %w", err)
+	if err := p.initializeNetworkSlot(ctx, slot); err != nil {
+		return nil, handleCreationFailure(err)
 	}
 	return slot, nil
+}
+
+func (p *Pool) initializeNetworkSlot(ctx context.Context, slot *Slot) error {
+	if p == nil {
+		return fmt.Errorf("pool is nil")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if err := createNetworkNamespace(slot.ID); err != nil {
+		return fmt.Errorf("create network namespace for slot ID %d: %w", slot.ID, err)
+	}
+	if err := p.setupSlotNetwork(ctx, slot); err != nil {
+		return fmt.Errorf("set up network for slot ID %d: %w", slot.ID, err)
+	}
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotIdle, "", nil); err != nil {
+		return fmt.Errorf("record warm network slot %d: %w", slot.ID, err)
+	}
+	return nil
+}
+
+func (p *Pool) cleanupSlotAllocation(slot *Slot, cause error) error {
+	if slot == nil {
+		return nil
+	}
+	var errs []error
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, slot.SandboxID(), cause); err != nil {
+		errs = append(errs, fmt.Errorf("record network slot cleanup: %w", err))
+	}
+	if err := p.teardownSlotNetwork(context.Background(), slot); err != nil {
+		p.markSlotTransient(context.Background(), slot, slot.SandboxID(), errors.Join(cause, err))
+		return errors.Join(append(errs, fmt.Errorf("teardown network slot: %w", err))...)
+	}
+	if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
+		p.markSlotTransient(context.Background(), slot, slot.SandboxID(), errors.Join(cause, err))
+		errs = append(errs, fmt.Errorf("delete network slot record: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 func shouldPreserveAfterCancel(ctx context.Context) bool {
@@ -223,38 +248,44 @@ func isExpectedShutdownError(ctx context.Context, err error) bool {
 	return strings.Contains(msg, "exit status -1") || strings.Contains(msg, "signal: interrupt")
 }
 
-func (p *Pool) upsertSlotRecord(ctx context.Context, slot *Slot, slotState, sandboxID string, err error) error {
+func (p *Pool) updateSlotRecord(ctx context.Context, slot *Slot, slotState, sandboxID string, err error) error {
 	if p == nil || p.slotStore == nil || slot == nil {
 		return nil
 	}
 	rec := state.NetworkSlotRecord{
-		SlotKey:   slot.Key,
-		SlotIndex: slot.Idx,
+		SlotID:    slot.ID,
 		State:     slotState,
 		SandboxID: sandboxID,
-		NetNSPath: slot.NetNSPath(),
 		UpdatedAt: time.Now().UnixNano(),
 	}
 	if result := slot.CNIResult(); result != nil {
-		rec.CNIID = slot.CNIContainerID()
 		rec.CNIIP = result.IP
 	}
 	if err != nil {
 		rec.LastError = err.Error()
 	}
-	return p.slotStore.UpsertNetworkSlot(ctx, rec)
+	return p.slotStore.UpdateNetworkSlot(ctx, rec)
 }
 
 func (p *Pool) deleteSlotRecord(ctx context.Context, slot *Slot) error {
 	if p == nil || p.slotStore == nil || slot == nil {
 		return nil
 	}
-	return p.slotStore.DeleteNetworkSlot(ctx, slot.Key)
+	if err := p.slotStore.DeleteNetworkSlot(ctx, slot.ID); err != nil {
+		return err
+	}
+	if p.slotIDs == nil {
+		return fmt.Errorf("network slot ID allocator is not initialized")
+	}
+	if err := p.slotIDs.Release(slot.ID); err != nil {
+		return fmt.Errorf("release network slot ID %d: %w", slot.ID, err)
+	}
+	return nil
 }
 
-func (p *Pool) markSlotCleaning(ctx context.Context, slot *Slot, sandboxID string, err error) {
-	if writeErr := p.upsertSlotRecord(ctx, slot, state.NetworkSlotCleaning, sandboxID, err); writeErr != nil {
-		getLogger().Warn("failed to mark network slot cleaning", ulog.F("slot_index", slot.Idx), ulog.F("error", writeErr))
+func (p *Pool) markSlotTransient(ctx context.Context, slot *Slot, sandboxID string, err error) {
+	if writeErr := p.updateSlotRecord(ctx, slot, state.NetworkSlotTransient, sandboxID, err); writeErr != nil {
+		getLogger().Warn("failed to mark network slot transient", ulog.F("slot_id", slot.ID), ulog.F("error", writeErr))
 	}
 }
 
@@ -278,7 +309,7 @@ func (p *Pool) Close() {
 		return
 	}
 	if p.warmSlots != nil {
-		p.warmSlots.close()
+		p.warmSlots.Close()
 	}
 	if p.populateCancel == nil || p.populateDone == nil {
 		return
@@ -301,7 +332,7 @@ func (p *Pool) populate(ctx context.Context) {
 
 	retryDelay := populateRetryMinDelay
 	for {
-		warmSlots, warmPoolSize := p.warmSlots.usage()
+		warmSlots, warmPoolSize := p.warmSlots.Usage()
 		if warmSlots >= warmPoolSize {
 			if !p.waitForWarmSlotNeed(ctx) {
 				return
@@ -331,10 +362,10 @@ func (p *Pool) populate(ctx context.Context) {
 				continue
 			}
 			retryDelay = populateRetryMinDelay
-			enqueueErr := p.warmSlots.push(slot)
+			enqueueErr := p.warmSlots.Push(slot)
 			if enqueueErr != nil {
 				if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
-					getLogger().Warn("pool: failed to discard unqueued warm slot", ulog.F("slot_index", slot.Idx), ulog.F("error", discardErr))
+					getLogger().Warn("pool: failed to discard unqueued warm slot", ulog.F("slot_id", slot.ID), ulog.F("error", discardErr))
 				}
 			}
 			if errors.Is(enqueueErr, errWarmPoolClosed) || ctx.Err() != nil {
@@ -378,28 +409,19 @@ func (p *Pool) discardSlotWithoutReplacement(slot *Slot) error {
 	if slot == nil {
 		return nil
 	}
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, "", nil); err != nil {
-		getLogger().Warn("failed to record network slot cleanup", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-	}
-	if err := p.teardownSlotNetwork(context.Background(), slot); err != nil {
-		getLogger().Warn("failed to discard unqueued network slot; slot left acquired", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
+	if err := p.cleanupSlotAllocation(slot, nil); err != nil {
+		getLogger().Warn("failed to discard unqueued network slot", ulog.F("slot_id", slot.ID), ulog.F("error", err))
 		return err
 	}
-	if err := p.slotStorage.Release(slot); err != nil {
-		getLogger().Warn("failed to release discarded unqueued network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		p.markSlotCleaning(context.Background(), slot, slot.SandboxID(), err)
-		return err
-	}
-	return p.deleteSlotRecord(context.Background(), slot)
+	return nil
 }
 
 func (p *Pool) preserveCreatedSlot(slot *Slot) {
 	if slot == nil {
 		return
 	}
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
-		getLogger().Warn("failed to preserve network slot record during shutdown", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotIdle, "", nil); err != nil {
+		getLogger().Warn("failed to preserve network slot record during shutdown", ulog.F("slot_id", slot.ID), ulog.F("error", err))
 	}
 }
 
@@ -412,10 +434,10 @@ func (p *Pool) handleCreatedSlotAfterCancel(ctx context.Context, slot *Slot) {
 }
 
 func (p *Pool) populateStatic(ctx context.Context) error {
-	if p.warmSlots.isClosed() {
+	if p.warmSlots.IsClosed() {
 		return errWarmPoolClosed
 	}
-	inPool, warmPoolSize := p.warmSlots.usage()
+	inPool, warmPoolSize := p.warmSlots.Usage()
 	target := warmPoolSize - inPool
 	if target <= 0 {
 		getLogger().Info("pool: static reservation completed", ulog.F("acquired_total", inPool), ulog.F("in_pool", inPool), ulog.F("target", warmPoolSize))
@@ -504,7 +526,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 			p.handleCreatedSlotAfterCancel(ctx, r.slot)
 			continue
 		}
-		enqueueErr := p.warmSlots.push(r.slot)
+		enqueueErr := p.warmSlots.Push(r.slot)
 		if enqueueErr != nil {
 			if errors.Is(enqueueErr, errWarmPoolClosed) {
 				queueClosed = true
@@ -524,7 +546,7 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	inPool, _ = p.warmSlots.usage()
+	inPool, _ = p.warmSlots.Usage()
 	if firstErr != nil {
 		return fmt.Errorf(
 			"static reservation stopped before reaching target: current=%d target=%d: %w",
@@ -544,16 +566,15 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, err
 	}
 
-	s, err := p.warmSlots.pop()
+	s, err := p.warmSlots.Pop()
 	if errors.Is(err, errWarmPoolClosed) {
 		return nil, err
 	}
 	if errors.Is(err, errWarmPoolEmpty) {
-		available, capacity := p.warmSlots.usage()
+		available, capacity := p.warmSlots.Usage()
 		getLogger().Warn(
 			"no available network slot in the pool",
 			ulog.F("capacity", capacity),
-			ulog.F("in_use", p.inUseCount()),
 			ulog.F("available", available),
 			ulog.F("prefill_ready", p.isPrefillReady()),
 			ulog.F("dynamic_reservation", p.dynamicReservation),
@@ -569,9 +590,9 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, nil
 	}
 	s.assignSandbox(sandboxID)
-	if err := p.upsertSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+	if err := p.updateSlotRecord(context.Background(), s, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
 		s.clearSandboxAssignment()
-		if enqueueErr := p.warmSlots.push(s); enqueueErr != nil {
+		if enqueueErr := p.warmSlots.Push(s); enqueueErr != nil {
 			discardErr := p.discardSlotWithoutReplacement(s)
 			joinedErr := errors.Join(
 				fmt.Errorf("failed to record assigned network slot: %w", err),
@@ -584,7 +605,6 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 		}
 		return nil, fmt.Errorf("failed to record assigned network slot: %w", err)
 	}
-	p.trackInUse(s)
 	return s, nil
 }
 
@@ -595,12 +615,6 @@ func (p *Pool) isPrefillReady() bool {
 	default:
 		return false
 	}
-}
-
-func (p *Pool) inUseCount() int {
-	p.inUseMu.Lock()
-	defer p.inUseMu.Unlock()
-	return len(p.inUse)
 }
 
 func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
@@ -623,12 +637,15 @@ func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
 		return err
 	}
 
+	// createNetworkSlot persists TRANSIENT before any OS resource is created.
+	// Because the CNI ID, namespace path, and options are derived from Slot ID,
+	// that one record is sufficient for recovery to issue an idempotent DEL.
 	cniResult, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to setup cni network: %w", err)
 	}
-	slot.setSlotNetwork(cniID, cniResult, opts)
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCreating, "", nil); err != nil {
+	slot.setCNIResult(cniResult)
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, "", nil); err != nil {
 		return fmt.Errorf("failed to record cni network setup: %w", err)
 	}
 
@@ -649,27 +666,25 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 			slot.clearSandboxAssignment()
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {
-				if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotWarmIdle, "", nil); err != nil {
+				if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotIdle, "", nil); err != nil {
 					slot.assignSandbox(sandboxID)
-					p.trackInUse(slot)
 					return fmt.Errorf("failed to record released network slot: %w", err)
 				}
-				p.untrackInUse(slot)
-				if err := p.warmSlots.push(slot); err != nil {
+				if err := p.warmSlots.Push(slot); err != nil {
 					if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
 						return errors.Join(
 							fmt.Errorf("failed to enqueue released network slot: %w", err),
 							fmt.Errorf("failed to discard unqueued released network slot: %w", discardErr),
 						)
 					}
-					getLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_index", slot.Idx), ulog.F("reason", err))
+					getLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_id", slot.ID), ulog.F("reason", err))
 					return nil
 				}
-				getLogger().Info("slot released back to pool", ulog.F("slot_index", slot.Idx))
+				getLogger().Info("slot released back to pool", ulog.F("slot_id", slot.ID))
 			} else {
-				getLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+				getLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID), ulog.F("error", slotHealthErr))
 				if err := p.Discard(ctx, slot); err != nil {
-					return fmt.Errorf("failed to discard unhealthy network slot %s: %w", slot.Key, err)
+					return fmt.Errorf("failed to discard unhealthy network slot %d: %w", slot.ID, err)
 				}
 			}
 		}
@@ -682,42 +697,31 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 		return nil
 	}
 
-	var errs []error
 	sandboxID := slot.SandboxID()
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, nil); err != nil {
-		return fmt.Errorf("failed to record cleaning network slot %s: %w", slot.Key, err)
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, sandboxID, nil); err != nil {
+		return fmt.Errorf("failed to record transient network slot %d: %w", slot.ID, err)
 	}
 	if err := p.teardownSlotNetwork(ctx, slot); err != nil {
-		getLogger().Error("failed to discard network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		getLogger().Warn("network slot still needs cleanup after failed discard", ulog.F("slot_index", slot.Idx))
-		_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
-		return fmt.Errorf("failed to discard network slot %s: %w", slot.Key, err)
+		getLogger().Error("failed to discard network slot", ulog.F("slot_id", slot.ID), ulog.F("error", err))
+		getLogger().Warn("network slot still needs cleanup after failed discard", ulog.F("slot_id", slot.ID))
+		_ = p.updateSlotRecord(context.Background(), slot, state.NetworkSlotTransient, sandboxID, err)
+		return fmt.Errorf("failed to discard network slot %d: %w", slot.ID, err)
 	}
 
-	if err := p.slotStorage.Release(slot); err != nil {
-		getLogger().Error("failed to release discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-		_ = p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err)
-		errs = append(errs, fmt.Errorf("failed to release discarded network slot %s: %w", slot.Key, err))
-	}
-	if len(errs) == 0 {
-		p.untrackInUse(slot)
-		if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
-			errs = append(errs, fmt.Errorf("failed to delete network slot record %s: %w", slot.Key, err))
-		}
+	if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
+		p.markSlotTransient(context.Background(), slot, sandboxID, err)
+		return fmt.Errorf("failed to delete network slot record %d: %w", slot.ID, err)
 	}
 
-	if len(errs) == 0 {
-		if err := p.replenishDroppedSlot(ctx); err != nil {
-			getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_index", slot.Idx), ulog.F("error", err))
-			errs = append(errs, err)
-		}
+	if err := p.replenishDroppedSlot(ctx); err != nil {
+		getLogger().Warn("failed to replenish discarded network slot", ulog.F("slot_id", slot.ID), ulog.F("error", err))
+		return err
 	}
-
-	return errors.Join(errs...)
+	return nil
 }
 
 func (p *Pool) replenishDroppedSlot(ctx context.Context) error {
-	if p.warmSlots.isClosed() {
+	if p.warmSlots.IsClosed() {
 		return nil
 	}
 
@@ -731,7 +735,7 @@ func (p *Pool) replenishDroppedSlot(ctx context.Context) error {
 		}
 		return err
 	}
-	if err := p.warmSlots.push(slot); err == nil {
+	if err := p.warmSlots.Push(slot); err == nil {
 		return nil
 	}
 	if discardErr := p.discardSlotWithoutReplacement(slot); discardErr != nil {
@@ -747,31 +751,32 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	var errs []error
 	netnsPath := slot.NetNSPath()
-	var cniErr error
 	cniID := slot.CNIContainerID()
 	cniIP := ""
-	cniTeardownComplete := slot.CNIResult() == nil
-	if slot.CNIResult() != nil {
-		if slot.CNIResult().IP != "" {
-			cniIP = slot.CNIResult().IP
-		}
-		if err := TeardownGuestTapNetwork(ctx, slot, netnsPath, slot.CNIResult()); err != nil {
-			errs = append(errs, err)
-		}
-		if p != nil && p.cniManager != nil {
-			cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
-		}
-		if cniErr == nil {
-			slot.clearSlotNetwork()
-			cniTeardownComplete = true
+	if result := slot.CNIResult(); result != nil {
+		cniIP = result.IP
+		if cniNetworkNamespacePath(netnsPath) != "" {
+			if err := TeardownGuestTapNetwork(ctx, slot, netnsPath, result); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-	slot.clearSandboxAssignment()
 
+	var cniErr error
+	cniTeardownComplete := false
+	if p == nil || p.cniManager == nil {
+		cniErr = fmt.Errorf("cni config not initialized")
+	} else {
+		cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
+	}
+	if cniErr == nil {
+		slot.clearCNIResult()
+		cniTeardownComplete = true
+	}
 	if cniErr != nil {
 		if isCNIBusyTeardownError(cniErr) {
 			if p.validateBusyCNITeardownClean(cniErr, slot, cniID, cniIP) == nil {
-				getLogger().Warn("cni teardown reported busy state after cleanup completed", ulog.F("slot_index", slot.Idx), ulog.F("error", cniErr))
+				getLogger().Warn("cni teardown reported busy state after cleanup completed", ulog.F("slot_id", slot.ID), ulog.F("error", cniErr))
 				cniTeardownComplete = true
 			} else {
 				errs = append(errs, cniErr)
@@ -780,8 +785,9 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 			errs = append(errs, cniErr)
 		}
 	}
+	slot.clearSandboxAssignment()
 	if cniTeardownComplete {
-		if err := DeleteSandboxNetworkNamespace(netnsPath); err != nil {
+		if err := DeleteSandboxNetworkNamespace(slot.ID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -790,9 +796,15 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 }
 
 func (p *Pool) teardownSandboxNetworkWithRetry(ctx context.Context, slot *Slot, netnsPath string) error {
+	cniID := slot.CNIContainerID()
+	opts, err := buildCNIOpts(slot, cniID, netnsPath)
+	if err != nil {
+		return err
+	}
+	cniNetNSPath := cniNetworkNamespacePath(netnsPath)
 	var lastErr error
 	for attempt := 0; attempt <= cniTeardownRetryAttempts; attempt++ {
-		err := p.cniManager.TeardownSandboxNetwork(ctx, slot.CNIContainerID(), netnsPath, slot.cniOpts...)
+		err := p.cniManager.TeardownSandboxNetwork(ctx, cniID, cniNetNSPath, opts...)
 		if err == nil {
 			return nil
 		}
@@ -929,13 +941,7 @@ func validateIPTablesChainDeleted(table, chain string) error {
 	return nil
 }
 
-func (p *Pool) trackInUse(slot *Slot) {
-	p.inUseMu.Lock()
-	defer p.inUseMu.Unlock()
-	p.inUse[slot.Key] = slot
-}
-
-func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
+func (p *Pool) RestoreAssigned(slot *Slot, sandboxID, ip string) error {
 	if p == nil {
 		return fmt.Errorf("pool is nil")
 	}
@@ -948,18 +954,26 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 	if strings.TrimSpace(ip) == "" {
 		return fmt.Errorf("cni ip is required")
 	}
-	if p.slotStorage != nil {
-		if err := p.slotStorage.Claim(slot); err != nil {
-			return fmt.Errorf("claim restored network slot %s: %w", slot.Key, err)
-		}
+	if p.slotStore == nil {
+		return fmt.Errorf("network slot store is required")
+	}
+	rec, err := p.slotStore.GetNetworkSlot(context.Background(), slot.ID)
+	if err != nil {
+		return fmt.Errorf("read restored network slot %d: %w", slot.ID, err)
+	}
+	if rec.State != state.NetworkSlotAssigned {
+		return fmt.Errorf("restored network slot %d state is %s, want %s", slot.ID, rec.State, state.NetworkSlotAssigned)
+	}
+	if rec.SandboxID != sandboxID {
+		return fmt.Errorf("restored network slot %d belongs to sandbox %s, not %s", slot.ID, rec.SandboxID, sandboxID)
+	}
+	if rec.CNIIP == "" || rec.CNIIP != ip {
+		return fmt.Errorf("restored network slot %d IP mismatch: record=%q sandbox=%q", slot.ID, rec.CNIIP, ip)
 	}
 	cniID := slot.CNIContainerID()
-	slot.setSlotNetwork(cniID, &CNIResult{IP: ip}, nil)
+	slot.setCNIResult(&CNIResult{IP: ip})
 	fail := func(err error) error {
-		if writeErr := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotCleaning, sandboxID, err); writeErr != nil {
-			getLogger().Warn("failed to mark rehydrated network slot cleaning", ulog.F("slot_index", slot.Idx), ulog.F("error", writeErr))
-		}
-		slot.clearSlotNetwork()
+		slot.clearCNIResult()
 		return err
 	}
 	if p.cniManager == nil {
@@ -968,11 +982,6 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 	if _, err := os.Stat(slot.NetNSPath()); err != nil {
 		return fail(fmt.Errorf("namespace missing: %w", err))
 	}
-	opts, err := buildCNIOpts(slot, cniID, slot.NetNSPath())
-	if err != nil {
-		return fail(err)
-	}
-	slot.setSlotNetwork(cniID, &CNIResult{IP: ip}, opts)
 	if err := ValidateReusableSlotNetwork(context.Background(), slot, slot.NetNSPath(), p.cniManager.config.IfName); err != nil {
 		return fail(fmt.Errorf("rehydrated network slot is not reusable: %w", err))
 	}
@@ -980,15 +989,16 @@ func (p *Pool) RestoreInUse(slot *Slot, sandboxID, ip string) error {
 		return fail(fmt.Errorf("rehydrated network slot has invalid ipam state: %w", err))
 	}
 	slot.assignSandbox(sandboxID)
-	if err := p.upsertSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
+	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
 		slot.clearSandboxAssignment()
 		return fmt.Errorf("failed to record rehydrated network slot: %w", err)
 	}
-	p.trackInUse(slot)
 	return nil
 }
 
-func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
+// AdoptIdle rebuilds Slot ID allocation state and recovers persisted
+// slots. It must complete before Start launches any Slot creation workers.
+func (p *Pool) AdoptIdle(ctx context.Context) (int, error) {
 	if p == nil || p.slotStore == nil {
 		return 0, nil
 	}
@@ -996,36 +1006,26 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrNetworkSlotStoreRead, err)
 	}
+	if p.slotIDs == nil {
+		p.slotIDs = slotstate.NewAllocator(firstSlotID, maxSlots)
+	}
+	usedIDs := make([]int, 0, len(records))
+	for _, rec := range records {
+		usedIDs = append(usedIDs, rec.SlotID)
+	}
+	if err := p.slotIDs.Rebuild(usedIDs); err != nil {
+		return 0, fmt.Errorf("%w: rebuild slot ID allocator: %v", ErrNetworkSlotStoreRead, err)
+	}
 	adopted := 0
 	var errs []error
-	// Reserve assigned slots before warm slots so persisted assignments never
-	// displace a network that may still belong to a running sandbox.
-	for _, rec := range records {
-		if rec.State != state.NetworkSlotAssigned {
-			continue
-		}
-		if err := p.slotStorage.Claim(recordSlotFromState(rec)); err != nil {
-			return 0, fmt.Errorf("%w: claim assigned slot %s: %v", ErrNetworkSlotCapacity, rec.SlotKey, err)
-		}
-	}
 	for _, rec := range records {
 		switch rec.State {
-		case state.NetworkSlotCreating:
-			cleaningErr := fmt.Errorf("slot was interrupted while creating")
-			if err := p.upsertSlotRecord(ctx, recordSlotFromState(rec), state.NetworkSlotCleaning, rec.SandboxID, cleaningErr); err != nil {
-				errs = append(errs, fmt.Errorf("mark creating slot %s cleaning: %w", rec.SlotKey, err))
-				continue
-			}
-			if err := p.cleanupRecordedSlot(ctx, rec, "startup creating"); err != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup creating slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, err))
+		case state.NetworkSlotTransient:
+			if err := p.cleanupRecordedSlot(ctx, rec, "startup transient"); err != nil {
+				errs = append(errs, fmt.Errorf("%w: cleanup transient slot %d: %v", ErrNetworkSlotCleanup, rec.SlotID, err))
 			}
 			continue
-		case state.NetworkSlotCleaning:
-			if err := p.cleanupRecordedSlot(ctx, rec, "startup cleaning"); err != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup recorded slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, err))
-			}
-			continue
-		case state.NetworkSlotWarmIdle:
+		case state.NetworkSlotIdle:
 		case state.NetworkSlotAssigned:
 			continue
 		default:
@@ -1033,31 +1033,25 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 		}
 		slot, err := slotFromNetworkSlotRecord(rec)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("restore warm slot %s: %w", rec.SlotKey, err))
-			continue
-		}
-		if err := p.slotStorage.Claim(slot); err != nil {
-			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm slot exceeds capacity"); cleanupErr != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup overflow warm slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
-			}
+			errs = append(errs, fmt.Errorf("restore warm slot %d: %w", rec.SlotID, err))
 			continue
 		}
 		if err := ValidateReusableSlotNetwork(ctx, slot, slot.NetNSPath(), p.cniManager.config.IfName); err != nil {
 			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm validation failed"); cleanupErr != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
+				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot %d: %v", ErrNetworkSlotCleanup, rec.SlotID, cleanupErr))
 			}
 			continue
 		}
 		if err := p.validateHostLocalAllocationOwned(slot.CNIContainerID(), rec.CNIIP); err != nil {
 			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm ipam validation failed"); cleanupErr != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot ipam %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
+				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot ipam %d: %v", ErrNetworkSlotCleanup, rec.SlotID, cleanupErr))
 			}
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return adopted, err
 		}
-		if enqueueErr := p.warmSlots.push(slot); enqueueErr == nil {
+		if enqueueErr := p.warmSlots.Push(slot); enqueueErr == nil {
 			adopted++
 		} else {
 			reason := "startup warm queue full"
@@ -1066,7 +1060,7 @@ func (p *Pool) AdoptWarmIdle(ctx context.Context) (int, error) {
 				errs = append(errs, enqueueErr)
 			}
 			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, reason); cleanupErr != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup overflow warm slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, cleanupErr))
+				errs = append(errs, fmt.Errorf("%w: cleanup overflow warm slot %d: %v", ErrNetworkSlotCleanup, rec.SlotID, cleanupErr))
 			}
 		}
 	}
@@ -1093,7 +1087,7 @@ func (p *Pool) CleanupAssignedWithoutReadySandbox(readySandboxIDs map[string]str
 			continue
 		}
 		if err := p.cleanupRecordedSlot(context.Background(), rec, "startup assigned without ready sandbox"); err != nil {
-			errs = append(errs, fmt.Errorf("%w: cleanup assigned slot %s: %v", ErrNetworkSlotCleanup, rec.SlotKey, err))
+			errs = append(errs, fmt.Errorf("%w: cleanup assigned slot %d: %v", ErrNetworkSlotCleanup, rec.SlotID, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -1105,67 +1099,29 @@ func (p *Pool) cleanupRecordedSlot(ctx context.Context, rec state.NetworkSlotRec
 		return err
 	}
 	sandboxID := rec.SandboxID
-	if err := p.upsertSlotRecord(ctx, slot, state.NetworkSlotCleaning, sandboxID, errors.New(reason)); err != nil {
-		return fmt.Errorf("record cleaning state: %w", err)
+	if err := p.updateSlotRecord(ctx, slot, state.NetworkSlotTransient, sandboxID, errors.New(reason)); err != nil {
+		return fmt.Errorf("record transient state: %w", err)
 	}
 	if err := p.teardownSlotNetwork(ctx, slot); err != nil {
-		p.markSlotCleaning(context.Background(), slot, sandboxID, err)
+		p.markSlotTransient(context.Background(), slot, sandboxID, err)
 		return fmt.Errorf("teardown network: %w", err)
 	}
-	if err := p.slotStorage.Release(slot); err != nil {
-		p.markSlotCleaning(context.Background(), slot, sandboxID, err)
-		return fmt.Errorf("release storage: %w", err)
-	}
 	if err := p.deleteSlotRecord(context.Background(), slot); err != nil {
+		p.markSlotTransient(context.Background(), slot, sandboxID, err)
 		return fmt.Errorf("delete slot record: %w", err)
 	}
 	return nil
 }
 
 func slotFromNetworkSlotRecord(rec state.NetworkSlotRecord) (*Slot, error) {
-	slot, err := NewSlot(rec.SlotKey, rec.SlotIndex)
-	if err != nil {
-		return nil, err
-	}
-	if rec.NetNSPath != "" {
-		slot.setNetNSPath(rec.NetNSPath)
-	}
-	cniID := rec.CNIID
-	if cniID == "" {
-		cniID = slot.CNIContainerID()
-	}
-	opts, err := buildCNIOpts(slot, cniID, slot.NetNSPath())
+	slot, err := NewSlot(rec.SlotID)
 	if err != nil {
 		return nil, err
 	}
 	if rec.CNIIP != "" {
-		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, opts)
+		slot.setCNIResult(&CNIResult{IP: rec.CNIIP})
 	}
 	return slot, nil
-}
-
-func recordSlotFromState(rec state.NetworkSlotRecord) *Slot {
-	slot := &Slot{Key: rec.SlotKey, Idx: rec.SlotIndex}
-	if rec.NetNSPath != "" {
-		slot.setNetNSPath(rec.NetNSPath)
-	}
-	if rec.CNIIP != "" {
-		cniID := rec.CNIID
-		if cniID == "" {
-			cniID = slot.CNIContainerID()
-		}
-		slot.setSlotNetwork(cniID, &CNIResult{IP: rec.CNIIP}, nil)
-	}
-	if rec.SandboxID != "" {
-		slot.assignSandbox(rec.SandboxID)
-	}
-	return slot
-}
-
-func (p *Pool) untrackInUse(slot *Slot) {
-	p.inUseMu.Lock()
-	defer p.inUseMu.Unlock()
-	delete(p.inUse, slot.Key)
 }
 
 func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {

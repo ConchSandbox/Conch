@@ -8,10 +8,9 @@ const (
 	SandboxSuspended = "SUSPENDED"
 	SandboxUnknown   = "UNKNOWN"
 
-	NetworkSlotCreating = "CREATING"
-	NetworkSlotWarmIdle = "WARM_IDLE"
-	NetworkSlotAssigned = "ASSIGNED"
-	NetworkSlotCleaning = "CLEANING"
+	NetworkSlotTransient = "TRANSIENT"
+	NetworkSlotIdle      = "IDLE"
+	NetworkSlotAssigned  = "ASSIGNED"
 )
 
 type SandboxRecord struct {
@@ -34,8 +33,7 @@ type SandboxRecord struct {
 	VMMSocketPath                 string         `json:"vmm_socket_path,omitempty"`
 	VsockCID                      uint32         `json:"vsock_cid,omitempty"`
 	VsockSocketPath               string         `json:"vsock_socket_path,omitempty"`
-	NetworkSlotKey                string         `json:"network_slot_key,omitempty"`
-	NetworkNS                     string         `json:"network_ns,omitempty"`
+	NetworkSlotID                 int            `json:"network_slot_id,omitempty"`
 	RootfsKey                     string         `json:"rootfs_key,omitempty"`
 	MemKey                        string         `json:"mem_key,omitempty"`
 	RootfsMount                   string         `json:"rootfs_mount,omitempty"`
@@ -60,13 +58,12 @@ type VolumeDevice struct {
 }
 
 type NetworkSlotRecord struct {
-	SlotKey   string `json:"slot_key"`
-	SlotIndex int    `json:"slot_index"`
-	State     string `json:"state"`
+	// SlotID is the sole slot identity. Storage keys and OS resource names are
+	// derived from it.
+	SlotID int    `json:"slot_id"`
+	State  string `json:"state"`
 
 	SandboxID string `json:"sandbox_id,omitempty"`
-	NetNSPath string `json:"netns_path,omitempty"`
-	CNIID     string `json:"cni_id,omitempty"`
 	CNIIP     string `json:"cni_ip,omitempty"`
 
 	UpdatedAt int64  `json:"updated_at,omitempty"`
