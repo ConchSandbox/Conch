@@ -26,6 +26,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -257,6 +258,8 @@ func (s *Daemon) Start(addr string, unixSocket string) error {
 
 	s.listener = ln
 	s.httpServer = &http.Server{Handler: s.router}
+	// Listener is bound, so clients can connect before Serve accepts.
+	util.NotifyReady()
 	err = s.httpServer.Serve(ln)
 	if err == http.ErrServerClosed {
 		logger.Info("Main server gracefully stopped")
@@ -275,6 +278,9 @@ func (s *Daemon) Shutdown() {
 	s.cleanupOnce.Do(func() {
 		finishShutdown := cleanupdiag.Start("daemon.shutdown")
 		defer finishShutdown(nil)
+
+		// Report deactivating while cleanup runs; TimeoutStopSec still applies.
+		util.NotifyStopping()
 
 		// stop httpServer
 		if s.httpServer != nil {
