@@ -103,7 +103,7 @@ func createNetworkNamespace(slotID int) (retErr error) {
 
 // cniNetworkNamespacePath returns an empty path when the Slot namespace is
 // absent or was only reserved but never bind-mounted. CNI DEL accepts an empty
-// namespace path for best-effort cleanup such as releasing host-local IPAM.
+// namespace path for best-effort cleanup of resources derived from the CNI ID.
 func cniNetworkNamespacePath(netnsPath string) string {
 	var stat unix.Statfs_t
 	if err := unix.Statfs(netnsPath, &stat); err != nil {

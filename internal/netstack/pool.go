@@ -23,12 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -656,6 +654,22 @@ func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
 	return nil
 }
 
+func (p *Pool) checkSlotCNI(ctx context.Context, slot *Slot) error {
+	if p == nil || p.cniManager == nil {
+		return fmt.Errorf("cni config not initialized")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	cniID := slot.CNIContainerID()
+	netnsPath := slot.NetNSPath()
+	opts, err := buildCNIOpts(slot, cniID, netnsPath)
+	if err != nil {
+		return err
+	}
+	return p.cniManager.CheckSandboxNetwork(ctx, cniID, netnsPath, opts...)
+}
+
 func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 	select {
 	case <-ctx.Done():
@@ -751,10 +765,7 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	var errs []error
 	netnsPath := slot.NetNSPath()
-	cniID := slot.CNIContainerID()
-	cniIP := ""
 	if result := slot.CNIResult(); result != nil {
-		cniIP = result.IP
 		if cniNetworkNamespacePath(netnsPath) != "" {
 			if err := TeardownGuestTapNetwork(ctx, slot, netnsPath, result); err != nil {
 				errs = append(errs, err)
@@ -772,18 +783,8 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 	if cniErr == nil {
 		slot.clearCNIResult()
 		cniTeardownComplete = true
-	}
-	if cniErr != nil {
-		if isCNIBusyTeardownError(cniErr) {
-			if p.validateBusyCNITeardownClean(cniErr, slot, cniID, cniIP) == nil {
-				getLogger().Warn("cni teardown reported busy state after cleanup completed", ulog.F("slot_id", slot.ID), ulog.F("error", cniErr))
-				cniTeardownComplete = true
-			} else {
-				errs = append(errs, cniErr)
-			}
-		} else {
-			errs = append(errs, cniErr)
-		}
+	} else {
+		errs = append(errs, cniErr)
 	}
 	slot.clearSandboxAssignment()
 	if cniTeardownComplete {
@@ -826,121 +827,6 @@ func isCNIBusyTeardownError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "resource busy")
 }
 
-func (p *Pool) validateBusyCNITeardownClean(cniErr error, slot *Slot, cniID, cniIP string) error {
-	if chain := cniBusyChain(cniErr); chain != "" {
-		if err := validateIPTablesChainDeleted("nat", chain); err != nil {
-			return err
-		}
-	} else {
-		return fmt.Errorf("cannot validate busy cni teardown without chain name")
-	}
-	if cniID == "" {
-		return fmt.Errorf("missing cni id")
-	}
-	if p == nil || p.cniManager == nil {
-		return fmt.Errorf("missing cni manager")
-	}
-
-	allocDir := p.cniManager.selectedHostLocalAllocDir
-	if allocDir == "" {
-		return fmt.Errorf("selected cni config does not use host-local ipam")
-	}
-	entries, err := os.ReadDir(allocDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading host-local allocation dir %s: %w", allocDir, err)
-	}
-
-	if cniIP != "" {
-		ipFile := cniIP
-		if ip, _, ok := strings.Cut(cniIP, "/"); ok {
-			ipFile = ip
-		}
-		if _, err := os.Stat(filepath.Join(allocDir, ipFile)); err == nil {
-			return fmt.Errorf("host-local allocation %s still exists for cni id %s", ipFile, cniID)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("checking host-local allocation %s: %w", ipFile, err)
-		}
-	}
-
-	for _, entry := range entries {
-		// host-local stores cursor/lock metadata next to IP allocation files; only allocation files can belong to a CNI ID.
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), "last_reserved_ip") || entry.Name() == "lock" {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(allocDir, entry.Name()))
-		if err != nil {
-			return fmt.Errorf("reading host-local allocation %s: %w", entry.Name(), err)
-		}
-		if strings.Contains(string(content), cniID) {
-			return fmt.Errorf("host-local allocation %s still references cni id %s", entry.Name(), cniID)
-		}
-	}
-
-	return nil
-}
-
-func (p *Pool) validateHostLocalAllocationOwned(cniID, cniIP string) error {
-	if p == nil || p.cniManager == nil || p.cniManager.selectedHostLocalAllocDir == "" {
-		return nil
-	}
-	if cniID == "" || cniIP == "" {
-		return fmt.Errorf("missing cni id or ip")
-	}
-	ipFile := cniIP
-	if ip, _, ok := strings.Cut(cniIP, "/"); ok {
-		ipFile = ip
-	}
-	path := filepath.Join(p.cniManager.selectedHostLocalAllocDir, ipFile)
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("reading host-local allocation %s: %w", path, err)
-	}
-	if !strings.Contains(string(content), cniID) {
-		return fmt.Errorf("host-local allocation %s does not reference cni id %s", path, cniID)
-	}
-	return nil
-}
-
-func cniBusyChain(err error) string {
-	if err == nil {
-		return ""
-	}
-	fields := strings.Fields(err.Error())
-	for i, field := range fields {
-		cleaned := strings.Trim(field, `"'.,;:()[]`)
-		if strings.HasPrefix(cleaned, "CNI-") {
-			return cleaned
-		}
-		if strings.EqualFold(cleaned, "chain") && i+1 < len(fields) {
-			next := strings.Trim(fields[i+1], `"'.,;:()[]`)
-			if strings.HasPrefix(next, "CNI-") {
-				return next
-			}
-		}
-	}
-	return ""
-}
-
-func validateIPTablesChainDeleted(table, chain string) error {
-	tables, err := iptables.New()
-	if err != nil {
-		return fmt.Errorf("error initializing iptables: %w", err)
-	}
-	chains, err := tables.ListChains(table)
-	if err != nil {
-		return fmt.Errorf("checking iptables %s chains: %w", table, err)
-	}
-	for _, existing := range chains {
-		if existing == chain {
-			return fmt.Errorf("iptables %s chain %s still exists after cni teardown", table, chain)
-		}
-	}
-	return nil
-}
-
 func (p *Pool) RestoreAssigned(slot *Slot, sandboxID, ip string) error {
 	if p == nil {
 		return fmt.Errorf("pool is nil")
@@ -970,7 +856,6 @@ func (p *Pool) RestoreAssigned(slot *Slot, sandboxID, ip string) error {
 	if rec.CNIIP == "" || rec.CNIIP != ip {
 		return fmt.Errorf("restored network slot %d IP mismatch: record=%q sandbox=%q", slot.ID, rec.CNIIP, ip)
 	}
-	cniID := slot.CNIContainerID()
 	slot.setCNIResult(&CNIResult{IP: ip})
 	fail := func(err error) error {
 		slot.clearCNIResult()
@@ -985,8 +870,8 @@ func (p *Pool) RestoreAssigned(slot *Slot, sandboxID, ip string) error {
 	if err := ValidateReusableSlotNetwork(context.Background(), slot, slot.NetNSPath(), p.cniManager.config.IfName); err != nil {
 		return fail(fmt.Errorf("rehydrated network slot is not reusable: %w", err))
 	}
-	if err := p.validateHostLocalAllocationOwned(cniID, ip); err != nil {
-		return fail(fmt.Errorf("rehydrated network slot has invalid ipam state: %w", err))
+	if err := p.checkSlotCNI(context.Background(), slot); err != nil {
+		return fail(fmt.Errorf("rehydrated network slot failed cni check: %w", err))
 	}
 	slot.assignSandbox(sandboxID)
 	if err := p.updateSlotRecord(context.Background(), slot, state.NetworkSlotAssigned, sandboxID, nil); err != nil {
@@ -1042,9 +927,9 @@ func (p *Pool) AdoptIdle(ctx context.Context) (int, error) {
 			}
 			continue
 		}
-		if err := p.validateHostLocalAllocationOwned(slot.CNIContainerID(), rec.CNIIP); err != nil {
-			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm ipam validation failed"); cleanupErr != nil {
-				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot ipam %d: %v", ErrNetworkSlotCleanup, rec.SlotID, cleanupErr))
+		if err := p.checkSlotCNI(ctx, slot); err != nil {
+			if cleanupErr := p.cleanupRecordedSlot(ctx, rec, "startup warm cni check failed"); cleanupErr != nil {
+				errs = append(errs, fmt.Errorf("%w: cleanup invalid warm slot cni state %d: %v", ErrNetworkSlotCleanup, rec.SlotID, cleanupErr))
 			}
 			continue
 		}
@@ -1143,7 +1028,7 @@ func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if err := ValidateReusableSlotNetwork(ctx, slot, slot.NetNSPath(), p.cniManager.config.IfName); err != nil {
 		return err
 	}
-	if err := p.validateHostLocalAllocationOwned(slot.CNIContainerID(), slot.CNIResult().IP); err != nil {
+	if err := p.checkSlotCNI(ctx, slot); err != nil {
 		return err
 	}
 	return nil

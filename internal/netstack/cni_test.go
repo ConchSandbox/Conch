@@ -99,42 +99,6 @@ func TestCNIConfigFileBridgeNames(t *testing.T) {
 	}
 }
 
-func TestCNIConfigFileHostLocalAllocDir(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  cniConfigFile
-		want string
-	}{
-		{
-			name: "top level default data dir",
-			cfg:  cniConfigFile{Name: "conch-bridge", IPAM: cniIPAMConfig{Type: "host-local"}},
-			want: filepath.Join(defaultHostLocalIPAMDataDir, "conch-bridge"),
-		},
-		{
-			name: "plugin custom data dir",
-			cfg: cniConfigFile{
-				Name: "conch-bridge",
-				Plugins: []cniPluginConfig{
-					{Type: "bridge", IPAM: cniIPAMConfig{Type: "host-local", DataDir: "/tmp/cni-state"}},
-				},
-			},
-			want: filepath.Join("/tmp/cni-state", "conch-bridge"),
-		},
-		{
-			name: "no host local",
-			cfg:  cniConfigFile{Name: "conch-bridge", IPAM: cniIPAMConfig{Type: "static"}},
-			want: "",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.hostLocalAllocDir(); got != tt.want {
-				t.Fatalf("hostLocalAllocDir() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSelectedCNIConfigMetadata(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "00-other.conf"), []byte(`{"name":"other","type":"bridge","bridge":"other0"}`), 0o600); err != nil {
@@ -143,8 +107,7 @@ func TestSelectedCNIConfigMetadata(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "10-conch.conf"), []byte(`{
 		"name": "conch-bridge",
 		"type": "bridge",
-		"bridge": "cni-conch0",
-		"ipam": {"type":"host-local","dataDir":"/tmp/conch-cni"}
+		"bridge": "cni-conch0"
 	}`), 0o600); err != nil {
 		t.Fatalf("write selected config: %v", err)
 	}
@@ -155,10 +118,6 @@ func TestSelectedCNIConfigMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.bridgeNames, []string{"cni-conch0"}) {
 		t.Fatalf("bridgeNames = %v, want [cni-conch0]", got.bridgeNames)
-	}
-	wantAllocDir := filepath.Join("/tmp/conch-cni", "conch-bridge")
-	if got.hostLocalAllocDir != wantAllocDir {
-		t.Fatalf("hostLocalAllocDir = %q, want %q", got.hostLocalAllocDir, wantAllocDir)
 	}
 }
 
@@ -231,26 +190,40 @@ func TestConvertCNIResultFallbackAndErrors(t *testing.T) {
 	}
 }
 
-func TestTeardownSandboxNetworkValidatesAllocationAfterRemoveError(t *testing.T) {
-	allocationDir := t.TempDir()
+func TestTeardownSandboxNetworkReturnsRemoveError(t *testing.T) {
 	cniID := "conch-slot-2"
-	if err := os.WriteFile(filepath.Join(allocationDir, "10.12.0.2"), []byte(cniID+"\n"), 0o600); err != nil {
-		t.Fatalf("write host-local allocation: %v", err)
-	}
 	removeErr := errors.New("cni del failed")
 	manager := &CNIManager{
 		plugin: &fakeCNIPlugin{remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
 			return removeErr
 		}},
-		selectedHostLocalAllocDir: allocationDir,
 	}
 
 	err := manager.TeardownSandboxNetwork(context.Background(), cniID, "/run/conch/netns/slot-2")
 	if !errors.Is(err, removeErr) {
 		t.Fatalf("TeardownSandboxNetwork() error = %v, want Remove error", err)
 	}
-	if !strings.Contains(err.Error(), "host-local allocation") {
-		t.Fatalf("TeardownSandboxNetwork() error = %v, want host-local validation error", err)
+}
+
+func TestCheckSandboxNetworkDelegatesToCNI(t *testing.T) {
+	checkErr := errors.New("cni check failed")
+	checkCalls := 0
+	manager := &CNIManager{plugin: &fakeCNIPlugin{
+		check: func(_ context.Context, id, path string, _ ...cni.NamespaceOpts) error {
+			checkCalls++
+			if id != "conch-slot-2" || path != "/run/conch/netns/slot-2" {
+				t.Fatalf("Check(%q, %q), want (conch-slot-2, /run/conch/netns/slot-2)", id, path)
+			}
+			return checkErr
+		},
+	}}
+
+	err := manager.CheckSandboxNetwork(context.Background(), "conch-slot-2", "/run/conch/netns/slot-2")
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("CheckSandboxNetwork() error = %v, want %v", err, checkErr)
+	}
+	if checkCalls != 1 {
+		t.Fatalf("CNI Check calls = %d, want 1", checkCalls)
 	}
 }
 

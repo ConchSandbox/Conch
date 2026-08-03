@@ -100,6 +100,7 @@ type fakeNetworkSlotStore struct {
 type fakeCNIPlugin struct {
 	setup  func(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
 	remove func(context.Context, string, string, ...cni.NamespaceOpts) error
+	check  func(context.Context, string, string, ...cni.NamespaceOpts) error
 }
 
 func (f *fakeCNIPlugin) Setup(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
@@ -120,8 +121,11 @@ func (f *fakeCNIPlugin) Remove(ctx context.Context, id, path string, opts ...cni
 	return f.remove(ctx, id, path, opts...)
 }
 
-func (*fakeCNIPlugin) Check(context.Context, string, string, ...cni.NamespaceOpts) error {
-	return nil
+func (f *fakeCNIPlugin) Check(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) error {
+	if f.check == nil {
+		return nil
+	}
+	return f.check(ctx, id, path, opts...)
 }
 
 func (*fakeCNIPlugin) Load(...cni.Opt) error { return nil }
@@ -354,6 +358,52 @@ func TestTeardownDerivesCNIIdentityWithoutPersistedIntent(t *testing.T) {
 	}
 }
 
+func TestCleanupSlotAllocationKeepsTransientAfterCNIDelFailure(t *testing.T) {
+	store := newFakeNetworkSlotStore()
+	slot, err := NewSlot(firstSlotID)
+	if err != nil {
+		t.Fatalf("NewSlot(): %v", err)
+	}
+	store.records[slot.ID] = state.NetworkSlotRecord{
+		SlotID: slot.ID,
+		State:  state.NetworkSlotTransient,
+	}
+	removeErr := errors.New("cni del failed")
+	removeCalls := 0
+	p := &Pool{
+		slotStore: store,
+		slotIDs:   testSlotIDAllocator(t, slot.ID),
+		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
+			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
+				removeCalls++
+				return removeErr
+			},
+		}},
+	}
+
+	err = p.cleanupSlotAllocation(slot, errors.New("slot initialization failed"))
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("cleanupSlotAllocation() error = %v, want %v", err, removeErr)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
+	}
+	rec, ok := store.records[slot.ID]
+	if !ok {
+		t.Fatal("transient slot record was deleted after failed CNI DEL")
+	}
+	if rec.State != state.NetworkSlotTransient {
+		t.Fatalf("slot record state = %q, want %q", rec.State, state.NetworkSlotTransient)
+	}
+	reused, acquireErr := p.slotIDs.Acquire()
+	if acquireErr != nil {
+		t.Fatalf("Acquire() after failed cleanup: %v", acquireErr)
+	}
+	if reused == slot.ID {
+		t.Fatalf("slot ID %d was released after failed CNI DEL", slot.ID)
+	}
+}
+
 func TestHandleCreatedSlotAfterPreserveCancelRecordsIdle(t *testing.T) {
 	store := newFakeNetworkSlotStore()
 	p := &Pool{
@@ -404,24 +454,12 @@ func TestHandleCreatedSlotAfterPlainCancelDiscardsSlot(t *testing.T) {
 	}
 }
 
-func TestCNIBusyErrorDetectionAndChainParsing(t *testing.T) {
+func TestCNIBusyErrorDetection(t *testing.T) {
 	if !isCNIBusyTeardownError(errors.New("CHAIN_DEL failed: Device or resource busy")) {
 		t.Fatalf("isCNIBusyTeardownError() = false, want true")
 	}
 	if isCNIBusyTeardownError(errors.New("some other cni error")) {
 		t.Fatalf("isCNIBusyTeardownError(non-busy) = true, want false")
-	}
-
-	tests := map[string]string{
-		`iptables: chain CNI-1234567890abcdef is busy`:             "CNI-1234567890abcdef",
-		`running ["iptables" "-X" "CNI-abc123", "--wait"]`:         "CNI-abc123",
-		`CHAIN_DEL failed (Device or resource busy): CNI-deadbeef`: "CNI-deadbeef",
-		`no chain here`: "",
-	}
-	for msg, want := range tests {
-		if got := cniBusyChain(errors.New(msg)); got != want {
-			t.Fatalf("cniBusyChain(%q) = %q, want %q", msg, got, want)
-		}
 	}
 }
 

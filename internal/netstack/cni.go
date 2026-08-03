@@ -17,19 +17,18 @@ import (
 )
 
 const (
-	DefaultCNIIfName            = "eth0"
-	DefaultCNIPluginConfDir     = "/etc/conch/cni/net.d"
-	DefaultCNIPluginBinDir      = "/usr/libexec/cni"
-	DefaultCNIPluginMaxConf     = 1
-	defaultCNIIfName            = DefaultCNIIfName
-	defaultCNIInterfacePrefix   = "eth"
-	defaultCNIPluginConfDir     = DefaultCNIPluginConfDir
-	defaultCNIPluginBinDir      = DefaultCNIPluginBinDir
-	defaultCNIPluginMaxConf     = DefaultCNIPluginMaxConf
-	defaultCNINamespace         = "conch"
-	defaultHostLocalIPAMDataDir = "/var/lib/cni/networks"
-	cniTeardownRetryAttempts    = 3
-	cniTeardownRetryDelay       = 100 * time.Millisecond
+	DefaultCNIIfName          = "eth0"
+	DefaultCNIPluginConfDir   = "/etc/conch/cni/net.d"
+	DefaultCNIPluginBinDir    = "/usr/libexec/cni"
+	DefaultCNIPluginMaxConf   = 1
+	defaultCNIIfName          = DefaultCNIIfName
+	defaultCNIInterfacePrefix = "eth"
+	defaultCNIPluginConfDir   = DefaultCNIPluginConfDir
+	defaultCNIPluginBinDir    = DefaultCNIPluginBinDir
+	defaultCNIPluginMaxConf   = DefaultCNIPluginMaxConf
+	defaultCNINamespace       = "conch"
+	cniTeardownRetryAttempts  = 3
+	cniTeardownRetryDelay     = 100 * time.Millisecond
 )
 
 type NamespaceOpts = cni.NamespaceOpts
@@ -44,30 +43,21 @@ type CNIManagerConfig struct {
 }
 
 type CNIManager struct {
-	plugin                    cni.CNI
-	config                    CNIManagerConfig
-	selectedConf              string
-	selectedBridgeNames       []string
-	selectedHostLocalAllocDir string
+	plugin              cni.CNI
+	config              CNIManagerConfig
+	selectedConf        string
+	selectedBridgeNames []string
 }
 
 type cniConfigFile struct {
-	Name    string            `json:"name"`
 	Type    string            `json:"type"`
 	Bridge  string            `json:"bridge"`
-	IPAM    cniIPAMConfig     `json:"ipam"`
 	Plugins []cniPluginConfig `json:"plugins"`
 }
 
 type cniPluginConfig struct {
-	Type   string        `json:"type"`
-	Bridge string        `json:"bridge"`
-	IPAM   cniIPAMConfig `json:"ipam"`
-}
-
-type cniIPAMConfig struct {
-	Type    string `json:"type"`
-	DataDir string `json:"dataDir"`
+	Type   string `json:"type"`
+	Bridge string `json:"bridge"`
 }
 
 type CNIResult struct {
@@ -103,8 +93,7 @@ type CNIDNS struct {
 }
 
 type cniSelectedMetadata struct {
-	bridgeNames       []string
-	hostLocalAllocDir string
+	bridgeNames []string
 }
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
@@ -137,7 +126,6 @@ func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 		return nil, fmt.Errorf("failed to inspect selected cni bridge config: %w", err)
 	}
 	manager.selectedBridgeNames = metadata.bridgeNames
-	manager.selectedHostLocalAllocDir = metadata.hostLocalAllocDir
 	return manager, nil
 }
 
@@ -258,7 +246,6 @@ func selectedCNIConfigMetadata(confDir, selectedConf string) (cniSelectedMetadat
 			return metadata, fmt.Errorf("parsing selected cni config %s: %w", path, err)
 		}
 		metadata.bridgeNames = cfg.bridgeNames()
-		metadata.hostLocalAllocDir = cfg.hostLocalAllocDir()
 		return metadata, nil
 	}
 	getLogger().Warn("selected cni config was not found while inspecting cleanup metadata", ulog.F("config", selectedConf), ulog.F("dir", confDir))
@@ -316,25 +303,6 @@ func (c cniConfigFile) bridgeNames() []string {
 		}
 	}
 	return bridges
-}
-
-func (c cniConfigFile) hostLocalAllocDir() string {
-	if strings.EqualFold(c.IPAM.Type, "host-local") {
-		return filepath.Join(c.IPAM.dataDir(), c.Name)
-	}
-	for _, plugin := range c.Plugins {
-		if strings.EqualFold(plugin.IPAM.Type, "host-local") {
-			return filepath.Join(plugin.IPAM.dataDir(), c.Name)
-		}
-	}
-	return ""
-}
-
-func (i cniIPAMConfig) dataDir() string {
-	if i.DataDir != "" {
-		return i.DataDir
-	}
-	return defaultHostLocalIPAMDataDir
 }
 
 func convertCNIResult(result *cni.Result, defaultIfName string) (*CNIResult, error) {
@@ -471,37 +439,15 @@ func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, n
 	if m == nil || m.plugin == nil {
 		return fmt.Errorf("cni config not initialized")
 	}
-	removeErr := m.plugin.Remove(ctx, cniID, netnsPath, opts...)
-	allocationErr := m.validateHostLocalAllocationReleased(cniID)
-	if allocationErr != nil {
-		allocationErr = fmt.Errorf("cni teardown left host-local allocation: %w", allocationErr)
-	}
-	return errors.Join(removeErr, allocationErr)
+	return m.plugin.Remove(ctx, cniID, netnsPath, opts...)
 }
 
-func (m *CNIManager) validateHostLocalAllocationReleased(cniID string) error {
-	if m == nil || m.selectedHostLocalAllocDir == "" || cniID == "" {
-		return nil
+func (m *CNIManager) CheckSandboxNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
+	if m == nil || m.plugin == nil {
+		return fmt.Errorf("cni config not initialized")
 	}
-	entries, err := os.ReadDir(m.selectedHostLocalAllocDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading host-local allocation dir %s: %w", m.selectedHostLocalAllocDir, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), "last_reserved_ip") || entry.Name() == "lock" {
-			continue
-		}
-		path := filepath.Join(m.selectedHostLocalAllocDir, entry.Name())
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("reading host-local allocation %s: %w", path, err)
-		}
-		if strings.Contains(string(content), cniID) {
-			return fmt.Errorf("host-local allocation %s still references cni id %s", path, cniID)
-		}
+	if err := m.plugin.Check(ctx, cniID, netnsPath, opts...); err != nil {
+		return fmt.Errorf("failed to check cni network: %w", err)
 	}
 	return nil
 }
