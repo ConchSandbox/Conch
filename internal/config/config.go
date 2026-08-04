@@ -208,7 +208,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to inspect config file permissions: %w", err)
 	}
-	if fileInfo.Mode().Perm()&0o077 != 0 {
+	// Allow owner-only files and group read, while forbidding group write or
+	// execute and every permission granted to other users.
+	if fileInfo.Mode().Perm()&0o037 != 0 {
 		return nil, fmt.Errorf(
 			"config file %q has insecure permissions %04o",
 			configPath,

@@ -227,7 +227,7 @@ func TestRunImagePushPassesResolvedNamespace(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -372,7 +372,7 @@ func TestResolveConchNamespaceUsesConfigAndOverride(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -431,7 +431,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
