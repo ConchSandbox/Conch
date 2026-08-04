@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"github.com/moby/sys/mountinfo"
+	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -167,66 +167,6 @@ func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
 	// virtiofsd 1.13.x (Rust) has no cache flag; the guest uses the default
 	// virtiofs cache mode (see agent mount logic).
 	return []string{"--socket-path", socket, "--shared-dir", volumeDir}
-}
-
-func (b *virtiofsBackend) Restore(namespace, sandboxID string, devices []Device) error {
-	if len(devices) != 1 {
-		return fmt.Errorf("expected one virtiofs device, got %d", len(devices))
-	}
-	device := devices[0]
-	if device.Backend != "" && device.Backend != b.Name() {
-		return fmt.Errorf("unsupported restored volume backend %q", device.Backend)
-	}
-	if device.SandboxID != "" && device.SandboxID != sandboxID {
-		return fmt.Errorf("restored volume sandbox_id mismatch: got %q want %q", device.SandboxID, sandboxID)
-	}
-	if strings.TrimSpace(device.Socket) == "" {
-		return fmt.Errorf("restored virtiofs socket is empty")
-	}
-	st, err := os.Stat(device.Socket)
-	if err != nil {
-		return fmt.Errorf("stat restored virtiofs socket %s: %w", device.Socket, err)
-	}
-	if st.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("restored virtiofs socket %s is not a unix socket", device.Socket)
-	}
-	if strings.TrimSpace(device.VolumeDir) == "" {
-		return fmt.Errorf("restored virtiofs volume dir is empty")
-	}
-	if st, err := os.Stat(device.VolumeDir); err != nil {
-		return fmt.Errorf("stat restored virtiofs volume dir %s: %w", device.VolumeDir, err)
-	} else if !st.IsDir() {
-		return fmt.Errorf("restored virtiofs volume dir %s is not a directory", device.VolumeDir)
-	}
-	if strings.TrimSpace(device.ConfigPath) == "" {
-		return fmt.Errorf("restored virtiofs config path is empty")
-	}
-	data, err := os.ReadFile(device.ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read restored virtiofs config %s: %w", device.ConfigPath, err)
-	}
-	var doc configDocument
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("parse restored virtiofs config %s: %w", device.ConfigPath, err)
-	}
-	if doc.Version != configVersion {
-		return fmt.Errorf("unsupported restored virtiofs config version %d", doc.Version)
-	}
-	for _, mount := range doc.Mounts {
-		if mount.Index < 0 {
-			return fmt.Errorf("restored virtiofs config has negative mount index %d", mount.Index)
-		}
-		bindTarget := filepath.Join(device.VolumeDir, strconv.Itoa(mount.Index))
-		if ok, err := isMountPoint(bindTarget); err != nil {
-			return fmt.Errorf("check restored bind mount %s: %w", bindTarget, err)
-		} else if !ok {
-			return fmt.Errorf("restored bind target %s is not a mount point", bindTarget)
-		}
-	}
-	if !isOurVirtiofsd(device.PID, device.StartTime) {
-		return fmt.Errorf("restored virtiofsd pid %d does not match recorded process", device.PID)
-	}
-	return nil
 }
 
 func (b *virtiofsBackend) Cleanup(namespace, sandboxID string, devices []Device) error {

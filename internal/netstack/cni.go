@@ -3,7 +3,6 @@ package netstack
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -417,16 +416,10 @@ func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netn
 		result, err = m.plugin.Setup(ctx, cniID, netnsPath, opts...)
 	}
 	if err != nil {
-		if isExpectedShutdownError(ctx, err) {
-			return nil, errors.Join(err, ctx.Err())
-		}
 		return nil, fmt.Errorf("failed to setup cni network: %w", err)
 	}
 	converted, err := convertCNIResult(result, m.config.IfName)
 	if err != nil {
-		if shouldPreserveAfterCancel(ctx) {
-			return nil, errors.Join(err, ctx.Err())
-		}
 		return nil, fmt.Errorf("failed to convert cni result: %w", err)
 	}
 	return converted, nil

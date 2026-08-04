@@ -23,6 +23,7 @@ type fakeSandboxOps struct {
 	checkpointResults  []sandbox.CheckpointResult
 	checkpointErr      error
 	createResult       sandbox.CreateResult
+	createErr          error
 	deleteErr          error
 }
 
@@ -57,7 +58,7 @@ func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult
 	if result.AgentToken == "" {
 		result.AgentToken = req.AgentToken
 	}
-	return result, nil
+	return result, f.createErr
 }
 
 func (f *fakeSandboxOps) Delete(sandbox.DeleteRequest) error {
@@ -106,23 +107,8 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-a",
 		Namespace:                     "team-a",
-		State:                         state.SandboxReady,
-		SourceTemplateID:              "t0",
-		SourceBootIndexDigest:         t0Digest,
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: t0Digest,
-		VMMName:                       "cloud-hypervisor",
-		VMMPID:                        1234,
-		VMMSocketPath:                 "/run/conch/sandbox-a/vmm.sock",
-		VsockCID:                      17,
-		VsockSocketPath:               "/run/conch/sandbox-a/vsock.sock",
-		RootfsKey:                     "sandbox-a-rootfs",
-		MemKey:                        "sandbox-a-mem",
-		RootfsMount:                   "/run/conch/sandbox-a/rootfs",
-		RootfsPmemPaths:               []string{"/run/conch/sandbox-a/rootfs/base.erofs"},
-		MemMount:                      "/run/conch/sandbox-a/mem",
-		VMMount:                       "/run/conch/sandbox-a/vm",
-		SnapshotRootDir:               "conch/snapshot",
 	}
 	if err := store.UpsertSandbox(ctx, before); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
@@ -212,9 +198,6 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-validation-failure",
 		Namespace:                     "team-a",
-		State:                         state.SandboxReady,
-		SourceTemplateID:              "t0",
-		SourceBootIndexDigest:         sourceDigest,
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: sourceDigest,
 	}
@@ -265,13 +248,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-lineage",
 		Namespace:                     "team-a",
-		State:                         state.SandboxReady,
-		SourceTemplateID:              "t0",
-		SourceBootIndexDigest:         t0Digest,
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: t0Digest,
-		RootfsKey:                     "runtime-rootfs",
-		MemKey:                        "runtime-mem",
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
@@ -328,27 +306,23 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if rec.SourceTemplateID != "t0" || rec.SourceBootIndexDigest != t0Digest {
-		t.Fatalf("sandbox immutable source changed: %#v", rec)
-	}
 	if rec.CheckpointHeadTemplateID != t2.ID || rec.CheckpointHeadBootIndexDigest != t2Digest {
 		t.Fatalf("sandbox checkpoint head = (%q, %q), want (%q, %q)",
 			rec.CheckpointHeadTemplateID, rec.CheckpointHeadBootIndexDigest, t2.ID, t2Digest)
 	}
-	if rec.RootfsKey != "runtime-rootfs" || rec.MemKey != "runtime-mem" {
-		t.Fatalf("sandbox runtime snapshot fields changed: %#v", rec)
-	}
 }
 
-func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
+func TestRemoveSandboxKeepsRecordWhenCleanupFails(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
-	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
-		SandboxID: "sandbox-1",
-		Namespace: "default",
-		State:     state.SandboxReady,
-	}); err != nil {
+	before := state.SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		Namespace:                     "default",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: digest.FromString("sandbox-1-head").String(),
+	}
+	if err := store.UpsertSandbox(ctx, before); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
@@ -361,8 +335,8 @@ func TestRemoveSandboxKeepsStateWhenCleanupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if rec.State != state.SandboxUnknown {
-		t.Fatalf("sandbox.State = %q, want %q", rec.State, state.SandboxUnknown)
+	if rec != before {
+		t.Fatalf("sandbox record = %#v, want unchanged %#v", rec, before)
 	}
 }
 
@@ -376,12 +350,8 @@ func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 
-	records, err := store.ListSandboxes(ctx)
-	if err != nil {
-		t.Fatalf("ListSandboxes() error = %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("sandboxes = %#v, want none", records)
+	if _, err := store.GetSandbox(ctx, "missing-sandbox"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -389,9 +359,10 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	rec := state.SandboxRecord{
-		SandboxID: "sandbox-serialized",
-		Namespace: "default",
-		State:     state.SandboxReady,
+		SandboxID:                     "sandbox-serialized",
+		Namespace:                     "default",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: digest.FromString("sandbox-serialized-head").String(),
 	}
 	if err := store.UpsertSandbox(ctx, rec); err != nil {
 		t.Fatal(err)
@@ -427,19 +398,14 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
+func TestCreateSandboxStoresOnlyCheckpointMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
+	bootIndexDigest := digest.FromString("sandbox-1-boot-index").String()
 
 	sandboxOps := &fakeSandboxOps{
 		createResult: sandbox.CreateResult{
-			RootfsKey:   "sandbox-1",
-			MemKey:      "sandbox-1-mem",
-			RootfsMount: "/run/conch/rootfs",
-			MemMount:    "/run/conch/mem",
-			VMMount:     "/run/conch/vm",
-			RootDir:     "conch/snapshot",
-			MemSize:     512,
+			BootIndexDigest: bootIndexDigest,
 		},
 	}
 	svc := New(sandboxOps, nil, nil, store, "default")
@@ -455,14 +421,30 @@ func TestCreateSandboxStoresRuntimeFieldsOnSandboxRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if rec.RootfsKey != "sandbox-1" || rec.MemKey != "sandbox-1-mem" {
-		t.Fatalf("runtime keys = (%q, %q), want sandbox keys", rec.RootfsKey, rec.MemKey)
+	want := state.SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		Namespace:                     "default",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: bootIndexDigest,
 	}
-	if rec.RootfsMount != "/run/conch/rootfs" || rec.MemMount != "/run/conch/mem" || rec.VMMount != "/run/conch/vm" {
-		t.Fatalf("mounts = (%q, %q, %q)", rec.RootfsMount, rec.MemMount, rec.VMMount)
+	if rec != want {
+		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
 	}
-	if rec.SnapshotRootDir != "conch/snapshot" {
-		t.Fatalf("SnapshotRootDir = %q", rec.SnapshotRootDir)
+}
+
+func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	svc := New(&fakeSandboxOps{createErr: errors.New("create failed")}, nil, nil, store, "default")
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
+	}); err == nil {
+		t.Fatal("CreateSandbox() error = nil, want create failure")
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -528,11 +510,13 @@ func TestCreateSandboxRejectsMissingOrWhitespaceDefaultTemplate(t *testing.T) {
 
 func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
 	store := newTestStore(t)
-	sandboxOps := &fakeSandboxOps{}
+	sandboxOps := &fakeSandboxOps{createResult: sandbox.CreateResult{
+		BootIndexDigest: digest.FromString("generated-sandbox-boot-index").String(),
+	}}
 	svc := New(sandboxOps, nil, nil, store, "default")
 	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
 
-	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{})
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: "tmpl-1"})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}

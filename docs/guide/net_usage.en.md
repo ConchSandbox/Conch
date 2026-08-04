@@ -62,7 +62,7 @@ network:
 Pay attention to the following network config items:
 
 - `warm_pool_size` sets the number of ready-to-use idle network slots to pre-create and maintain and cannot exceed the code-defined total capacity of 4000 slots.
-- At startup, Conch rebuilds its in-memory ID allocator from all BoltDB Slot records—including transient, idle, and assigned slots. Those records share the fixed total capacity of 4000; CNI/IPAM address capacity may impose a lower effective limit.
+- On every startup, Conch creates a fresh in-memory slot ID allocator and warm pool. It does not restore or adopt old slots from BoltDB; CNI/IPAM address capacity may impose a lower effective limit.
 - With `dynamic_reservation` enabled, a CNI allocation failure rolls back the attempted slot and is retried with exponential backoff. Sandbox creation reports an unavailable resource when the pool is empty.
 - `tap_ip` and `tap_mask` define the VM-facing `tap` subnet inside each sandbox.
 - `plugin_bin_dirs` points to the CNI plugin directory, and `plugin_conf_dir` points to the Conch CNI config directory.
@@ -115,11 +115,11 @@ ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- Expected result: normal exit, including `SIGTERM` and `SIGINT`, preserves network resources so they can be adopted again after restart. Netns entries, CNI IPAM allocation files, and the CNI bridge may continue to exist. After restarting `conchd`, preserved warm slots should be adopted, and slots assigned to sandboxes should be restored according to the sandbox state.
+- Expected result: a normal exit, including `SIGTERM` and `SIGINT`, closes the in-memory warm pool and makes a best-effort attempt to remove each queued idle slot's tap, CNI allocation, and network namespace. A cleanup failure is logged and does not prevent process exit. After restart, `conchd` prefills a fresh pool and does not adopt old slots. Resources left by an abnormal exit are not remediated, and old sandboxes are not restored; delete all active sandboxes before restarting the daemon.
 
 ## Manual Cleanup
 
-Normal `conchd` exit preserves all network resources. If a full reset is needed, meaning no sandbox, snapshot, network, or other state should be kept, stop `conchd`, delete data record `/var/lib/conch/state.db`, and manually remove the namespace, bridge, and IPAM directory:
+Normal `conchd` exit makes a best-effort attempt to clean the in-memory warm pool. If network resources remain after an abnormal exit or an individual cleanup failure, stop `conchd` and manually remove the namespaces, bridge, and IPAM directory with the commands below. Network slots are no longer stored in `/var/lib/conch/state.db`, so deleting that database is not a substitute for network cleanup:
 
 ```bash
 sudo sh -c '

@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -13,11 +12,9 @@ import (
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchplugins"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/volume"
-	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type Config struct {
@@ -63,15 +60,9 @@ func New(
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.DynamicReservation, cfg.TapIP, cfg.TapMask, cfg.CNI, currentNetworkSlotStore())
+	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.DynamicReservation, cfg.TapIP, cfg.TapMask, cfg.CNI)
 	if err != nil {
 		return nil, err
-	}
-	if _, err := pool.AdoptIdle(ctx); err != nil {
-		if errors.Is(err, netstack.ErrNetworkSlotStoreRead) || errors.Is(err, netstack.ErrNetworkSlotCleanup) || errors.Is(err, netstack.ErrNetworkSlotCapacity) {
-			return nil, err
-		}
-		ulog.GetLogger().Warn("some warm network slots were not adopted", ulog.F("error", err))
 	}
 	manager, err := conchsandbox.NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout)
 	if err != nil {
@@ -108,20 +99,6 @@ func (s *Service) Checkpoint(req conchsandbox.CheckpointRequest) (conchsandbox.C
 	return s.manager.Checkpoint(req)
 }
 
-func (s *Service) Rehydrate(records []state.SandboxRecord) (int, map[string]struct{}, error) {
-	if s == nil || s.manager == nil {
-		return 0, nil, nil
-	}
-	return s.manager.Rehydrate(records)
-}
-
-func (s *Service) CleanupAssignedWithoutReadySandbox(restoredSandboxIDs map[string]struct{}) error {
-	if s == nil || s.manager == nil {
-		return nil
-	}
-	return s.manager.CleanupAssignedWithoutReadySandbox(restoredSandboxIDs)
-}
-
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
@@ -132,7 +109,7 @@ func (s *Service) Close() error {
 		return s.closeErr
 	}
 	s.closed = true
-	finish := cleanupdiag.Start("sandbox_service.close_preserve")
+	finish := cleanupdiag.Start("sandbox_service.close")
 	if s.manager != nil {
 		s.manager.Close()
 	}
@@ -141,10 +118,9 @@ func (s *Service) Close() error {
 }
 
 var (
-	readyMu          sync.Mutex
-	readyCh          chan<- *Service
-	networkSlotStore netstack.NetworkSlotStore
-	volumeManager    *volume.Manager
+	readyMu       sync.Mutex
+	readyCh       chan<- *Service
+	volumeManager *volume.Manager
 )
 
 func SetReadyChannel(ch chan<- *Service) {
@@ -153,22 +129,10 @@ func SetReadyChannel(ch chan<- *Service) {
 	readyCh = ch
 }
 
-func SetNetworkSlotStore(store netstack.NetworkSlotStore) {
-	readyMu.Lock()
-	defer readyMu.Unlock()
-	networkSlotStore = store
-}
-
 func SetVolumeManager(manager *volume.Manager) {
 	readyMu.Lock()
 	defer readyMu.Unlock()
 	volumeManager = manager
-}
-
-func currentNetworkSlotStore() netstack.NetworkSlotStore {
-	readyMu.Lock()
-	defer readyMu.Unlock()
-	return networkSlotStore
 }
 
 func currentVolumeManager() *volume.Manager {

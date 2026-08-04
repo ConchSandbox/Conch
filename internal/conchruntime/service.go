@@ -20,7 +20,6 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
-	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -176,41 +175,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VolumeMounts: opts.VolumeMounts,
 	}
 
-	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
 		Namespace:                     namespace,
-		State:                         state.SandboxReady,
-		CreatedAt:                     createdAt,
-		LeaseID:                       opts.LeaseID,
-		SourceTemplateID:              opts.TemplateID,
-		SourceBootIndexDigest:         createResult.BootIndexDigest,
 		CheckpointHeadTemplateID:      opts.TemplateID,
 		CheckpointHeadBootIndexDigest: createResult.BootIndexDigest,
-		IP:                            createResult.IP,
-		VMMName:                       opts.VMMName,
-		VCPUNum:                       opts.VCPUNum,
-		RamMB:                         opts.RamMB,
-		VMMPID:                        createResult.VMMPID,
-		VMMSocketPath:                 createResult.VMMSocketPath,
-		VsockCID:                      createResult.VsockCID,
-		VsockSocketPath:               createResult.VsockSocketPath,
-		NetworkSlotID:                 createResult.NetworkSlotID,
-		RootfsKey:                     createResult.RootfsKey,
-		MemKey:                        createResult.MemKey,
-		RootfsMount:                   createResult.RootfsMount,
-		RootfsPmemPaths:               append([]string(nil), createResult.RootfsPmemPaths...),
-		MemMount:                      createResult.MemMount,
-		VMMount:                       createResult.VMMount,
-		SnapshotRootDir:               createResult.RootDir,
-		VolumeDevices:                 volumeDevicesToState(createResult.VolumeDevices),
-	}
-	if err != nil {
-		rec.State = state.SandboxUnknown
-		rec.LastError = err.Error()
-		_ = s.upsertSandbox(ctx, rec)
-		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		return SandboxCreateResult{}, err
@@ -225,27 +198,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:      opts.RamMB,
 		CreatedAt:  createdAt,
 	}, nil
-}
-
-func volumeDevicesToState(devices []volume.Device) []state.VolumeDevice {
-	if len(devices) == 0 {
-		return nil
-	}
-	out := make([]state.VolumeDevice, 0, len(devices))
-	for _, device := range devices {
-		out = append(out, state.VolumeDevice{
-			SandboxID:  device.SandboxID,
-			Namespace:  device.Namespace,
-			Backend:    device.Backend,
-			Tag:        device.Tag,
-			Socket:     device.Socket,
-			VolumeDir:  device.VolumeDir,
-			ConfigPath: device.ConfigPath,
-			PID:        device.PID,
-			StartTime:  device.StartTime,
-		})
-	}
-	return out
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -277,12 +229,11 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, recErr := s.getSandbox(ctx, sandboxID)
-	stateFound := recErr == nil
-	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
-		return fmt.Errorf("get sandbox state: %w", recErr)
-	}
 	if namespace == "" {
+		rec, recErr := s.getSandbox(ctx, sandboxID)
+		if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
+			return fmt.Errorf("get sandbox state: %w", recErr)
+		}
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
@@ -291,11 +242,6 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string
 		err = nil
 	}
 	if err != nil {
-		if stateFound {
-			rec.State = state.SandboxUnknown
-			rec.LastError = err.Error()
-			_ = s.upsertSandbox(ctx, rec)
-		}
 		return err
 	}
 	if s.Store != nil {
@@ -310,21 +256,12 @@ func (s *Service) SuspendSandbox(ctx context.Context, namespace, sandboxID strin
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, _ := s.getSandbox(ctx, sandboxID)
 	if namespace == "" {
+		rec, _ := s.getSandbox(ctx, sandboxID)
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
-	if rec.SandboxID != "" {
-		rec.State = state.SandboxSuspended
-		if err != nil {
-			rec.State = state.SandboxUnknown
-			rec.LastError = err.Error()
-		}
-		_ = s.upsertSandbox(ctx, rec)
-	}
-	return err
+	return s.Sandbox.Suspend(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
 }
 
 func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string) error {
@@ -333,23 +270,12 @@ func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, _ := s.getSandbox(ctx, sandboxID)
 	if namespace == "" {
+		rec, _ := s.getSandbox(ctx, sandboxID)
 		namespace = rec.Namespace
 	}
 	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Resume(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
-	if rec.SandboxID != "" {
-		rec.State = state.SandboxReady
-		if err != nil {
-			rec.State = state.SandboxUnknown
-			rec.LastError = err.Error()
-		} else {
-			rec.LastError = ""
-		}
-		_ = s.upsertSandbox(ctx, rec)
-	}
-	return err
+	return s.Sandbox.Resume(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
 }
 
 func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointOptions) (SandboxCheckpointResult, error) {
@@ -376,9 +302,6 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	namespace = s.normalizeNamespace(namespace)
 	if recordNamespace := s.normalizeNamespace(rec.Namespace); recordNamespace != namespace {
 		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s belongs to namespace %s, not %s", sandboxID, recordNamespace, namespace)
-	}
-	if len(rec.VolumeDevices) > 0 {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", sandboxID)
 	}
 	parentTemplateID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if parentTemplateID == "" {
@@ -443,22 +366,17 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	if err := s.Store.PublishCheckpoint(ctx, state.CheckpointPublication{
-		Entry: conchtemplate.Entry{
-			ID:               templateID,
-			Origin:           conchtemplate.OriginCheckpoint,
-			BootMode:         conchtemplate.BootModeResume,
-			BootIndexDigest:  info.BootIndexDigest,
-			Namespace:        namespace,
-			ParentTemplateID: parentTemplateID,
-			SourceSandboxID:  sandboxID,
-			BuildRef:         published.ImageName,
-			Labels:           copyMap(opts.Labels),
-			CreatedAt:        time.Now().UnixNano(),
-		},
-		SandboxID:                   rec.SandboxID,
-		ExpectedHeadTemplateID:      parentTemplateID,
-		ExpectedHeadBootIndexDigest: parentBootIndexDigest,
+	if err := s.Store.PublishCheckpoint(ctx, conchtemplate.Entry{
+		ID:               templateID,
+		Origin:           conchtemplate.OriginCheckpoint,
+		BootMode:         conchtemplate.BootModeResume,
+		BootIndexDigest:  info.BootIndexDigest,
+		Namespace:        namespace,
+		ParentTemplateID: parentTemplateID,
+		SourceSandboxID:  sandboxID,
+		BuildRef:         published.ImageName,
+		Labels:           copyMap(opts.Labels),
+		CreatedAt:        time.Now().UnixNano(),
 	}); err != nil {
 		return SandboxCheckpointResult{}, err
 	}

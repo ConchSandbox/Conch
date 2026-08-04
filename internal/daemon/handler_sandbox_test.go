@@ -140,9 +140,6 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-1",
 		Namespace:                     "default",
-		State:                         state.SandboxReady,
-		SourceTemplateID:              "tmpl-source",
-		SourceBootIndexDigest:         sourceDigest,
 		CheckpointHeadTemplateID:      "tmpl-source",
 		CheckpointHeadBootIndexDigest: sourceDigest,
 	}); err != nil {

@@ -49,36 +49,6 @@ func NewAllocator(firstID, capacity int) *Allocator {
 	}
 }
 
-// Rebuild replaces allocation state using IDs found in persistent storage.
-// It must run before concurrent calls to Acquire or Release begin.
-func (a *Allocator) Rebuild(usedIDs []int) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	used := make([]bool, len(a.used))
-	for _, id := range usedIDs {
-		offset := id - a.firstID
-		if offset < 0 || offset >= len(used) {
-			return fmt.Errorf("slot ID %d is outside allocator range [%d, %d)", id, a.firstID, a.firstID+len(used))
-		}
-		if used[offset] {
-			return fmt.Errorf("slot ID %d appears more than once", id)
-		}
-		used[offset] = true
-	}
-
-	free := make(idHeap, 0, len(used)-len(usedIDs))
-	for offset, inUse := range used {
-		if !inUse {
-			free = append(free, a.firstID+offset)
-		}
-	}
-	heap.Init(&free)
-	a.used = used
-	a.free = free
-	return nil
-}
-
 func (a *Allocator) Acquire() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

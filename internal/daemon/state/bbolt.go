@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +15,10 @@ import (
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
-var (
-	ErrNotFound      = errors.New("state record not found")
-	ErrAlreadyExists = errors.New("state record already exists")
-)
+var ErrNotFound = errors.New("state record not found")
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
-	[]byte("network_slots"),
 	[]byte("templates"),
 }
 
@@ -129,6 +124,18 @@ func (s *BoltStore) delete(_ context.Context, bucket []byte, key string) error {
 }
 
 func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error {
+	if strings.TrimSpace(rec.SandboxID) == "" {
+		return fmt.Errorf("sandbox id is required")
+	}
+	if strings.TrimSpace(rec.Namespace) == "" {
+		return fmt.Errorf("sandbox namespace is required")
+	}
+	if strings.TrimSpace(rec.CheckpointHeadTemplateID) == "" {
+		return fmt.Errorf("sandbox checkpoint head template id is required")
+	}
+	if strings.TrimSpace(rec.CheckpointHeadBootIndexDigest) == "" {
+		return fmt.Errorf("sandbox checkpoint head boot index digest is required")
+	}
 	return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
 }
 
@@ -138,104 +145,8 @@ func (s *BoltStore) GetSandbox(ctx context.Context, id string) (SandboxRecord, e
 	return rec, err
 }
 
-func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) {
-	var out []SandboxRecord
-	err := s.list(ctx, []byte("sandboxes"), func(data []byte) error {
-		var rec SandboxRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
-}
-
-func (s *BoltStore) CreateNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	key := networkSlotBucketKey(rec.SlotID)
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("marshal network slot %d: %w", rec.SlotID, err)
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		slots := tx.Bucket([]byte("network_slots"))
-		if slots.Get([]byte(key)) != nil {
-			return fmt.Errorf("%w: network slot %d", ErrAlreadyExists, rec.SlotID)
-		}
-		return slots.Put([]byte(key), data)
-	})
-}
-
-func networkSlotBucketKey(slotID int) string {
-	return strconv.Itoa(slotID)
-}
-
-func (s *BoltStore) UpdateNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	key := networkSlotBucketKey(rec.SlotID)
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("marshal state record: %w", err)
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		slots := tx.Bucket([]byte("network_slots"))
-		existingData := slots.Get([]byte(key))
-		if existingData == nil {
-			return fmt.Errorf("%w: network slot %d", ErrNotFound, rec.SlotID)
-		}
-		var existing NetworkSlotRecord
-		if err := json.Unmarshal(existingData, &existing); err != nil {
-			return fmt.Errorf("unmarshal network slot %d: %w", rec.SlotID, err)
-		}
-		if rec.SlotID != existing.SlotID {
-			return fmt.Errorf("network slot %d identity is immutable: stored slot ID is %d", rec.SlotID, existing.SlotID)
-		}
-		return slots.Put([]byte(key), data)
-	})
-}
-
-func (s *BoltStore) GetNetworkSlot(ctx context.Context, slotID int) (NetworkSlotRecord, error) {
-	var rec NetworkSlotRecord
-	key := networkSlotBucketKey(slotID)
-	if err := s.get(ctx, []byte("network_slots"), key, &rec); err != nil {
-		return rec, err
-	}
-	if rec.SlotID != slotID {
-		return NetworkSlotRecord{}, fmt.Errorf("network slot bucket key %d contains slot ID %d", slotID, rec.SlotID)
-	}
-	return rec, nil
-}
-
-func (s *BoltStore) ListNetworkSlots(ctx context.Context) ([]NetworkSlotRecord, error) {
-	var out []NetworkSlotRecord
-	err := s.list(ctx, []byte("network_slots"), func(data []byte) error {
-		var rec NetworkSlotRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
-func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotID int) error {
-	return s.delete(ctx, []byte("network_slots"), networkSlotBucketKey(slotID))
 }
 
 func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry) error {
@@ -290,23 +201,19 @@ func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
 // and advances the Sandbox checkpoint head. Content publication and validation
 // happen before this transaction, so a failed transaction can only leave safe
 // orphaned content.
-func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointPublication) error {
-	entry, err := conchtemplate.NormalizeEntry(publication.Entry)
+func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplate.Entry) error {
+	entry, err := conchtemplate.NormalizeEntry(checkpoint)
 	if err != nil {
 		return err
 	}
 	templateID := entry.ID
-	sandboxID := strings.TrimSpace(publication.SandboxID)
+	sandboxID := strings.TrimSpace(entry.SourceSandboxID)
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
-	expectedHeadID := strings.TrimSpace(publication.ExpectedHeadTemplateID)
+	expectedHeadID := strings.TrimSpace(entry.ParentTemplateID)
 	if expectedHeadID == "" {
 		return fmt.Errorf("expected checkpoint head template id is required")
-	}
-	expectedHeadDigest := strings.TrimSpace(publication.ExpectedHeadBootIndexDigest)
-	if expectedHeadDigest == "" {
-		return fmt.Errorf("expected checkpoint head boot index digest is required")
 	}
 	if entry.Origin != conchtemplate.OriginCheckpoint {
 		return fmt.Errorf(
@@ -350,12 +257,6 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointP
 		}
 		if currentHeadID != expectedHeadID {
 			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", sandboxID, expectedHeadID, currentHeadID)
-		}
-		if currentHeadDigest != expectedHeadDigest {
-			return fmt.Errorf("sandbox %s checkpoint head digest changed from %s to %s", sandboxID, expectedHeadDigest, currentHeadDigest)
-		}
-		if parentID := entry.ParentTemplateID; parentID != currentHeadID {
-			return fmt.Errorf("template %s parent %s does not match sandbox %s checkpoint head %s", templateID, parentID, sandboxID, currentHeadID)
 		}
 		if sourceID := entry.SourceSandboxID; sourceID != strings.TrimSpace(sandboxRecord.SandboxID) {
 			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)

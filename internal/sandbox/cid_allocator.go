@@ -233,38 +233,6 @@ func (a *CIDAllocator) ReleaseCID(sandboxId string) error {
 	return a.writeCIDMapLocked(fd, cidMap)
 }
 
-func (a *CIDAllocator) ReserveCID(sandboxId string, cid uint32) error {
-	if sandboxId == "" || cid == 0 {
-		return nil
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	fd, err := a.acquireFileLock()
-	if err != nil {
-		return err
-	}
-	defer a.releaseFileLock(fd)
-
-	cidMap, err := a.readCIDMapLocked(fd)
-	if err != nil {
-		return err
-	}
-	if existing, ok := cidMap.CidMap[sandboxId]; ok && existing != cid {
-		return fmt.Errorf("sandbox %s already has cid %d, cannot reserve %d", sandboxId, existing, cid)
-	}
-	for id, existing := range cidMap.CidMap {
-		if id != sandboxId && existing == cid {
-			return fmt.Errorf("cid %d already reserved by sandbox %s", cid, id)
-		}
-	}
-	cidMap.CidMap[sandboxId] = cid
-	if cid >= cidMap.NextCID {
-		cidMap.NextCID = cid + 1
-	}
-	return a.writeCIDMapLocked(fd, cidMap)
-}
-
 func (a *CIDAllocator) GetCID(sandboxId string) (uint32, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

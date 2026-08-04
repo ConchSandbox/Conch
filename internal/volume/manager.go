@@ -72,10 +72,6 @@ func (m *Manager) CleanupSandbox(namespace, sandboxID string, devices []Device) 
 	return m.backend.Cleanup(namespace, sandboxID, devices)
 }
 
-func (m *Manager) RestoreSandbox(namespace, sandboxID string, devices []Device) error {
-	return m.backend.Restore(namespace, sandboxID, devices)
-}
-
 func isBlockedTarget(target string) bool {
 	switch target {
 	case "/", "/proc", "/sys", "/dev", "/run":

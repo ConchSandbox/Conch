@@ -67,7 +67,6 @@ type SandboxConfig struct {
 	TapIP              string
 	TapMask            int
 	CNI                netstack.CNIManagerConfig
-	NetworkSlotStore   netstack.NetworkSlotStore
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
@@ -188,9 +187,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		defer templateSvc.SetStateStore(nil)
 	}
 	if cfg.Sandbox != nil {
-		sandboxSvc.SetNetworkSlotStore(cfg.Sandbox.NetworkSlotStore)
 		sandboxSvc.SetVolumeManager(cfg.Sandbox.VolumeManager)
-		defer sandboxSvc.SetNetworkSlotStore(nil)
 		defer sandboxSvc.SetVolumeManager(nil)
 	}
 	hostCtx, cancel := context.WithCancel(ctx)

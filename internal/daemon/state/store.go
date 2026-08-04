@@ -11,18 +11,11 @@ type Store interface {
 
 	UpsertSandbox(context.Context, SandboxRecord) error
 	GetSandbox(context.Context, string) (SandboxRecord, error)
-	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
-
-	CreateNetworkSlot(context.Context, NetworkSlotRecord) error
-	UpdateNetworkSlot(context.Context, NetworkSlotRecord) error
-	GetNetworkSlot(context.Context, int) (NetworkSlotRecord, error)
-	ListNetworkSlots(context.Context) ([]NetworkSlotRecord, error)
-	DeleteNetworkSlot(context.Context, int) error
 
 	CreateTemplate(context.Context, template.Entry) error
 	GetTemplate(context.Context, string) (template.Entry, error)
 	ListTemplates(context.Context) ([]template.Entry, error)
 	DeleteTemplate(context.Context, string) error
-	PublishCheckpoint(context.Context, CheckpointPublication) error
+	PublishCheckpoint(context.Context, template.Entry) error
 }

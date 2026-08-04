@@ -25,7 +25,6 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
-	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -138,7 +137,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
 			CNI:                cfg.Network.CNI,
-			NetworkSlotStore:   store,
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
@@ -165,27 +163,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
-	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
-		Store:             store,
-		LeaseClient:       daemonClient,
-		SandboxRehydrator: host.SandboxService(),
-		DefaultNamespace:  cfg.Containerd.DefaultNamespace,
-	})
-	if err != nil {
-		cancel()
-		_ = host.Close()
-		_ = store.Close()
-		return nil, fmt.Errorf("reconcile state: %w", err)
-	}
-	logger.Info("State recovery reconciled",
-		ulog.F("sandboxes_checked", recoveryResult.SandboxesChecked),
-		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
-		ulog.F("runtime_leases_checked", recoveryResult.RuntimeLeasesChecked),
-		ulog.F("lease_errors", recoveryResult.LeaseErrors),
-		ulog.F("sandboxes_rehydrated", recoveryResult.SandboxesRehydrated),
-		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
-		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
-	)
 
 	handleSignals(ctx, cancel, s)
 

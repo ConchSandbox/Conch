@@ -1,7 +1,6 @@
 package slot
 
 import (
-	"errors"
 	"sync"
 	"testing"
 )
@@ -25,37 +24,6 @@ func TestAllocatorReturnsLowestFreeID(t *testing.T) {
 	reused, err := allocator.Acquire()
 	if err != nil || reused != first {
 		t.Fatalf("reused Acquire() = (%d, %v), want (%d, nil)", reused, err, first)
-	}
-}
-
-func TestAllocatorRebuildsFromPersistedIDs(t *testing.T) {
-	allocator := NewAllocator(testFirstID, 3)
-	if err := allocator.Rebuild([]int{testFirstID, testFirstID + 2}); err != nil {
-		t.Fatalf("Rebuild(): %v", err)
-	}
-
-	id, err := allocator.Acquire()
-	if err != nil || id != testFirstID+1 {
-		t.Fatalf("Acquire() after rebuild = (%d, %v), want (%d, nil)", id, err, testFirstID+1)
-	}
-	if _, err := allocator.Acquire(); !errors.Is(err, ErrCapacity) {
-		t.Fatalf("Acquire() at capacity error = %v, want ErrCapacity", err)
-	}
-	if err := allocator.Release(testFirstID); err != nil {
-		t.Fatalf("Release() persisted ID: %v", err)
-	}
-	if err := allocator.Release(testFirstID); err == nil {
-		t.Fatal("duplicate Release() succeeded")
-	}
-}
-
-func TestAllocatorRejectsInvalidRebuild(t *testing.T) {
-	allocator := NewAllocator(testFirstID, 2)
-	if err := allocator.Rebuild([]int{testFirstID, testFirstID}); err == nil {
-		t.Fatal("Rebuild() with duplicate ID succeeded")
-	}
-	if err := allocator.Rebuild([]int{testFirstID - 1}); err == nil {
-		t.Fatal("Rebuild() with out-of-range ID succeeded")
 	}
 }
 

@@ -61,7 +61,7 @@ network:
 
 Conch 网络配置需要注意如下事项：
 - `warm_pool_size` 给定了预先创建并保持可用的空闲网络 Slot 数量，不能超过代码内置的 4000 Slot 总容量上限。
-- Conch 启动时根据 BoltDB 中所有 Slot 记录（暂态、空闲和已分配）重建内存 ID 分配器，这些记录共同占用固定的 4000 Slot 总容量；实际可用数量还会受到 CNI/IPAM 地址容量限制。
+- Conch 每次启动都会创建新的内存 Slot ID 分配器和 warm pool，不会从 BoltDB 恢复或接管旧 Slot；实际可用数量还会受到 CNI/IPAM 地址容量限制。
 - 开启 `dynamic_reservation` 后，CNI 分配失败不会破坏已有 Slot；Conch 会回滚本次创建并以指数退避方式重试。池为空时，新建沙箱会返回资源不可用错误。
 - `tap_ip` 和 `tap_mask` 给定了每个沙箱内部面向虚拟机的 `tap` 子网。
 - `plugin_bin_dirs` 指向 CNI 插件目录, `plugin_conf_dir` 指向 Conch CNI 配置目录。
@@ -117,12 +117,12 @@ ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- 预期结果：正常退出（包括 `SIGTERM`, `SIGINT` 等）会保留网络资源，以便重启后重新接管。netns、CNI IPAM 分发文件以及 CNI bridge 都可能继续存在。重启 `conchd` 后，保留下来的预热槽位应被接管，而已分配给沙箱的应根据沙箱的具体状态进行恢复。
+- 预期结果：正常退出（包括 `SIGTERM`、`SIGINT`）会关闭内存 warm pool，并尽力清理队列中空闲 Slot 的 tap、CNI 分配和网络命名空间。单个 Slot 清理失败只记录日志，不阻止进程退出。重启 `conchd` 后会从空池重新预热，不会接管旧 Slot。当前不处理异常退出留下的资源，也不会恢复旧 sandbox；重启前应先删除所有活跃 sandbox。
 
 
 ## 手动清理流程
 
-正常退出 `conchd` 会保留所有的网络资源，如果需要完全重置（即不保留任何沙箱、快照、网络等记录），可在退出 `conchd` 后删除数据记录 `/var/lib/conch/state.db`，并使用如下指令手动删除命名空间、网桥以及 IPAM 目录：
+正常退出 `conchd` 会尽力清理内存 warm pool。异常退出或单项清理失败后若仍有网络残留，可在退出 `conchd` 后使用如下指令手动删除命名空间、网桥以及 IPAM 目录。网络 Slot 不再写入 `/var/lib/conch/state.db`，删除该数据库不会代替网络清理：
 
 ```bash
 sudo sh -c '

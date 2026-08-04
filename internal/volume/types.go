@@ -45,7 +45,6 @@ type PrepareRequest struct {
 type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) ([]Device, error)
-	Restore(namespace, sandboxID string, devices []Device) error
 	Cleanup(namespace, sandboxID string, devices []Device) error
 }
 

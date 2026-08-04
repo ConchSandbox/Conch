@@ -203,7 +203,6 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	entry.state = sandboxReady
 	entry.mu.Unlock()
 
 	select {
@@ -211,37 +210,10 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 		if err == nil {
 			t.Fatal("same sandbox reserve succeeded while an entry already existed")
 		}
-		if !strings.Contains(err.Error(), "ready") {
-			t.Fatalf("same sandbox reserve error = %v, want ready state", err)
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("same sandbox reserve error = %v, want already exists", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("same sandbox reserve did not unblock after entry lock was released")
-	}
-}
-
-func TestLifecycleOperationsRejectCreatingSandbox(t *testing.T) {
-	m := &Manager{}
-
-	key, entry, err := m.reserveSandboxEntry("ns", "sandbox-a")
-	if err != nil {
-		t.Fatalf("reserveSandboxEntry() error = %v", err)
-	}
-	entry.mu.Unlock()
-	defer m.sandboxes.CompareAndDelete(key, entry)
-
-	err = m.Delete(DeleteRequest{Namespace: "ns", SandboxID: "sandbox-a"})
-	if err == nil {
-		t.Fatal("Delete() succeeded for creating sandbox")
-	}
-	if !strings.Contains(err.Error(), "creating") {
-		t.Fatalf("Delete() error = %v, want creating state", err)
-	}
-
-	_, err = m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
-	if err == nil {
-		t.Fatal("Checkpoint() succeeded for creating sandbox")
-	}
-	if !strings.Contains(err.Error(), "creating") {
-		t.Fatalf("Checkpoint() error = %v, want creating state", err)
 	}
 }
