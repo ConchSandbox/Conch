@@ -415,7 +415,7 @@ func TestCreateSandboxIncludesNamespace(t *testing.T) {
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","ip":"192.0.2.2"}`)),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"sandboxID":"sandbox-123","domain":"192.0.2.2"}`)),
 				Header:     make(http.Header),
 			}, nil
 		}),

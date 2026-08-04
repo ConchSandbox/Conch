@@ -66,6 +66,34 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 	}
 }
 
+func TestReadyPayloadIncludesEnvironment(t *testing.T) {
+	payload, err := readyPayload(ReadyOptions{
+		SandboxID:  "sandbox-1",
+		AgentToken: "token",
+		Env: map[string]string{
+			"SOME_RANDOM_KEY": "key123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("readyPayload() error = %v", err)
+	}
+	want := "I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:token\nENV_JSON:{\"SOME_RANDOM_KEY\":\"key123\"}\n"
+	if payload != want {
+		t.Fatalf("readyPayload() = %q, want %q", payload, want)
+	}
+}
+
+func TestReadyPayloadRejectsPayloadLargerThanGuestReadLimit(t *testing.T) {
+	_, err := readyPayload(ReadyOptions{
+		SandboxID:  "sandbox-1",
+		AgentToken: "token",
+		Env:        map[string]string{"TOO_LARGE": strings.Repeat("x", maxVsockInitPayload)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "maximum is 1024") {
+		t.Fatalf("readyPayload() error = %v, want 1024-byte limit error", err)
+	}
+}
+
 func TestValidateAgentReadyAcceptsVersionMismatch(t *testing.T) {
 	if err := validateAgentReady("READY:0.0.0", "sandbox-version", ulog.GetLogger(), ""); err != nil {
 		t.Fatalf("validateAgentReady() error = %v, want nil for version mismatch", err)

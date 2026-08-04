@@ -4,7 +4,7 @@ from enum import Enum
 from io import IOBase, TextIOBase
 from typing import IO, Callable, Iterator, Optional, Dict, Any, List, Tuple, Literal, overload, TypedDict, Union
 from dataclasses import dataclass, field
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 import requests
 import requests_unixsocket
 import uuid
@@ -25,10 +25,7 @@ VCPU_NUM_KEY = "vcpu_num"
 VCPU_MAX_KEY = "vcpu_max"
 RAM_MB_KEY = "ram_mb"
 STATUS_KEY = "status"
-ERROR_KEY = "error"
 MESSAGE_KEY = "message"
-IP_KEY = "ip"
-AGENT_TOKEN_KEY = "agent_token"
 
 TEMPLATE_ID_RESP_KEY = "template_id"
 VOLUME_MOUNTS_KEY = "volumeMounts"
@@ -41,11 +38,17 @@ CFG_UNIX_SOCKET_KEY = "unix_socket"
 CFG_API_URL_KEY = "api_url"
 
 # API paths
-SANDBOX_CREATE_PATH = "/api/sandbox/create"
-SANDBOX_DELETE_PATH = "/api/sandbox/delete"
+SANDBOX_COLLECTION_PATH = "/api/v1/sandboxes"
+SANDBOX_INSTANCE_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}"
+SANDBOX_CREATE_PATH = SANDBOX_COLLECTION_PATH
+SANDBOX_LIST_PATH = SANDBOX_COLLECTION_PATH
+SANDBOX_GET_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
+SANDBOX_DELETE_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
+SERVICE_HEALTH_PATH = "/health"
+HTTP_NO_CONTENT = 204
 
 RANDOM_ID_HEX_BYTES = 12
 UNKNOWN_EXIT_CODE = -1
@@ -628,8 +631,6 @@ class FilesManager:
 class Sandbox:
     def __init__(
             self,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
             sandbox_id: Optional[str] = None,
             template_id: Optional[str] = None,
             namespace: Optional[str] = None,
@@ -637,15 +638,15 @@ class Sandbox:
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
-            config_path: Optional[str] = None,
+            env: Optional[Dict[str, str]] = None,
     ):
-        self._config: Dict[str, Any] = load_config(config_path=config_path)
+        self._config: Dict[str, Any] = load_config()
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
 
         configured_unix_socket = sandbox_cfg.get(CFG_UNIX_SOCKET_KEY, "")
         configured_api_url = sandbox_cfg.get(CFG_API_URL_KEY, "")
-        self.unix_socket = unix_socket if unix_socket is not None else configured_unix_socket
-        self.api_url = api_url.rstrip('/') if api_url else configured_api_url.rstrip('/')
+        self.unix_socket = configured_unix_socket
+        self.api_url = configured_api_url.rstrip('/')
         self._session = requests_unixsocket.Session() if self.unix_socket else requests.Session()
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
@@ -655,15 +656,38 @@ class Sandbox:
 
         self.ip = None
         self.agent_token = None
-        self.client = None
+        self._client = None
+        self.control_plane_only = False
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
+        self.image_name = None
+        self.snapshot_id = None
+        self.started_at = None
+        self.end_at = None
+        self.disk_size_mb = None
+        self.conch_init_version = None
+        self.alias = None
         self.commands = CommandManager(self)
         self.files = FilesManager(self)
         self.volume_mounts = volume_mounts or []
+        self.env = env
+        self.metadata: Dict[str, str] = {}
+        self.lifecycle: Dict[str, Any] = {}
 
+    @property
+    def client(self):
+        if self._client is None:
+            if self.control_plane_only:
+                raise RuntimeError("Agent credentials unavailable for retrieved sandbox")
+            raise RuntimeError("Sandbox agent client is not initialized")
+        return self._client
 
+    @client.setter
+    def client(self, value):
+        self._client = value
+        if value is not None:
+            self.control_plane_only = False
 
     def _build_control_plane_url(self, path: str) -> str:
         if self.unix_socket:
@@ -682,6 +706,29 @@ class Sandbox:
     def _get_vmm_name(self) -> str:
         return self._config[CFG_IMAGE_SECTION].get(VMM_NAME_KEY, "")
 
+    def _get_control_plane_response(self, path: str):
+        response = self._session.get(self._build_control_plane_url(path))
+        response.raise_for_status()
+        return response
+
+    def _get_control_plane_requests(
+            self,
+            path: str,
+            params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        response = self._session.get(self._build_control_plane_url(path), params=params)
+        response.raise_for_status()
+        return {} if response.status_code == HTTP_NO_CONTENT else response.json()
+
+    def _delete_control_plane_requests(
+            self,
+            path: str,
+            params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        response = self._session.delete(self._build_control_plane_url(path), params=params)
+        response.raise_for_status()
+        return {} if response.status_code == HTTP_NO_CONTENT else response.json()
+
     def _build_create_payload(self) -> Dict[str, Any]:
         if not self.template_id:
             raise ValueError("template_id is required")
@@ -699,37 +746,54 @@ class Sandbox:
         }
         if self.volume_mounts:
             payload[VOLUME_MOUNTS_KEY] = self.volume_mounts
+        if self.env is not None:
+            payload["env"] = self.env
         return payload
 
-    def _update_client_from_result(self, result: Dict[str, Any]):
-        # Initialize/update the AgentClient based on sandbox creation result
-        status = result.get(STATUS_KEY)
-        server_ip = result.get(IP_KEY)
-        agent_token = result.get(AGENT_TOKEN_KEY)
-
-        if status == "ok" and server_ip:
-            if not agent_token:
-                raise RuntimeError("Sandbox creation failed: missing agent_token in response")
-            self.ip = server_ip
-            self.agent_token = agent_token
-            if self.client:
+    def _apply_sandbox_record(self, record: Dict[str, Any]) -> None:
+        if not isinstance(record, dict):
+            return
+        self.sandbox_id = record.get("sandboxID") or self.sandbox_id
+        self.namespace = record.get(NAMESPACE_KEY) or self.namespace
+        self.template_id = record.get("templateID") or self.template_id
+        self.ip = record.get("domain") or self.ip
+        if record.get("conchInitAccessToken"):
+            self.agent_token = record["conchInitAccessToken"]
+        self.vcpu_num = record.get("cpuCount") or self.vcpu_num
+        self.ram_mb = record.get("memoryMB") or self.ram_mb
+        for attribute, field_name in {
+            "image_name": "imageName",
+            "snapshot_id": "snapshotID",
+            "started_at": "startedAt",
+            "end_at": "endAt",
+            "disk_size_mb": "diskSizeMB",
+            "conch_init_version": "conchInitVersion",
+            "alias": "alias",
+        }.items():
+            if field_name in record:
+                setattr(self, attribute, record[field_name])
+        if "metadata" in record:
+            self.metadata = dict(record["metadata"] or {})
+        if "lifecycle" in record:
+            self.lifecycle = dict(record["lifecycle"] or {})
+        if "volumeMounts" in record:
+            self.volume_mounts = list(record["volumeMounts"] or [])
+        if self.ip and self.agent_token:
+            if self._client:
                 try:
-                    self.client.close()
+                    self._client.close()
                 except Exception:
                     pass
-            self.client = AgentClient(host=self.ip, token=self.agent_token)
-        else:
-            error_val = result.get(ERROR_KEY)
-            error_msg = str(error_val) if error_val is not None else "Unknown error"
-            raise RuntimeError(f"Sandbox creation failed: {error_msg}")
+            self._client = AgentClient(host=self.ip, token=self.agent_token)
 
     def _do_create(self):
         payload = self._build_create_payload()
 
         try:
             result = self._post_control_plane_requests(SANDBOX_CREATE_PATH, payload)
-            result[SANDBOX_ID_KEY] = self.sandbox_id
-            self._update_client_from_result(result)
+            self._apply_sandbox_record(result)
+            if not self.ip or not self.agent_token:
+                raise RuntimeError("Sandbox creation failed: incomplete response")
             return self
 
         except requests.exceptions.RequestException as e:
@@ -737,33 +801,82 @@ class Sandbox:
 
     def delete(self, sandbox_id: Optional[str] = None) -> bool:
         target_id = sandbox_id if sandbox_id else self.sandbox_id
-        payload = {
-            NAMESPACE_KEY: self.namespace,
-            SANDBOX_ID_KEY: target_id,
-        }
+        if not target_id:
+            raise RuntimeError("Cannot delete sandbox without sandbox_id")
+        params = {NAMESPACE_KEY: self.namespace} if self.namespace else None
+        path = SANDBOX_DELETE_PATH_TEMPLATE.format(
+            sandbox_id=quote(str(target_id), safe="")
+        )
 
         try:
-            result = self._post_control_plane_requests(SANDBOX_DELETE_PATH, payload)
-            result[SANDBOX_ID_KEY] = target_id
+            self._delete_control_plane_requests(path, params=params)
             return True
 
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
 
+    @classmethod
+    def service_health(cls) -> bool:
+        try:
+            sbx = cls()
+            return sbx._get_control_plane_response(SERVICE_HEALTH_PATH).status_code == HTTP_NO_CONTENT
+        except (requests.exceptions.RequestException, ValueError, FileNotFoundError, KeyError):
+            return False
+
+    @classmethod
+    def list(
+            cls,
+            namespace: Optional[str] = None,
+            state: Optional[List[str]] = None,
+            limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        sbx = cls(
+            namespace=namespace,
+        )
+        params: Dict[str, Any] = {}
+        if sbx.namespace:
+            params[NAMESPACE_KEY] = sbx.namespace
+        if state:
+            params["state"] = state
+        if limit is not None:
+            params["limit"] = limit
+        try:
+            result = sbx._get_control_plane_requests(SANDBOX_LIST_PATH, params or None)
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+        return result if isinstance(result, list) else []
+
+    @classmethod
+    def get(
+            cls,
+            sandbox_id: str,
+            namespace: Optional[str] = None,
+    ) -> "Sandbox":
+        if not sandbox_id:
+            raise RuntimeError("Cannot get sandbox without sandbox_id")
+        sbx = cls(
+            sandbox_id=sandbox_id,
+            namespace=namespace,
+        )
+        path = SANDBOX_GET_PATH_TEMPLATE.format(
+            sandbox_id=quote(str(sandbox_id), safe="")
+        )
+        params = {NAMESPACE_KEY: sbx.namespace} if sbx.namespace else None
+        try:
+            sbx._apply_sandbox_record(sbx._get_control_plane_requests(path, params))
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+        sbx.control_plane_only = sbx._client is None
+        return sbx
+
     @staticmethod
     def delete_sandbox(
             sandbox_id: str,
-            unix_socket: Optional[str] = None,
-            api_url: Optional[str] = None,
             namespace: Optional[str] = None,
-            config_path: Optional[str] = None,
     ):
         sbx = Sandbox(
             sandbox_id=sandbox_id,
-            unix_socket=unix_socket,
-            api_url=api_url,
             namespace=namespace,
-            config_path=config_path,
         )
         return sbx.delete(sandbox_id=sandbox_id)
 
@@ -803,8 +916,27 @@ class Sandbox:
             raise RuntimeError(_request_exception_message(e))
 
     @classmethod
-    def create(cls, template_id: Optional[str] = None, **kwargs) -> "Sandbox":
-        sbx = cls(template_id=template_id, **kwargs)
+    def create(
+            cls,
+            template_id: Optional[str] = None,
+            sandbox_id: Optional[str] = None,
+            namespace: Optional[str] = None,
+            vcpu_num: Optional[int] = None,
+            vcpu_max: Optional[int] = None,
+            ram_mb: Optional[int] = None,
+            volume_mounts: Optional[List[Dict[str, Any]]] = None,
+            env: Optional[Dict[str, str]] = None,
+    ) -> "Sandbox":
+        sbx = cls(
+            sandbox_id=sandbox_id,
+            template_id=template_id,
+            namespace=namespace,
+            vcpu_num=vcpu_num,
+            vcpu_max=vcpu_max,
+            ram_mb=ram_mb,
+            volume_mounts=volume_mounts,
+            env=env,
+        )
         return sbx._do_create()
 
     def get_info(self) -> SandboxInfo:
@@ -816,8 +948,9 @@ class Sandbox:
 
     def health_check(self) -> Dict[str, Any]:
         # Check sandbox health status
+        client = self.client
         try:
-            return self.client.health_check()
+            return client.health_check()
         except Exception as e:
             return {
                 STATUS_KEY: "ERROR",

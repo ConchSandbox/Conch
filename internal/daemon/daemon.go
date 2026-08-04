@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,8 +195,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 func (s *Daemon) routes() {
-	s.router.HandleFunc("/api/sandbox/create", s.handleCreateSandbox)
-	s.router.HandleFunc("/api/sandbox/delete", s.handleDeleteSandbox)
+	// sandbox
+	s.router.HandleFunc("GET /api/v1/sandboxes", s.handleListSandbox)
+	s.router.HandleFunc("POST /api/v1/sandboxes", s.handleCreateSandbox)
+	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}", s.handleGetSandbox)
+	s.router.HandleFunc("DELETE /api/v1/sandboxes/{sandboxID}", s.handleDeleteSandbox)
+	s.router.HandleFunc("/health", s.handleHealth)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
 	s.router.HandleFunc("/api/sandbox/checkpoint", s.handleCheckpointSandbox)
@@ -217,7 +223,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
 	s.router.HandleFunc("/api/image/import", s.handleImportImage)
 }
-
 func (s *Daemon) Start(addr string, unixSocket string) error {
 	logger := ulog.GetLogger()
 	var (
@@ -339,6 +344,28 @@ func (s *Daemon) Shutdown() {
 	})
 }
 
+func (s *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.controlPlaneReady() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Daemon) controlPlaneReady() bool {
+	return s != nil &&
+		s.stateStore != nil &&
+		s.containerdHost != nil &&
+		s.daemonClient != nil &&
+		s.runtimeService != nil &&
+		s.runtimeService.Sandbox != nil &&
+		s.runtimeService.Store != nil
+}
+
 func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	logger := ulog.GetLogger()
 	logger.Debug("Handling create sandbox request")
@@ -354,7 +381,6 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		Namespace:    req.Namespace,
 		SandboxID:    req.SandboxID,
@@ -365,6 +391,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUMax:      req.VCPUMax,
 		RamMB:        req.RAMMB,
 		VolumeMounts: req.VolumeMounts,
+		Env:          req.Env,
 	})
 	if err != nil {
 		logger.Error("Failed to create sandbox",
@@ -382,44 +409,206 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":      "ok",
-		"sandbox_id":  result.SandboxID,
-		"ip":          result.IP,
-		"agent_token": result.AgentToken,
-	})
+	_ = json.NewEncoder(w).Encode(sandboxResponseFromCreate(result))
 }
 
 func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("sandboxID")
 	logger := ulog.GetLogger()
-	logger.Debug("Handling delete sandbox request")
+	logger.Debug("Handling delete sandbox request", ulog.F("sandbox_id", sandboxID))
 
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	var req sandboxDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if sandboxID == "" {
+		http.Error(w, "Missing sandbox id", http.StatusBadRequest)
+		return
+	}
+	if s.stateStore == nil {
+		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	err := s.runtimeService.RemoveSandbox(r.Context(), req.Namespace, req.SandboxID)
+	namespace := s.resolveNamespace(r.URL.Query().Get("namespace"))
+	record, err := s.findSandboxRecord(r.Context(), sandboxID, namespace)
 	if err != nil {
-		logger.Error("Failed to delete sandbox",
-			ulog.F("sandbox_id", req.SandboxID),
+		logger.Error("Failed to resolve sandbox for deletion",
+			ulog.F("sandbox_id", sandboxID),
 			ulog.F("error", err),
 		)
 		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	if err := s.runtimeService.RemoveSandbox(r.Context(), record.Namespace, record.SandboxID); err != nil {
+		logger.Error("Failed to delete sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", req.SandboxID))
+	logger.Info("Sandbox deleted successfully", ulog.F("sandbox_id", sandboxID))
+	w.WriteHeader(http.StatusNoContent)
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
+	if s.stateStore == nil {
+		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	namespace := s.resolveNamespace(r.URL.Query().Get("namespace"))
+	states, err := parseSandboxStates(r.URL.Query()["state"])
+	if err != nil {
+		http.Error(w, "Invalid state filter: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	limit, err := parseSandboxListLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		http.Error(w, "Invalid limit", http.StatusBadRequest)
+		return
+	}
+	records, err := s.stateStore.ListSandboxes(r.Context())
+	if err != nil {
+		http.Error(w, "Failed to list sandboxes: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sandboxes := make([]sandboxInspectResponse, 0, len(records))
+	for _, record := range records {
+		if record.Namespace == namespace && matchesSandboxState(record, states) {
+			sandboxes = append(sandboxes, sandboxResponseFromRecord(record, false))
+		}
+	}
+	if len(sandboxes) > limit {
+		sandboxes = sandboxes[:limit]
+	}
+	writeJSON(w, sandboxes)
+}
+
+func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("sandboxID")
+	if s.stateStore == nil {
+		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	record, err := s.findSandboxRecord(r.Context(), sandboxID, s.resolveNamespace(r.URL.Query().Get("namespace")))
+	if err != nil {
+		http.Error(w, "Failed to get sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, sandboxResponseFromRecord(*record, true))
+}
+
+func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID, namespace string) (*state.SandboxRecord, error) {
+	records, err := s.stateStore.ListSandboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range records {
+		if records[i].SandboxID != sandboxID {
+			continue
+		}
+		if namespace != "" && records[i].Namespace != namespace {
+			continue
+		}
+		return &records[i], nil
+	}
+	return nil, nil
+}
+
+func (s *Daemon) resolveNamespace(namespace string) string {
+	if namespace = strings.TrimSpace(namespace); namespace != "" {
+		return namespace
+	}
+	if s.daemonClient != nil {
+		if namespace = strings.TrimSpace(s.daemonClient.DefaultNamespace()); namespace != "" {
+			return namespace
+		}
+	}
+	return "default"
+}
+
+func parseSandboxStates(values []string) (map[string]bool, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	states := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value != "running" && value != "paused" {
+			return nil, fmt.Errorf("unsupported state %q", value)
+		}
+		states[value] = true
+	}
+	return states, nil
+}
+
+func parseSandboxListLimit(raw string) (int, error) {
+	if raw == "" {
+		return 100, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > 5000 {
+		return 0, fmt.Errorf("limit must be between 1 and 5000")
+	}
+	return limit, nil
+}
+
+func matchesSandboxState(record state.SandboxRecord, states map[string]bool) bool {
+	running := record.State == state.SandboxReady
+	paused := record.State == state.SandboxSuspended
+	if len(states) == 0 {
+		return running || paused
+	}
+	return states["running"] && running || states["paused"] && paused
+}
+
+func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandboxInspectResponse {
+	response := sandboxInspectResponse{
+		TemplateID:   record.SourceTemplateID,
+		ImageName:    "",
+		SnapshotID:   "",
+		SandboxID:    record.SandboxID,
+		Namespace:    record.Namespace,
+		StartedAt:    formatUnixNanoRFC3339(record.CreatedAt),
+		CPUCount:     record.VCPUNum,
+		MemoryMB:     record.RamMB,
+		Alias:        "",
+		Metadata:     map[string]string{},
+		VolumeMounts: []sandboxVolumeMountResponse{},
+	}
+	if response.Metadata == nil {
+		response.Metadata = map[string]string{}
+	}
+	if detailed {
+		domain := record.IP
+		response.Domain = &domain
+		response.Lifecycle = &sandboxLifecycleResponse{}
+	}
+	return response
+}
+
+func sandboxResponseFromCreate(result runtimeapi.SandboxCreateResult) createSandboxResponse {
+	// TODO: populate conchInitVersion and alias when runtime support is available.
+	return createSandboxResponse{
+		TemplateID:           result.TemplateID,
+		SandboxID:            result.SandboxID,
+		Namespace:            result.Namespace,
+		ConchInitAccessToken: result.AgentToken,
+		Domain:               result.IP,
+	}
+}
+
+func formatUnixNanoRFC3339(timestamp int64) string {
+	if timestamp <= 0 {
+		return ""
+	}
+	return time.Unix(0, timestamp).UTC().Format(time.RFC3339)
 }
 
 func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
@@ -438,7 +627,16 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.runtimeService.SuspendSandbox(r.Context(), req.Namespace, req.SandboxID)
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	err = s.runtimeService.SuspendSandbox(r.Context(), record.Namespace, record.SandboxID)
 	if err != nil {
 		logger.Error("Failed to suspend sandbox",
 			ulog.F("sandbox_id", req.SandboxID),
@@ -464,7 +662,16 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runtimeService.ResumeSandbox(r.Context(), req.Namespace, req.SandboxID); err != nil {
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	if err := s.runtimeService.ResumeSandbox(r.Context(), record.Namespace, record.SandboxID); err != nil {
 		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

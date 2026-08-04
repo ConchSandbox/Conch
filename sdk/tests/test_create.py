@@ -50,7 +50,7 @@ def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
     config = load_config()
     config["image"].pop(VMM_NAME_KEY, None)
 
-    monkeypatch.setattr("conch.sandbox.load_config", lambda config_path=None: config)
+    monkeypatch.setattr("conch.sandbox.load_config", lambda: config)
     sbx = Sandbox(sandbox_id="sandbox-test", template_id="tmpl_test")
 
     payload = sbx._build_create_payload()
