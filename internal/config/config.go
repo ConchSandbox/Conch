@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,14 +189,31 @@ func LoadConfig(configPath string) (*Config, error) {
 		configPath = absPath
 	}
 
-	// Read config file
-	data, err := os.ReadFile(configPath)
+	// Open the file once so the permission check applies to the same file that is read.
+	file, err := os.Open(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Config file doesn't exist, use default
 			return DefaultConfig(), nil
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect config file permissions: %w", err)
+	}
+	if fileInfo.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf(
+			"config file %q has insecure permissions %04o",
+			configPath,
+			fileInfo.Mode().Perm(),
+		)
 	}
 
 	// Parse YAML
