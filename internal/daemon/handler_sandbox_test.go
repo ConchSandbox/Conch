@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/openeuler/Conch/internal/conchruntime"
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -33,6 +34,35 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 	if response.SandboxID == "" || response.SandboxID != sandboxOps.createReq.SandboxID {
 		t.Fatalf("sandbox identity = response:%q request:%q", response.SandboxID, sandboxOps.createReq.SandboxID)
+	}
+}
+
+func TestHandleCreateSandboxUsesConfiguredDefaultsForOmittedResources(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil, nil, "default")
+	defaults := config.DefaultConfig().Sandbox
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
+		VMMName: defaults.DefaultVMMName,
+		VCPUNum: defaults.DefaultVCPUNum,
+		VCPUMax: defaults.DefaultVCPUMax,
+		RamMB:   defaults.DefaultRAMMB,
+	})
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"tmpl_123","sandbox_id":"sandbox-123"}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	got := sandboxOps.createReq
+	if got.VMMName != defaults.DefaultVMMName || got.VCPUNum != defaults.DefaultVCPUNum ||
+		got.VCPUMax != defaults.DefaultVCPUMax || got.RAMMB != defaults.DefaultRAMMB {
+		t.Fatalf("resources = vmm:%q vcpu:%d/%d ram:%d; want vmm:%q vcpu:%d/%d ram:%d",
+			got.VMMName, got.VCPUNum, got.VCPUMax, got.RAMMB,
+			defaults.DefaultVMMName, defaults.DefaultVCPUNum, defaults.DefaultVCPUMax, defaults.DefaultRAMMB)
 	}
 }
 

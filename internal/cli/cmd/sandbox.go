@@ -24,6 +24,27 @@ func printSandboxHelp(out io.Writer) {
 	fmt.Fprintln(out, "Run 'conch sandbox <command> --help' for command-specific usage.")
 }
 
+func PrintSandboxCreateHelp(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  conch sandbox create --template-id <template-id> [options]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Description:")
+	fmt.Fprintln(out, "  Create a sandbox from a Template ID. VMM and vCPU settings are selected")
+	fmt.Fprintln(out, "  by conchd; memory also uses the conchd default unless --ram-mb is set.")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --template-id string")
+	fmt.Fprintln(out, "        template ID (required)")
+	fmt.Fprintln(out, "  --sandbox-id string")
+	fmt.Fprintln(out, "        sandbox ID (default: generated)")
+	fmt.Fprintln(out, "  --ram-mb int")
+	fmt.Fprintln(out, "        memory size in MiB (default: conchd sandbox.default_ram_mb)")
+	fmt.Fprintln(out, "  -n, --namespace string")
+	fmt.Fprintln(out, "        containerd namespace")
+	fmt.Fprintln(out, "  --config string")
+	fmt.Fprintln(out, "        config file path")
+}
+
 func RunSandbox(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printSandboxHelp(os.Stdout)
@@ -31,6 +52,10 @@ func RunSandbox(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "create":
+		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
+			PrintSandboxCreateHelp(os.Stdout)
+			return nil
+		}
 		return runSandboxCreate(ctx, args[1:])
 	case "checkpoint":
 		return runSandboxCheckpoint(ctx, args[1:])
@@ -51,8 +76,9 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	ramMB := fs.Int64("ram-mb", 0, "memory size in MB")
+	ramMB := fs.Int64("ram-mb", 0, "memory size in MiB")
 	fs.StringVar(namespace, "n", "", "containerd namespace")
+	fs.Usage = func() { PrintSandboxCreateHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -61,6 +87,9 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	}
 	if *templateID == "" {
 		return fmt.Errorf("conch sandbox create: --template-id is required")
+	}
+	if *ramMB < 0 {
+		return fmt.Errorf("conch sandbox create: --ram-mb must not be negative")
 	}
 	cfg, err := LoadConchConfig(*configPath)
 	if err != nil {

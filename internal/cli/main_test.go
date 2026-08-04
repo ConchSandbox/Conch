@@ -124,6 +124,23 @@ func TestPrintImagePushHelpIncludesExample(t *testing.T) {
 	}
 }
 
+func TestPrintSandboxCreateHelpExplainsDaemonDefaults(t *testing.T) {
+	var buf bytes.Buffer
+	cmd.PrintSandboxCreateHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch sandbox create --template-id <template-id> [options]",
+		"VMM and vCPU settings are selected",
+		"memory also uses the conchd default unless --ram-mb is set",
+		"conchd sandbox.default_ram_mb",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sandbox create help missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestParseImagePushArgs(t *testing.T) {
 	tests := []struct {
 		name        string

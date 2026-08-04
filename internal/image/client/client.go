@@ -21,9 +21,6 @@ const (
 	// DefaultConchAPIURL is the default conchd HTTP base URL.
 	DefaultConchAPIURL = "http://localhost:4063"
 	defaultUnixAPIURL  = "http://conchd-unix"
-	defaultVmmName     = "cloud-hypervisor"
-	DefaultRamMB       = 256
-	defaultRamMB       = DefaultRamMB
 	createSandbox      = "/api/v1/sandboxes"
 	suspendSandbox     = "/api/sandbox/suspend"
 	resumeSandbox      = "/api/sandbox/resume"
@@ -54,10 +51,10 @@ func ResolveBaseURL() string {
 type CreateRequest struct {
 	Namespace    string        `json:"namespace,omitempty"`
 	TemplateID   string        `json:"template_id"`
-	VmmName      string        `json:"vmm_name"`
+	VmmName      string        `json:"vmm_name,omitempty"`
 	SandboxId    string        `json:"sandbox_id"`
-	VcpuNum      int64         `json:"vcpu_num"`
-	RamMB        int64         `json:"ram_mb"`
+	VcpuNum      int64         `json:"vcpu_num,omitempty"`
+	RamMB        int64         `json:"ram_mb,omitempty"`
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 }
 
@@ -347,17 +344,13 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 	}
 }
 
-// CreateSandbox calls POST /api/v1/sandboxes using a template ID.
+// CreateSandbox calls POST /api/v1/sandboxes using a template ID. A zero
+// ramMB leaves ram_mb unspecified so conchd can apply its configured default.
 func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB int64) error {
-	if ramMB <= 0 {
-		ramMB = defaultRamMB
-	}
 	req := CreateRequest{
 		Namespace:  strings.TrimSpace(namespace),
 		TemplateID: templateID,
 		SandboxId:  sandboxID,
-		VmmName:    defaultVmmName,
-		VcpuNum:    1,
 		RamMB:      ramMB,
 	}
 	body, err := json.Marshal(req)
