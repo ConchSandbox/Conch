@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -916,10 +917,23 @@ func writeImageResults(w http.ResponseWriter, results map[string]string) {
 
 func writeImageError(w http.ResponseWriter, prefix string, err error) {
 	status := http.StatusInternalServerError
+	detail := err.Error()
 	if errors.Is(err, conchimage.ErrInvalidRequest) || errors.Is(err, conchimage.ErrOCIConversionFailed) {
 		status = http.StatusBadRequest
+	} else {
+		var registryErr remoteerrors.ErrUnexpectedStatus
+		if errors.As(err, &registryErr) {
+			if registryErr.StatusCode >= http.StatusContinue && registryErr.StatusCode <= 599 {
+				status = registryErr.StatusCode
+			}
+			if text := http.StatusText(registryErr.StatusCode); text != "" {
+				detail = "registry request failed: " + text
+			} else {
+				detail = "registry request failed"
+			}
+		}
 	}
-	http.Error(w, prefix+": "+err.Error(), status)
+	http.Error(w, prefix+": "+detail, status)
 }
 
 func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
