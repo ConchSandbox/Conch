@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/openeuler/Conch/internal/netstack"
@@ -77,8 +79,9 @@ type ImageConfig struct {
 }
 
 const (
-	DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
-	DefaultVMMName     = "stratovirt"
+	DefaultKernelImage   = "hub.oepkgs.net/conch/kernel:6.6.0"
+	DefaultVMMName       = "stratovirt"
+	defaultVolumeBackend = "virtiofs"
 )
 
 type SandboxConfig struct {
@@ -163,7 +166,7 @@ func DefaultConfig() *Config {
 		},
 		Volume: VolumeConfig{
 			MaxMounts: 10,
-			Backend:   "virtiofs",
+			Backend:   defaultVolumeBackend,
 			Virtiofs: VolumeVirtiofsConfig{
 				Binary:     "virtiofsd",
 				RuntimeDir: "/run/conch/sandboxes",
@@ -197,7 +200,9 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// Parse YAML
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
@@ -303,11 +308,31 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.State.Path == "" {
 		cfg.State.Path = defaultCfg.State.Path
 	}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Server.WorkDir != "" {
 		WorkDir = cfg.Server.WorkDir
 	}
 
 	return &cfg, nil
+}
+
+func validateConfig(cfg *Config) error {
+	if cfg.Network.PoolSize < 0 {
+		return fmt.Errorf("invalid network.pool_size=%d: must be greater than or equal to 0", cfg.Network.PoolSize)
+	}
+	if cfg.Network.TapMask < 1 || cfg.Network.TapMask > 32 {
+		return fmt.Errorf("invalid network.tap_mask=%d: must be between 1 and 32", cfg.Network.TapMask)
+	}
+	if cfg.Volume.MaxMounts < 0 {
+		return fmt.Errorf("invalid volume.max_mounts=%d: must be greater than or equal to 0", cfg.Volume.MaxMounts)
+	}
+	backend := strings.TrimSpace(cfg.Volume.Backend)
+	if backend != "" && backend != defaultVolumeBackend {
+		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)
+	}
+	return nil
 }
 
 func resolveCNIPluginConfDir(configPath, confDir, defaultConfDir string) string {

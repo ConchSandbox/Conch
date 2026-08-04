@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/openeuler/Conch/internal/netstack"
@@ -235,9 +236,81 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfigIgnoresRemovedCRISection(t *testing.T) {
+func TestLoadConfigRejectsRemovedCRISection(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte("app:\n  name: conch-with-unused-config\ncri:\n  enabled: true\n  socket: /run/legacy-runtime.sock\n")
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := LoadConfig(cfgPath)
+	if err == nil {
+		t.Fatal("LoadConfig() error = nil, want removed cri section to be rejected")
+	}
+	if !strings.Contains(err.Error(), "field cri not found") {
+		t.Fatalf("LoadConfig() error = %q, want an unknown cri field error", err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "negative network pool size",
+			data:    "network:\n  pool_size: -1\n",
+			wantErr: "network.pool_size",
+		},
+		{
+			name:    "negative volume max mounts",
+			data:    "volume:\n  max_mounts: -1\n",
+			wantErr: "volume.max_mounts",
+		},
+		{
+			name:    "invalid tap mask",
+			data:    "network:\n  tap_mask: 33\n",
+			wantErr: "network.tap_mask",
+		},
+		{
+			name:    "unsupported volume backend",
+			data:    "volume:\n  backend: 9p\n",
+			wantErr: "volume.backend",
+		},
+		{
+			name:    "unknown top-level field",
+			data:    "unknown_section:\n  enabled: true\n",
+			wantErr: "field unknown_section not found",
+		},
+		{
+			name:    "unknown nested field",
+			data:    "network:\n  pool_szie: 12\n",
+			wantErr: "field pool_szie not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfgPath, []byte(tt.data), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			_, err := LoadConfig(cfgPath)
+			if err == nil {
+				t.Fatalf("LoadConfig() error = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("LoadConfig() error = %q, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("network:\n  pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -246,8 +319,18 @@ func TestLoadConfigIgnoresRemovedCRISection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if cfg.App.Name != "conch-with-unused-config" {
-		t.Fatalf("LoadConfig().App.Name = %q, want conch-with-unused-config", cfg.App.Name)
+	want := DefaultConfig()
+	if cfg.Network.PoolSize != want.Network.PoolSize {
+		t.Errorf("LoadConfig().Network.PoolSize = %d, want default %d", cfg.Network.PoolSize, want.Network.PoolSize)
+	}
+	if cfg.Network.TapMask != want.Network.TapMask {
+		t.Errorf("LoadConfig().Network.TapMask = %d, want default %d", cfg.Network.TapMask, want.Network.TapMask)
+	}
+	if cfg.Volume.MaxMounts != want.Volume.MaxMounts {
+		t.Errorf("LoadConfig().Volume.MaxMounts = %d, want default %d", cfg.Volume.MaxMounts, want.Volume.MaxMounts)
+	}
+	if cfg.Volume.Backend != want.Volume.Backend {
+		t.Errorf("LoadConfig().Volume.Backend = %q, want default %q", cfg.Volume.Backend, want.Volume.Backend)
 	}
 }
 
