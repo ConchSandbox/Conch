@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/openeuler/Conch/internal/netstack"
@@ -77,8 +80,9 @@ type ImageConfig struct {
 }
 
 const (
-	DefaultKernelImage = "hub.oepkgs.net/conch/kernel:6.6.0"
-	DefaultVMMName     = "stratovirt"
+	DefaultKernelImage   = "hub.oepkgs.net/conch/kernel:6.6.0"
+	DefaultVMMName       = "stratovirt"
+	defaultVolumeBackend = "virtiofs"
 )
 
 type SandboxConfig struct {
@@ -163,7 +167,7 @@ func DefaultConfig() *Config {
 		},
 		Volume: VolumeConfig{
 			MaxMounts: 10,
-			Backend:   "virtiofs",
+			Backend:   defaultVolumeBackend,
 			Virtiofs: VolumeVirtiofsConfig{
 				Binary:     "virtiofsd",
 				RuntimeDir: "/run/conch/sandboxes",
@@ -185,8 +189,8 @@ func LoadConfig(configPath string) (*Config, error) {
 		configPath = absPath
 	}
 
-	// Read config file
-	data, err := os.ReadFile(configPath)
+	// Open the file once so the permission check applies to the same file that is read.
+	file, err := os.Open(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Config file doesn't exist, use default
@@ -194,10 +198,29 @@ func LoadConfig(configPath string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect config file permissions: %w", err)
+	}
+	if fileInfo.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf(
+			"config file %q has insecure permissions %04o",
+			configPath,
+			fileInfo.Mode().Perm(),
+		)
+	}
 
 	// Parse YAML
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
@@ -303,11 +326,31 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.State.Path == "" {
 		cfg.State.Path = defaultCfg.State.Path
 	}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Server.WorkDir != "" {
 		WorkDir = cfg.Server.WorkDir
 	}
 
 	return &cfg, nil
+}
+
+func validateConfig(cfg *Config) error {
+	if cfg.Network.PoolSize < 0 {
+		return fmt.Errorf("invalid network.pool_size=%d: must be greater than or equal to 0", cfg.Network.PoolSize)
+	}
+	if cfg.Network.TapMask < 1 || cfg.Network.TapMask > 32 {
+		return fmt.Errorf("invalid network.tap_mask=%d: must be between 1 and 32", cfg.Network.TapMask)
+	}
+	if cfg.Volume.MaxMounts < 0 {
+		return fmt.Errorf("invalid volume.max_mounts=%d: must be greater than or equal to 0", cfg.Volume.MaxMounts)
+	}
+	backend := strings.TrimSpace(cfg.Volume.Backend)
+	if backend != "" && backend != defaultVolumeBackend {
+		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)
+	}
+	return nil
 }
 
 func resolveCNIPluginConfDir(configPath, confDir, defaultConfDir string) string {

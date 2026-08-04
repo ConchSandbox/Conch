@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
@@ -140,6 +143,98 @@ func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandlePullImagePreservesRegistryAuthStatus(t *testing.T) {
+	const (
+		registryUsername = "registry-user"
+		registryPassword = "registry-password"
+	)
+	tests := []struct {
+		name       string
+		statusCode int
+		wrap       func(error) error
+	}{
+		{
+			name:       "unauthorized",
+			statusCode: http.StatusUnauthorized,
+			wrap: func(err error) error {
+				return fmt.Errorf("pull failed: resolve failed: %w", err)
+			},
+		},
+		{
+			name:       "forbidden",
+			statusCode: http.StatusForbidden,
+			wrap: func(err error) error {
+				return errors.Join(errors.New("pull failed"), fmt.Errorf("resolve failed: %w", err))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registryErr := remoteerrors.ErrUnexpectedStatus{
+				Status:        fmt.Sprintf("%d %s", tt.statusCode, http.StatusText(tt.statusCode)),
+				StatusCode:    tt.statusCode,
+				RequestMethod: http.MethodGet,
+				RequestURL:    "https://" + registryUsername + ":" + registryPassword + "@registry.example.invalid/v2/conch/manifests/latest",
+			}
+			server := newImageHandlerServer(&fakeImageService{pullErr: tt.wrap(registryErr)})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"registry.example.invalid/conch:latest"}`))
+			server.router.ServeHTTP(rec, req)
+
+			if rec.Code != tt.statusCode {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.statusCode, rec.Body.String())
+			}
+			wantBody := "Failed to pull image: registry request failed: " + http.StatusText(tt.statusCode) + "\n"
+			if rec.Body.String() != wantBody {
+				t.Fatalf("body = %q, want %q", rec.Body.String(), wantBody)
+			}
+			if strings.Contains(rec.Body.String(), registryUsername) || strings.Contains(rec.Body.String(), registryPassword) {
+				t.Fatalf("response body leaked registry credentials: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlePullImagePreservesRegistryStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{
+			name:       "plain auth-like message",
+			err:        errors.New("registry returned 401 Unauthorized"),
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "typed registry status",
+			wantStatus: http.StatusTooManyRequests,
+			err: remoteerrors.ErrUnexpectedStatus{
+				Status:        "429 Too Many Requests",
+				StatusCode:    http.StatusTooManyRequests,
+				RequestMethod: http.MethodGet,
+				RequestURL:    "https://registry.example.invalid/v2/conch/manifests/latest",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newImageHandlerServer(&fakeImageService{pullErr: tt.err})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"registry.example.invalid/conch:latest"}`))
+			server.router.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }
 

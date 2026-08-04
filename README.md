@@ -91,9 +91,10 @@ sandbox:
   sandbox_id: ""                                # 留空则自动生成
 
 image:
-  vmm_name: "cloud-hypervisor"                  # 虚拟机监视器名称
-  vcpu_num: 1                                   # 虚拟 CPU 数量
-  ram_mb: 1024                                  # 内存大小（MB）
+  # vmm_name: ""                                # 可选覆盖；未设置时使用服务端 sandbox.default_vmm_name（默认 stratovirt）
+  vcpu_num: 2                                   # 虚拟 CPU 数量
+  vcpu_max: 2                                   # 最大虚拟 CPU 数量（默认与 vcpu_num 相同）
+  ram_mb: 4096                                  # 内存大小（MB）
 ```
 
 安装 SDK 后可通过命令初始化系统级配置（可选）：
