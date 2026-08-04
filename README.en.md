@@ -94,9 +94,10 @@ sandbox:
   template_id: "tmpl_xxx"                         # Template ID
 
 image:
-  vmm_name: "cloud-hypervisor"                  # Virtual machine monitor name
-  vcpu_num: 1                                   # Number of virtual CPUs
-  ram_mb: 1024                                  # Memory size in MB
+  # vmm_name: ""                                # Optional override; if unset, uses server sandbox.default_vmm_name (default: stratovirt)
+  vcpu_num: 2                                   # Number of virtual CPUs
+  vcpu_max: 2                                   # Max number of virtual CPUs (default: same as vcpu_num)
+  ram_mb: 4096                                  # Memory size in MB
 ```
 
 After installing the SDK, you can initialize system-level configuration (optional):
