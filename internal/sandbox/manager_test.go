@@ -43,7 +43,7 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	boot := &recordingBootPreparer{}
 	m := &Manager{
 		boot:         boot,
-		cidAllocator: NewCIDAllocatorInDir(t.TempDir()),
+		cidAllocator: NewCIDAllocator(),
 	}
 	sbx := &Sandbox{
 		cleanup:   NewCleanup(),

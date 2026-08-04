@@ -710,7 +710,3 @@ func (m *Manager) AllocateUniqueCID(sandboxId string) (uint32, error) {
 func (m *Manager) ReleaseCID(sandboxId string) error {
 	return m.cidAllocator.ReleaseCID(sandboxId)
 }
-
-func (m *Manager) CleanupCIDMap() error {
-	return m.cidAllocator.Cleanup()
-}
