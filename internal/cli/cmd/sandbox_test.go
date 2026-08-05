@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func TestPrintSandboxHelpListsSandboxCommands(t *testing.T) {
@@ -23,6 +25,8 @@ Commands:
   checkpoint  Checkpoint a sandbox into a resumable template.
   suspend     Suspend a running sandbox.
   resume      Resume a suspended sandbox.
+  delete      Delete a sandbox.
+  ls          List sandboxes.
 
 Run 'conch sandbox <command> --help' for command-specific usage.
 `
@@ -100,4 +104,21 @@ func captureSandboxCreateRequest(t *testing.T, resourceArgs ...string) map[strin
 		t.Fatalf("RunSandbox() error = %v", err)
 	}
 	return got
+}
+
+func TestPrintSandboxList(t *testing.T) {
+	var out bytes.Buffer
+	records := []client.SandboxRecord{
+		{SandboxID: "sandbox-b", TemplateID: "tmpl-b", CPUCount: 2, MemoryMB: 512, StartedAt: "2026-01-02T03:04:05Z"},
+		{SandboxID: "sandbox-a", TemplateID: "tmpl-a", CPUCount: 1, MemoryMB: 256, StartedAt: "2026-01-01T03:04:05Z"},
+	}
+	if err := printSandboxList(&out, records); err != nil {
+		t.Fatalf("printSandboxList() error = %v", err)
+	}
+	want := "ID         TEMPLATE  CPU  MEMORY_MB  STARTED_AT\n" +
+		"sandbox-a  tmpl-a    1    256        2026-01-01T03:04:05Z\n" +
+		"sandbox-b  tmpl-b    2    512        2026-01-02T03:04:05Z\n"
+	if got := out.String(); got != want {
+		t.Fatalf("sandbox list output = %q, want %q", got, want)
+	}
 }

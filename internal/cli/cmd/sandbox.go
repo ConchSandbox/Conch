@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"text/tabwriter"
 	"time"
 
 	"github.com/openeuler/Conch/internal/cli/client"
@@ -20,6 +22,8 @@ func printSandboxHelp(out io.Writer) {
 	fmt.Fprintln(out, "  checkpoint  Checkpoint a sandbox into a resumable template.")
 	fmt.Fprintln(out, "  suspend     Suspend a running sandbox.")
 	fmt.Fprintln(out, "  resume      Resume a suspended sandbox.")
+	fmt.Fprintln(out, "  delete      Delete a sandbox.")
+	fmt.Fprintln(out, "  ls          List sandboxes.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch sandbox <command> --help' for command-specific usage.")
 }
@@ -61,10 +65,71 @@ func RunSandbox(ctx context.Context, args []string) error {
 		return runSandboxLifecycle(ctx, args[1:], "suspend")
 	case "resume":
 		return runSandboxLifecycle(ctx, args[1:], "resume")
+	case "delete":
+		return runSandboxDelete(ctx, args[1:])
+	case "ls", "list":
+		return runSandboxList(ctx, args[1:])
 	default:
 		printSandboxHelp(os.Stderr)
 		return fmt.Errorf("unknown sandbox command %q", args[0])
 	}
+}
+
+func runSandboxDelete(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sandbox delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("conch sandbox delete: exactly one sandbox ID is required")
+	}
+	c, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch sandbox delete: create API client: %w", err)
+	}
+	id := fs.Arg(0)
+	if err := c.DeleteSandbox(ctx, id); err != nil {
+		return fmt.Errorf("conch sandbox delete: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Deleted sandbox: %s\n", id)
+	return nil
+}
+
+func runSandboxList(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sandbox ls", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("conch sandbox ls: unexpected positional arguments: %v", fs.Args())
+	}
+	c, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch sandbox ls: create API client: %w", err)
+	}
+	records, err := c.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("conch sandbox ls: %w", err)
+	}
+	return printSandboxList(os.Stdout, records)
+}
+
+func printSandboxList(out io.Writer, records []client.SandboxRecord) error {
+	sort.SliceStable(records, func(i, j int) bool {
+		return records[i].SandboxID < records[j].SandboxID
+	})
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tTEMPLATE\tCPU\tMEMORY_MB\tSTARTED_AT")
+	for _, record := range records {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
+			record.SandboxID, record.TemplateID,
+			record.CPUCount, record.MemoryMB, record.StartedAt)
+	}
+	return tw.Flush()
 }
 
 func runSandboxCreate(ctx context.Context, args []string) error {
