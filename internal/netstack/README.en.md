@@ -11,11 +11,19 @@ Conch uses a daemon-owned network pool with prefilled slots ready to be leased t
   - the guest tap subnet/IP plan
   - namespace-local forwarding and NAT between the CNI IP and guest tap IP
 
-The numeric Slot ID is the slot's sole identity. Pool allocates IDs with an in-memory min-heap and occupancy bitmap, rebuilding that state from BoltDB Slot records at startup. The BoltDB bucket key, CNI ID, netns path, and veth names are all derived from the ID instead of storing independently mutable key/index values.
+The numeric Slot ID is the slot's sole identity. Pool allocates IDs with an in-memory min-heap and occupancy bitmap. Conch creates a fresh in-memory allocator and warm pool on every startup; it does not restore or adopt old Slots from BoltDB. The CNI ID and netns path are derived from the Slot ID instead of being stored as independently mutable values.
 
 Network ownership is split as follows:
 - Conch owns reusable slot allocation, sandbox network namespace lifecycle, VM guest `tap0`, namespace-local forwarding, and NAT between the CNI-provided outer IP and the guest IP on the tap subnet.
 - CNI owns creation and removal of outer sandbox interface, normally `eth0`: bridge attachment, veth creation, IPAM, routes, DNS returned by the plugin, and plugin-managed host egress policy.
+
+Internal responsibilities are divided as follows:
+- `pool.go` orchestrates Slot creation, health checks, destruction, initial prefill, and continuous refill.
+- `cni.go` encapsulates CNI ADD and DEL together with outer-interface validation. Conch loads exactly one non-loopback CNI configuration; with the built-in loopback network, the fixed minimum network count is 2.
+- `netns.go` creates, enters, and deletes network namespaces.
+- `guest_tap.go` manages the VM-facing `tap0`, IPv4 forwarding, and NAT.
+- `slot.go` stores Slot state and derived addressing. State mutations are private to the `netstack` package; Sandbox only reads the Slot ID, CNI IP, netns path, and tap name through read-only methods.
+- The `slot` subpackage only provides the ID allocator and warm queue. It contains no network domain state and performs no CNI, netlink, or iptables operations.
 
 ## Lineage and Change
 

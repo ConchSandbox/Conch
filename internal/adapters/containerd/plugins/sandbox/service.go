@@ -19,7 +19,6 @@ import (
 
 type Config struct {
 	WarmPoolSize       int                       `toml:"warm_pool_size" json:"warmPoolSize"`
-	DynamicReservation bool                      `toml:"dynamic_reservation" json:"dynamicReservation"`
 	TapIP              string                    `toml:"tap_ip" json:"tapIP"`
 	TapMask            int                       `toml:"tap_mask" json:"tapMask"`
 	CNI                netstack.CNIManagerConfig `toml:"cni" json:"cni"`
@@ -60,7 +59,7 @@ func New(
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.DynamicReservation, cfg.TapIP, cfg.TapMask, cfg.CNI)
+	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.TapIP, cfg.TapMask, cfg.CNI)
 	if err != nil {
 		return nil, err
 	}

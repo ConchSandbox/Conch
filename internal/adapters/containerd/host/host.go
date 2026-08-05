@@ -63,7 +63,6 @@ type SnapshotConfig struct {
 
 type SandboxConfig struct {
 	WarmPoolSize       int
-	DynamicReservation bool
 	TapIP              string
 	TapMask            int
 	CNI                netstack.CNIManagerConfig
@@ -294,7 +293,6 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 	}
 	return map[string]any{
 		"warm_pool_size":       cfg.WarmPoolSize,
-		"dynamic_reservation":  cfg.DynamicReservation,
 		"tap_ip":               cfg.TapIP,
 		"tap_mask":             cfg.TapMask,
 		"cni":                  cfg.CNI,

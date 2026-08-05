@@ -5,39 +5,25 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	cni "github.com/containerd/go-cni"
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 )
 
-func TestNormalizeAndValidateWarmPoolSize(t *testing.T) {
+func TestNewPoolRejectsInvalidWarmPoolSize(t *testing.T) {
 	tests := []struct {
-		name       string
-		warm       int
-		wantWarm   int
-		wantErrSub string
+		name string
+		warm int
 	}{
-		{name: "defaults", wantWarm: DefaultWarmPoolSize},
-		{name: "explicit", warm: 100, wantWarm: 100},
-		{name: "maximum", warm: maxSlots, wantWarm: maxSlots},
-		{name: "exceeds maximum", warm: maxSlots + 1, wantErrSub: "maximum supported slots"},
-		{name: "negative", warm: -1, wantErrSub: "warm_pool_size"},
+		{name: "exceeds maximum", warm: maxSlots + 1},
+		{name: "negative", warm: -1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotWarm, err := normalizeAndValidateWarmPoolSize(tt.warm)
-			if tt.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
-					t.Fatalf("normalizeAndValidateWarmPoolSize() error = %v, want containing %q", err, tt.wantErrSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("normalizeAndValidateWarmPoolSize() error = %v", err)
-			}
-			if gotWarm != tt.wantWarm {
-				t.Fatalf("normalizeAndValidateWarmPoolSize() = %d, want %d", gotWarm, tt.wantWarm)
+			if _, err := NewPool(tt.warm, "", 0, CNIManagerConfig{}); err == nil || !strings.Contains(err.Error(), "network.warm_pool_size") {
+				t.Fatalf("NewPool() error = %v, want invalid warm pool size error", err)
 			}
 		})
 	}
@@ -46,7 +32,6 @@ func TestNormalizeAndValidateWarmPoolSize(t *testing.T) {
 type fakeCNIPlugin struct {
 	setup  func(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
 	remove func(context.Context, string, string, ...cni.NamespaceOpts) error
-	check  func(context.Context, string, string, ...cni.NamespaceOpts) error
 }
 
 func (f *fakeCNIPlugin) Setup(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
@@ -56,29 +41,12 @@ func (f *fakeCNIPlugin) Setup(ctx context.Context, id, path string, opts ...cni.
 	return f.setup(ctx, id, path, opts...)
 }
 
-func (f *fakeCNIPlugin) SetupSerially(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
-	return f.Setup(ctx, id, path, opts...)
-}
-
 func (f *fakeCNIPlugin) Remove(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) error {
 	if f.remove == nil {
 		return nil
 	}
 	return f.remove(ctx, id, path, opts...)
 }
-
-func (f *fakeCNIPlugin) Check(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) error {
-	if f.check == nil {
-		return nil
-	}
-	return f.check(ctx, id, path, opts...)
-}
-
-func (*fakeCNIPlugin) Load(...cni.Opt) error { return nil }
-
-func (*fakeCNIPlugin) Status() error { return nil }
-
-func (*fakeCNIPlugin) GetConfig() *cni.ConfigResult { return nil }
 
 func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	t.Helper()
@@ -87,9 +55,13 @@ func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	if err != nil {
 		t.Fatalf("Acquire(): %v", err)
 	}
-	slot, err := NewSlot(id)
+	cfg, err := newSlotConfig("", 0)
 	if err != nil {
-		t.Fatalf("NewSlot(): %v", err)
+		t.Fatalf("newSlotConfig(): %v", err)
+	}
+	slot, err := newSlot(id, cfg)
+	if err != nil {
+		t.Fatalf("newSlot(): %v", err)
 	}
 	return allocator, slot
 }
@@ -112,15 +84,15 @@ func TestSetupSlotNetworkLeavesRollbackToPool(t *testing.T) {
 		config: CNIManagerConfig{IfName: defaultCNIIfName},
 	}}
 
-	err := p.setupSlotNetwork(context.Background(), slot)
+	err := p.provisionSlotNetwork(context.Background(), slot)
 	if !errors.Is(err, setupErr) {
-		t.Fatalf("setupSlotNetwork() error = %v, want %v", err, setupErr)
+		t.Fatalf("provisionSlotNetwork() error = %v, want %v", err, setupErr)
 	}
 	if removeCalls != 0 {
 		t.Fatalf("CNI Remove calls during setup = %d, want 0; Pool cleanup owns DEL", removeCalls)
 	}
-	if slot.CNIResult() != nil {
-		t.Fatalf("slot CNI result after failed ADD = %#v, want nil", slot.CNIResult())
+	if slot.CNIIP() != "" {
+		t.Fatalf("slot CNI IP after failed ADD = %q, want empty", slot.CNIIP())
 	}
 }
 
@@ -130,8 +102,8 @@ func TestTeardownDerivesCNIIdentityFromSlot(t *testing.T) {
 	p := &Pool{cniManager: &CNIManager{plugin: &fakeCNIPlugin{
 		remove: func(_ context.Context, id, path string, _ ...cni.NamespaceOpts) error {
 			removeCalls++
-			if id != slot.CNIContainerID() || path != "" {
-				t.Fatalf("Remove(%q, %q), want (%q, empty)", id, path, slot.CNIContainerID())
+			if id != slot.cniContainerID() || path != "" {
+				t.Fatalf("Remove(%q, %q), want (%q, empty)", id, path, slot.cniContainerID())
 			}
 			return nil
 		},
@@ -144,12 +116,13 @@ func TestTeardownDerivesCNIIdentityFromSlot(t *testing.T) {
 	}
 }
 
-func TestCleanupSlotAllocationKeepsIDReservedAfterCNIDelFailure(t *testing.T) {
+func TestDestroyNetworkSlotKeepsIDReservedWithoutSignalAfterCNIDelFailure(t *testing.T) {
 	allocator, slot := allocatedTestSlot(t)
 	removeErr := errors.New("cni del failed")
 	removeCalls := 0
 	p := &Pool{
-		slotIDs: allocator,
+		refillNeeded: make(chan struct{}, 1),
+		slotIDs:      allocator,
 		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
 			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
 				removeCalls++
@@ -158,9 +131,9 @@ func TestCleanupSlotAllocationKeepsIDReservedAfterCNIDelFailure(t *testing.T) {
 		}},
 	}
 
-	err := p.cleanupSlotAllocation(slot)
+	err := p.destroyNetworkSlot(context.Background(), slot)
 	if !errors.Is(err, removeErr) {
-		t.Fatalf("cleanupSlotAllocation() error = %v, want %v", err, removeErr)
+		t.Fatalf("destroyNetworkSlot() error = %v, want %v", err, removeErr)
 	}
 	if removeCalls != 1 {
 		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
@@ -169,23 +142,30 @@ func TestCleanupSlotAllocationKeepsIDReservedAfterCNIDelFailure(t *testing.T) {
 	if acquireErr != nil {
 		t.Fatalf("Acquire() after failed cleanup: %v", acquireErr)
 	}
-	if reused == slot.ID {
-		t.Fatalf("slot ID %d was released after failed CNI DEL", slot.ID)
+	if reused == slot.ID() {
+		t.Fatalf("slot ID %d was released after failed CNI DEL", slot.ID())
+	}
+	select {
+	case <-p.refillNeeded:
+		t.Fatal("destroyNetworkSlot() signaled refill even though the slot ID remained reserved")
+	default:
 	}
 }
 
-func TestHandleCreatedSlotAfterCancelDiscardsSlot(t *testing.T) {
+func TestDestroyNetworkSlotReleasesID(t *testing.T) {
 	allocator, slot := allocatedTestSlot(t)
 	p := &Pool{
 		slotIDs:    allocator,
 		cniManager: &CNIManager{plugin: &fakeCNIPlugin{}},
 	}
 
-	p.handleCreatedSlotAfterCancel(slot)
+	if err := p.destroyNetworkSlot(context.Background(), slot); err != nil {
+		t.Fatalf("destroyNetworkSlot(): %v", err)
+	}
 
 	reused, err := allocator.Acquire()
-	if err != nil || reused != slot.ID {
-		t.Fatalf("Acquire() after discard = (%d, %v), want (%d, nil)", reused, err, slot.ID)
+	if err != nil || reused != slot.ID() {
+		t.Fatalf("Acquire() after discard = (%d, %v), want (%d, nil)", reused, err, slot.ID())
 	}
 }
 
@@ -202,11 +182,9 @@ func TestPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
 	allocator, slot := allocatedTestSlot(t)
 	removeCalls := 0
 	p := &Pool{
-		warmSlots:          slotstate.NewQueue[*Slot](1),
-		warmSlotNeeded:     make(chan struct{}, 1),
-		dynamicReservation: true,
-		prefillReady:       make(chan struct{}),
-		slotIDs:            allocator,
+		warmSlots:    slotstate.NewQueue[*Slot](1),
+		refillNeeded: make(chan struct{}, 1),
+		slotIDs:      allocator,
 		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
 			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
 				removeCalls++
@@ -233,8 +211,8 @@ func TestPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
 		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
 	}
 	reused, err := allocator.Acquire()
-	if err != nil || reused != slot.ID {
-		t.Fatalf("Acquire() after Close() = (%d, %v), want (%d, nil)", reused, err, slot.ID)
+	if err != nil || reused != slot.ID() {
+		t.Fatalf("Acquire() after Close() = (%d, %v), want (%d, nil)", reused, err, slot.ID())
 	}
 }
 
@@ -280,20 +258,38 @@ func TestPoolCloseWaitsForPopulationBeforeCleaningBufferedSlots(t *testing.T) {
 	}
 }
 
-func TestReplenishDroppedSlotSkipsClosedPool(t *testing.T) {
-	p := &Pool{warmSlots: slotstate.NewQueue[*Slot](1)}
-	p.warmSlots.Close()
-	if err := p.replenishDroppedSlot(context.Background()); err != nil {
-		t.Fatalf("replenishDroppedSlot() after close: %v", err)
+func TestDiscardWakesPopulateRetryAfterCapacityRelease(t *testing.T) {
+	allocator, slot := allocatedTestSlot(t)
+	p := &Pool{
+		refillNeeded: make(chan struct{}, 1),
+		slotIDs:      allocator,
+		cniManager:   &CNIManager{plugin: &fakeCNIPlugin{}},
+	}
+	retryDone := make(chan bool, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		retryDone <- p.waitForPopulateRetry(ctx, time.Hour)
+	}()
+
+	if err := p.Discard(context.Background(), slot); err != nil {
+		t.Fatalf("Discard(): %v", err)
+	}
+	select {
+	case retry := <-retryDone:
+		if !retry {
+			t.Fatal("waitForPopulateRetry() stopped instead of retrying")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful Discard() did not wake populate retry")
 	}
 }
 
 func TestGetAssignsWarmSlot(t *testing.T) {
 	_, slot := allocatedTestSlot(t)
 	p := &Pool{
-		warmSlots:      slotstate.NewQueue[*Slot](1),
-		warmSlotNeeded: make(chan struct{}, 1),
-		prefillReady:   make(chan struct{}),
+		warmSlots:    slotstate.NewQueue[*Slot](1),
+		refillNeeded: make(chan struct{}, 1),
 	}
 	if err := p.warmSlots.Push(slot); err != nil {
 		t.Fatalf("Push(): %v", err)
@@ -303,7 +299,12 @@ func TestGetAssignsWarmSlot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(): %v", err)
 	}
-	if got != slot || got.SandboxID() != "sandbox-a" {
-		t.Fatalf("Get() = %#v, sandbox ID %q", got, got.SandboxID())
+	if got != slot || got.sandboxID != "sandbox-a" {
+		t.Fatalf("Get() = %#v, sandbox ID %q", got, got.sandboxID)
+	}
+	select {
+	case <-p.refillNeeded:
+	default:
+		t.Fatal("Get() did not signal refill")
 	}
 }

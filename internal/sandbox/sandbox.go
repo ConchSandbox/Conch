@@ -95,7 +95,7 @@ func ResumeSandbox(
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
 		if err != nil {
-			return fmt.Errorf("failed to release network slot %d: %w", slot.ID, err)
+			return fmt.Errorf("failed to release network slot %d: %w", slot.ID(), err)
 		}
 		return nil
 	})
@@ -181,7 +181,7 @@ func CreateSandbox(
 	cleanup.Add(func(ctx context.Context) error {
 		err := pool.Release(ctx, slot)
 		if err != nil {
-			return fmt.Errorf("failed to release network slot %d: %w", slot.ID, err)
+			return fmt.Errorf("failed to release network slot %d: %w", slot.ID(), err)
 		}
 		return nil
 	})

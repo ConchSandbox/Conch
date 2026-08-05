@@ -53,11 +53,10 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	WarmPoolSize       int       `yaml:"warm_pool_size"`
-	DynamicReservation bool      `yaml:"dynamic_reservation"`
-	TapIP              string    `yaml:"tap_ip"`
-	TapMask            int       `yaml:"tap_mask"`
-	CNI                CNIConfig `yaml:"cni"`
+	WarmPoolSize int       `yaml:"warm_pool_size"`
+	TapIP        string    `yaml:"tap_ip"`
+	TapMask      int       `yaml:"tap_mask"`
+	CNI          CNIConfig `yaml:"cni"`
 }
 
 // CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
@@ -131,14 +130,12 @@ func DefaultConfig() *Config {
 			WorkDir:    defaultWorkDir,
 		},
 		Network: NetworkConfig{
-			WarmPoolSize:       netstack.DefaultWarmPoolSize,
-			DynamicReservation: false,
-			TapIP:              "192.168.100.2",
-			TapMask:            24,
+			WarmPoolSize: netstack.DefaultWarmPoolSize,
+			TapIP:        "192.168.100.2",
+			TapMask:      24,
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
-				PluginMaxConf: netstack.DefaultCNIPluginMaxConf,
 				IfName:        netstack.DefaultCNIIfName,
 			},
 		},
@@ -266,9 +263,6 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
 	}
 	cfg.Network.CNI.PluginConfDir = resolveCNIPluginConfDir(configPath, cfg.Network.CNI.PluginConfDir, defaultCfg.Network.CNI.PluginConfDir)
-	if cfg.Network.CNI.PluginMaxConf == 0 {
-		cfg.Network.CNI.PluginMaxConf = defaultCfg.Network.CNI.PluginMaxConf
-	}
 	if cfg.Network.CNI.IfName == "" {
 		cfg.Network.CNI.IfName = defaultCfg.Network.CNI.IfName
 	}

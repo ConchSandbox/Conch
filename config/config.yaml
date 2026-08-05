@@ -19,8 +19,6 @@ server:
 network:
   # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250
   warm_pool_size: 250
-  # Keep replenishing the warm pool in the background. Allocation failures are retried with backoff.
-  dynamic_reservation: false
   # Tap interface address inside the sandbox network namespace
   tap_ip: 192.168.100.2
   # CIDR mask for tap_ip
@@ -34,12 +32,8 @@ network:
     # Change this if your Conch CNI configs live somewhere else.
     # If this default directory has no config, Conch falls back to cni/net.d next to this config file.
     plugin_conf_dir: /etc/conch/cni/net.d
-    # Number of non-loopback network configs to load from plugin_conf_dir
-    plugin_max_conf: 1
     # Outer sandbox interface name created by CNI; go-cni currently generates the first interface as <prefix>0
     if_name: eth0
-    # Run CNI setup serially when plugin chains require strict ordering
-    setup_serially: false
 
 containerd:
   root_dir: /var/lib/conch/containerd

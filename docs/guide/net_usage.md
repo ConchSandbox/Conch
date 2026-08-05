@@ -47,22 +47,19 @@
 ```yaml
 network:
   warm_pool_size: 250
-  dynamic_reservation: false
   tap_ip: 192.168.100.2
   tap_mask: 24
   cni:
     plugin_bin_dirs:
       - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
-    plugin_max_conf: 1
     if_name: eth0
-    setup_serially: false
 ```
 
 Conch 网络配置需要注意如下事项：
 - `warm_pool_size` 给定了预先创建并保持可用的空闲网络 Slot 数量，不能超过代码内置的 4000 Slot 总容量上限。
 - Conch 每次启动都会创建新的内存 Slot ID 分配器和 warm pool，不会从 BoltDB 恢复或接管旧 Slot；实际可用数量还会受到 CNI/IPAM 地址容量限制。
-- 开启 `dynamic_reservation` 后，CNI 分配失败不会破坏已有 Slot；Conch 会回滚本次创建并以指数退避方式重试。池为空时，新建沙箱会返回资源不可用错误。
+- Conch 启动时会并发预填充空闲 Slot，运行期间持续补充到 `warm_pool_size`；CNI 分配失败会回滚本次创建并以指数退避方式重试。池为空时，新建沙箱会返回资源不可用错误。
 - `tap_ip` 和 `tap_mask` 给定了每个沙箱内部面向虚拟机的 `tap` 子网。
 - `plugin_bin_dirs` 指向 CNI 插件目录, `plugin_conf_dir` 指向 Conch CNI 配置目录。
 - `if_name` 给定了 CNI 创建的沙箱网络接口名称，通常是 `eth0`；当前 go-cni 会把第一个接口生成为 `<prefix>0`，因此该配置需要与这一命名方式一致。

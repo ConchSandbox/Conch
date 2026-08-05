@@ -468,7 +468,7 @@ func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx 
 		VMMSocketPath:   sbx.process.VmmSocketPath,
 		VsockCID:        runtimeIDs.vsockCID,
 		VsockSocketPath: runtimeIDs.vsockSocketPath,
-		NetworkSlotID:   sbx.slot.ID,
+		NetworkSlotID:   sbx.slot.ID(),
 		RootfsKey:       runtime.RootfsKey,
 		MemKey:          runtime.MemKey,
 		RootfsMount:     runtime.RootfsMount,

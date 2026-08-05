@@ -47,23 +47,20 @@ The network-related section in `config/config.yaml` is:
 ```yaml
 network:
   warm_pool_size: 250
-  dynamic_reservation: false
   tap_ip: 192.168.100.2
   tap_mask: 24
   cni:
     plugin_bin_dirs:
       - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
-    plugin_max_conf: 1
     if_name: eth0
-    setup_serially: false
 ```
 
 Pay attention to the following network config items:
 
 - `warm_pool_size` sets the number of ready-to-use idle network slots to pre-create and maintain and cannot exceed the code-defined total capacity of 4000 slots.
 - On every startup, Conch creates a fresh in-memory slot ID allocator and warm pool. It does not restore or adopt old slots from BoltDB; CNI/IPAM address capacity may impose a lower effective limit.
-- With `dynamic_reservation` enabled, a CNI allocation failure rolls back the attempted slot and is retried with exponential backoff. Sandbox creation reports an unavailable resource when the pool is empty.
+- Conch concurrently prefills idle slots at startup and continuously refills the pool to `warm_pool_size` during normal operation. A failed CNI allocation is rolled back and retried with exponential backoff. Sandbox creation reports an unavailable resource when the pool is empty.
 - `tap_ip` and `tap_mask` define the VM-facing `tap` subnet inside each sandbox.
 - `plugin_bin_dirs` points to the CNI plugin directory, and `plugin_conf_dir` points to the Conch CNI config directory.
 - `if_name` sets the sandbox network interface name created by CNI, normally `eth0`; current go-cni creates the first interface as `<prefix>0`, so this value must match that naming pattern.
