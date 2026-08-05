@@ -491,3 +491,32 @@ func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 		t.Fatalf("create request unexpectedly includes template_id: %#v", body)
 	}
 }
+
+func TestSandboxListAndDeleteUseV1API(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.RequestURI() != listSandbox {
+				t.Fatalf("list request = %s %s", r.Method, r.URL.String())
+			}
+			_ = json.NewEncoder(w).Encode([]SandboxRecord{{SandboxID: "sandbox-1"}})
+		case http.MethodDelete:
+			if r.URL.Path != deleteSandbox+"sandbox-1" {
+				t.Fatalf("delete request = %s %s", r.Method, r.URL.String())
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	c := newTestClient(t, Options{BaseURL: server.URL})
+	records, err := c.ListSandboxes(context.Background())
+	if err != nil || len(records) != 1 || records[0].SandboxID != "sandbox-1" {
+		t.Fatalf("ListSandboxes() = %#v, %v", records, err)
+	}
+	if err := c.DeleteSandbox(context.Background(), "sandbox-1"); err != nil {
+		t.Fatalf("DeleteSandbox() error = %v", err)
+	}
+}

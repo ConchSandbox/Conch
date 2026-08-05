@@ -80,6 +80,17 @@ conch image unpack registry.example.com/conch/nginx:latest
 
 详细设计见 [Conch Image Workflow Design](docs/design/image-workflow.md)。
 
+### 沙箱查询与删除
+
+使用 `ls`（或等价的 `list`）查看沙箱，并使用 `delete` 删除指定沙箱：
+
+```bash
+conch sandbox ls
+conch sandbox delete <sandbox-id>
+```
+
+列表按 Sandbox ID 稳定排序，输出列为 `ID`、`TEMPLATE`、`CPU`、`MEMORY_MB` 和 `STARTED_AT`。
+
 ### SDK 配置
 
 SDK 需要通过配置文件指定 conchd 的连接方式和沙箱参数。项目提供了默认配置模板 `config/sdk-config.yaml`：
