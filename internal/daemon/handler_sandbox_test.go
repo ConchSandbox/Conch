@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/openeuler/Conch/internal/apierror"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -70,11 +71,14 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 				t.Fatalf("status = %d, want %d, body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
 			}
 			if tt.wantStatus == http.StatusBadRequest {
-				var response map[string]string
+				var response apierror.Envelope
 				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 					t.Fatalf("decode error response: %v", err)
 				}
-				if response["status"] != "error" || response["error"] != conchruntime.ErrTemplateIDRequired.Error() {
+				if response.Version != apierror.EnvelopeVersion ||
+					response.Code != apierror.CodeInvalidArgument ||
+					response.Message != conchruntime.ErrTemplateIDRequired.Error() ||
+					response.RequestID == "" || recorder.Header().Get("X-Request-ID") != response.RequestID {
 					t.Fatalf("error response = %#v", response)
 				}
 				return

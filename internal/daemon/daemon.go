@@ -379,9 +379,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req sandboxCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
@@ -398,12 +396,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, conchruntime.ErrTemplateIDRequired) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status": "error",
-				"error":  err.Error(),
-			})
+			writeInvalidArgument(w, r, err.Error())
 			return
 		}
 		writeTemplateError(w, r, err)
@@ -629,9 +622,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req sandboxLifecycleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -666,8 +657,7 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req sandboxLifecycleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
@@ -693,8 +683,7 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req sandboxCheckpointRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
@@ -724,8 +713,8 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req templateCreateRequest
-	if err := json.Unmarshal([]byte(r.FormValue("metadata")), &req); err != nil {
-		http.Error(w, "Invalid metadata: "+err.Error(), http.StatusBadRequest)
+	if err := decodeStrictJSON(strings.NewReader(r.FormValue("metadata")), &req); err != nil {
+		writeInvalidArgument(w, r, "invalid metadata: "+err.Error())
 		return
 	}
 	tmpDir, err := os.MkdirTemp("", "conch-template-api-*")
@@ -872,9 +861,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req pullImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	opts := runtimeapi.PullImageOptions{
@@ -914,9 +901,7 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req pushImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	opts := runtimeapi.PushImageOptions{
@@ -959,8 +944,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req listImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	images, err := s.runtimeService.ListImages(r.Context(), runtimeapi.ListImagesOptions{
@@ -990,8 +974,7 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req removeImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	opts := runtimeapi.RemoveImageOptions{
@@ -1025,9 +1008,7 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req unpackImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Warn("Invalid request body", ulog.F("error", err))
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -1117,11 +1098,53 @@ func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return false
 	}
-	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	return decodeJSONBody(w, r, out)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, out any) bool {
+	if err := decodeStrictJSON(r.Body, out); err != nil {
+		writeInvalidArgument(w, r, "invalid request body: "+err.Error())
 		return false
 	}
 	return true
+}
+
+func decodeStrictJSON(reader io.Reader, out any) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain a single JSON value")
+		}
+		return fmt.Errorf("invalid trailing data: %w", err)
+	}
+	return nil
+}
+
+func writeInvalidArgument(w http.ResponseWriter, r *http.Request, message string) {
+	writeAPIError(w, r, http.StatusBadRequest, apierror.CodeInvalidArgument, "", message)
+}
+
+func writeAPIError(w http.ResponseWriter, r *http.Request, status int, code, resourceType, message string) {
+	writeAPIErrorWithRequestID(w, status, code, resourceType, message, requestCorrelationID(r))
+}
+
+func writeAPIErrorWithRequestID(w http.ResponseWriter, status int, code, resourceType, message, requestID string) {
+	w.Header().Set("X-Request-ID", requestID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apierror.Envelope{
+		Version:      apierror.EnvelopeVersion,
+		Code:         code,
+		ResourceType: resourceType,
+		Message:      message,
+		RequestID:    requestID,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, value any) {
@@ -1131,30 +1154,29 @@ func writeJSON(w http.ResponseWriter, value any) {
 
 func writeTemplateError(w http.ResponseWriter, r *http.Request, err error) {
 	requestID := requestCorrelationID(r)
-	w.Header().Set("X-Request-ID", requestID)
-	w.Header().Set("Content-Type", "application/json")
 
 	var notFound *conchruntime.TemplateNotFoundError
 	if errors.As(err, &notFound) {
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(apierror.Envelope{
-			Version:      apierror.EnvelopeVersion,
-			Code:         apierror.CodeNotFound,
-			ResourceType: apierror.ResourceTemplate,
-			Message:      "template not found",
-			RequestID:    requestID,
-		})
+		writeAPIErrorWithRequestID(
+			w,
+			http.StatusNotFound,
+			apierror.CodeNotFound,
+			apierror.ResourceTemplate,
+			"template not found",
+			requestID,
+		)
 		return
 	}
 
 	ulog.GetLogger().Error("template API request failed", ulog.F("error", err), ulog.F("request_id", requestID))
-	w.WriteHeader(http.StatusInternalServerError)
-	_ = json.NewEncoder(w).Encode(apierror.Envelope{
-		Version:   apierror.EnvelopeVersion,
-		Code:      apierror.CodeInternalError,
-		Message:   "internal server error",
-		RequestID: requestID,
-	})
+	writeAPIErrorWithRequestID(
+		w,
+		http.StatusInternalServerError,
+		apierror.CodeInternalError,
+		"",
+		"internal server error",
+		requestID,
+	)
 }
 
 func requestCorrelationID(r *http.Request) string {
@@ -1202,8 +1224,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req snapshotInfoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {
@@ -1241,8 +1262,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req listSnapshotRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), runtimeapi.ListSnapshotsOptions{
@@ -1272,8 +1292,7 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req removeSnapshotRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {

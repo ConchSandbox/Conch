@@ -4,10 +4,11 @@ package apierror
 import "fmt"
 
 const (
-	EnvelopeVersion   = 1
-	CodeNotFound      = "not_found"
-	CodeInternalError = "internal_error"
-	ResourceTemplate  = "template"
+	EnvelopeVersion     = 1
+	CodeInvalidArgument = "invalid_argument"
+	CodeNotFound        = "not_found"
+	CodeInternalError   = "internal_error"
+	ResourceTemplate    = "template"
 )
 
 // Envelope contains only client-safe error details.
