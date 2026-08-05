@@ -402,7 +402,7 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxIncludesNamespace(t *testing.T) {
+func TestCreateSandboxIncludesNamespaceAndExplicitRAM(t *testing.T) {
 	var got CreateRequest
 	c := NewClient("http://example.invalid")
 	c.httpClient = &http.Client{
@@ -421,7 +421,7 @@ func TestCreateSandboxIncludesNamespace(t *testing.T) {
 		}),
 	}
 
-	if err := c.CreateSandbox("tmpl_123", "sandbox-123", "team-a", DefaultRamMB); err != nil {
+	if err := c.CreateSandbox("tmpl_123", "sandbox-123", "team-a", 4096); err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if got.TemplateID != "tmpl_123" || got.SandboxId != "sandbox-123" {
@@ -429,5 +429,33 @@ func TestCreateSandboxIncludesNamespace(t *testing.T) {
 	}
 	if got.Namespace != "team-a" {
 		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
+	}
+	if got.RamMB != 4096 {
+		t.Fatalf("ram_mb = %d, want 4096", got.RamMB)
+	}
+	if got.VmmName != "" || got.VcpuNum != 0 {
+		t.Fatalf("unexpected client resource defaults = %#v", got)
+	}
+}
+
+func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
+	var body map[string]any
+	c := NewClient("http://example.invalid")
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"sandboxID":"sandbox-123","domain":"192.0.2.2"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	if err := c.CreateSandbox("", "sandbox-123", "team-a", 0); err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if _, ok := body["template_id"]; ok {
+		t.Fatalf("create request unexpectedly includes template_id: %#v", body)
 	}
 }

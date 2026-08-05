@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func TestLoadConfig(t *testing.T) {
 			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
 	)
-	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -239,7 +240,7 @@ func TestLoadConfig(t *testing.T) {
 func TestLoadConfigRejectsRemovedCRISection(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte("app:\n  name: conch-with-unused-config\ncri:\n  enabled: true\n  socket: /run/legacy-runtime.sock\n")
-	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -293,7 +294,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(cfgPath, []byte(tt.data), 0600); err != nil {
+			if err := os.WriteFile(cfgPath, []byte(tt.data), 0640); err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
 
@@ -311,7 +312,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte("network:\n  pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
-	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -339,7 +340,8 @@ func TestLoadConfigRejectsInsecurePermissions(t *testing.T) {
 		name string
 		mode os.FileMode
 	}{
-		{name: "group readable", mode: 0o640},
+		{name: "group writable", mode: 0o660},
+		{name: "group executable", mode: 0o610},
 		{name: "other readable", mode: 0o604},
 		{name: "world readable and writable", mode: 0o666},
 	}
@@ -348,7 +350,7 @@ func TestLoadConfigRejectsInsecurePermissions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 			data := []byte("app:\n  name: shared-conch-config\n")
-			if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+			if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
 			if err := os.Chmod(cfgPath, tt.mode); err != nil {
@@ -361,6 +363,25 @@ func TestLoadConfigRejectsInsecurePermissions(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "insecure permissions") {
 				t.Fatalf("LoadConfig() error = %q, want insecure permissions error", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowsGroupReadOnly(t *testing.T) {
+	for _, mode := range []os.FileMode{0o600, 0o640} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfgPath, []byte("app:\n  name: secure-config\n"), mode); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			cfg, err := LoadConfig(cfgPath)
+			if err != nil {
+				t.Fatalf("LoadConfig() error = %v", err)
+			}
+			if cfg.App.Name != "secure-config" {
+				t.Fatalf("LoadConfig().App.Name = %q, want secure-config", cfg.App.Name)
 			}
 		})
 	}

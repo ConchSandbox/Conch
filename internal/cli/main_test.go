@@ -124,6 +124,23 @@ func TestPrintImagePushHelpIncludesExample(t *testing.T) {
 	}
 }
 
+func TestPrintSandboxCreateHelpExplainsDaemonDefaults(t *testing.T) {
+	var buf bytes.Buffer
+	cmd.PrintSandboxCreateHelp(&buf)
+
+	got := buf.String()
+	for _, want := range []string{
+		"conch sandbox create [--template-id <template-id>] [options]",
+		"sandbox.default_template_id",
+		"Other unset resources also use conchd defaults",
+		"conchd sandbox.default_ram_mb",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sandbox create help missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestParseImagePushArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -210,7 +227,7 @@ func TestRunImagePushPassesResolvedNamespace(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -355,7 +372,7 @@ func TestResolveConchNamespaceUsesConfigAndOverride(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -414,7 +431,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 containerd:
   default_namespace: team-a
-`), 0o644); err != nil {
+`), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

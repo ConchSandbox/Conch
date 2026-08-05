@@ -52,10 +52,12 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
                volume_mounts=None, env=None) -> Sandbox
 ```
 
-基于 Template 创建沙箱。连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
+基于 Template 创建沙箱。省略 `template_id` 时，由 conchd 使用
+`sandbox.default_template_id`；该默认值未配置或为空白时，conchd 返回明确的 HTTP 400。
+连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
 
 **参数：**
-- `template_id` (str): 要启动的 `tmpl_xxx`
+- `template_id` (str, 可选): 要启动的 `tmpl_xxx`；省略时使用 conchd 默认 Template
 - `sandbox_id` (str, 可选): 指定沙箱 ID，默认自动生成
 - `namespace` (str, 可选): 沙箱命名空间
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
@@ -64,13 +66,17 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
 
 **返回：** 成功返回 `Sandbox` 对象。
 
-**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效或缺少 `template_id` 时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
+**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
 
 **示例：**
 ```python
 # 从指定 Template 创建
 sbx = Sandbox.create(template_id="tmpl_123")
 sbx.commands.run(cmd='python3', content='print("Hello")')
+sbx.delete()
+
+# 省略 Template，由 conchd 的 sandbox.default_template_id 决定
+sbx = Sandbox.create()
 sbx.delete()
 
 # 从 checkpoint 产生的可恢复 Template 创建
@@ -386,6 +392,13 @@ sbx.commands.kill(tag='http-srv', signal=15)
 ---
 
 ### 文件操作
+
+所有文件接口的远端路径（`path`、`remote_path` 和上传规格中的 `filepath`）必须是已规范化的
+guest 绝对路径，例如 `/home/user/a.txt` 或卷在 guest 内可见的 `/workspace/data.txt`。
+相对路径、`..` 或 `.` 路径段、重复或多余的分隔符以及 NUL 字节都会在文件访问前被拒绝；
+根路径 `/` 本身有效。`guestd` 在 chroot 到 sandbox merge root 后提供这些接口，因此 `/`
+表示 guest 根目录，已配置的卷仍可通过其 guest 挂载目标访问。该校验定义的是 guest API 的
+路径语义，不表示此前存在越过 chroot 边界的 host 文件系统逃逸。
 
 #### 上传文件
 

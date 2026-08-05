@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -15,12 +16,22 @@ import (
 )
 
 func cleanAgentFilepath(path, operation string) (string, string) {
+	// File requests are served after chrootToMerge, so absolute paths resolve
+	// from the sandbox guest root and can address configured volume mounts.
+	// This validation enforces the guest API contract; it is not a host-escape
+	// boundary.
 	if path == "" {
 		return "", "filepath is required for " + operation
 	}
+	if strings.IndexByte(path, 0) >= 0 {
+		return "", "filepath contains a NUL byte for " + operation
+	}
+	if !filepath.IsAbs(path) {
+		return "", "filepath must be a normalized absolute guest path for " + operation
+	}
 	cleaned := filepath.Clean(path)
-	if cleaned == "." {
-		return "", "invalid filepath for " + operation
+	if cleaned != path {
+		return "", "filepath must be a normalized absolute guest path for " + operation
 	}
 	return cleaned, ""
 }
@@ -117,8 +128,14 @@ func (s *AgentServer) PostFileStream(stream postFileStream) error {
 				return connectErrorf(connect.CodeInternal, "failed to set temporary upload file permissions for %s: %v", targetPath, err)
 			}
 			file = created
-		} else if chunk.Filepath != "" && filepath.Clean(chunk.Filepath) != targetPath {
-			return connectError(connect.CodeInvalidArgument, "filepath changed during stream upload")
+		} else if chunk.Filepath != "" {
+			cleanedFilepath, errMsg := cleanAgentFilepath(chunk.Filepath, "stream upload")
+			if errMsg != "" {
+				return connectError(connect.CodeInvalidArgument, errMsg)
+			}
+			if cleanedFilepath != targetPath {
+				return connectError(connect.CodeInvalidArgument, "filepath changed during stream upload")
+			}
 		}
 
 		if len(chunk.Content) == 0 {

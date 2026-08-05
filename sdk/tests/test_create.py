@@ -55,3 +55,25 @@ def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
 
     payload = sbx._build_create_payload()
     assert payload[VMM_NAME_KEY] == ""
+
+
+def test_build_create_payload_omits_template_id_for_daemon_default(monkeypatch):
+    config = load_config()
+    config["sandbox"]["template_id"] = "tmpl-client-config-must-not-override-daemon"
+    monkeypatch.setattr("conch.sandbox.load_config", lambda: config)
+
+    payload = Sandbox(sandbox_id="sandbox-test")._build_create_payload()
+
+    assert "template_id" not in payload
+
+
+def test_build_create_payload_omits_whitespace_template_id():
+    payload = Sandbox(sandbox_id="sandbox-test", template_id=" \t ")._build_create_payload()
+
+    assert "template_id" not in payload
+
+
+def test_build_create_payload_keeps_explicit_template_id():
+    payload = Sandbox(sandbox_id="sandbox-test", template_id="tmpl-explicit")._build_create_payload()
+
+    assert payload["template_id"] == "tmpl-explicit"
