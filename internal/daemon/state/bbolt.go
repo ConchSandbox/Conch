@@ -31,7 +31,6 @@ type templateRecord struct {
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
 	BootIndexDigest  string            `json:"boot_index_digest"`
-	Namespace        string            `json:"namespace"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
@@ -127,9 +126,6 @@ func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error 
 	if strings.TrimSpace(rec.SandboxID) == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
-	if strings.TrimSpace(rec.Namespace) == "" {
-		return fmt.Errorf("sandbox namespace is required")
-	}
 	if strings.TrimSpace(rec.CheckpointHeadTemplateID) == "" {
 		return fmt.Errorf("sandbox checkpoint head template id is required")
 	}
@@ -143,6 +139,19 @@ func (s *BoltStore) GetSandbox(ctx context.Context, id string) (SandboxRecord, e
 	var rec SandboxRecord
 	err := s.get(ctx, []byte("sandboxes"), id, &rec)
 	return rec, err
+}
+
+func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) {
+	var out []SandboxRecord
+	err := s.list(ctx, []byte("sandboxes"), func(data []byte) error {
+		var rec SandboxRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		out = append(out, rec)
+		return nil
+	})
+	return out, err
 }
 
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
@@ -261,19 +270,6 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplat
 		if sourceID := entry.SourceSandboxID; sourceID != strings.TrimSpace(sandboxRecord.SandboxID) {
 			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)
 		}
-		sandboxNamespace := strings.TrimSpace(sandboxRecord.Namespace)
-		if sandboxNamespace == "" {
-			return fmt.Errorf("sandbox %s has no namespace", sandboxID)
-		}
-		if entry.Namespace != sandboxNamespace {
-			return fmt.Errorf(
-				"template %s belongs to namespace %s, not sandbox namespace %s",
-				templateID,
-				entry.Namespace,
-				sandboxNamespace,
-			)
-		}
-
 		sandboxRecord.CheckpointHeadTemplateID = templateID
 		sandboxRecord.CheckpointHeadBootIndexDigest = entry.BootIndexDigest
 		sandboxData, err := json.Marshal(sandboxRecord)
@@ -293,7 +289,6 @@ func templateRecordFromEntry(entry conchtemplate.Entry) templateRecord {
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),
 		BootIndexDigest:  entry.BootIndexDigest,
-		Namespace:        entry.Namespace,
 		ParentTemplateID: entry.ParentTemplateID,
 		SourceSandboxID:  entry.SourceSandboxID,
 		ImageName:        entry.ImageName,
@@ -309,7 +304,6 @@ func templateEntryFromRecord(rec templateRecord) (conchtemplate.Entry, error) {
 		Origin:           conchtemplate.Origin(rec.Origin),
 		BootMode:         conchtemplate.BootMode(rec.BootMode),
 		BootIndexDigest:  rec.BootIndexDigest,
-		Namespace:        rec.Namespace,
 		ParentTemplateID: rec.ParentTemplateID,
 		SourceSandboxID:  rec.SourceSandboxID,
 		ImageName:        rec.ImageName,

@@ -35,24 +35,24 @@ func TestTemplateRegistryFlags(t *testing.T) {
 	var pull templateRegistryOptions
 	pullFlags := flag.NewFlagSet("template pull", flag.ContinueOnError)
 	registerTemplateRegistryFlags(pullFlags, &pull, false)
-	if err := pullFlags.Parse([]string{"--plain-http", "--user", "alice:secret", "-n", "team-a", "registry.example/template:latest"}); err != nil {
+	if err := pullFlags.Parse([]string{"--plain-http", "--user", "alice:secret", "registry.example/template:latest"}); err != nil {
 		t.Fatalf("parse pull flags: %v", err)
 	}
 	username, password, err := templateRegistryCredentials(pull)
 	if err != nil {
 		t.Fatalf("templateRegistryCredentials() error = %v", err)
 	}
-	if !pull.plainHTTP || pull.namespace != "team-a" || username != "alice" || password != "secret" || pullFlags.Arg(0) != "registry.example/template:latest" {
+	if !pull.plainHTTP || username != "alice" || password != "secret" || pullFlags.Arg(0) != "registry.example/template:latest" {
 		t.Fatalf("pull options = %#v, args = %#v", pull, pullFlags.Args())
 	}
 
 	var push templateRegistryOptions
 	pushFlags := flag.NewFlagSet("template push", flag.ContinueOnError)
 	registerTemplateRegistryFlags(pushFlags, &push, true)
-	if err := pushFlags.Parse([]string{"--username", "bob", "--password", "token", "--timeout", "5m", "-n", "team-a", "tmpl_1", "mirror.example/template:copy"}); err != nil {
+	if err := pushFlags.Parse([]string{"--username", "bob", "--password", "token", "--timeout", "5m", "tmpl_1", "mirror.example/template:copy"}); err != nil {
 		t.Fatalf("parse push flags: %v", err)
 	}
-	if push.username != "bob" || push.password != "token" || push.timeout != "5m" || push.namespace != "team-a" || len(pushFlags.Args()) != 2 {
+	if push.username != "bob" || push.password != "token" || push.timeout != "5m" || len(pushFlags.Args()) != 2 {
 		t.Fatalf("push options = %#v, args = %#v", push, pushFlags.Args())
 	}
 }

@@ -29,14 +29,13 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 		Resume:          true,
 		VMMName:         "cloud-hypervisor",
 	}}
-	runtimeService := conchruntime.New(&fakeSandboxOps{}, imageOps, imageOps, store, "default")
+	runtimeService := conchruntime.New(&fakeSandboxOps{}, imageOps, imageOps, store)
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
 	pullRecorder := httptest.NewRecorder()
 	pullRequest := httptest.NewRequest(http.MethodPost, "/api/template/pull", bytes.NewBufferString(`{
 		"reference":"registry.example.invalid/conch/template:latest",
-		"namespace":"team-a",
 		"plain_http":true,
 		"username":"pull-user",
 		"password":"pull-pass",
@@ -58,10 +57,10 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 	if pullResponse.Status != "ok" || pullResponse.TemplateID == "" || pullResponse.BootIndexDigest != digest || pullResponse.BuildRef != reference {
 		t.Fatalf("pull response = %#v", pullResponse)
 	}
-	if imageOps.pullReq.ImageName != reference || imageOps.pullReq.Namespace != "team-a" || !imageOps.pullReq.SkipUnpack || !imageOps.pullReq.PlainHTTP {
+	if imageOps.pullReq.ImageName != reference || !imageOps.pullReq.SkipUnpack || !imageOps.pullReq.PlainHTTP {
 		t.Fatalf("image pull request = %#v", imageOps.pullReq)
 	}
-	if imageOps.inspectReferenceReq != (bootIndexReferenceCall{Namespace: "team-a", Reference: reference}) {
+	if imageOps.inspectReferenceReq != (bootIndexReferenceCall{Reference: reference}) {
 		t.Fatalf("reference inspect request = %#v", imageOps.inspectReferenceReq)
 	}
 	rec, err := store.GetTemplate(context.Background(), pullResponse.TemplateID)
@@ -76,7 +75,6 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 	pushBody, _ := json.Marshal(templatePushRequest{
 		TemplateID:      pullResponse.TemplateID,
 		RemoteReference: "mirror.example.invalid/conch/template:copy",
-		Namespace:       "team-a",
 		PlainHTTP:       true,
 		Username:        "push-user",
 		Password:        "push-pass",
@@ -88,7 +86,7 @@ func TestTemplatePullAndPushHandlersUseRegistryBootIndex(t *testing.T) {
 		t.Fatalf("push status = %d, body = %s", pushRecorder.Code, pushRecorder.Body.String())
 	}
 	if imageOps.pushBootIndexReq.BootIndexDigest != digest || imageOps.pushBootIndexReq.RemoteReference != "mirror.example.invalid/conch/template:copy" ||
-		imageOps.pushBootIndexReq.Namespace != "team-a" || !imageOps.pushBootIndexReq.PlainHTTP || imageOps.pushBootIndexReq.RegistryTimeout != "10m" {
+		!imageOps.pushBootIndexReq.PlainHTTP || imageOps.pushBootIndexReq.RegistryTimeout != "10m" {
 		t.Fatalf("Boot Index push request = %#v", imageOps.pushBootIndexReq)
 	}
 }

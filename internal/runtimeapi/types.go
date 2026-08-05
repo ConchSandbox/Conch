@@ -19,7 +19,6 @@ const (
 )
 
 type SandboxCreateOptions struct {
-	Namespace    string
 	SandboxID    string
 	LeaseID      string
 	TemplateID   string
@@ -41,7 +40,6 @@ type SandboxDefaults struct {
 
 type SandboxCreateResult struct {
 	SandboxID  string
-	Namespace  string
 	IP         string
 	AgentToken string
 	TemplateID string
@@ -51,7 +49,6 @@ type SandboxCreateResult struct {
 }
 
 type SandboxCheckpointOptions struct {
-	Namespace string
 	SandboxID string
 	Labels    map[string]string
 }
@@ -62,7 +59,6 @@ type SandboxCheckpointResult struct {
 }
 
 type TemplateCreateOptions struct {
-	Namespace    string
 	Source       string
 	KernelPath   string
 	InitrdPath   string
@@ -81,7 +77,6 @@ type TemplateCreateResult struct {
 
 type TemplatePullOptions struct {
 	Reference string
-	Namespace string
 	PlainHTTP bool
 	Username  string
 	Password  string
@@ -97,7 +92,6 @@ type TemplatePullResult struct {
 type TemplatePushOptions struct {
 	TemplateID      string
 	RemoteReference string
-	Namespace       string
 	PlainHTTP       bool
 	Username        string
 	Password        string
@@ -105,9 +99,8 @@ type TemplatePushOptions struct {
 }
 
 type TemplateListOptions struct {
-	Namespace string
-	Origin    string
-	BootMode  string
+	Origin   string
+	BootMode string
 }
 
 type TemplateRecord struct {
@@ -115,7 +108,6 @@ type TemplateRecord struct {
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
 	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
-	Namespace        string            `json:"namespace"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
@@ -126,7 +118,6 @@ type TemplateRecord struct {
 
 type PullImageOptions struct {
 	ImageName  string
-	Namespace  string
 	PlainHTTP  bool
 	Username   string
 	Password   string
@@ -140,7 +131,6 @@ type PullImageResult struct {
 type PushImageOptions struct {
 	LocalImage      string
 	RemoteImage     string
-	Namespace       string
 	PlainHTTP       bool
 	Username        string
 	Password        string
@@ -148,23 +138,19 @@ type PushImageOptions struct {
 }
 
 type ListImagesOptions struct {
-	Namespace string
-	Filters   []string
+	Filters []string
 }
 
 type RemoveImageOptions struct {
-	Namespace   string
 	ImageName   string
 	Synchronous bool
 }
 
 type UnpackImageOptions struct {
 	ImageName string
-	Namespace string
 }
 
 type ImportImageArchiveOptions struct {
-	Namespace   string
 	ImportedTag string
 }
 
@@ -174,7 +160,6 @@ type ImportImageArchiveResult struct {
 }
 
 type ExportImageArchiveOptions struct {
-	Namespace string
 	ImageName string
 }
 
@@ -191,18 +176,15 @@ type ImageRecord struct {
 }
 
 type ListSnapshotsOptions struct {
-	Namespace string
-	Filters   []string
+	Filters []string
 }
 
 type RemoveSnapshotOptions struct {
-	Namespace string
-	Key       string
+	Key string
 }
 
 type SnapshotInfoOptions struct {
-	Namespace string
-	Key       string
+	Key string
 }
 
 type SnapshotRecord struct {

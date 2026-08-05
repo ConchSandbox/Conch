@@ -8,10 +8,11 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	imageconverter "github.com/containerd/containerd/v2/core/images/converter"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/platforms"
 	toolkit "github.com/erofs/erofs-container-toolkit/pkg/converter"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
 
 type ToolkitConverter struct {
@@ -33,7 +34,7 @@ func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest
 		return ConvertRootfsResult{}, err
 	}
 
-	convertCtx := namespaces.WithNamespace(ctx, req.Namespace)
+	convertCtx := containerdclient.NewNamespaceContext(ctx)
 	converted, err := imageconverter.Convert(
 		convertCtx,
 		c.client,

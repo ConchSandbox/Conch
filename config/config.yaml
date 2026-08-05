@@ -38,7 +38,6 @@ network:
 containerd:
   root_dir: /var/lib/conch/containerd
   state_dir: /run/conch/containerd
-  default_namespace: default
 
 sandbox:
   vsock_signal_retry: 10ms

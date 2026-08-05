@@ -50,7 +50,7 @@ conch image push localhost/conch/openeuler:latest registry.example.com/conch/ope
 conch image unpack registry.example.com/conch/openeuler:latest
 ```
 
-这些命令会通过 conchd API 操作 conchd 进程内的 containerd store，支持通过配置读取 `server.unix_socket` 或 `server.host` / `server.port`，以及 `containerd.default_namespace`。使用 `--skip-unpack` 拉取后，可以稍后通过 `conch image unpack` 单独生成 snapshot。
+这些命令会通过 conchd API 操作 conchd 进程内的 containerd store，支持通过配置读取 `server.unix_socket` 或 `server.host` / `server.port`。使用 `--skip-unpack` 拉取后，可以稍后通过 `conch image unpack` 单独生成 snapshot。
 
 ## 3. conch image
 

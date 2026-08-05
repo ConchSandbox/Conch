@@ -18,7 +18,6 @@ from .errors import InvalidArgumentError, NotFoundError, SandboxError
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
-NAMESPACE_KEY = "namespace"
 TEMPLATE_ID_KEY = "template_id"
 VMM_NAME_KEY = "vmm_name"
 VCPU_NUM_KEY = "vcpu_num"
@@ -633,7 +632,6 @@ class Sandbox:
             self,
             sandbox_id: Optional[str] = None,
             template_id: Optional[str] = None,
-            namespace: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
@@ -651,7 +649,6 @@ class Sandbox:
 
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
-        self.namespace = namespace or ""
         # Template defaulting belongs to conchd. SDK configuration must not
         # override sandbox.default_template_id when the caller omits the ID.
         self.template_id = template_id
@@ -734,7 +731,6 @@ class Sandbox:
     def _build_create_payload(self) -> Dict[str, Any]:
         config = self._config[CFG_IMAGE_SECTION]
         payload = {
-            NAMESPACE_KEY: self.namespace,
             VMM_NAME_KEY: self._get_vmm_name(),
             SANDBOX_ID_KEY: self.sandbox_id,
             VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
@@ -753,7 +749,6 @@ class Sandbox:
         if not isinstance(record, dict):
             return
         self.sandbox_id = record.get("sandboxID") or self.sandbox_id
-        self.namespace = record.get(NAMESPACE_KEY) or self.namespace
         self.template_id = record.get("templateID") or self.template_id
         self.ip = record.get("domain") or self.ip
         if record.get("conchInitAccessToken"):
@@ -802,13 +797,12 @@ class Sandbox:
         target_id = sandbox_id if sandbox_id else self.sandbox_id
         if not target_id:
             raise RuntimeError("Cannot delete sandbox without sandbox_id")
-        params = {NAMESPACE_KEY: self.namespace} if self.namespace else None
         path = SANDBOX_DELETE_PATH_TEMPLATE.format(
             sandbox_id=quote(str(target_id), safe="")
         )
 
         try:
-            self._delete_control_plane_requests(path, params=params)
+            self._delete_control_plane_requests(path)
             return True
 
         except requests.exceptions.RequestException as e:
@@ -825,16 +819,11 @@ class Sandbox:
     @classmethod
     def list(
             cls,
-            namespace: Optional[str] = None,
             state: Optional[List[str]] = None,
             limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        sbx = cls(
-            namespace=namespace,
-        )
+        sbx = cls()
         params: Dict[str, Any] = {}
-        if sbx.namespace:
-            params[NAMESPACE_KEY] = sbx.namespace
         if state:
             params["state"] = state
         if limit is not None:
@@ -849,20 +838,15 @@ class Sandbox:
     def get(
             cls,
             sandbox_id: str,
-            namespace: Optional[str] = None,
     ) -> "Sandbox":
         if not sandbox_id:
             raise RuntimeError("Cannot get sandbox without sandbox_id")
-        sbx = cls(
-            sandbox_id=sandbox_id,
-            namespace=namespace,
-        )
+        sbx = cls(sandbox_id=sandbox_id)
         path = SANDBOX_GET_PATH_TEMPLATE.format(
             sandbox_id=quote(str(sandbox_id), safe="")
         )
-        params = {NAMESPACE_KEY: sbx.namespace} if sbx.namespace else None
         try:
-            sbx._apply_sandbox_record(sbx._get_control_plane_requests(path, params))
+            sbx._apply_sandbox_record(sbx._get_control_plane_requests(path))
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
         sbx.control_plane_only = sbx._client is None
@@ -871,17 +855,12 @@ class Sandbox:
     @staticmethod
     def delete_sandbox(
             sandbox_id: str,
-            namespace: Optional[str] = None,
     ):
-        sbx = Sandbox(
-            sandbox_id=sandbox_id,
-            namespace=namespace,
-        )
+        sbx = Sandbox(sandbox_id=sandbox_id)
         return sbx.delete(sandbox_id=sandbox_id)
 
     def checkpoint(self):
         payload = {
-            NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: self.sandbox_id,
         }
 
@@ -905,7 +884,6 @@ class Sandbox:
 
     def _lifecycle(self, path: str) -> bool:
         payload = {
-            NAMESPACE_KEY: self.namespace,
             SANDBOX_ID_KEY: self.sandbox_id,
         }
         try:
@@ -919,7 +897,6 @@ class Sandbox:
             cls,
             template_id: Optional[str] = None,
             sandbox_id: Optional[str] = None,
-            namespace: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
             ram_mb: Optional[int] = None,
@@ -929,7 +906,6 @@ class Sandbox:
         sbx = cls(
             sandbox_id=sandbox_id,
             template_id=template_id,
-            namespace=namespace,
             vcpu_num=vcpu_num,
             vcpu_max=vcpu_max,
             ram_mb=ram_mb,

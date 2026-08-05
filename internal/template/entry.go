@@ -34,7 +34,6 @@ type Entry struct {
 	Origin           Origin
 	BootMode         BootMode
 	BootIndexDigest  string
-	Namespace        string
 	ParentTemplateID string
 	SourceSandboxID  string
 	ImageName        string
@@ -75,7 +74,6 @@ func NormalizeEntry(entry Entry) (Entry, error) {
 		return Entry{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
 	}
 	entry.BootIndexDigest = parsed.String()
-	entry.Namespace = normalizeNamespace(entry.Namespace)
 	entry.ParentTemplateID = strings.TrimSpace(entry.ParentTemplateID)
 	entry.SourceSandboxID = strings.TrimSpace(entry.SourceSandboxID)
 	entry.ImageName = strings.TrimSpace(entry.ImageName)

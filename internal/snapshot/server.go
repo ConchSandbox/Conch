@@ -169,9 +169,6 @@ func NewServer(workDir string, daemonClient *containerdclient.Client) (*Server, 
 	}
 	erofsSn, err := snapshotter.NewContainerdSnap(
 		daemonClient.SnapshotService("erofs"),
-		daemonClient.NamespaceService(),
-		daemonClient.DefaultNamespace(),
-		snapshotter.WithNamespaceContext(daemonClient.WithNamespace),
 	)
 	if err != nil {
 		return nil, err
@@ -235,7 +232,7 @@ func (s *Server) getActiveRootfsPmem(ns, key string) []string {
 
 func (s *Server) removeRootfsSnapshot(namespace, key string) {
 	if s.snt != nil {
-		_ = s.snt.Remove(context.Background(), namespace, key)
+		_ = s.snt.Remove(context.Background(), key)
 	}
 	s.removeActiveSnapshot(namespace, key)
 }
@@ -268,9 +265,10 @@ func (s *Server) unmountPath(path string) error {
 // VMM-neutral memory layout for cold startup.
 func (s *Server) CreateBootLayout(
 	ctx context.Context,
-	namespace, key string,
+	key string,
 	req BootLayoutRequest,
 ) (_ *BootLayout, err error) {
+	namespace := containerdclient.Namespace
 	if si := s.getActiveSnapshot(namespace, key); si != nil {
 		return nil, fmt.Errorf("snapshot [%s:%s] existed", namespace, key)
 	}
@@ -381,9 +379,10 @@ func (s *Server) CreateBootLayout(
 // memory layer or a checkpoint view for restore.
 func (s *Server) RestoreBootLayout(
 	ctx context.Context,
-	namespace, key string,
+	key string,
 	req BootLayoutRequest,
 ) (_ *BootLayout, err error) {
+	namespace := containerdclient.Namespace
 	memoryLayout, err := normalizeMemoryLayout(req.MemoryLayout)
 	if err != nil {
 		return nil, err
@@ -506,7 +505,8 @@ func (s *Server) RestoreBootLayout(
 }
 
 // ReleaseBootLayout releases active snapshots and per-sandbox views for a runtime layout.
-func (s *Server) ReleaseBootLayout(ctx context.Context, namespace, key string) error {
+func (s *Server) ReleaseBootLayout(ctx context.Context, key string) error {
+	namespace := containerdclient.Namespace
 	memKey := getMemKeyFromRootfs(key)
 	var errs []error
 
@@ -545,11 +545,12 @@ func (s *Server) Close() error {
 }
 
 // SnapshotInfo returns snapshot metadata, preferring active runtime state.
-func (s *Server) SnapshotInfo(ctx context.Context, namespace, key string) (snapshots.Info, error) {
+func (s *Server) SnapshotInfo(ctx context.Context, key string) (snapshots.Info, error) {
+	namespace := containerdclient.Namespace
 	if info := s.getActiveSnapshot(namespace, key); info != nil {
 		return *info, nil
 	}
-	return s.snt.Stat(ctx, namespace, key)
+	return s.snt.Stat(ctx, key)
 }
 
 // withLabels creates a snapshot option with labels from layout metadata.

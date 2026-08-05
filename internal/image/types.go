@@ -13,7 +13,6 @@ var (
 
 type PrepareRootfsSourceOptions struct {
 	Source      string `json:"source"`
-	Namespace   string `json:"namespace,omitempty"`
 	TargetImage string `json:"target_image,omitempty"`
 	PlainHTTP   bool   `json:"plain_http,omitempty"`
 	Username    string `json:"username,omitempty"`
@@ -26,7 +25,6 @@ type PrepareRootfsSourceResult struct {
 }
 
 type PublishBootImageOptions struct {
-	Namespace       string `json:"namespace,omitempty"`
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`
 	InitrdPath      string `json:"initrd_path"`
@@ -56,7 +54,6 @@ type BootIndexInfo struct {
 // sandbox components. MemRoot is a self-contained directory whose artifact
 // layout is defined by VMMName.
 type PublishCheckpointBootImageOptions struct {
-	Namespace             string `json:"namespace,omitempty"`
 	SourceBootIndexDigest string `json:"source_boot_index_digest"`
 	BootIndexTag          string `json:"boot_index_tag"`
 	MemRoot               string `json:"mem_root"`
@@ -75,7 +72,6 @@ type PublishCheckpointBootImageResult struct {
 // immutable Boot Index digest. RemoteReference is only the registry name
 // assigned at the destination and never participates in content identity.
 type PushBootIndexOptions struct {
-	Namespace       string `json:"namespace,omitempty"`
 	BootIndexDigest string `json:"boot_index_digest"`
 	RemoteReference string `json:"remote_reference"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`

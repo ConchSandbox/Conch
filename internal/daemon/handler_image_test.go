@@ -19,7 +19,7 @@ func TestHandlePullImageForwardsTargetImageOptions(t *testing.T) {
 	svc := &fakeImageService{results: map[string]string{"rootfs": "rootfs-id"}}
 	server := newImageHandlerServer(svc)
 
-	body := bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest","namespace":"team-a","plain_http":true,"username":"user","password":"pass","skip_unpack":true}`)
+	body := bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest","plain_http":true,"username":"user","password":"pass","skip_unpack":true}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", body)
 	server.router.ServeHTTP(rec, req)
@@ -28,7 +28,6 @@ func TestHandlePullImageForwardsTargetImageOptions(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if svc.pullReq.ImageName != "docker.io/library/nginx:latest" ||
-		svc.pullReq.Namespace != "team-a" ||
 		!svc.pullReq.PlainHTTP ||
 		svc.pullReq.Username != "user" ||
 		svc.pullReq.Password != "pass" ||
@@ -50,7 +49,7 @@ func TestHandleUnpackImage(t *testing.T) {
 	svc := &fakeImageService{results: map[string]string{"sandbox": "vm-id"}}
 	server := newImageHandlerServer(svc)
 
-	body := bytes.NewBufferString(`{"image_name":"hub.oepkgs.net/conch/conch-index:v0.1","namespace":"default"}`)
+	body := bytes.NewBufferString(`{"image_name":"hub.oepkgs.net/conch/conch-index:v0.1"}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/unpack", body)
 	server.router.ServeHTTP(rec, req)
@@ -75,12 +74,12 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 	server := newImageHandlerServer(svc)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/list", bytes.NewBufferString(`{"namespace":"team-a","filters":["name==localhost/conch/demo:latest"]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/image/list", bytes.NewBufferString(`{"filters":["name==localhost/conch/demo:latest"]}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.listReq.Namespace != "team-a" || len(svc.listReq.Filters) != 1 {
+	if len(svc.listReq.Filters) != 1 {
 		t.Fatalf("list request = %#v", svc.listReq)
 	}
 	var listResp listImageResponse
@@ -98,12 +97,12 @@ func TestHandleListAndRemoveImage(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/image/remove", bytes.NewBufferString(`{"namespace":"team-a","image_name":"localhost/conch/demo:latest","synchronous":true}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/image/remove", bytes.NewBufferString(`{"image_name":"localhost/conch/demo:latest","synchronous":true}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remove status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.removeReq.Namespace != "team-a" || svc.removeReq.ImageName != "localhost/conch/demo:latest" || !svc.removeReq.Synchronous {
+	if svc.removeReq.ImageName != "localhost/conch/demo:latest" || !svc.removeReq.Synchronous {
 		t.Fatalf("remove request = %#v", svc.removeReq)
 	}
 }

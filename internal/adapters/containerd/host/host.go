@@ -36,18 +36,16 @@ const (
 	PluginID   = conchplugins.HostPluginID
 	PluginURI  = conchplugins.HostPluginURI
 
-	defaultNamespace = "default"
-	startTimeout     = 10 * time.Second
+	startTimeout = 10 * time.Second
 )
 
 type Config struct {
-	RootDir          string
-	StateDir         string
-	DefaultNamespace string
-	Image            ImageConfig
-	Snapshot         SnapshotConfig
-	TemplateStore    state.Store
-	Sandbox          *SandboxConfig
+	RootDir       string
+	StateDir      string
+	Image         ImageConfig
+	Snapshot      SnapshotConfig
+	TemplateStore state.Store
+	Sandbox       *SandboxConfig
 }
 
 type ImageConfig struct {
@@ -153,9 +151,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	if cfg.StateDir == "" {
 		return nil, errors.New("containerd state dir is required")
 	}
-	if cfg.DefaultNamespace == "" {
-		cfg.DefaultNamespace = defaultNamespace
-	}
 	if cfg.Sandbox != nil && cfg.TemplateStore == nil {
 		return nil, errors.New("template store is required when sandbox service is enabled")
 	}
@@ -209,9 +204,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	pluginConfigs := map[string]any{
-		PluginURI: map[string]any{
-			"default_namespace": cfg.DefaultNamespace,
-		},
 		conchplugins.ImageServiceURI: imagePluginConfig(cfg.Image),
 		string(plugins.ServicePlugin) + "." + services.DiffService: map[string]any{
 			"default": []string{"erofs", "walking"},
@@ -312,7 +304,6 @@ func imagePluginConfig(cfg ImageConfig) map[string]any {
 }
 
 type bootstrapConfig struct {
-	DefaultNamespace string `toml:"default_namespace" json:"defaultNamespace"`
 }
 
 type bootstrapInstance struct {
@@ -361,12 +352,7 @@ func init() {
 			plugins.ServicePlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
-			cfg := ic.Config.(*bootstrapConfig)
-			ns := cfg.DefaultNamespace
-			if ns == "" {
-				ns = defaultNamespace
-			}
-			client, err := containerdclient.NewInMemory(ic, containerd.WithDefaultNamespace(ns))
+			client, err := containerdclient.NewInMemory(ic, containerd.WithDefaultNamespace(containerdclient.Namespace))
 			if err != nil {
 				return nil, err
 			}

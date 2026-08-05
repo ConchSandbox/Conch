@@ -152,7 +152,6 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 
 	return []Device{{
 		SandboxID:  req.SandboxID,
-		Namespace:  req.Namespace,
 		Backend:    b.Name(),
 		Tag:        virtiofsTag,
 		Socket:     socket,
@@ -169,7 +168,7 @@ func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
 	return []string{"--socket-path", socket, "--shared-dir", volumeDir}
 }
 
-func (b *virtiofsBackend) Cleanup(namespace, sandboxID string, devices []Device) error {
+func (b *virtiofsBackend) Cleanup(sandboxID string, devices []Device) error {
 	var errs []error
 
 	if v, ok := b.procs.LoadAndDelete(sandboxID); ok {

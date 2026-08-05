@@ -20,7 +20,6 @@ type RootfsErofsConverter interface {
 }
 
 type ConvertRootfsRequest struct {
-	Namespace   string   `json:"namespace,omitempty"`
 	SourceImage string   `json:"source_image"`
 	TargetImage string   `json:"target_image"`
 	MkfsOptions []string `json:"mkfs_options,omitempty"`
@@ -41,12 +40,8 @@ type ErofsLayer struct {
 }
 
 func NormalizeRequest(req ConvertRootfsRequest) (ConvertRootfsRequest, error) {
-	req.Namespace = strings.TrimSpace(req.Namespace)
 	req.SourceImage = strings.TrimSpace(req.SourceImage)
 	req.TargetImage = strings.TrimSpace(req.TargetImage)
-	if req.Namespace == "" {
-		return ConvertRootfsRequest{}, fmt.Errorf("namespace is required")
-	}
 	if req.SourceImage == "" {
 		return ConvertRootfsRequest{}, fmt.Errorf("source image is required")
 	}

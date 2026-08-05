@@ -11,7 +11,6 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/snapshots"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -77,15 +76,8 @@ func (locks *keyedUnpackLocks) acquire(ctx context.Context, key string) (func(),
 	}
 }
 
-func bootIndexUnpackKey(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) string {
-	namespace, ok := namespaces.Namespace(ctx)
-	if !ok || namespace == "" {
-		namespace = client.DefaultNamespace()
-	}
-	if namespace == "" {
-		namespace = namespaces.Default
-	}
-	return namespace + "\x00" + desc.Digest.String()
+func bootIndexUnpackKey(desc ocispec.Descriptor) string {
+	return desc.Digest.String()
 }
 
 // UnpackAllSubImages parses OCI Image Index, unpacks all child manifests,
@@ -136,7 +128,7 @@ func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Cl
 	if client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
-	release, err := bootIndexUnpackLocks.acquire(ctx, bootIndexUnpackKey(ctx, client, indexDesc))
+	release, err := bootIndexUnpackLocks.acquire(ctx, bootIndexUnpackKey(indexDesc))
 	if err != nil {
 		return nil, fmt.Errorf("wait to unpack boot index %s: %w", indexDesc.Digest, err)
 	}

@@ -155,17 +155,15 @@ func (f *fakeImageService) PublishBootImage(_ context.Context, req conchimage.Pu
 }
 
 type bootIndexCall struct {
-	Namespace       string
 	BootIndexDigest string
 }
 
 type bootIndexReferenceCall struct {
-	Namespace string
 	Reference string
 }
 
-func (f *fakeImageService) InspectBootIndex(_ context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
-	f.inspectReq = bootIndexCall{Namespace: namespace, BootIndexDigest: bootIndexDigest}
+func (f *fakeImageService) InspectBootIndex(_ context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+	f.inspectReq = bootIndexCall{BootIndexDigest: bootIndexDigest}
 	result := f.inspectResp
 	if result.BootIndexDigest == "" {
 		result.BootIndexDigest = bootIndexDigest
@@ -182,8 +180,8 @@ func (f *fakeImageService) InspectBootIndex(_ context.Context, namespace, bootIn
 	return result, f.inspectErr
 }
 
-func (f *fakeImageService) InspectBootIndexReference(_ context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {
-	f.inspectReferenceReq = bootIndexReferenceCall{Namespace: namespace, Reference: reference}
+func (f *fakeImageService) InspectBootIndexReference(_ context.Context, reference string) (conchimage.BootIndexInfo, error) {
+	f.inspectReferenceReq = bootIndexReferenceCall{Reference: reference}
 	return f.inspectReferenceResp, f.inspectReferenceErr
 }
 
@@ -235,7 +233,7 @@ func (f *fakeImageService) ConvertRootfsToErofs(_ context.Context, req erofsconv
 }
 
 func newRuntimeForTest(image conchruntime.ImageOps, templateBootIndex conchruntime.TemplateBootIndexOps, snapshot conchruntime.SnapshotOps, sandboxOps conchruntime.SandboxOps) *conchruntime.Service {
-	rt := conchruntime.New(sandboxOps, image, templateBootIndex, nil, "default")
+	rt := conchruntime.New(sandboxOps, image, templateBootIndex, nil)
 	rt.Snapshot = snapshot
 	return rt
 }
@@ -302,10 +300,10 @@ func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult
 		return sandbox.CreateResult{}, f.createErr
 	}
 	return sandbox.CreateResult{
-		IP:         "192.0.2.2",
-		AgentToken: req.AgentToken,
-		Namespace:  req.Namespace,
-		SandboxID:  req.SandboxID,
+		IP:              "192.0.2.2",
+		AgentToken:      req.AgentToken,
+		SandboxID:       req.SandboxID,
+		BootIndexDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}, nil
 }
 
@@ -436,7 +434,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, nil, store, "default")
+	runtimeService := conchruntime.New(sandboxOps, nil, nil, store)
 	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateID: "tmpl-default",
 		VCPUNum:    4,
@@ -451,12 +449,13 @@ func TestSandboxV1Handlers(t *testing.T) {
 	server.routes()
 
 	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-		SandboxID:        "sandbox-1",
-		Namespace:        "default",
-		State:            state.SandboxReady,
-		SourceTemplateID: "tmpl-1",
-		VCPUNum:          2,
-		RamMB:            128,
+		SandboxID:                     "sandbox-1",
+		State:                         state.SandboxReady,
+		SourceTemplateID:              "tmpl-1",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		VCPUNum:                       2,
+		RamMB:                         128,
 	}); err != nil {
 		t.Fatalf("seed sandbox: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
@@ -22,9 +23,8 @@ func TestCreateBootLayout(t *testing.T) {
 	}
 
 	host, err := containerdhost.Start(context.Background(), containerdhost.Config{
-		RootDir:          t.TempDir(),
-		StateDir:         t.TempDir(),
-		DefaultNamespace: "default",
+		RootDir:  t.TempDir(),
+		StateDir: t.TempDir(),
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: t.TempDir(),
 		},
@@ -41,11 +41,11 @@ func TestCreateBootLayout(t *testing.T) {
 	}
 	defer server.Close()
 
-	ns := "default"
+	ns := containerdclient.Namespace
 	rootfsParent := "test-rootfs-parent"
 	memParent := "test-mem-parent"
 	vmParent := "test-vm-parent"
-	parentCtx, err := host.Client().WithNamespace(context.Background(), ns)
+	parentCtx, err := host.Client().WithNamespace(context.Background())
 	if err != nil {
 		t.Fatalf("create namespace session: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestCreateBootLayout(t *testing.T) {
 		Mem:    memParent,
 		VM:     vmParent,
 	}
-	layout, err := server.CreateBootLayout(context.Background(), ns, key, snapshot.BootLayoutRequest{
+	layout, err := server.CreateBootLayout(context.Background(), key, snapshot.BootLayoutRequest{
 		Parents:      parents,
 		MemoryLayout: snapshot.MemoryLayoutWritableFile,
 	})
@@ -87,13 +87,13 @@ func TestCreateBootLayout(t *testing.T) {
 	activePrepared := true
 	defer func() {
 		if activePrepared {
-			_ = server.ReleaseBootLayout(context.Background(), ns, key)
+			_ = server.ReleaseBootLayout(context.Background(), key)
 		}
 	}()
 	t.Logf("create layout result: %v\n", layout)
 
 	t.Logf("run release active layout: %s\n", key)
-	if err := server.ReleaseBootLayout(context.Background(), ns, key); err != nil {
+	if err := server.ReleaseBootLayout(context.Background(), key); err != nil {
 		t.Fatalf("release layout failed: %v\n", err)
 	}
 	activePrepared = false

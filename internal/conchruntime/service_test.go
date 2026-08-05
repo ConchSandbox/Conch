@@ -24,6 +24,7 @@ type fakeSandboxOps struct {
 	checkpointErr      error
 	createResult       sandbox.CreateResult
 	createErr          error
+	createCalls        int
 	deleteErr          error
 }
 
@@ -44,11 +45,9 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
+	f.createCalls++
 	f.req = req
 	result := f.createResult
-	if result.Namespace == "" {
-		result.Namespace = req.Namespace
-	}
 	if result.SandboxID == "" {
 		result.SandboxID = req.SandboxID
 	}
@@ -101,12 +100,11 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		ImageName:       "localhost/conch/checkpoints:t1",
 	}}}
 	store := newTestStore(t)
-	svc := New(sandboxOps, imageOps, imageOps, store, "default")
-	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, conchtemplate.BootModeCold)
+	svc := New(sandboxOps, imageOps, imageOps, store)
+	seedTemplate(t, ctx, svc.Templates, "t0", t0Digest, conchtemplate.BootModeCold)
 
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-a",
-		Namespace:                     "team-a",
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: t0Digest,
 	}
@@ -115,7 +113,6 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 
 	result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
-		Namespace: "team-a",
 		SandboxID: "sandbox-a",
 		Labels:    map[string]string{"generation": "t1"},
 	})
@@ -131,7 +128,6 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	// Generation identity and parent snapshot IDs are deliberately absent from
 	// the runtime capture seam; it receives only the sandbox identity.
 	if got, want := sandboxOps.checkpointRequests[0], (sandbox.CheckpointRequest{
-		Namespace: "team-a",
 		SandboxID: "sandbox-a",
 	}); got != want {
 		t.Fatalf("checkpoint request = %#v, want %#v", got, want)
@@ -140,7 +136,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		t.Fatalf("checkpoint publish calls = %#v, want one", imageOps.checkpointCalls)
 	}
 	publish := imageOps.checkpointCalls[0]
-	if publish.Namespace != "team-a" || publish.SourceBootIndexDigest != t0Digest {
+	if publish.SourceBootIndexDigest != t0Digest {
 		t.Fatalf("checkpoint publish source = %#v", publish)
 	}
 	if publish.BootIndexTag != "localhost/conch/template:"+result.TemplateID ||
@@ -193,11 +189,10 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 		inspectErr: errors.New("invalid checkpoint boot index"),
 	}
 	store := newTestStore(t)
-	svc := New(sandboxOps, imageOps, imageOps, store, "default")
-	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", sourceDigest, conchtemplate.BootModeCold)
+	svc := New(sandboxOps, imageOps, imageOps, store)
+	seedTemplate(t, ctx, svc.Templates, "t0", sourceDigest, conchtemplate.BootModeCold)
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-validation-failure",
-		Namespace:                     "team-a",
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: sourceDigest,
 	}
@@ -206,7 +201,6 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	}
 
 	if _, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
-		Namespace: "team-a",
 		SandboxID: before.SandboxID,
 	}); err == nil {
 		t.Fatal("CheckpointSandbox() error = nil, want validation failure")
@@ -243,22 +237,21 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 		{BootIndexDigest: t2Digest, ImageName: "localhost/conch/checkpoints:t2"},
 	}}
 	store := newTestStore(t)
-	svc := New(sandboxOps, imageOps, imageOps, store, "default")
-	seedTemplate(t, ctx, svc.Templates, "t0", "team-a", t0Digest, conchtemplate.BootModeCold)
+	svc := New(sandboxOps, imageOps, imageOps, store)
+	seedTemplate(t, ctx, svc.Templates, "t0", t0Digest, conchtemplate.BootModeCold)
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-lineage",
-		Namespace:                     "team-a",
 		CheckpointHeadTemplateID:      "t0",
 		CheckpointHeadBootIndexDigest: t0Digest,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
-	t1Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", SandboxID: "sandbox-lineage"})
+	t1Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{SandboxID: "sandbox-lineage"})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox(t1) error = %v", err)
 	}
-	t2Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{Namespace: "team-a", SandboxID: "sandbox-lineage"})
+	t2Result, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{SandboxID: "sandbox-lineage"})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox(t2) error = %v", err)
 	}
@@ -318,7 +311,6 @@ func TestRemoveSandboxKeepsRecordWhenCleanupFails(t *testing.T) {
 
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-1",
-		Namespace:                     "default",
 		CheckpointHeadTemplateID:      "tmpl-1",
 		CheckpointHeadBootIndexDigest: digest.FromString("sandbox-1-head").String(),
 	}
@@ -327,8 +319,8 @@ func TestRemoveSandboxKeepsRecordWhenCleanupFails(t *testing.T) {
 	}
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("cleanup failed")}
-	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.RemoveSandbox(ctx, "default", "sandbox-1"); err == nil {
+	svc := New(sandboxOps, nil, nil, store)
+	if err := svc.RemoveSandbox(ctx, "sandbox-1"); err == nil {
 		t.Fatalf("RemoveSandbox() error = nil, want cleanup error")
 	}
 	rec, err := store.GetSandbox(ctx, "sandbox-1")
@@ -345,8 +337,8 @@ func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	store := newTestStore(t)
 
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
-	svc := New(sandboxOps, nil, nil, store, "default")
-	if err := svc.RemoveSandbox(ctx, "default", "missing-sandbox"); err != nil {
+	svc := New(sandboxOps, nil, nil, store)
+	if err := svc.RemoveSandbox(ctx, "missing-sandbox"); err != nil {
 		t.Fatalf("RemoveSandbox() error = %v", err)
 	}
 
@@ -360,7 +352,6 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	store := newTestStore(t)
 	rec := state.SandboxRecord{
 		SandboxID:                     "sandbox-serialized",
-		Namespace:                     "default",
 		CheckpointHeadTemplateID:      "tmpl-1",
 		CheckpointHeadBootIndexDigest: digest.FromString("sandbox-serialized-head").String(),
 	}
@@ -371,13 +362,13 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 		firstEntered: make(chan struct{}),
 		releaseFirst: make(chan struct{}),
 	}
-	svc := New(ops, nil, nil, store, "default")
+	svc := New(ops, nil, nil, store)
 
 	firstDone := make(chan error, 1)
 	secondDone := make(chan error, 1)
-	go func() { firstDone <- svc.RemoveSandbox(ctx, "default", rec.SandboxID) }()
+	go func() { firstDone <- svc.RemoveSandbox(ctx, rec.SandboxID) }()
 	<-ops.firstEntered
-	go func() { secondDone <- svc.RemoveSandbox(ctx, "default", rec.SandboxID) }()
+	go func() { secondDone <- svc.RemoveSandbox(ctx, rec.SandboxID) }()
 	select {
 	case err := <-secondDone:
 		t.Fatalf("second RemoveSandbox returned before first completed: %v", err)
@@ -398,7 +389,7 @@ func TestConcurrentRemoveSandboxCallsAreSerialized(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxStoresOnlyCheckpointMetadata(t *testing.T) {
+func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	bootIndexDigest := digest.FromString("sandbox-1-boot-index").String()
@@ -408,12 +399,13 @@ func TestCreateSandboxStoresOnlyCheckpointMetadata(t *testing.T) {
 			BootIndexDigest: bootIndexDigest,
 		},
 	}
-	svc := New(sandboxOps, nil, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store)
 
-	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+	result, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
@@ -423,9 +415,12 @@ func TestCreateSandboxStoresOnlyCheckpointMetadata(t *testing.T) {
 	}
 	want := state.SandboxRecord{
 		SandboxID:                     "sandbox-1",
-		Namespace:                     "default",
+		State:                         state.SandboxReady,
+		CreatedAt:                     result.CreatedAt,
+		SourceTemplateID:              "tmpl-1",
 		CheckpointHeadTemplateID:      "tmpl-1",
 		CheckpointHeadBootIndexDigest: bootIndexDigest,
+		IP:                            result.IP,
 	}
 	if rec != want {
 		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
@@ -435,7 +430,7 @@ func TestCreateSandboxStoresOnlyCheckpointMetadata(t *testing.T) {
 func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
-	svc := New(&fakeSandboxOps{createErr: errors.New("create failed")}, nil, nil, store, "default")
+	svc := New(&fakeSandboxOps{createErr: errors.New("create failed")}, nil, nil, store)
 
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
@@ -448,9 +443,34 @@ func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsExistingGlobalIDBeforeRuntimeCreate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		CheckpointHeadTemplateID:      "tmpl-existing",
+		CheckpointHeadBootIndexDigest: digest.FromString("existing-sandbox").String(),
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() seed error = %v", err)
+	}
+	ops := &fakeSandboxOps{}
+	svc := New(ops, nil, nil, store)
+
+	_, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-new",
+	})
+	if !errors.Is(err, ErrSandboxAlreadyExists) {
+		t.Fatalf("CreateSandbox() error = %v, want ErrSandboxAlreadyExists", err)
+	}
+	if ops.createCalls != 0 {
+		t.Fatalf("runtime Create() calls = %d, want 0", ops.createCalls)
+	}
+}
+
 func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	svc := New(sandboxOps, nil, nil, nil, "default")
+	svc := New(sandboxOps, nil, nil, nil)
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: "tmpl_default",
 		VMMName:    "cloud-hypervisor",
@@ -494,7 +514,7 @@ func TestCreateSandboxRejectsMissingOrWhitespaceDefaultTemplate(t *testing.T) {
 	for _, defaultTemplate := range []string{"", " \t "} {
 		t.Run(fmt.Sprintf("default %q", defaultTemplate), func(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
-			svc := New(sandboxOps, nil, nil, nil, "default")
+			svc := New(sandboxOps, nil, nil, nil)
 			svc.SetSandboxDefaults(SandboxDefaults{TemplateID: defaultTemplate})
 
 			_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: " \n "})
@@ -513,7 +533,7 @@ func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{createResult: sandbox.CreateResult{
 		BootIndexDigest: digest.FromString("generated-sandbox-boot-index").String(),
 	}}
-	svc := New(sandboxOps, nil, nil, store, "default")
+	svc := New(sandboxOps, nil, nil, store)
 	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
 
 	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: "tmpl-1"})
@@ -534,7 +554,7 @@ func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
 
 func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	svc := New(sandboxOps, nil, nil, nil, "default")
+	svc := New(sandboxOps, nil, nil, nil)
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: "tmpl_default",
 		VMMName:    "default-vmm",
@@ -609,7 +629,6 @@ func seedTemplate(
 	ctx context.Context,
 	templates conchtemplate.Store,
 	id string,
-	namespace string,
 	bootIndexDigest string,
 	bootMode conchtemplate.BootMode,
 ) {
@@ -619,7 +638,6 @@ func seedTemplate(
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        bootMode,
 		BootIndexDigest: bootIndexDigest,
-		Namespace:       namespace,
 		BuildRef:        "localhost/conch/templates:" + id,
 	}); err != nil {
 		t.Fatalf("CreateTemplate(%s) error = %v", id, err)

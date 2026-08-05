@@ -14,13 +14,12 @@ import (
 
 func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T) {
 	ctx := context.Background()
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, "team-a", template.BootModeCold)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, template.BootModeCold)
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, false, "")}
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	got, err := preparer.Prepare(ctx, PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
@@ -29,12 +28,12 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	assertBootResolverRequest(t, resolver.requests, "team-a", bootDigest)
+	assertBootResolverRequest(t, resolver.requests, bootDigest)
 	if len(snapshots.creates) != 1 || len(snapshots.restores) != 0 {
 		t.Fatalf("snapshot calls: creates=%#v restores=%#v", snapshots.creates, snapshots.restores)
 	}
 	call := snapshots.creates[0]
-	if call.namespace != "team-a" || call.key != "sandbox-a" || call.memorySizeMB != 512 {
+	if call.key != "sandbox-a" || call.memorySizeMB != 512 {
 		t.Fatalf("cold create call = %#v", call)
 	}
 	if call.memoryLayout != snapshot.MemoryLayoutWritableFile {
@@ -56,12 +55,11 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 
 func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	ctx := context.Background()
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, "team-a", template.BootModeCold)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, template.BootModeCold)
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, false, "")}
 	snapshots := &fakeSnapshotBackend{}
 
 	got, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(ctx, PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-stratovirt",
 		VMMName:    "stratovirt",
@@ -86,13 +84,12 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 
 func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	ctx := context.Background()
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, "team-a", template.BootModeResume)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, true, "cloud-hypervisor")}
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	got, err := preparer.Prepare(ctx, PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
@@ -100,12 +97,12 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	assertBootResolverRequest(t, resolver.requests, "team-a", bootDigest)
+	assertBootResolverRequest(t, resolver.requests, bootDigest)
 	if len(snapshots.restores) != 1 || len(snapshots.creates) != 0 {
 		t.Fatalf("snapshot calls: creates=%#v restores=%#v", snapshots.creates, snapshots.restores)
 	}
 	call := snapshots.restores[0]
-	if call.namespace != "team-a" || call.key != "sandbox-a" {
+	if call.key != "sandbox-a" {
 		t.Fatalf("restore call = %#v", call)
 	}
 	if call.memoryLayout != snapshot.MemoryLayoutWritableFile || call.memorySizeMB != 256 {
@@ -122,37 +119,17 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	}
 }
 
-func TestBootPreparerRejectsTemplateNamespaceMismatchBeforeDigestResolution(t *testing.T) {
-	templates, entry, _ := newBootTemplate(t, template.OriginImage, "team-a", template.BootModeCold)
-	resolver := &fakeBootResolver{}
-	snapshots := &fakeSnapshotBackend{}
-
-	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		Namespace:  "team-b",
-		TemplateID: entry.ID,
-		SandboxID:  "sandbox-a",
-	})
-	if err == nil || !strings.Contains(err.Error(), "belongs to namespace team-a, not team-b") {
-		t.Fatalf("Prepare() error = %v, want namespace mismatch", err)
-	}
-	if len(resolver.requests) != 0 || snapshots.callCount() != 0 {
-		t.Fatalf("backends called after namespace mismatch: resolver=%#v snapshots=%#v", resolver.requests, snapshots)
-	}
-}
-
 func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	entry := template.Entry{
-		ID:        "tmpl_missing",
-		Origin:    template.OriginImage,
-		Namespace: "team-a",
-		BootMode:  template.BootModeCold,
+		ID:       "tmpl_missing",
+		Origin:   template.OriginImage,
+		BootMode: template.BootModeCold,
 	}
 	templates := &fakeTemplateReader{entry: entry}
 	resolver := &fakeBootResolver{}
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-a",
 	})
@@ -174,7 +151,7 @@ func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 		{name: "cached resume resolved cold", cachedMode: template.BootModeResume, resolvedMode: template.BootModeCold},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, "team-a", tt.cachedMode)
+			templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, tt.cachedMode)
 			resume := tt.resolvedMode == template.BootModeResume
 			vmmName := ""
 			if resume {
@@ -183,7 +160,6 @@ func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 			resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, resume, vmmName)}
 			snapshots := &fakeSnapshotBackend{}
 			_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-				Namespace:  "team-a",
 				TemplateID: entry.ID,
 				SandboxID:  "sandbox-a",
 			})
@@ -198,12 +174,11 @@ func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 }
 
 func TestBootPreparerRejectsResumeVMMMismatch(t *testing.T) {
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, "team-a", template.BootModeResume)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, true, "cloud-hypervisor")}
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
@@ -217,13 +192,12 @@ func TestBootPreparerRejectsResumeVMMMismatch(t *testing.T) {
 }
 
 func TestBootPreparerRejectsStratovirtResumeWithoutMemorySize(t *testing.T) {
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, "team-a", template.BootModeResume)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
 	resolved := resolvedBoot(bootDigest, true, "stratovirt")
 	resolved.MemorySizeMB = 0
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}).Prepare(context.Background(), PrepareBootRequest{
-		Namespace:  "team-a",
 		TemplateID: entry.ID,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
@@ -238,19 +212,19 @@ func TestBootPreparerRejectsStratovirtResumeWithoutMemorySize(t *testing.T) {
 
 func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *testing.T) {
 	ctx := context.Background()
-	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, "team-a", template.BootModeResume)
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, true, "stratovirt")}
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	first, err := preparer.Prepare(ctx, PrepareBootRequest{
-		Namespace: "team-a", TemplateID: entry.ID, SandboxID: "sandbox-a", VMMName: "stratovirt",
+		TemplateID: entry.ID, SandboxID: "sandbox-a", VMMName: "stratovirt",
 	})
 	if err != nil {
 		t.Fatalf("first Prepare() error = %v", err)
 	}
 	second, err := preparer.Prepare(ctx, PrepareBootRequest{
-		Namespace: "team-a", TemplateID: entry.ID, SandboxID: "sandbox-b", VMMName: "stratovirt",
+		TemplateID: entry.ID, SandboxID: "sandbox-b", VMMName: "stratovirt",
 	})
 	if err != nil {
 		t.Fatalf("second Prepare() error = %v", err)
@@ -297,7 +271,6 @@ func (f *fakeTemplateReader) Get(_ context.Context, id string) (template.Entry, 
 }
 
 type bootResolverCall struct {
-	Namespace       string
 	BootIndexDigest string
 }
 
@@ -307,8 +280,8 @@ type fakeBootResolver struct {
 	requests []bootResolverCall
 }
 
-func (f *fakeBootResolver) ResolveBoot(_ context.Context, namespace, bootIndexDigest string) (ResolvedBoot, error) {
-	f.requests = append(f.requests, bootResolverCall{Namespace: namespace, BootIndexDigest: bootIndexDigest})
+func (f *fakeBootResolver) ResolveBoot(_ context.Context, bootIndexDigest string) (ResolvedBoot, error) {
+	f.requests = append(f.requests, bootResolverCall{BootIndexDigest: bootIndexDigest})
 	if f.err != nil {
 		return ResolvedBoot{}, f.err
 	}
@@ -316,7 +289,6 @@ func (f *fakeBootResolver) ResolveBoot(_ context.Context, namespace, bootIndexDi
 }
 
 type bootLayoutCall struct {
-	namespace    string
 	key          string
 	parents      snapshot.ParentSnapshotIDs
 	memoryLayout snapshot.MemoryLayoutMode
@@ -332,9 +304,8 @@ type fakeSnapshotBackend struct {
 	releases []bootLayoutCall
 }
 
-func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, namespace, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
+func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
 	f.creates = append(f.creates, bootLayoutCall{
-		namespace:    namespace,
 		key:          key,
 		parents:      req.Parents,
 		memoryLayout: req.MemoryLayout,
@@ -343,9 +314,8 @@ func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, namespace, key
 	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
 }
 
-func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, namespace, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
+func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
 	f.restores = append(f.restores, bootLayoutCall{
-		namespace:    namespace,
 		key:          key,
 		parents:      req.Parents,
 		memoryLayout: req.MemoryLayout,
@@ -354,8 +324,8 @@ func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, namespace, ke
 	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
 }
 
-func (f *fakeSnapshotBackend) ReleaseBootLayout(_ context.Context, namespace, key string) error {
-	f.releases = append(f.releases, bootLayoutCall{namespace: namespace, key: key})
+func (f *fakeSnapshotBackend) ReleaseBootLayout(_ context.Context, key string) error {
+	f.releases = append(f.releases, bootLayoutCall{key: key})
 	return nil
 }
 
@@ -378,7 +348,7 @@ func resolvedBoot(bootDigest string, resume bool, vmmName string) ResolvedBoot {
 	return result
 }
 
-func newBootTemplate(t *testing.T, origin template.Origin, namespace string, mode template.BootMode) (*fakeTemplateReader, template.Entry, string) {
+func newBootTemplate(t *testing.T, origin template.Origin, mode template.BootMode) (*fakeTemplateReader, template.Entry, string) {
 	t.Helper()
 	bootDigest := digest.FromString(t.Name() + "/" + string(origin) + "/" + string(mode)).String()
 	entry := template.Entry{
@@ -386,7 +356,6 @@ func newBootTemplate(t *testing.T, origin template.Origin, namespace string, mod
 		Origin:          origin,
 		BootMode:        mode,
 		BootIndexDigest: bootDigest,
-		Namespace:       namespace,
 	}
 	return &fakeTemplateReader{entry: entry}, entry, bootDigest
 }
@@ -400,12 +369,12 @@ func mustBootPreparer(t *testing.T, templates TemplateReader, snapshots Snapshot
 	return preparer
 }
 
-func assertBootResolverRequest(t *testing.T, requests []bootResolverCall, namespace, bootDigest string) {
+func assertBootResolverRequest(t *testing.T, requests []bootResolverCall, bootDigest string) {
 	t.Helper()
 	if len(requests) != 1 {
 		t.Fatalf("ResolveBoot() calls = %#v, want one", requests)
 	}
-	if requests[0].Namespace != namespace || requests[0].BootIndexDigest != bootDigest {
+	if requests[0].BootIndexDigest != bootDigest {
 		t.Fatalf("ResolveBoot() request = %#v", requests[0])
 	}
 }

@@ -47,7 +47,7 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ### 创建沙箱
 
 ```python
-Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
+Sandbox.create(template_id=None, sandbox_id=None,
                vcpu_num=None, vcpu_max=None, ram_mb=None,
                volume_mounts=None, env=None) -> Sandbox
 ```
@@ -59,7 +59,6 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
 **参数：**
 - `template_id` (str, 可选): 要启动的 `tmpl_xxx`；省略时使用 conchd 默认 Template
 - `sandbox_id` (str, 可选): 指定沙箱 ID，默认自动生成
-- `namespace` (str, 可选): 沙箱命名空间
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
 - `volume_mounts` (list, 可选): 卷挂载配置
 - `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。沙箱 ID、访问令牌、协议字段和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 1024 字节；超过限制时会在虚拟机启动前拒绝创建请求。
@@ -161,7 +160,7 @@ sandbox.delete(sandbox_id=None) -> bool
 
 **静态方法：**
 ```python
-Sandbox.delete_sandbox(sandbox_id, namespace=None) -> bool
+Sandbox.delete_sandbox(sandbox_id) -> bool
 ```
 
 无需创建实例即可删除指定沙箱。连接地址从 SDK 配置读取，不作为删除请求参数发送。
@@ -192,8 +191,8 @@ Sandbox.service_health() -> bool
 ### 获取沙箱（ `List` 和 `Get` ）
 
 ```python
-Sandbox.list(namespace=None, state=None, limit=None) -> list[dict]
-Sandbox.get(sandbox_id, namespace=None) -> Sandbox
+Sandbox.list(state=None, limit=None) -> list[dict]
+Sandbox.get(sandbox_id) -> Sandbox
 ```
 
 `list` 的 `state` 筛选项可接受 `running` 和 `paused`，而 `limit` 需为 1-5000 的整数。未指定 `state` 时也只返回 `READY` 和 `SUSPENDED` 记录；`UNKNOWN` 等内部状态不会出现在列表中。
@@ -202,7 +201,6 @@ Sandbox.get(sandbox_id, namespace=None) -> Sandbox
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `namespace` | str | 仅返回指定命名空间中的沙箱；未指定时使用 daemon 的默认命名空间 |
 | `state` | list[str] | 按状态筛选；支持 `running` 和 `paused`，其中 `READY` 表示 `running`，`SUSPENDED` 表示 `paused` |
 | `limit` | int | 最多返回的沙箱数量，默认值为 `100`，取值范围为 `1` 至 `5000` |
 
@@ -211,11 +209,10 @@ Sandbox.get(sandbox_id, namespace=None) -> Sandbox
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `sandbox_id` | str | 要获取的沙箱 ID |
-| `namespace` | str | 沙箱所属命名空间；未指定时使用 daemon 的默认命名空间 |
 
 `Sandbox.list()` 返回沙箱摘要字典列表；`Sandbox.get()` 返回已填充基础信息的 `Sandbox` 对象。沙箱响应可包含以下字段：
 
-`Sandbox.get()` 会填充 namespace、资源、domain、metadata 和 lifecycle 等可用的控制面字段。由于 daemon 当前不会恢复创建时的 conch-init 访问令牌，GET 响应会省略 `conchInitAccessToken`，该方法返回的对象仅用于控制面操作，例如读取元数据或删除沙箱。命令、文件和沙箱内 Agent 健康检查会抛出 `Agent credentials unavailable for retrieved sandbox`。`Sandbox.create()` 返回的对象不受此限制。
+`Sandbox.get()` 会填充资源、domain、metadata 和 lifecycle 等可用的控制面字段。由于 daemon 当前不会恢复创建时的 conch-init 访问令牌，GET 响应会省略 `conchInitAccessToken`，该方法返回的对象仅用于控制面操作，例如读取元数据或删除沙箱。命令、文件和沙箱内 Agent 健康检查会抛出 `Agent credentials unavailable for retrieved sandbox`。`Sandbox.create()` 返回的对象不受此限制。
 
 下表使用 REST API 的 JSON 字段名。Python SDK 会将其映射为 Python 属性，例如 `sandboxID` 对应 `sandbox_id`、`templateID` 对应 `template_id`、`startedAt` 对应 `started_at`，`domain` 对应 `ip`。
 
@@ -225,7 +222,6 @@ Sandbox.get(sandbox_id, namespace=None) -> Sandbox
 | `imageName` | str | 关联镜像名称；后端无法提供时为空字符串 |
 | `snapshotID` | str | 关联快照 ID；后端无法提供时为空字符串 |
 | `sandboxID` | str | 对外使用的 Conch 沙箱 ID |
-| `namespace` | str | 沙箱所属命名空间 |
 | `startedAt` | str | 沙箱创建时间，使用 RFC 3339 格式 |
 | `endAt` | str | 预留的沙箱结束时间字段；当前固定返回空字符串 |
 | `cpuCount` | int | 虚拟 CPU 数量 |
@@ -528,7 +524,7 @@ print(result)
 ## Sandbox 构造函数
 
 ```python
-Sandbox(sandbox_id=None, template_id=None, namespace=None,
+Sandbox(sandbox_id=None, template_id=None,
         vcpu_num=None, vcpu_max=None, ram_mb=None,
         volume_mounts=None, env=None)
 ```
@@ -539,7 +535,6 @@ Sandbox(sandbox_id=None, template_id=None, namespace=None,
 |------|------|------|
 | `sandbox_id` | str | 沙箱 ID，默认自动生成 |
 | `template_id` | str | Template ID |
-| `namespace` | str | 命名空间 |
 | `vcpu_num` | int | 虚拟 CPU 数量 |
 | `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |

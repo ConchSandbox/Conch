@@ -64,9 +64,8 @@ type CNIConfig = netstack.CNIManagerConfig
 
 // ContainerdConfig holds containerd runtime configuration
 type ContainerdConfig struct {
-	RootDir          string `yaml:"root_dir"`
-	StateDir         string `yaml:"state_dir"`
-	DefaultNamespace string `yaml:"default_namespace"`
+	RootDir  string `yaml:"root_dir"`
+	StateDir string `yaml:"state_dir"`
 }
 
 // ImageConfig holds image workflow defaults.
@@ -140,9 +139,8 @@ func DefaultConfig() *Config {
 			},
 		},
 		Containerd: ContainerdConfig{
-			RootDir:          "/var/lib/conch/containerd",
-			StateDir:         "/run/conch/containerd",
-			DefaultNamespace: "default",
+			RootDir:  "/var/lib/conch/containerd",
+			StateDir: "/run/conch/containerd",
 		},
 		Image: ImageConfig{
 			DefaultKernelImage:            DefaultKernelImage,
@@ -272,9 +270,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Containerd.StateDir == "" {
 		cfg.Containerd.StateDir = defaultCfg.Containerd.StateDir
 	}
-	if cfg.Containerd.DefaultNamespace == "" {
-		cfg.Containerd.DefaultNamespace = defaultCfg.Containerd.DefaultNamespace
-	}
 	if cfg.Image.DefaultKernelImage == "" {
 		cfg.Image.DefaultKernelImage = defaultCfg.Image.DefaultKernelImage
 	}
@@ -328,8 +323,8 @@ func LoadConfig(configPath string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
-	if cfg.Network.PoolSize < 0 {
-		return fmt.Errorf("invalid network.pool_size=%d: must be greater than or equal to 0", cfg.Network.PoolSize)
+	if cfg.Network.WarmPoolSize < 0 {
+		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}
 	if cfg.Network.TapMask < 1 || cfg.Network.TapMask > 32 {
 		return fmt.Errorf("invalid network.tap_mask=%d: must be between 1 and 32", cfg.Network.TapMask)

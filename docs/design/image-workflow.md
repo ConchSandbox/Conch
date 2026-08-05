@@ -14,8 +14,6 @@
 
 conchd 会在进程内初始化 containerd v2 服务和 Conch 插件，不要求单独启动系统 `containerd` 守护进程。
 
-上述 image workflow 命令均支持通过 `-n/--namespace` 指定 containerd namespace；未指定时使用配置中的默认 namespace，并最终兜底为 `default`。
-
 ## 2. 镜像与组件
 
 Conch 原生镜像使用 OCI image/index 作为外层结构，内部组件通过 descriptor annotation 区分：

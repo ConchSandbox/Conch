@@ -341,7 +341,7 @@ func TestKeyedUnpackLocksSerializeSameKeyAndReleaseEntries(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			release, err := locks.acquire(context.Background(), "namespace\x00boot-index")
+			release, err := locks.acquire(context.Background(), "boot-index")
 			if err != nil {
 				t.Errorf("acquire: %v", err)
 				return

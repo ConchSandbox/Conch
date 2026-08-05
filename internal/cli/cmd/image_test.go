@@ -69,6 +69,22 @@ func TestRunImageListPrintsKind(t *testing.T) {
 	}
 }
 
+func TestRunImageListRejectsInvalidConfig(t *testing.T) {
+	configPath := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(configPath, []byte("server: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("CONCH_API_URL", "http://127.0.0.1:4063")
+
+	err := runImageList(context.Background(), []string{"--config", configPath})
+	if err == nil {
+		t.Fatal("runImageList() error = nil")
+	}
+	if !strings.Contains(err.Error(), "failed to parse config file") {
+		t.Fatalf("runImageList() error = %v, want YAML parse error", err)
+	}
+}
+
 func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 	images := []client.ImageRecord{
 		{Name: "localhost:5000/busybox:latest", TargetDigest: "sha256:source"},

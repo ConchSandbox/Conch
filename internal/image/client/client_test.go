@@ -19,6 +19,15 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
 
+func newTestClient(t *testing.T, baseURL string) *Client {
+	t.Helper()
+	c, err := NewClient(baseURL)
+	if err != nil {
+		t.Fatalf("NewClient(%q): %v", baseURL, err)
+	}
+	return c
+}
+
 func TestImageAPIMethods(t *testing.T) {
 	var pullReq PullImageRequest
 	var unpackReq UnpackImageRequest
@@ -57,16 +66,15 @@ func TestImageAPIMethods(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL)
+	c := newTestClient(t, server.URL)
 	pullResults, err := c.PullImage(context.Background(), PullImageRequest{
 		ImageName:  "docker.io/library/nginx:latest",
-		Namespace:  "team-a",
 		SkipUnpack: true,
 	})
 	if err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
-	if pullReq.ImageName != "docker.io/library/nginx:latest" || pullReq.Namespace != "team-a" || !pullReq.SkipUnpack {
+	if pullReq.ImageName != "docker.io/library/nginx:latest" || !pullReq.SkipUnpack {
 		t.Fatalf("pull request = %#v", pullReq)
 	}
 	if pullResults["rootfs"] != "rootfs-id" {
@@ -75,12 +83,11 @@ func TestImageAPIMethods(t *testing.T) {
 
 	unpackResults, err := c.UnpackImage(context.Background(), UnpackImageRequest{
 		ImageName: "hub.oepkgs.net/conch/conch-index:v0.1",
-		Namespace: "default",
 	})
 	if err != nil {
 		t.Fatalf("UnpackImage: %v", err)
 	}
-	if unpackReq.ImageName != "hub.oepkgs.net/conch/conch-index:v0.1" || unpackReq.Namespace != "default" {
+	if unpackReq.ImageName != "hub.oepkgs.net/conch/conch-index:v0.1" {
 		t.Fatalf("unpack request = %#v", unpackReq)
 	}
 	if unpackResults["sandbox"] != "sandbox-id" {
@@ -88,13 +95,12 @@ func TestImageAPIMethods(t *testing.T) {
 	}
 
 	images, err := c.ListImages(context.Background(), ListImagesRequest{
-		Namespace: "team-a",
-		Filters:   []string{"name==localhost/conch/demo:latest"},
+		Filters: []string{"name==localhost/conch/demo:latest"},
 	})
 	if err != nil {
 		t.Fatalf("ListImages: %v", err)
 	}
-	if listReq.Namespace != "team-a" || len(listReq.Filters) != 1 {
+	if len(listReq.Filters) != 1 {
 		t.Fatalf("list request = %#v", listReq)
 	}
 	if len(images) != 1 || images[0].Name != "localhost/conch/demo:latest" {
@@ -106,12 +112,11 @@ func TestImageAPIMethods(t *testing.T) {
 
 	if err := c.RemoveImage(context.Background(), RemoveImageRequest{
 		ImageName:   "localhost/conch/demo:latest",
-		Namespace:   "team-a",
 		Synchronous: true,
 	}); err != nil {
 		t.Fatalf("RemoveImage: %v", err)
 	}
-	if removeReq.ImageName != "localhost/conch/demo:latest" || removeReq.Namespace != "team-a" || !removeReq.Synchronous {
+	if removeReq.ImageName != "localhost/conch/demo:latest" || !removeReq.Synchronous {
 		t.Fatalf("remove request = %#v", removeReq)
 	}
 }
@@ -122,7 +127,7 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL)
+	c := newTestClient(t, server.URL)
 	_, err := c.PullImage(context.Background(), PullImageRequest{ImageName: "bad"})
 	if err == nil {
 		t.Fatal("PullImage() error = nil")
@@ -134,13 +139,13 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 
 func TestConchAPITimeoutEnv(t *testing.T) {
 	t.Setenv("CONCH_API_TIMEOUT", "5m")
-	c := NewClient("http://127.0.0.1:4063")
+	c := newTestClient(t, "http://127.0.0.1:4063")
 	if c.httpClient.Timeout != 5*time.Minute {
 		t.Fatalf("timeout = %s, want 5m", c.httpClient.Timeout)
 	}
 
 	t.Setenv("CONCH_API_TIMEOUT", "bad")
-	c = NewClient("http://127.0.0.1:4063")
+	c = newTestClient(t, "http://127.0.0.1:4063")
 	if c.httpClient.Timeout != defaultHTTPTimeout {
 		t.Fatalf("timeout = %s, want default %s", c.httpClient.Timeout, defaultHTTPTimeout)
 	}
@@ -148,9 +153,41 @@ func TestConchAPITimeoutEnv(t *testing.T) {
 
 func TestConchAPITimeoutOverride(t *testing.T) {
 	t.Setenv("CONCH_API_TIMEOUT", "5m")
-	c := NewClientWithConfigAndTimeout("http://127.0.0.1:4063", "", 10*time.Minute)
+	c, err := NewClientWithConfigAndTimeout("http://127.0.0.1:4063", "", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("NewClientWithConfigAndTimeout: %v", err)
+	}
 	if c.httpClient.Timeout != 10*time.Minute {
 		t.Fatalf("timeout = %s, want 10m", c.httpClient.Timeout)
+	}
+}
+
+func TestNewClientWithConfigRejectsInvalidYAML(t *testing.T) {
+	configPath := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(configPath, []byte("server: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	c, err := NewClientWithConfig("http://127.0.0.1:4063", configPath)
+	if err == nil {
+		t.Fatal("NewClientWithConfig() error = nil")
+	}
+	if c != nil {
+		t.Fatalf("NewClientWithConfig() client = %#v, want nil", c)
+	}
+	if !strings.Contains(err.Error(), "failed to parse config file") {
+		t.Fatalf("NewClientWithConfig() error = %v, want YAML parse error", err)
+	}
+}
+
+func TestNewClientWithConfigAllowsMissingFile(t *testing.T) {
+	configPath := t.TempDir() + "/missing.yaml"
+	c, err := NewClientWithConfig("", configPath)
+	if err != nil {
+		t.Fatalf("NewClientWithConfig() error = %v", err)
+	}
+	if c == nil {
+		t.Fatal("NewClientWithConfig() client = nil")
 	}
 }
 
@@ -236,13 +273,12 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL)
+	c := newTestClient(t, server.URL)
 	templateResp, err := c.CreateTemplate(context.Background(), TemplateCreateRequest{
 		Source:       "docker.io/library/busybox:latest",
 		KernelPath:   kernel.Name(),
 		InitrdPath:   initrd.Name(),
 		BootIndexTag: "localhost/conch/template:latest",
-		Namespace:    "team-a",
 		PlainHTTP:    true,
 		Username:     "user",
 		Password:     "pass",
@@ -251,7 +287,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
-	if templateMetadata.Source != "docker.io/library/busybox:latest" || templateMetadata.Namespace != "team-a" || templateMetadata.BootIndexTag != "localhost/conch/template:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
+	if templateMetadata.Source != "docker.io/library/busybox:latest" || templateMetadata.BootIndexTag != "localhost/conch/template:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
 		t.Fatalf("template metadata = %#v", templateMetadata)
 	}
 	if templateKernelBody != "kernel-content" || templateInitrdBody != "initrd-content" {
@@ -262,13 +298,12 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	}
 
 	snapshots, err := c.ListSnapshots(context.Background(), ListSnapshotsRequest{
-		Namespace: "team-a",
-		Filters:   []string{"kind==committed"},
+		Filters: []string{"kind==committed"},
 	})
 	if err != nil {
 		t.Fatalf("ListSnapshots: %v", err)
 	}
-	if listSnapshotsReq.Namespace != "team-a" || len(listSnapshotsReq.Filters) != 1 {
+	if len(listSnapshotsReq.Filters) != 1 {
 		t.Fatalf("snapshot list request = %#v", listSnapshotsReq)
 	}
 	if len(snapshots) != 1 || snapshots[0].Key != "sha256:rootfs" {
@@ -276,19 +311,18 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	}
 
 	if err := c.RemoveSnapshot(context.Background(), RemoveSnapshotRequest{
-		Key:       "sha256:rootfs",
-		Namespace: "team-a",
+		Key: "sha256:rootfs",
 	}); err != nil {
 		t.Fatalf("RemoveSnapshot: %v", err)
 	}
-	if removeSnapshotReq.Key != "sha256:rootfs" || removeSnapshotReq.Namespace != "team-a" {
+	if removeSnapshotReq.Key != "sha256:rootfs" {
 		t.Fatalf("snapshot remove request = %#v", removeSnapshotReq)
 	}
 }
 
-func TestCheckpointSandboxIncludesNamespace(t *testing.T) {
+func TestCheckpointSandboxRequest(t *testing.T) {
 	var got SandboxCheckpointRequest
-	c := NewClient("http://example.invalid")
+	c := newTestClient(t, "http://example.invalid")
 	c.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Path != checkpointSandbox {
@@ -305,7 +339,7 @@ func TestCheckpointSandboxIncludesNamespace(t *testing.T) {
 		}),
 	}
 
-	templateID, err := c.CheckpointSandbox(context.Background(), "sandbox-123", "team-a")
+	templateID, err := c.CheckpointSandbox(context.Background(), "sandbox-123")
 	if err != nil {
 		t.Fatalf("CheckpointSandbox: %v", err)
 	}
@@ -314,9 +348,6 @@ func TestCheckpointSandboxIncludesNamespace(t *testing.T) {
 	}
 	if got.SandboxId != "sandbox-123" {
 		t.Fatalf("sandbox_id = %q, want %q", got.SandboxId, "sandbox-123")
-	}
-	if got.Namespace != "team-a" {
-		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
 	}
 }
 
@@ -368,11 +399,10 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	c := NewClient(server.URL)
+	c := newTestClient(t, server.URL)
 
 	pulled, err := c.PullTemplate(context.Background(), TemplatePullRequest{
 		Reference: "registry.example.invalid/conch/template:latest",
-		Namespace: "team-a",
 		PlainHTTP: true,
 		Username:  "pull-user",
 		Password:  "pull-pass",
@@ -381,14 +411,13 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullTemplate() error = %v", err)
 	}
-	if pulled.TemplateID != "tmpl_pulled" || pulled.BuildRef != pullReq.Reference || !pullReq.PlainHTTP || pullReq.Namespace != "team-a" {
+	if pulled.TemplateID != "tmpl_pulled" || pulled.BuildRef != pullReq.Reference || !pullReq.PlainHTTP {
 		t.Fatalf("PullTemplate() response = %#v, request = %#v", pulled, pullReq)
 	}
 
 	if err := c.PushTemplate(context.Background(), TemplatePushRequest{
 		TemplateID:      pulled.TemplateID,
 		RemoteReference: "mirror.example.invalid/conch/template:copy",
-		Namespace:       "team-a",
 		PlainHTTP:       true,
 		Username:        "push-user",
 		Password:        "push-pass",
@@ -397,14 +426,14 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 		t.Fatalf("PushTemplate() error = %v", err)
 	}
 	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" ||
-		pushReq.Namespace != "team-a" || !pushReq.PlainHTTP || pushReq.RegistryTimeout != "10m" {
+		!pushReq.PlainHTTP || pushReq.RegistryTimeout != "10m" {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 }
 
-func TestCreateSandboxIncludesNamespaceAndExplicitRAM(t *testing.T) {
+func TestCreateSandboxIncludesExplicitRAM(t *testing.T) {
 	var got CreateRequest
-	c := NewClient("http://example.invalid")
+	c := newTestClient(t, "http://example.invalid")
 	c.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Path != createSandbox {
@@ -421,14 +450,11 @@ func TestCreateSandboxIncludesNamespaceAndExplicitRAM(t *testing.T) {
 		}),
 	}
 
-	if err := c.CreateSandbox("tmpl_123", "sandbox-123", "team-a", 4096); err != nil {
+	if err := c.CreateSandbox("tmpl_123", "sandbox-123", 4096); err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if got.TemplateID != "tmpl_123" || got.SandboxId != "sandbox-123" {
 		t.Fatalf("create request = %#v", got)
-	}
-	if got.Namespace != "team-a" {
-		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
 	}
 	if got.RamMB != 4096 {
 		t.Fatalf("ram_mb = %d, want 4096", got.RamMB)
@@ -440,7 +466,7 @@ func TestCreateSandboxIncludesNamespaceAndExplicitRAM(t *testing.T) {
 
 func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 	var body map[string]any
-	c := NewClient("http://example.invalid")
+	c := newTestClient(t, "http://example.invalid")
 	c.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -452,7 +478,7 @@ func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 		}, nil
 	})}
 
-	if err := c.CreateSandbox("", "sandbox-123", "team-a", 0); err != nil {
+	if err := c.CreateSandbox("", "sandbox-123", 0); err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if _, ok := body["template_id"]; ok {

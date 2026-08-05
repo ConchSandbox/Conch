@@ -17,15 +17,15 @@ type TemplateReader interface {
 }
 
 type SnapshotBackend interface {
-	CreateBootLayout(ctx context.Context, namespace, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
-	RestoreBootLayout(ctx context.Context, namespace, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
-	ReleaseBootLayout(ctx context.Context, namespace, key string) error
+	CreateBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
+	RestoreBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
+	ReleaseBootLayout(ctx context.Context, key string) error
 }
 
 // BootResolver resolves immutable Boot Index content into the committed
 // snapshot parents needed to prepare one Sandbox runtime.
 type BootResolver interface {
-	ResolveBoot(ctx context.Context, namespace, bootIndexDigest string) (ResolvedBoot, error)
+	ResolveBoot(ctx context.Context, bootIndexDigest string) (ResolvedBoot, error)
 }
 
 // ResolvedBoot is the Sandbox-owned view of a resolved Boot Index. Image
@@ -65,7 +65,6 @@ type BootRuntime struct {
 }
 
 type PrepareBootRequest struct {
-	Namespace  string
 	TemplateID string
 	SandboxID  string
 	VMMName    string
@@ -78,7 +77,6 @@ type PreparedBoot struct {
 }
 
 type ReleaseBootRequest struct {
-	Namespace string
 	SandboxID string
 }
 
@@ -114,24 +112,23 @@ func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (Pre
 	if p == nil || p.templates == nil || p.snapshots == nil || p.resolver == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
-	namespace := normalizeBootNamespace(req.Namespace)
 	key := strings.TrimSpace(req.SandboxID)
 	if key == "" {
 		return PreparedBoot{}, fmt.Errorf("sandbox_id is required")
 	}
-	resolved, entry, err := p.resolveTemplate(ctx, namespace, req.TemplateID)
+	resolved, entry, err := p.resolveTemplate(ctx, req.TemplateID)
 	if err != nil {
 		return PreparedBoot{}, err
 	}
 	if err := validateResolvedBoot(resolved, entry.BootMode, strings.TrimSpace(req.VMMName)); err != nil {
 		return PreparedBoot{}, fmt.Errorf("template %s: %w", entry.ID, err)
 	}
-	return p.prepareResolvedBoot(ctx, namespace, key, req.VMMName, req.RAMMB, resolved)
+	return p.prepareResolvedBoot(ctx, key, req.VMMName, req.RAMMB, resolved)
 }
 
 func (p *bootPreparer) resolveTemplate(
 	ctx context.Context,
-	namespace, templateID string,
+	templateID string,
 ) (ResolvedBoot, template.Entry, error) {
 	templateID = strings.TrimSpace(templateID)
 	if templateID == "" {
@@ -141,20 +138,11 @@ func (p *bootPreparer) resolveTemplate(
 	if err != nil {
 		return ResolvedBoot{}, template.Entry{}, err
 	}
-	recordNamespace := normalizeBootNamespace(entry.Namespace)
-	if namespace != recordNamespace {
-		return ResolvedBoot{}, template.Entry{}, fmt.Errorf(
-			"template %s belongs to namespace %s, not %s",
-			entry.ID,
-			recordNamespace,
-			namespace,
-		)
-	}
 	bootIndexDigest := strings.TrimSpace(entry.BootIndexDigest)
 	if bootIndexDigest == "" {
 		return ResolvedBoot{}, template.Entry{}, fmt.Errorf("template %s has no boot index digest", entry.ID)
 	}
-	resolved, err := p.resolver.ResolveBoot(ctx, recordNamespace, bootIndexDigest)
+	resolved, err := p.resolver.ResolveBoot(ctx, bootIndexDigest)
 	if err != nil {
 		return ResolvedBoot{}, template.Entry{}, fmt.Errorf(
 			"resolve template %s boot index %s: %w",
@@ -175,7 +163,7 @@ func (p *bootPreparer) resolveTemplate(
 
 func (p *bootPreparer) prepareResolvedBoot(
 	ctx context.Context,
-	namespace, key string,
+	key string,
 	requestedVMM string,
 	ramMB int64,
 	resolved ResolvedBoot,
@@ -205,9 +193,9 @@ func (p *bootPreparer) prepareResolvedBoot(
 	}
 	var layout *snapshot.BootLayout
 	if resume {
-		layout, err = p.snapshots.RestoreBootLayout(ctx, namespace, key, layoutReq)
+		layout, err = p.snapshots.RestoreBootLayout(ctx, key, layoutReq)
 	} else {
-		layout, err = p.snapshots.CreateBootLayout(ctx, namespace, key, layoutReq)
+		layout, err = p.snapshots.CreateBootLayout(ctx, key, layoutReq)
 	}
 	if err != nil {
 		return PreparedBoot{}, fmt.Errorf("failed to prepare boot layout: %w", err)
@@ -237,12 +225,11 @@ func (p *bootPreparer) Release(ctx context.Context, req ReleaseBootRequest) erro
 	if p == nil || p.snapshots == nil {
 		return fmt.Errorf("sandbox boot preparer is not configured")
 	}
-	namespace := normalizeBootNamespace(req.Namespace)
 	key := strings.TrimSpace(req.SandboxID)
 	if key == "" {
 		return fmt.Errorf("sandbox_id is required")
 	}
-	return p.snapshots.ReleaseBootLayout(ctx, namespace, key)
+	return p.snapshots.ReleaseBootLayout(ctx, key)
 }
 
 func memoryLayoutForVMM(vmmName string, resume bool) (snapshot.MemoryLayoutMode, error) {
@@ -326,11 +313,4 @@ func BootSpecFromRuntime(runtime BootRuntime) BootSpec {
 		InitrdPath:   filepath.Join(runtime.VMMount, common.VmInitrdRelativePath),
 		SnapfilePath: snapfilePath,
 	}
-}
-
-func normalizeBootNamespace(namespace string) string {
-	if ns := strings.TrimSpace(namespace); ns != "" {
-		return ns
-	}
-	return "default"
 }

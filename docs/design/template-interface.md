@@ -20,7 +20,6 @@ provenance, and creation metadata.
 | `Origin` | `Origin` | Identifies the process that produced the Template. | Required. |
 | `BootMode` | `BootMode` | Identifies how the Template starts a Sandbox. | Required. |
 | `BootIndexDigest` | `string` | References the OCI Boot Index associated with the Template. | Required; must be a valid OCI digest. |
-| `Namespace` | `string` | Scopes the Template record to a namespace. | Defaults to `default` when empty. |
 | `ParentTemplateID` | `string` | Identifies the parent Template when this record derives from another Template. | Optional. |
 | `SourceSandboxID` | `string` | Identifies the Sandbox used to produce the Template. | Optional. |
 | `ImageName` | `string` | Records the source image name associated with the Template. | Optional. |
@@ -48,7 +47,6 @@ provenance, and creation metadata.
 | --- | --- |
 | `Origin` | Matches all origins. |
 | `BootMode` | Matches all boot modes. |
-| `Namespace` | Matches all namespaces. |
 
 ## Store Interface
 
@@ -68,8 +66,7 @@ Create(ctx context.Context, entry Entry) (Entry, error)
 ```
 
 Creates a new Template record after validating the `Entry` constraints above.
-An empty `Namespace` is normalized to `default`, and a zero `CreatedAt` is set
-to the current Unix time in nanoseconds.
+A zero `CreatedAt` is set to the current Unix time in nanoseconds.
 
 The record is inserted atomically. An existing record is never overwritten; a
 duplicate `ID` returns `ErrAlreadyExists`. On success, `Create` returns the

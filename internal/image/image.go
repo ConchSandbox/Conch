@@ -17,8 +17,8 @@ import (
 
 // GetSnapshotID resolves image name and returns rootfs snapshot ID (chainID)
 // Supports both regular images and OCI Image Index (multi-architecture images)
-func GetSnapshotID(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (string, error) {
-	nsCtx, err := client.WithNamespace(ctx, namespace)
+func GetSnapshotID(ctx context.Context, client *containerdclient.Client, imageName string) (string, error) {
+	nsCtx, err := client.WithNamespace(ctx)
 	if err != nil {
 		return "", fmt.Errorf("create namespace context: %w", err)
 	}
@@ -82,8 +82,8 @@ type BootParentSnapshotIDs struct {
 	VM     string
 }
 
-func ResolveBootParentSnapshotIDs(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (BootParentSnapshotIDs, bool, error) {
-	nsCtx, err := client.WithNamespace(ctx, namespace)
+func ResolveBootParentSnapshotIDs(ctx context.Context, client *containerdclient.Client, imageName string) (BootParentSnapshotIDs, bool, error) {
+	nsCtx, err := client.WithNamespace(ctx)
 	if err != nil {
 		return BootParentSnapshotIDs{}, false, fmt.Errorf("create namespace context: %w", err)
 	}

@@ -40,7 +40,7 @@ func TestJSONHandlersRejectUnknownFields(t *testing.T) {
 	imageOps := &fakeImageService{}
 	snapshotOps := &fakeSnapshotService{}
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, imageOps, imageOps, nil, "default")
+	runtimeService := conchruntime.New(sandboxOps, imageOps, imageOps, nil)
 	runtimeService.Snapshot = snapshotOps
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
@@ -85,10 +85,10 @@ func TestJSONHandlersRejectUnknownFields(t *testing.T) {
 		t.Fatalf("sandbox backend was called: %#v", sandboxOps)
 	}
 	if imageOps.pullReq.ImageName != "" || imageOps.pushReq.LocalImage != "" ||
-		imageOps.removeReq.ImageName != "" || imageOps.unpackReq.ImageName != "" || imageOps.listReq.Namespace != "" {
+		imageOps.removeReq.ImageName != "" || imageOps.unpackReq.ImageName != "" {
 		t.Fatalf("image backend was called: %#v", imageOps)
 	}
-	if snapshotOps.infoReq.Key != "" || snapshotOps.removeReq.Key != "" || snapshotOps.listReq.Namespace != "" {
+	if snapshotOps.infoReq.Key != "" || snapshotOps.removeReq.Key != "" {
 		t.Fatalf("snapshot backend was called: %#v", snapshotOps)
 	}
 }
@@ -121,7 +121,6 @@ func TestTemplateCreateRejectsUnknownMetadataField(t *testing.T) {
 func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	metadata := `{
 		"source":"example.invalid/image:latest",
-		"namespace":"team-a",
 		"boot_index_tag":"example.invalid/conch/boot:latest",
 		"plain_http":true,
 		"username":"tester",
@@ -133,8 +132,7 @@ func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	if err := decodeStrictJSON(strings.NewReader(metadata), &req); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if req.Source != "example.invalid/image:latest" || req.Namespace != "team-a" ||
-		req.BootIndexTag != "example.invalid/conch/boot:latest" || !req.PlainHTTP ||
+	if req.Source != "example.invalid/image:latest" || req.BootIndexTag != "example.invalid/conch/boot:latest" || !req.PlainHTTP ||
 		req.Username != "tester" || req.Password != "secret" ||
 		req.Labels["purpose"] != "strict-json-test" {
 		t.Fatalf("decoded metadata = %#v", req)
@@ -162,7 +160,7 @@ func TestSandboxCreateRejectsUnknownFieldsWithoutSideEffects(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
-			runtimeService := conchruntime.New(sandboxOps, nil, nil, nil, "default")
+			runtimeService := conchruntime.New(sandboxOps, nil, nil, nil)
 			server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 			server.routes()
 

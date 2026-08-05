@@ -14,12 +14,10 @@ import (
 )
 
 type bootIndexCall struct {
-	Namespace       string
 	BootIndexDigest string
 }
 
 type bootIndexReferenceCall struct {
-	Namespace string
 	Reference string
 }
 
@@ -97,8 +95,8 @@ func (f *templateBuildImageOps) PublishBootImage(context.Context, conchimage.Pub
 	return f.publishResult, f.publishErr
 }
 
-func (f *templateBuildImageOps) InspectBootIndex(_ context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
-	f.inspectCalls = append(f.inspectCalls, bootIndexCall{Namespace: namespace, BootIndexDigest: bootIndexDigest})
+func (f *templateBuildImageOps) InspectBootIndex(_ context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+	f.inspectCalls = append(f.inspectCalls, bootIndexCall{BootIndexDigest: bootIndexDigest})
 	result := f.inspectResult
 	if result.BootIndexDigest == "" {
 		result.BootIndexDigest = bootIndexDigest
@@ -116,8 +114,8 @@ func (f *templateBuildImageOps) InspectBootIndex(_ context.Context, namespace, b
 	return result, f.inspectErr
 }
 
-func (f *templateBuildImageOps) InspectBootIndexReference(_ context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {
-	f.inspectReferenceCalls = append(f.inspectReferenceCalls, bootIndexReferenceCall{Namespace: namespace, Reference: reference})
+func (f *templateBuildImageOps) InspectBootIndexReference(_ context.Context, reference string) (conchimage.BootIndexInfo, error) {
+	f.inspectReferenceCalls = append(f.inspectReferenceCalls, bootIndexReferenceCall{Reference: reference})
 	return f.inspectReferenceResult, f.inspectReferenceErr
 }
 
@@ -157,11 +155,10 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 				VMMName:         "cloud-hypervisor",
 			}}
 			store := newTestStore(t)
-			svc := New(nil, imageOps, imageOps, store, "default")
+			svc := New(nil, imageOps, imageOps, store)
 
 			result, err := svc.PullTemplate(ctx, TemplatePullOptions{
 				Reference: reference,
-				Namespace: "team-a",
 				PlainHTTP: true,
 				Username:  "registry-user",
 				Password:  "registry-pass",
@@ -177,7 +174,7 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 				t.Fatalf("Pull() calls = %#v", imageOps.pullCalls)
 			}
 			pull := imageOps.pullCalls[0]
-			if pull.ImageName != reference || pull.Namespace != "team-a" || !pull.SkipUnpack ||
+			if pull.ImageName != reference || !pull.SkipUnpack ||
 				!pull.PlainHTTP || pull.Username != "registry-user" || pull.Password != "registry-pass" {
 				t.Fatalf("Pull() request = %#v", pull)
 			}
@@ -185,7 +182,6 @@ func TestPullTemplateCreatesEntryAfterStaticValidation(t *testing.T) {
 				t.Fatalf("PullTemplate unpacked content during static validation: %#v", imageOps.unpackCalls)
 			}
 			if len(imageOps.inspectReferenceCalls) != 1 || imageOps.inspectReferenceCalls[0] != (bootIndexReferenceCall{
-				Namespace: "team-a",
 				Reference: reference,
 			}) {
 				t.Fatalf("InspectBootIndexReference() calls = %#v", imageOps.inspectReferenceCalls)
@@ -211,7 +207,7 @@ func TestPullTemplateDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 		inspectReferenceErr: errors.New("invalid boot index"),
 	}
 	store := newTestStore(t)
-	svc := New(nil, imageOps, imageOps, store, "default")
+	svc := New(nil, imageOps, imageOps, store)
 
 	if _, err := svc.PullTemplate(ctx, TemplatePullOptions{
 		Reference: "registry.example.invalid/conch/template:invalid",
@@ -235,8 +231,8 @@ func TestPushTemplateUsesImmutableBootIndexDigest(t *testing.T) {
 		BootIndexDigest: bootIndexDigest,
 	}}
 	store := newTestStore(t)
-	svc := New(&fakeSandboxOps{}, imageOps, imageOps, store, "default")
-	pulled, err := svc.PullTemplate(ctx, TemplatePullOptions{Reference: buildRef, Namespace: "team-a"})
+	svc := New(&fakeSandboxOps{}, imageOps, imageOps, store)
+	pulled, err := svc.PullTemplate(ctx, TemplatePullOptions{Reference: buildRef})
 	if err != nil {
 		t.Fatalf("PullTemplate() error = %v", err)
 	}
@@ -247,7 +243,6 @@ func TestPushTemplateUsesImmutableBootIndexDigest(t *testing.T) {
 	err = svc.PushTemplate(ctx, TemplatePushOptions{
 		TemplateID:      pulled.TemplateID,
 		RemoteReference: "mirror.example.invalid/conch/template:copy",
-		Namespace:       "team-a",
 		PlainHTTP:       true,
 		Username:        "push-user",
 		Password:        "push-pass",
@@ -265,7 +260,6 @@ func TestPushTemplateUsesImmutableBootIndexDigest(t *testing.T) {
 	if got, want := imageOps.pushBootIndexCalls[0], (conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
 		RemoteReference: "mirror.example.invalid/conch/template:copy",
-		Namespace:       "team-a",
 		PlainHTTP:       true,
 		Username:        "push-user",
 		Password:        "push-pass",
@@ -291,10 +285,9 @@ func TestCreateTemplateStoresStaticallyValidatedEntry(t *testing.T) {
 		},
 	}
 	store := newTestStore(t)
-	svc := New(nil, imageOps, imageOps, store, "default")
+	svc := New(nil, imageOps, imageOps, store)
 
 	result, err := svc.CreateTemplate(ctx, TemplateCreateOptions{
-		Namespace:    "team-a",
 		Source:       "localhost:5000/busybox:latest",
 		KernelPath:   "/kernel",
 		InitrdPath:   "/initrd",
@@ -307,7 +300,6 @@ func TestCreateTemplateStoresStaticallyValidatedEntry(t *testing.T) {
 		t.Fatalf("CreateTemplate() = %#v", result)
 	}
 	if len(imageOps.inspectCalls) != 1 || imageOps.inspectCalls[0] != (bootIndexCall{
-		Namespace:       "team-a",
 		BootIndexDigest: bootIndexDigest,
 	}) {
 		t.Fatalf("InspectBootIndex() calls = %#v", imageOps.inspectCalls)
@@ -327,7 +319,7 @@ func TestCreateTemplateStoresStaticallyValidatedEntry(t *testing.T) {
 
 func TestCreateTemplateRequiresImageService(t *testing.T) {
 	store := newTestStore(t)
-	svc := New(nil, nil, &templateBuildImageOps{}, store, "default")
+	svc := New(nil, nil, &templateBuildImageOps{}, store)
 
 	if _, err := svc.CreateTemplate(context.Background(), TemplateCreateOptions{}); err == nil || err.Error() != "image service is required" {
 		t.Fatalf("CreateTemplate() error = %v, want image service is required", err)
@@ -347,7 +339,7 @@ func TestCreateTemplateDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 		inspectErr: errors.New("invalid published boot index"),
 	}
 	store := newTestStore(t)
-	svc := New(nil, imageOps, imageOps, store, "default")
+	svc := New(nil, imageOps, imageOps, store)
 
 	if _, err := svc.CreateTemplate(ctx, TemplateCreateOptions{
 		Source:     "source",
@@ -376,7 +368,7 @@ func TestCreateTemplateFromSourceRemovesTemporaryConvertedImage(t *testing.T) {
 	}
 	svc := &Service{Image: imageOps, TemplateBootIndex: imageOps}
 
-	result, err := svc.createTemplateFromSource(context.Background(), "team-a", "tmpl-1", TemplateCreateOptions{
+	result, err := svc.createTemplateFromSource(context.Background(), "tmpl-1", TemplateCreateOptions{
 		Source:       "localhost:5000/busybox:latest",
 		KernelPath:   "/kernel",
 		InitrdPath:   "/initrd",
@@ -392,7 +384,7 @@ func TestCreateTemplateFromSourceRemovesTemporaryConvertedImage(t *testing.T) {
 		t.Fatalf("remove calls = %#v, want one", imageOps.removeCalls)
 	}
 	remove := imageOps.removeCalls[0]
-	if remove.Namespace != "team-a" || remove.ImageName != "conch-erofs-rootfs:tmpl-1" || remove.Synchronous {
+	if remove.ImageName != "conch-erofs-rootfs:tmpl-1" || remove.Synchronous {
 		t.Fatalf("remove options = %#v", remove)
 	}
 }
@@ -408,7 +400,7 @@ func TestCreateTemplateFromSourceIgnoresTemporaryImageCleanupFailure(t *testing.
 	}
 	svc := &Service{Image: imageOps, TemplateBootIndex: imageOps}
 
-	if _, err := svc.createTemplateFromSource(context.Background(), "default", "tmpl-1", TemplateCreateOptions{
+	if _, err := svc.createTemplateFromSource(context.Background(), "tmpl-1", TemplateCreateOptions{
 		Source: "source", KernelPath: "/kernel", InitrdPath: "/initrd",
 	}); err != nil {
 		t.Fatalf("cleanup failure must not fail template creation: %v", err)
@@ -426,7 +418,7 @@ func TestCreateTemplateFromSourceKeepsTemporaryImageWhenPublishFails(t *testing.
 	}
 	svc := &Service{Image: imageOps, TemplateBootIndex: imageOps}
 
-	if _, err := svc.createTemplateFromSource(context.Background(), "default", "tmpl-1", TemplateCreateOptions{
+	if _, err := svc.createTemplateFromSource(context.Background(), "tmpl-1", TemplateCreateOptions{
 		Source: "source", KernelPath: "/kernel", InitrdPath: "/initrd",
 	}); err == nil {
 		t.Fatal("createTemplateFromSource() error = nil, want publish failure")

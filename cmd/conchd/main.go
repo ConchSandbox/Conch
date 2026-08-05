@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon"
 	"github.com/openeuler/Conch/internal/util"
@@ -70,7 +71,7 @@ func main() {
 		ulog.F("server.pid_file", cfg.Server.PIDFile),
 		ulog.F("containerd.root_dir", cfg.Containerd.RootDir),
 		ulog.F("containerd.state_dir", cfg.Containerd.StateDir),
-		ulog.F("containerd.default_namespace", cfg.Containerd.DefaultNamespace),
+		ulog.F("containerd.namespace", containerdclient.Namespace),
 		ulog.F("network.warm_pool_size", cfg.Network.WarmPoolSize),
 	)
 

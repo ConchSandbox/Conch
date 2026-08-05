@@ -11,6 +11,7 @@ type Store interface {
 
 	UpsertSandbox(context.Context, SandboxRecord) error
 	GetSandbox(context.Context, string) (SandboxRecord, error)
+	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
 	CreateTemplate(context.Context, template.Entry) error

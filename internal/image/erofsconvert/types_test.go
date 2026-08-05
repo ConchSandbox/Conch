@@ -10,14 +10,13 @@ import (
 
 func TestNormalizeRequestDefaults(t *testing.T) {
 	req, err := NormalizeRequest(ConvertRootfsRequest{
-		Namespace:   " default ",
 		SourceImage: " source:latest ",
 		TargetImage: " target:latest ",
 	})
 	if err != nil {
 		t.Fatalf("NormalizeRequest: %v", err)
 	}
-	if req.Namespace != "default" || req.SourceImage != "source:latest" || req.TargetImage != "target:latest" {
+	if req.SourceImage != "source:latest" || req.TargetImage != "target:latest" {
 		t.Fatalf("request not trimmed: %#v", req)
 	}
 	if req.AlignBytes != DefaultAlignBytes {
@@ -35,18 +34,13 @@ func TestNormalizeRequestRequiredFields(t *testing.T) {
 		want string
 	}{
 		{
-			name: "namespace",
-			req:  ConvertRootfsRequest{SourceImage: "source", TargetImage: "target"},
-			want: "namespace is required",
-		},
-		{
 			name: "source",
-			req:  ConvertRootfsRequest{Namespace: "default", TargetImage: "target"},
+			req:  ConvertRootfsRequest{TargetImage: "target"},
 			want: "source image is required",
 		},
 		{
 			name: "target",
-			req:  ConvertRootfsRequest{Namespace: "default", SourceImage: "source"},
+			req:  ConvertRootfsRequest{SourceImage: "source"},
 			want: "target image is required",
 		},
 	}

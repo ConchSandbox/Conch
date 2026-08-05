@@ -46,6 +46,10 @@ type Service struct {
 	cfg       Config
 }
 
+func namespaceContext(ctx context.Context) context.Context {
+	return namespaces.WithNamespace(ctx, containerdclient.Namespace)
+}
+
 type Config struct {
 	DefaultKernelImage            string `toml:"default_kernel_image" json:"defaultKernelImage"`
 	DefaultKernelPlainHTTP        bool   `toml:"default_kernel_plain_http" json:"defaultKernelPlainHTTP"`
@@ -77,14 +81,7 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 		return runtimeapi.PullImageResult{}, fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	pullCtx := namespaces.WithNamespace(ctx, ns)
+	pullCtx := namespaceContext(ctx)
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		PlainHTTP: req.PlainHTTP,
 		Credentials: func(string) (string, string, error) {
@@ -139,14 +136,7 @@ func (s *Service) PrepareRootfsSource(ctx context.Context, req conchimage.Prepar
 	if req.Source == "" {
 		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("%w: source is required", conchimage.ErrInvalidRequest)
 	}
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	sourceCtx := namespaces.WithNamespace(ctx, ns)
+	sourceCtx := namespaceContext(ctx)
 
 	img, err := s.client.GetImage(sourceCtx, req.Source)
 	if err != nil {
@@ -197,14 +187,7 @@ func (s *Service) Push(ctx context.Context, req runtimeapi.PushImageOptions) err
 	if req.RemoteImage == "" {
 		return fmt.Errorf("%w: remote_image is required", conchimage.ErrInvalidRequest)
 	}
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	pushCtx := namespaces.WithNamespace(ctx, ns)
+	pushCtx := namespaceContext(ctx)
 	img, err := s.client.GetImage(pushCtx, req.LocalImage)
 	if err != nil {
 		return fmt.Errorf("lookup image %s: %w", req.LocalImage, err)
@@ -236,14 +219,7 @@ func (s *Service) PushBootIndex(ctx context.Context, req conchimage.PushBootInde
 	if req.RemoteReference == "" {
 		return fmt.Errorf("%w: remote_reference is required", conchimage.ErrInvalidRequest)
 	}
-	ns := strings.TrimSpace(req.Namespace)
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	pushCtx := namespaces.WithNamespace(ctx, ns)
+	pushCtx := namespaceContext(ctx)
 	desc, err := conchimage.BootIndexDescriptorFromDigest(pushCtx, s.client.ContentStore(), req.BootIndexDigest)
 	if err != nil {
 		return err
@@ -268,14 +244,7 @@ func (s *Service) List(ctx context.Context, req runtimeapi.ListImagesOptions) ([
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("image service has no containerd client")
 	}
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	listCtx := namespaces.WithNamespace(ctx, ns)
+	listCtx := namespaceContext(ctx)
 	items, err := s.client.ImageService().List(listCtx, req.Filters...)
 	if err != nil {
 		return nil, fmt.Errorf("list images: %w", err)
@@ -310,14 +279,7 @@ func (s *Service) Remove(ctx context.Context, req runtimeapi.RemoveImageOptions)
 	if req.ImageName == "" {
 		return fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	removeCtx := namespaces.WithNamespace(ctx, ns)
+	removeCtx := namespaceContext(ctx)
 	opts := []images.DeleteOpt{}
 	if req.Synchronous {
 		opts = append(opts, images.SynchronousDelete())
@@ -457,14 +419,7 @@ func (s *Service) Unpack(ctx context.Context, req runtimeapi.UnpackImageOptions)
 		return nil, fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	unpackCtx := namespaces.WithNamespace(ctx, ns)
+	unpackCtx := namespaceContext(ctx)
 	results, err := conchimage.UnpackAllSubImages(unpackCtx, s.client.Client, req.ImageName)
 	if err != nil {
 		return nil, err
@@ -474,14 +429,14 @@ func (s *Service) Unpack(ctx context.Context, req runtimeapi.UnpackImageOptions)
 
 // InspectBootIndex resolves and validates a Boot Index directly by digest. It
 // does not create image records or snapshots.
-func (s *Service) InspectBootIndex(ctx context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
-	_, _, info, err := s.inspectBootIndex(ctx, namespace, bootIndexDigest)
+func (s *Service) InspectBootIndex(ctx context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+	_, _, info, err := s.inspectBootIndex(ctx, bootIndexDigest)
 	return info, err
 }
 
 // InspectBootIndexReference validates the complete Boot Index closure named
 // by a local image record without unpacking any component snapshots.
-func (s *Service) InspectBootIndexReference(ctx context.Context, namespace, reference string) (conchimage.BootIndexInfo, error) {
+func (s *Service) InspectBootIndexReference(ctx context.Context, reference string) (conchimage.BootIndexInfo, error) {
 	if s == nil || s.client == nil {
 		return conchimage.BootIndexInfo{}, fmt.Errorf("image service has no containerd client")
 	}
@@ -489,14 +444,7 @@ func (s *Service) InspectBootIndexReference(ctx context.Context, namespace, refe
 	if reference == "" {
 		return conchimage.BootIndexInfo{}, fmt.Errorf("%w: reference is required", conchimage.ErrInvalidRequest)
 	}
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	inspectCtx := namespaces.WithNamespace(ctx, ns)
+	inspectCtx := namespaceContext(ctx)
 	img, err := s.client.GetImage(inspectCtx, reference)
 	if err != nil {
 		return conchimage.BootIndexInfo{}, fmt.Errorf("lookup boot index reference %s: %w", reference, err)
@@ -510,8 +458,8 @@ func (s *Service) InspectBootIndexReference(ctx context.Context, namespace, refe
 
 // ResolveBoot validates a Boot Index by digest and idempotently unpacks its
 // components into the committed snapshot parents required by Sandbox.
-func (s *Service) ResolveBoot(ctx context.Context, namespace, bootIndexDigest string) (conchsandbox.ResolvedBoot, error) {
-	resolveCtx, desc, info, err := s.inspectBootIndex(ctx, namespace, bootIndexDigest)
+func (s *Service) ResolveBoot(ctx context.Context, bootIndexDigest string) (conchsandbox.ResolvedBoot, error) {
+	resolveCtx, desc, info, err := s.inspectBootIndex(ctx, bootIndexDigest)
 	if err != nil {
 		return conchsandbox.ResolvedBoot{}, err
 	}
@@ -539,7 +487,7 @@ func (s *Service) ResolveBoot(ctx context.Context, namespace, bootIndexDigest st
 
 func (s *Service) inspectBootIndex(
 	ctx context.Context,
-	namespace, bootIndexDigest string,
+	bootIndexDigest string,
 ) (context.Context, ocispec.Descriptor, conchimage.BootIndexInfo, error) {
 	if s == nil || s.client == nil {
 		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, fmt.Errorf("image service has no containerd client")
@@ -547,14 +495,7 @@ func (s *Service) inspectBootIndex(
 	if strings.TrimSpace(bootIndexDigest) == "" {
 		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", conchimage.ErrInvalidRequest)
 	}
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	resolveCtx := namespaces.WithNamespace(ctx, ns)
+	resolveCtx := namespaceContext(ctx)
 	desc, err := conchimage.BootIndexDescriptorFromDigest(resolveCtx, s.client.ContentStore(), bootIndexDigest)
 	if err != nil {
 		return nil, ocispec.Descriptor{}, conchimage.BootIndexInfo{}, err
@@ -574,14 +515,7 @@ func (s *Service) ImportArchive(ctx context.Context, archive io.Reader, req runt
 		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("%w: archive is required", conchimage.ErrInvalidRequest)
 	}
 
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	importCtx := namespaces.WithNamespace(ctx, ns)
+	importCtx := namespaceContext(ctx)
 	importOpts := []containerd.ImportOpt{}
 	if req.ImportedTag != "" {
 		importOpts = append(importOpts, containerd.WithIndexName(req.ImportedTag))
@@ -671,14 +605,7 @@ func (s *Service) ExportArchive(ctx context.Context, w io.Writer, req runtimeapi
 		return fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
 	}
 
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	exportCtx := namespaces.WithNamespace(ctx, ns)
+	exportCtx := namespaceContext(ctx)
 	if _, err := s.client.ImageService().Get(exportCtx, req.ImageName); err != nil {
 		return fmt.Errorf("lookup image %s: %w", req.ImageName, err)
 	}
@@ -705,14 +632,7 @@ func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBo
 		return conchimage.PublishBootImageResult{}, fmt.Errorf("%w: boot_index_tag is required", conchimage.ErrInvalidRequest)
 	}
 
-	ns := req.Namespace
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	namespaceCtx := namespaceContext(ctx)
 	publishCtx, done, err := s.client.WithLease(namespaceCtx)
 	if err != nil {
 		return conchimage.PublishBootImageResult{}, fmt.Errorf("create content lease: %w", err)
@@ -774,14 +694,7 @@ func (s *Service) PublishCheckpointBootImage(
 		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("%w: memory_size_mb must be positive", conchimage.ErrInvalidRequest)
 	}
 
-	ns := strings.TrimSpace(req.Namespace)
-	if ns == "" {
-		ns = s.client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
-	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	namespaceCtx := namespaceContext(ctx)
 	publishCtx, done, err := s.client.WithLease(namespaceCtx)
 	if err != nil {
 		return conchimage.PublishCheckpointBootImageResult{}, fmt.Errorf("create content lease: %w", err)
@@ -849,12 +762,6 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.Con
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("rootfs erofs converter is not configured")
 	}
 
-	if req.Namespace == "" {
-		req.Namespace = s.client.DefaultNamespace()
-	}
-	if req.Namespace == "" {
-		req.Namespace = "default"
-	}
 	normalized, err := erofsconvert.NormalizeRequest(req)
 	if err != nil {
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("%w: %v", conchimage.ErrInvalidRequest, err)
@@ -863,7 +770,7 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.Con
 	if err != nil {
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
-	convertCtx := namespaces.WithNamespace(ctx, normalized.Namespace)
+	convertCtx := namespaceContext(ctx)
 	imgInfo, err := s.client.ImageService().Get(convertCtx, result.ImageName)
 	if err != nil {
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("lookup converted image: %w", err)
@@ -871,7 +778,7 @@ func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.Con
 	if err := containerd.NewImage(s.client.Client, imgInfo).Unpack(convertCtx, "erofs"); err != nil {
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
 	}
-	snapshotKey, err := conchimage.GetSnapshotID(ctx, s.client, normalized.Namespace, result.ImageName)
+	snapshotKey, err := conchimage.GetSnapshotID(ctx, s.client, result.ImageName)
 	if err != nil {
 		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("resolve converted rootfs snapshot key: %w", err)
 	}

@@ -43,33 +43,31 @@ func New(client *containerdclient.Client, workDir string) (*Service, error) {
 
 func (s *Service) CreateBootLayout(
 	ctx context.Context,
-	namespace string,
 	key string,
 	req conchsnapshot.BootLayoutRequest,
 ) (*conchsnapshot.BootLayout, error) {
 	if s == nil || s.server == nil {
 		return nil, fmt.Errorf("snapshot service is not configured")
 	}
-	return s.server.CreateBootLayout(ctx, namespace, key, req)
+	return s.server.CreateBootLayout(ctx, key, req)
 }
 
 func (s *Service) RestoreBootLayout(
 	ctx context.Context,
-	namespace string,
 	key string,
 	req conchsnapshot.BootLayoutRequest,
 ) (*conchsnapshot.BootLayout, error) {
 	if s == nil || s.server == nil {
 		return nil, fmt.Errorf("snapshot service is not configured")
 	}
-	return s.server.RestoreBootLayout(ctx, namespace, key, req)
+	return s.server.RestoreBootLayout(ctx, key, req)
 }
 
-func (s *Service) ReleaseBootLayout(ctx context.Context, namespace, key string) error {
+func (s *Service) ReleaseBootLayout(ctx context.Context, key string) error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("snapshot service is not configured")
 	}
-	return s.server.ReleaseBootLayout(ctx, namespace, key)
+	return s.server.ReleaseBootLayout(ctx, key)
 }
 
 func (s *Service) Close() error {
@@ -87,7 +85,7 @@ func (s *Service) List(ctx context.Context, opts runtimeapi.ListSnapshotsOptions
 		return nil, fmt.Errorf("snapshot service has no containerd client")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +110,7 @@ func (s *Service) Remove(ctx context.Context, opts runtimeapi.RemoveSnapshotOpti
 		return fmt.Errorf("key is required")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client)
 	if err != nil {
 		return err
 	}
@@ -140,7 +138,7 @@ func (s *Service) Info(ctx context.Context, opts runtimeapi.SnapshotInfoOptions)
 		return runtimeapi.SnapshotRecord{}, fmt.Errorf("key is required")
 	}
 	snapshotter := s.client.SnapshotService("erofs")
-	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client, opts.Namespace)
+	snapshotCtx, err := snapshotNamespaceContext(ctx, s.client)
 	if err != nil {
 		return runtimeapi.SnapshotRecord{}, err
 	}
@@ -193,18 +191,11 @@ func snapshotRecord(info snapshots.Info) runtimeapi.SnapshotRecord {
 	return record
 }
 
-func snapshotNamespaceContext(ctx context.Context, client *containerdclient.Client, namespace string) (context.Context, error) {
-	ns := namespace
-	if ns == "" && client != nil {
-		ns = client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
+func snapshotNamespaceContext(ctx context.Context, client *containerdclient.Client) (context.Context, error) {
 	if client != nil {
-		return client.WithNamespace(ctx, ns)
+		return client.WithNamespace(ctx)
 	}
-	return namespaces.WithNamespace(ctx, ns), nil
+	return namespaces.WithNamespace(ctx, containerdclient.Namespace), nil
 }
 
 var (

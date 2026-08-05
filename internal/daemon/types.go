@@ -9,7 +9,6 @@ import (
 
 type pullImageRequest struct {
 	ImageName  string `json:"image_name"`
-	Namespace  string `json:"namespace,omitempty"`
 	PlainHTTP  bool   `json:"plain_http,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"password,omitempty"`
@@ -19,7 +18,6 @@ type pullImageRequest struct {
 type pushImageRequest struct {
 	LocalImage      string `json:"local_image"`
 	RemoteImage     string `json:"remote_image"`
-	Namespace       string `json:"namespace,omitempty"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
@@ -27,19 +25,16 @@ type pushImageRequest struct {
 }
 
 type listImageRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type removeImageRequest struct {
-	Namespace   string `json:"namespace,omitempty"`
 	ImageName   string `json:"image_name"`
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
 type unpackImageRequest struct {
 	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
 }
 
 type imageRecordResponse struct {
@@ -64,18 +59,15 @@ type importImageArchiveResponse struct {
 }
 
 type listSnapshotRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type removeSnapshotRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
+	Key string `json:"key"`
 }
 
 type snapshotInfoRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
+	Key string `json:"key"`
 }
 
 type snapshotRecordResponse struct {
@@ -97,7 +89,6 @@ type removeSnapshotResponse struct {
 }
 
 type sandboxCreateRequest struct {
-	Namespace    string            `json:"namespace"`
 	TemplateID   string            `json:"template_id"`
 	VMMName      string            `json:"vmm_name"`
 	SandboxID    string            `json:"sandbox_id"`
@@ -121,7 +112,6 @@ type sandboxLifecycleResponse struct {
 type createSandboxResponse struct {
 	TemplateID           string `json:"templateID"`
 	SandboxID            string `json:"sandboxID"`
-	Namespace            string `json:"namespace"`
 	ConchInitVersion     string `json:"conchInitVersion"`
 	Alias                string `json:"alias"`
 	ConchInitAccessToken string `json:"conchInitAccessToken"`
@@ -133,7 +123,6 @@ type sandboxInspectResponse struct {
 	ImageName        string                       `json:"imageName"`
 	SnapshotID       string                       `json:"snapshotID"`
 	SandboxID        string                       `json:"sandboxID"`
-	Namespace        string                       `json:"namespace"`
 	StartedAt        string                       `json:"startedAt"`
 	EndAt            string                       `json:"endAt"`
 	CPUCount         int64                        `json:"cpuCount"`
@@ -148,20 +137,17 @@ type sandboxInspectResponse struct {
 }
 
 type sandboxLifecycleRequest struct {
-	Namespace string `json:"namespace,omitempty"`
 	SandboxID string `json:"sandbox_id"`
 }
 
 type sandboxCheckpointRequest struct {
-	Namespace string            `json:"namespace,omitempty"`
 	SandboxID string            `json:"sandbox_id"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type templateListRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	Origin    string `json:"origin,omitempty"`
-	BootMode  string `json:"boot_mode,omitempty"`
+	Origin   string `json:"origin,omitempty"`
+	BootMode string `json:"boot_mode,omitempty"`
 }
 
 type templateIDRequest struct {
@@ -170,7 +156,6 @@ type templateIDRequest struct {
 
 type templateCreateRequest struct {
 	Source       string            `json:"source"`
-	Namespace    string            `json:"namespace,omitempty"`
 	BootIndexTag string            `json:"boot_index_tag,omitempty"`
 	PlainHTTP    bool              `json:"plain_http,omitempty"`
 	Username     string            `json:"username,omitempty"`
@@ -180,7 +165,6 @@ type templateCreateRequest struct {
 
 type templatePullRequest struct {
 	Reference string            `json:"reference"`
-	Namespace string            `json:"namespace,omitempty"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
 	Password  string            `json:"password,omitempty"`
@@ -190,7 +174,6 @@ type templatePullRequest struct {
 type templatePushRequest struct {
 	TemplateID      string `json:"template_id"`
 	RemoteReference string `json:"remote_reference"`
-	Namespace       string `json:"namespace,omitempty"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`

@@ -8,55 +8,28 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	ctdnamespaces "github.com/containerd/containerd/v2/pkg/namespaces"
+
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
 
-func TestContainerdSnapUsesDefaultNamespace(t *testing.T) {
+func TestContainerdSnapUsesFixedConchNamespace(t *testing.T) {
 	sn := &recordingSnapshotter{}
-	store := &fakeNamespaceStore{items: []string{"team-a"}}
-	s, err := NewContainerdSnap(sn, store, "team-a")
+	s, err := NewContainerdSnap(sn)
 	if err != nil {
 		t.Fatalf("NewContainerdSnap: %v", err)
 	}
 
-	if _, err := s.Prepare(context.Background(), "", "active", "", nil); err != nil {
+	if _, err := s.Prepare(context.Background(), "active", "", nil); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if sn.lastNamespace != "team-a" {
-		t.Fatalf("namespace = %q, want team-a", sn.lastNamespace)
-	}
-}
-
-func TestContainerdSnapUsesExplicitNamespaceAndListsNamespaces(t *testing.T) {
-	sn := &recordingSnapshotter{}
-	store := &fakeNamespaceStore{items: []string{"team-a", "team-b"}}
-	s, err := NewContainerdSnap(sn, store, "default")
-	if err != nil {
-		t.Fatalf("NewContainerdSnap: %v", err)
-	}
-
-	if _, err := s.Stat(context.Background(), "team-b", "committed"); err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if sn.lastNamespace != "team-b" {
-		t.Fatalf("namespace = %q, want team-b", sn.lastNamespace)
-	}
-
-	items, err := s.ListNamespaces(context.Background())
-	if err != nil {
-		t.Fatalf("ListNamespaces: %v", err)
-	}
-	if len(items) != 2 || items[0] != "team-a" || items[1] != "team-b" {
-		t.Fatalf("namespaces = %v, want [team-a team-b]", items)
+	if sn.lastNamespace != containerdclient.Namespace {
+		t.Fatalf("namespace = %q, want %s", sn.lastNamespace, containerdclient.Namespace)
 	}
 }
 
 func TestNewContainerdSnapValidatesDependencies(t *testing.T) {
-	store := &fakeNamespaceStore{}
-	if _, err := NewContainerdSnap(nil, store, "default"); err == nil {
+	if _, err := NewContainerdSnap(nil); err == nil {
 		t.Fatal("NewContainerdSnap with nil snapshotter succeeded")
-	}
-	if _, err := NewContainerdSnap(&recordingSnapshotter{}, nil, "default"); err == nil {
-		t.Fatal("NewContainerdSnap with nil namespace store succeeded")
 	}
 }
 
@@ -113,29 +86,5 @@ func (r *recordingSnapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, 
 }
 
 func (r *recordingSnapshotter) Close() error {
-	return nil
-}
-
-type fakeNamespaceStore struct {
-	items []string
-}
-
-func (f *fakeNamespaceStore) Create(ctx context.Context, namespace string, labels map[string]string) error {
-	return nil
-}
-
-func (f *fakeNamespaceStore) Labels(ctx context.Context, namespace string) (map[string]string, error) {
-	return nil, nil
-}
-
-func (f *fakeNamespaceStore) SetLabel(ctx context.Context, namespace, key, value string) error {
-	return nil
-}
-
-func (f *fakeNamespaceStore) List(ctx context.Context) ([]string, error) {
-	return f.items, nil
-}
-
-func (f *fakeNamespaceStore) Delete(ctx context.Context, namespace string, opts ...ctdnamespaces.DeleteOpts) error {
 	return nil
 }

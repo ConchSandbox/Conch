@@ -18,7 +18,6 @@ type templateCreateOptions struct {
 	kernel     string
 	initrd     string
 	tag        string
-	namespace  string
 	configPath string
 	apiURL     string
 	address    string
@@ -29,7 +28,6 @@ type templateCreateOptions struct {
 }
 
 type templateRegistryOptions struct {
-	namespace  string
 	configPath string
 	apiURL     string
 	address    string
@@ -72,8 +70,6 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        initrd file path")
 	fmt.Fprintln(out, "  -t, --tag string")
 	fmt.Fprintln(out, "        output Conch image tag")
-	fmt.Fprintln(out, "  -n, --namespace string")
-	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
 	fmt.Fprintln(out, "  -api-url string")
 	fmt.Fprintln(out, "        conchd API base URL (default: config server endpoint or http://localhost:4063)")
 	fmt.Fprintln(out, "  -address string")
@@ -136,13 +132,12 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template pull: %w", err)
 	}
-	cfg, err := LoadConchConfig(opts.configPath)
+	conchClient, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath)
 	if err != nil {
-		return fmt.Errorf("conch template pull: load config: %w", err)
+		return fmt.Errorf("conch template pull: %w", err)
 	}
-	result, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath).PullTemplate(ctx, client.TemplatePullRequest{
+	result, err := conchClient.PullTemplate(ctx, client.TemplatePullRequest{
 		Reference: fs.Arg(0),
-		Namespace: ResolveConchNamespace(cfg, opts.namespace),
 		PlainHTTP: opts.plainHTTP,
 		Username:  username,
 		Password:  password,
@@ -178,14 +173,13 @@ func runTemplatePush(ctx context.Context, args []string) error {
 			return fmt.Errorf("conch template push: invalid --timeout %q", opts.timeout)
 		}
 	}
-	cfg, err := LoadConchConfig(opts.configPath)
+	conchClient, err := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout)
 	if err != nil {
-		return fmt.Errorf("conch template push: load config: %w", err)
+		return fmt.Errorf("conch template push: %w", err)
 	}
-	if err := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout).PushTemplate(ctx, client.TemplatePushRequest{
+	if err := conchClient.PushTemplate(ctx, client.TemplatePushRequest{
 		TemplateID:      fs.Arg(0),
 		RemoteReference: fs.Arg(1),
-		Namespace:       ResolveConchNamespace(cfg, opts.namespace),
 		PlainHTTP:       opts.plainHTTP,
 		Username:        username,
 		Password:        password,
@@ -198,8 +192,6 @@ func runTemplatePush(ctx context.Context, args []string) error {
 }
 
 func registerTemplateRegistryFlags(fs *flag.FlagSet, opts *templateRegistryOptions, push bool) {
-	fs.StringVar(&opts.namespace, "namespace", "", "containerd namespace")
-	fs.StringVar(&opts.namespace, "n", "", "containerd namespace")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
 	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
@@ -259,8 +251,6 @@ func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) 
 	fs.StringVar(&opts.initrd, "initrd", "", "initrd file path")
 	fs.StringVar(&opts.tag, "tag", "", "boot index image tag")
 	fs.StringVar(&opts.tag, "t", "", "boot index image tag")
-	fs.StringVar(&opts.namespace, "namespace", "", "containerd namespace")
-	fs.StringVar(&opts.namespace, "n", "", "containerd namespace")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
 	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
@@ -271,16 +261,15 @@ func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) 
 }
 
 func createTemplate(ctx context.Context, command string, opts templateCreateOptions) error {
-	cfg, err := LoadConchConfig(opts.configPath)
+	conchClient, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath)
 	if err != nil {
-		return fmt.Errorf("%s: load config: %w", command, err)
+		return fmt.Errorf("%s: %w", command, err)
 	}
-	res, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath).CreateTemplate(ctx, client.TemplateCreateRequest{
+	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
 		Source:       opts.source,
 		KernelPath:   opts.kernel,
 		InitrdPath:   opts.initrd,
 		BootIndexTag: opts.tag,
-		Namespace:    ResolveConchNamespace(cfg, opts.namespace),
 		PlainHTTP:    opts.plainHTTP,
 		Username:     opts.username,
 		Password:     opts.password,
@@ -305,22 +294,19 @@ func printTemplateCreateSummary(out io.Writer, res client.TemplateCreateResponse
 func runTemplateList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("template ls", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	origin := fs.String("origin", "", "template origin: image or checkpoint")
 	bootMode := fs.String("boot-mode", "", "boot mode: cold or resume")
 	configPath := fs.String("config", "", "config file path")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := LoadConchConfig(*configPath)
+	conchClient, err := client.NewClientWithConfig("", *configPath)
 	if err != nil {
-		return fmt.Errorf("conch template ls: load config: %w", err)
+		return fmt.Errorf("conch template ls: %w", err)
 	}
-	items, err := client.NewClientWithConfig("", *configPath).ListTemplates(ctx, client.TemplateListRequest{
-		Namespace: ResolveConchNamespace(cfg, *namespace),
-		Origin:    *origin,
-		BootMode:  *bootMode,
+	items, err := conchClient.ListTemplates(ctx, client.TemplateListRequest{
+		Origin:   *origin,
+		BootMode: *bootMode,
 	})
 	if err != nil {
 		return fmt.Errorf("conch template ls: %w", err)
@@ -339,7 +325,11 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch template inspect: exactly one template ID is required")
 	}
-	item, err := client.NewClientWithConfig("", *configPath).InspectTemplate(ctx, fs.Arg(0))
+	conchClient, err := client.NewClientWithConfig("", *configPath)
+	if err != nil {
+		return fmt.Errorf("conch template inspect: %w", err)
+	}
+	item, err := conchClient.InspectTemplate(ctx, fs.Arg(0))
 	if err != nil {
 		return fmt.Errorf("conch template inspect: %w", err)
 	}
@@ -358,7 +348,11 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch template rm: exactly one template ID is required")
 	}
 	id := fs.Arg(0)
-	if err := client.NewClientWithConfig("", *configPath).RemoveTemplate(ctx, id); err != nil {
+	conchClient, err := client.NewClientWithConfig("", *configPath)
+	if err != nil {
+		return fmt.Errorf("conch template rm: %w", err)
+	}
+	if err := conchClient.RemoveTemplate(ctx, id); err != nil {
 		return fmt.Errorf("conch template rm: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "Removed template: %s\n", id)

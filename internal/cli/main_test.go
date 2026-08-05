@@ -116,7 +116,6 @@ func TestPrintImagePushHelpIncludesExample(t *testing.T) {
 		"--timeout duration",
 		"timeout for this push operation",
 		"conch image push --timeout 30m",
-		"containerd namespace",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("push help output missing %q:\n%s", want, got)
@@ -148,7 +147,6 @@ func TestParseImagePushArgs(t *testing.T) {
 		wantLocal   string
 		wantRemote  string
 		wantPlain   bool
-		wantNS      string
 		wantTimeout string
 		wantErr     bool
 	}{
@@ -160,18 +158,10 @@ func TestParseImagePushArgs(t *testing.T) {
 		},
 		{
 			name:       "plain http",
-			args:       []string{"--plain-http", "-n", "team-a", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
+			args:       []string{"--plain-http", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
 			wantLocal:  "localhost/demo:latest",
 			wantRemote: "conch.example.com/conch/demo:latest",
 			wantPlain:  true,
-			wantNS:     "team-a",
-		},
-		{
-			name:       "namespace equals",
-			args:       []string{"--namespace=team-b", "localhost/demo:latest", "conch.example.com/conch/demo:latest"},
-			wantLocal:  "localhost/demo:latest",
-			wantRemote: "conch.example.com/conch/demo:latest",
-			wantNS:     "team-b",
 		},
 		{
 			name:        "timeout",
@@ -201,14 +191,14 @@ func TestParseImagePushArgs(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.LocalImage != tt.wantLocal || got.RemoteImage != tt.wantRemote || got.PlainHTTP != tt.wantPlain || got.Namespace != tt.wantNS || got.Timeout != tt.wantTimeout {
+			if got.LocalImage != tt.wantLocal || got.RemoteImage != tt.wantRemote || got.PlainHTTP != tt.wantPlain || got.Timeout != tt.wantTimeout {
 				t.Fatalf("parsePushArgs() = %#v", got)
 			}
 		})
 	}
 }
 
-func TestRunImagePushPassesResolvedNamespace(t *testing.T) {
+func TestRunImagePushPassesRequest(t *testing.T) {
 	var got client.PushImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/image/push" {
@@ -222,24 +212,12 @@ func TestRunImagePushPassesResolvedNamespace(t *testing.T) {
 	defer server.Close()
 	t.Setenv("CONCH_API_URL", server.URL)
 
-	dir := t.TempDir()
-	cfgPath := dir + "/config.yaml"
-	if err := os.WriteFile(cfgPath, []byte(`
-containerd:
-  default_namespace: team-a
-`), 0o640); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	err := cmd.RunImagePush(context.Background(), []string{"--config", cfgPath, "localhost/demo:latest", "remote/demo:latest"})
+	err := cmd.RunImagePush(context.Background(), []string{"localhost/demo:latest", "remote/demo:latest"})
 	if err != nil {
 		t.Fatalf("runPush: %v", err)
 	}
 	if got.LocalImage != "localhost/demo:latest" || got.RemoteImage != "remote/demo:latest" {
 		t.Fatalf("push request = %#v", got)
-	}
-	if got.Namespace != "team-a" {
-		t.Fatalf("namespace = %q, want %q", got.Namespace, "team-a")
 	}
 	if got.RegistryTimeout != "" {
 		t.Fatalf("registry timeout = %q, want empty", got.RegistryTimeout)
@@ -273,7 +251,6 @@ func TestPrintImagePullHelpIncludesExample(t *testing.T) {
 	got := buf.String()
 	for _, want := range []string{
 		"conch image pull [options] <image-name>",
-		"containerd namespace",
 		"conchd API base URL",
 		"config file path",
 		"--plain-http",
@@ -353,10 +330,9 @@ func TestPrintImageUnpackHelpIncludesExample(t *testing.T) {
 	got := buf.String()
 	for _, want := range []string{
 		"conch image unpack [options] <image-name>",
-		"containerd namespace",
 		"conchd API base URL",
 		"config file path",
-		"conch image unpack -n default hub.oepkgs.net/conch/conch-index:v0.1",
+		"conch image unpack hub.oepkgs.net/conch/conch-index:v0.1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unpack help output missing %q:\n%s", want, got)
@@ -364,32 +340,7 @@ func TestPrintImageUnpackHelpIncludesExample(t *testing.T) {
 	}
 }
 
-func TestResolveConchNamespaceUsesConfigAndOverride(t *testing.T) {
-	t.Setenv("CONTAINERD_ADDRESS", "unix:///must/not/be/used.sock")
-
-	dir := t.TempDir()
-	cfgPath := dir + "/config.yaml"
-	if err := os.WriteFile(cfgPath, []byte(`
-containerd:
-  default_namespace: team-a
-`), 0o640); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := cmd.LoadConchConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	ns := cmd.ResolveConchNamespace(cfg, "")
-	if ns != "team-a" {
-		t.Fatalf("namespace = %q, want %q", ns, "team-a")
-	}
-
-	ns = cmd.ResolveConchNamespace(cfg, "override-ns")
-	if ns != "override-ns" {
-		t.Fatalf("override namespace = %q, want %q", ns, "override-ns")
-	}
-
+func TestResolveConchAPIURLUsesOverrideAndAlias(t *testing.T) {
 	if got := cmd.ResolveConchAPIURL("http://explicit", "http://alias"); got != "http://explicit" {
 		t.Fatalf("api url = %q, want explicit", got)
 	}
@@ -428,10 +379,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	if err := os.WriteFile(initrdPath, []byte("initrd-content"), 0o644); err != nil {
 		t.Fatalf("write initrd: %v", err)
 	}
-	if err := os.WriteFile(cfgPath, []byte(`
-containerd:
-  default_namespace: team-a
-`), 0o640); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -488,7 +436,7 @@ containerd:
 	if err != nil {
 		t.Fatalf("runTemplateCreate: %v", err)
 	}
-	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" || metadata.Namespace != "team-a" || metadata.BootIndexTag != "localhost/conch/busybox:latest" {
+	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" || metadata.BootIndexTag != "localhost/conch/busybox:latest" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 	if kernelBody != "kernel-content" || initrdBody != "initrd-content" {

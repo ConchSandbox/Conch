@@ -76,7 +76,6 @@ func (m *Manager) SetVolumeManager(volumeManager *volume.Manager) {
 }
 
 type CreateRequest struct {
-	Namespace    string
 	TemplateID   string
 	VMMName      string
 	SandboxID    string
@@ -90,17 +89,14 @@ type CreateRequest struct {
 }
 
 type DeleteRequest struct {
-	Namespace string
 	SandboxID string
 }
 
 type LifecycleRequest struct {
-	Namespace string
 	SandboxID string
 }
 
 type CheckpointRequest struct {
-	Namespace string
 	SandboxID string
 }
 
@@ -109,7 +105,6 @@ type CheckpointResult = CapturedBootComponents
 type CreateResult struct {
 	IP              string
 	AgentToken      string
-	Namespace       string
 	SandboxID       string
 	LeaseID         string
 	VMMPID          int
@@ -138,12 +133,8 @@ func GenerateAgentToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(tokenBytes), nil
 }
 
-func sandboxMapKey(namespace, sandboxID string) string {
-	return namespace + ":" + sandboxID
-}
-
-func (m *Manager) reserveSandboxEntry(namespace, sandboxID string) (string, *sandboxEntry, error) {
-	mapKey := sandboxMapKey(namespace, sandboxID)
+func (m *Manager) reserveSandboxEntry(sandboxID string) (string, *sandboxEntry, error) {
+	mapKey := sandboxID
 	entry := &sandboxEntry{state: sandboxReady}
 	entry.mu.Lock()
 
@@ -179,7 +170,7 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, namespace, vmmName, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 	readyOpts := hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
@@ -198,9 +189,9 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, na
 	var sbx *Sandbox
 	var createErr error
 	if resume {
-		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, namespace, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -234,8 +225,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	namespace := m.resolveNamespace(req.Namespace)
-	mapKey, entry, err := m.reserveSandboxEntry(namespace, req.SandboxID)
+	mapKey, entry, err := m.reserveSandboxEntry(req.SandboxID)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -246,7 +236,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		}
 	}()
 
-	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, namespace, req)
+	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -264,7 +254,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		}
 	}()
 
-	boot, err := m.prepareSandboxBoot(leaseCtx, namespace, req, runtimeIDs)
+	boot, err := m.prepareSandboxBoot(leaseCtx, req, runtimeIDs)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -273,7 +263,6 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 			return
 		}
 		rmErr := m.boot.Release(leaseCtx, ReleaseBootRequest{
-			Namespace: namespace,
 			SandboxID: runtimeIDs.key,
 		})
 		if rmErr != nil {
@@ -284,7 +273,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	}()
 
 	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
-	volumeDevices, err := m.prepareVolumes(namespace, req, boot.Runtime.Resume)
+	volumeDevices, err := m.prepareVolumes(req, boot.Runtime.Resume)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -294,7 +283,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		if err == nil || !volumesPrepared || m.volumeManager == nil {
 			return
 		}
-		if cleanupErr := m.volumeManager.CleanupSandbox(namespace, req.SandboxID, volumeDevices); cleanupErr != nil {
+		if cleanupErr := m.volumeManager.CleanupSandbox(req.SandboxID, volumeDevices); cleanupErr != nil {
 			logger.Warn("failed to cleanup volume mounts after create failure",
 				ulog.F("sandbox_id", req.SandboxID),
 				ulog.F("error", cleanupErr),
@@ -302,13 +291,13 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		}
 	}()
 	vmStartSpec.VirtioFS = volumeDevicesToDriver(volumeDevices)
-	sbx, err := m.startSandbox(ctx, namespace, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
+	sbx, err := m.startSandbox(ctx, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
 	if err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxID)
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
-	registerSandboxVolumeCleanup(sbx, m.volumeManager, namespace, req.SandboxID, volumeDevices)
+	registerSandboxVolumeCleanup(sbx, m.volumeManager, req.SandboxID, volumeDevices)
 
 	entry.sbx = sbx
 	entry.state = sandboxReady
@@ -316,10 +305,10 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
-	return buildSandboxCreateResult(namespace, leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
+	return buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
 }
 
-func (m *Manager) prepareVolumes(namespace string, req CreateRequest, resume bool) ([]volume.Device, error) {
+func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Device, error) {
 	if len(req.VolumeMounts) == 0 {
 		return nil, nil
 	}
@@ -329,7 +318,7 @@ func (m *Manager) prepareVolumes(namespace string, req CreateRequest, resume boo
 	if m.volumeManager == nil {
 		return nil, fmt.Errorf("volume manager is not configured")
 	}
-	return m.volumeManager.PrepareSandbox(namespace, req.SandboxID, req.VolumeMounts)
+	return m.volumeManager.PrepareSandbox(req.SandboxID, req.VolumeMounts)
 }
 
 func volumeDevicesToDriver(devices []volume.Device) []driver.VirtioFSDevice {
@@ -346,13 +335,13 @@ func volumeDevicesToDriver(devices []volume.Device) []driver.VirtioFSDevice {
 	return out
 }
 
-func (m *Manager) prepareRuntimeLease(ctx context.Context, namespace string, req CreateRequest) (context.Context, string, error) {
+func (m *Manager) prepareRuntimeLease(ctx context.Context, req CreateRequest) (context.Context, string, error) {
 	leaseCtx := ctx
 	leaseID := req.LeaseID
 	if m.daemonClient == nil {
 		return leaseCtx, leaseID, nil
 	}
-	leaseCtx, leaseID, err := m.daemonClient.WithRuntimeLease(ctx, namespace, leaseID)
+	leaseCtx, leaseID, err := m.daemonClient.WithRuntimeLease(ctx, leaseID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to ensure runtime lease: %w", err)
 	}
@@ -383,14 +372,13 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 	}, nil
 }
 
-func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req CreateRequest, runtimeIDs createRuntimeIDs) (PreparedBoot, error) {
+func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, runtimeIDs createRuntimeIDs) (PreparedBoot, error) {
 	if m.boot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
 	logger := ulog.GetLogger()
 	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
 	return m.boot.Prepare(ctx, PrepareBootRequest{
-		Namespace:  namespace,
 		TemplateID: req.TemplateID,
 		SandboxID:  runtimeIDs.key,
 		VMMName:    req.VMMName,
@@ -398,11 +386,10 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, namespace string, req 
 	})
 }
 
-func (m *Manager) startSandbox(ctx context.Context, namespace string, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
+func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
 	return createSandboxWithVsockSend(
 		ctx,
 		vmStartSpec,
-		namespace,
 		req.VMMName,
 		req.SandboxID,
 		req.AgentToken,
@@ -456,12 +443,11 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 	m.sandboxes.CompareAndDelete(mapKey, entry)
 }
 
-func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
+func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
 		IP:              sbx.slot.CNIIP(),
 		AgentToken:      req.AgentToken,
-		Namespace:       namespace,
 		SandboxID:       req.SandboxID,
 		LeaseID:         leaseID,
 		VMMPID:          sbx.process.Pid(),
@@ -483,24 +469,14 @@ func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx 
 	}
 }
 
-func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, namespace, sandboxID string, devices []volume.Device) {
+func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, sandboxID string, devices []volume.Device) {
 	if sb == nil || volumeManager == nil || len(devices) == 0 {
 		return
 	}
 	volumeDevices := append([]volume.Device(nil), devices...)
 	sb.cleanup.Add(func(ctx context.Context) error {
-		return volumeManager.CleanupSandbox(namespace, sandboxID, volumeDevices)
+		return volumeManager.CleanupSandbox(sandboxID, volumeDevices)
 	})
-}
-
-func (m *Manager) resolveNamespace(namespace string) string {
-	if namespace != "" {
-		return namespace
-	}
-	if m.daemonClient == nil {
-		return "default"
-	}
-	return m.daemonClient.DefaultNamespace()
 }
 
 func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) error {
@@ -508,7 +484,6 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	var errs []error
 	fields := []ulog.Field{
 		ulog.F("sandbox_id", sandboxID),
-		ulog.F("namespace", sbx.namespace),
 		ulog.F("lease_id", sbx.leaseID),
 	}
 
@@ -527,7 +502,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	if sbx.leaseID != "" && m.daemonClient != nil {
 		var leaseErr error
 		finishLease := cleanupdiag.Start("sandbox.cleanup.restore_runtime_lease", fields...)
-		bootCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.namespace, sbx.leaseID)
+		bootCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.leaseID)
 		finishLease(leaseErr)
 		if leaseErr != nil {
 			logger.Warn("failed to restore runtime lease context for cleanup",
@@ -540,14 +515,12 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	}
 	finishBootRelease := cleanupdiag.Start("sandbox.boot.release", fields...)
 	err = m.boot.Release(bootCtx, ReleaseBootRequest{
-		Namespace: sbx.namespace,
 		SandboxID: sandboxID,
 	})
 	finishBootRelease(err)
 	if err != nil {
 		logger.Warn("failed to release sandbox boot layout",
 			ulog.F("sandbox_id", sandboxID),
-			ulog.F("namespace", sbx.namespace),
 			ulog.F("error", err),
 		)
 		errs = append(errs, err)
@@ -564,8 +537,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 }
 
 func (m *Manager) Delete(req DeleteRequest) error {
-	namespace := m.resolveNamespace(req.Namespace)
-	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	mapKey := req.SandboxID
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
@@ -594,8 +566,7 @@ func (m *Manager) Suspend(req LifecycleRequest) error {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	namespace := m.resolveNamespace(req.Namespace)
-	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	mapKey := req.SandboxID
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
@@ -625,8 +596,7 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	namespace := m.resolveNamespace(req.Namespace)
-	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	mapKey := req.SandboxID
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
@@ -655,8 +625,7 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
-	namespace := m.resolveNamespace(req.Namespace)
-	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	mapKey := req.SandboxID
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return CheckpointResult{}, err

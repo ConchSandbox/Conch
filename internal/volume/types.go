@@ -26,7 +26,6 @@ type VirtiofsConfig struct {
 // with state persistence and the sandbox manager.
 type Device struct {
 	SandboxID  string `json:"sandbox_id,omitempty"`
-	Namespace  string `json:"namespace,omitempty"`
 	Backend    string `json:"backend,omitempty"`
 	Tag        string `json:"tag,omitempty"`
 	Socket     string `json:"socket,omitempty"`
@@ -37,7 +36,6 @@ type Device struct {
 }
 
 type PrepareRequest struct {
-	Namespace string
 	SandboxID string
 	Mounts    []Mount
 }
@@ -45,7 +43,7 @@ type PrepareRequest struct {
 type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) ([]Device, error)
-	Cleanup(namespace, sandboxID string, devices []Device) error
+	Cleanup(sandboxID string, devices []Device) error
 }
 
 var safeSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

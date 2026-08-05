@@ -62,7 +62,6 @@ type Sandbox struct {
 	process     *vmm.Process
 	vmStartSpec VMStartSpec
 	vmmName     string
-	namespace   string
 	sandboxID   string
 	leaseID     string
 	slot        *netstack.Slot
@@ -72,7 +71,7 @@ type Sandbox struct {
 func ResumeSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -133,7 +132,6 @@ func ResumeSandbox(
 		process:     vmmHandle,
 		cleanup:     cleanup,
 		vmmName:     vmmName,
-		namespace:   namespace,
 		sandboxID:   sandboxId,
 		slot:        slot,
 	}
@@ -157,7 +155,7 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	namespace, vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 
@@ -219,7 +217,6 @@ func CreateSandbox(
 		process:     vmmHandle,
 		cleanup:     cleanup,
 		vmmName:     vmmName,
-		namespace:   namespace,
 		sandboxID:   sandboxId,
 		slot:        slot,
 	}

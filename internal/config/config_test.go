@@ -126,7 +126,7 @@ func TestLoadConfig(t *testing.T) {
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
-			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
+			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n" +
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n  default_kernel_plain_http: true\n  default_kernel_registry_username: kernel-user\n  default_kernel_registry_password: kernel-pass\n" +
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
@@ -190,9 +190,6 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Containerd.StateDir != "/tmp/conch-containerd-state" {
 		t.Errorf("LoadConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/tmp/conch-containerd-state")
 	}
-	if cfg.Containerd.DefaultNamespace != "team-a" {
-		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "team-a")
-	}
 	if cfg.Image.DefaultKernelImage != "registry.example.invalid/conch/kernel:6.6.0" {
 		t.Errorf("LoadConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, "registry.example.invalid/conch/kernel:6.6.0")
 	}
@@ -249,8 +246,8 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	}{
 		{
 			name:    "negative network pool size",
-			data:    "network:\n  pool_size: -1\n",
-			wantErr: "network.pool_size",
+			data:    "network:\n  warm_pool_size: -1\n",
+			wantErr: "network.warm_pool_size",
 		},
 		{
 			name:    "negative volume max mounts",
@@ -299,7 +296,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("network:\n  pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
+	data := []byte("network:\n  warm_pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -309,8 +306,8 @@ func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	want := DefaultConfig()
-	if cfg.Network.PoolSize != want.Network.PoolSize {
-		t.Errorf("LoadConfig().Network.PoolSize = %d, want default %d", cfg.Network.PoolSize, want.Network.PoolSize)
+	if cfg.Network.WarmPoolSize != want.Network.WarmPoolSize {
+		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want default %d", cfg.Network.WarmPoolSize, want.Network.WarmPoolSize)
 	}
 	if cfg.Network.TapMask != want.Network.TapMask {
 		t.Errorf("LoadConfig().Network.TapMask = %d, want default %d", cfg.Network.TapMask, want.Network.TapMask)
@@ -433,9 +430,6 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	}
 	if cfg.Containerd.StateDir != "/run/conch/containerd" {
 		t.Errorf("DefaultConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/run/conch/containerd")
-	}
-	if cfg.Containerd.DefaultNamespace != "default" {
-		t.Errorf("DefaultConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
 	}
 	if cfg.Image.DefaultKernelImage != DefaultKernelImage {
 		t.Errorf("DefaultConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, DefaultKernelImage)

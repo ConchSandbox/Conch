@@ -23,16 +23,15 @@ func TestPublishBootImagePublishesContentWithoutUnpackingSnapshots(t *testing.T)
 		t.Skip("mkfs.erofs is required")
 	}
 	host, err := containerdhost.Start(context.Background(), containerdhost.Config{
-		RootDir:          t.TempDir(),
-		StateDir:         t.TempDir(),
-		DefaultNamespace: "publish-test",
-		Snapshot:         containerdhost.SnapshotConfig{WorkDir: t.TempDir()},
+		RootDir:  t.TempDir(),
+		StateDir: t.TempDir(),
+		Snapshot: containerdhost.SnapshotConfig{WorkDir: t.TempDir()},
 	})
 	if err != nil {
 		t.Skipf("embedded containerd host unavailable: %v", err)
 	}
 	t.Cleanup(func() { _ = host.Close() })
-	ctx := namespaces.WithNamespace(context.Background(), "publish-test")
+	ctx := namespaces.WithNamespace(context.Background(), "conch")
 	leaseCtx, done, err := host.Client().WithLease(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +57,6 @@ func TestPublishBootImagePublishesContentWithoutUnpackingSnapshots(t *testing.T)
 	snapshotter := host.Client().SnapshotService("erofs")
 	before := snapshotCount(t, ctx, snapshotter)
 	result, err := host.ImageService().PublishBootImage(ctx, conchimage.PublishBootImageOptions{
-		Namespace:       "publish-test",
 		RootfsImageName: rootfsName,
 		KernelPath:      kernel,
 		InitrdPath:      initrd,
@@ -81,9 +79,8 @@ func TestPublishCheckpointBootImageReusesImmutableComponentsAndCreatesNoSnapshot
 	}
 
 	host, err := containerdhost.Start(context.Background(), containerdhost.Config{
-		RootDir:          t.TempDir(),
-		StateDir:         t.TempDir(),
-		DefaultNamespace: "checkpoint-test",
+		RootDir:  t.TempDir(),
+		StateDir: t.TempDir(),
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: t.TempDir(),
 		},
@@ -97,7 +94,7 @@ func TestPublishCheckpointBootImageReusesImmutableComponentsAndCreatesNoSnapshot
 		}
 	})
 
-	ctx := namespaces.WithNamespace(context.Background(), "checkpoint-test")
+	ctx := namespaces.WithNamespace(context.Background(), "conch")
 	leaseCtx, done, err := host.Client().WithLease(ctx)
 	if err != nil {
 		t.Fatalf("create content lease: %v", err)
@@ -126,7 +123,6 @@ func TestPublishCheckpointBootImageReusesImmutableComponentsAndCreatesNoSnapshot
 
 	before := snapshotCount(t, ctx, host.Client().SnapshotService("erofs"))
 	result, err := host.ImageService().PublishCheckpointBootImage(ctx, conchimage.PublishCheckpointBootImageOptions{
-		Namespace:             "checkpoint-test",
 		SourceBootIndexDigest: sourceIndex.Digest.String(),
 		BootIndexTag:          "localhost/conch/checkpoint:one",
 		MemRoot:               writeCaptureRoot(t, "captured-memory"),
@@ -144,7 +140,7 @@ func TestPublishCheckpointBootImageReusesImmutableComponentsAndCreatesNoSnapshot
 		t.Fatalf("snapshot count changed from %d to %d during checkpoint publication", before, after)
 	}
 
-	info, err := host.ImageService().InspectBootIndex(ctx, "checkpoint-test", result.BootIndexDigest)
+	info, err := host.ImageService().InspectBootIndex(ctx, result.BootIndexDigest)
 	if err != nil {
 		t.Fatalf("InspectBootIndex: %v", err)
 	}
@@ -165,7 +161,7 @@ func TestPublishCheckpointBootImageReusesImmutableComponentsAndCreatesNoSnapshot
 	if imageRecord.Target.Digest.String() != result.BootIndexDigest {
 		t.Fatalf("tag target = %s, want %s", imageRecord.Target.Digest, result.BootIndexDigest)
 	}
-	referenceInfo, err := host.ImageService().InspectBootIndexReference(ctx, "checkpoint-test", result.ImageName)
+	referenceInfo, err := host.ImageService().InspectBootIndexReference(ctx, result.ImageName)
 	if err != nil {
 		t.Fatalf("InspectBootIndexReference: %v", err)
 	}
