@@ -13,7 +13,7 @@ import secrets
 # Try relative imports first (when imported as a package), fall back to absolute imports
 from .client import AgentClient
 from .config_loader import load_config
-from .errors import InvalidArgumentError, NotFoundError, SandboxError
+from .errors import InvalidArgumentError, NotFoundError, SandboxError, TemplateNotFoundError
 
 
 # API keys
@@ -62,6 +62,26 @@ def _request_exception_message(exc: requests.exceptions.RequestException) -> str
     if response is not None and getattr(response, "text", None):
         return response.text
     return str(exc)
+
+
+def _control_plane_exception(exc: requests.exceptions.RequestException) -> SandboxError:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            envelope = response.json()
+        except ValueError:
+            envelope = None
+        if (
+            isinstance(envelope, dict)
+            and envelope.get("version") == 1
+            and envelope.get("code") == "not_found"
+            and envelope.get("resource_type") == "template"
+        ):
+            return TemplateNotFoundError(
+                str(envelope.get("message") or "template not found"),
+                str(envelope.get("request_id") or ""),
+            )
+    return SandboxError(_request_exception_message(exc))
 
 @dataclass
 class TemplateInfo:
@@ -796,7 +816,7 @@ class Sandbox:
             return self
 
         except requests.exceptions.RequestException as e:
-            raise RuntimeError(_request_exception_message(e))
+            raise _control_plane_exception(e) from None
 
     def delete(self, sandbox_id: Optional[str] = None) -> bool:
         target_id = sandbox_id if sandbox_id else self.sandbox_id

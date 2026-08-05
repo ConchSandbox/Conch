@@ -14,6 +14,17 @@ class NotFoundError(SandboxError):
     pass
 
 
+class TemplateNotFoundError(NotFoundError):
+    """The selected control-plane Template does not exist."""
+
+    code = "not_found"
+    resource_type = "template"
+
+    def __init__(self, message: str = "template not found", request_id: str = ""):
+        super().__init__(message)
+        self.request_id = request_id
+
+
 class AuthenticationError(SandboxError):
     pass
 

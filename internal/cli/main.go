@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
+	"github.com/openeuler/Conch/internal/apierror"
 	cmd "github.com/openeuler/Conch/internal/cli/cmd"
 	"github.com/openeuler/Conch/internal/version"
 )
@@ -63,6 +65,10 @@ func Run(args []string) int {
 		return 2
 	}
 	if err != nil {
+		if errors.Is(err, apierror.ErrTemplateNotFound) {
+			fmt.Fprintln(os.Stderr, "template not found")
+			return 3
+		}
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}

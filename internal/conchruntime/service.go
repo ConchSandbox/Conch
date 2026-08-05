@@ -178,6 +178,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 
 	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
+	if errors.Is(err, conchtemplate.ErrNotFound) {
+		return SandboxCreateResult{}, &TemplateNotFoundError{ID: opts.TemplateID}
+	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
 		Namespace:                     namespace,
@@ -877,6 +880,9 @@ func (s *Service) GetTemplate(ctx context.Context, id string) (runtimeapi.Templa
 	}
 	rec, err := s.Templates.Get(ctx, id)
 	if err != nil {
+		if errors.Is(err, conchtemplate.ErrNotFound) {
+			return runtimeapi.TemplateRecord{}, &TemplateNotFoundError{ID: strings.TrimSpace(id)}
+		}
 		return runtimeapi.TemplateRecord{}, err
 	}
 	return publicTemplateRecord(rec), nil
@@ -886,7 +892,18 @@ func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
 	if s == nil || s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	return s.Templates.Delete(ctx, id)
+	normalizedID := strings.TrimSpace(id)
+	if _, err := s.Templates.Get(ctx, normalizedID); err != nil {
+		if errors.Is(err, conchtemplate.ErrNotFound) {
+			return &TemplateNotFoundError{ID: normalizedID}
+		}
+		return err
+	}
+	err := s.Templates.Delete(ctx, id)
+	if errors.Is(err, conchtemplate.ErrNotFound) {
+		return &TemplateNotFoundError{ID: normalizedID}
+	}
+	return err
 }
 
 func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {

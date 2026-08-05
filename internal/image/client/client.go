@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openeuler/Conch/internal/apierror"
 	"github.com/openeuler/Conch/internal/config"
 )
 
@@ -363,8 +364,7 @@ func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB in
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("create sandbox returned status %d: %s", resp.StatusCode, string(body))
+		return decodeAPIError(createSandbox, resp)
 	}
 	var cr CreateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
@@ -549,13 +549,21 @@ func (c *Client) postBootMultipart(ctx context.Context, path, kernelPath, initrd
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+		return decodeAPIError(path, resp)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decoding %s response: %w", path, err)
 	}
 	return nil
+}
+
+func decodeAPIError(path string, resp *http.Response) error {
+	body, _ := io.ReadAll(resp.Body)
+	var envelope apierror.Envelope
+	if json.Unmarshal(body, &envelope) == nil && envelope.Version == apierror.EnvelopeVersion && envelope.Code != "" {
+		return &apierror.Error{StatusCode: resp.StatusCode, Envelope: envelope}
+	}
+	return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
 }
 
 func (c *Client) ListSnapshots(ctx context.Context, req ListSnapshotsRequest) ([]SnapshotRecord, error) {
@@ -582,8 +590,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+		return decodeAPIError(path, resp)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decoding %s response: %w", path, err)
@@ -607,8 +614,7 @@ func (c *Client) postJSON(ctx context.Context, path string, payload any, out any
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, string(body))
+		return decodeAPIError(path, resp)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decoding %s response: %w", path, err)

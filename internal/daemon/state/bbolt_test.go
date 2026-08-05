@@ -272,8 +272,12 @@ func TestBoltStorePublishCheckpointCASFailureLeavesBothRecordsUnchanged(t *testi
 	}); err == nil {
 		t.Fatal("PublishCheckpoint() error = nil, want CAS failure")
 	}
-	if _, err := store.GetTemplate(ctx, "t1"); !errors.Is(err, ErrNotFound) {
+	_, err = store.GetTemplate(ctx, "t1")
+	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetTemplate() error = %v, want ErrNotFound", err)
+	}
+	if !errors.Is(err, conchtemplate.ErrNotFound) {
+		t.Fatalf("GetTemplate() error = %v, want template.ErrNotFound", err)
 	}
 	sandboxRecord, _ := store.GetSandbox(ctx, "sandbox-1")
 	if sandboxRecord.CheckpointHeadTemplateID != "new-head" {

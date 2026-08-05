@@ -19,6 +19,7 @@ import (
 
 type fakeSandboxOps struct {
 	req                sandbox.CreateRequest
+	createErr          error
 	checkpointRequests []sandbox.CheckpointRequest
 	checkpointResults  []sandbox.CheckpointResult
 	checkpointErr      error
@@ -44,6 +45,9 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.req = req
+	if f.createErr != nil {
+		return sandbox.CreateResult{}, f.createErr
+	}
 	result := f.createResult
 	if result.Namespace == "" {
 		result.Namespace = req.Namespace
@@ -58,6 +62,37 @@ func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult
 		result.AgentToken = req.AgentToken
 	}
 	return result, nil
+}
+
+func TestCreateSandboxClassifiesMissingTemplate(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{createErr: conchtemplate.ErrNotFound}
+	svc := New(sandboxOps, nil, nil, nil, "default")
+
+	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: "tmpl_missing"})
+	var notFound *TemplateNotFoundError
+	if !errors.As(err, &notFound) || notFound.ID != "tmpl_missing" {
+		t.Fatalf("CreateSandbox() error = %#v, want TemplateNotFoundError", err)
+	}
+}
+
+func TestTemplateLookupAndRemovalClassifyNotFound(t *testing.T) {
+	svc := New(nil, nil, nil, newTestStore(t), "default")
+	for name, operation := range map[string]func() error{
+		"inspect": func() error {
+			_, err := svc.GetTemplate(context.Background(), " tmpl_missing ")
+			return err
+		},
+		"remove": func() error {
+			return svc.RemoveTemplate(context.Background(), " tmpl_missing ")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var notFound *TemplateNotFoundError
+			if err := operation(); !errors.As(err, &notFound) || notFound.ID != "tmpl_missing" {
+				t.Fatalf("error = %#v, want TemplateNotFoundError", err)
+			}
+		})
+	}
 }
 
 func (f *fakeSandboxOps) Delete(sandbox.DeleteRequest) error {

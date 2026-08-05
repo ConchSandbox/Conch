@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/adapters/containerd/host"
+	"github.com/openeuler/Conch/internal/apierror"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -403,11 +406,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		logger.Error("Failed to create sandbox",
-			ulog.F("sandbox_id", req.SandboxID),
-			ulog.F("error", err),
-		)
-		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeTemplateError(w, r, err)
 		return
 	}
 
@@ -841,7 +840,7 @@ func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.runtimeService.GetTemplate(r.Context(), req.ID)
 	if err != nil {
-		http.Error(w, "Failed to inspect template: "+err.Error(), http.StatusInternalServerError)
+		writeTemplateError(w, r, err)
 		return
 	}
 	writeJSON(w, item)
@@ -853,7 +852,7 @@ func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtimeService.RemoveTemplate(r.Context(), req.ID); err != nil {
-		http.Error(w, "Failed to remove template: "+err.Error(), http.StatusInternalServerError)
+		writeTemplateError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -1128,6 +1127,45 @@ func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeTemplateError(w http.ResponseWriter, r *http.Request, err error) {
+	requestID := requestCorrelationID(r)
+	w.Header().Set("X-Request-ID", requestID)
+	w.Header().Set("Content-Type", "application/json")
+
+	var notFound *conchruntime.TemplateNotFoundError
+	if errors.As(err, &notFound) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(apierror.Envelope{
+			Version:      apierror.EnvelopeVersion,
+			Code:         apierror.CodeNotFound,
+			ResourceType: apierror.ResourceTemplate,
+			Message:      "template not found",
+			RequestID:    requestID,
+		})
+		return
+	}
+
+	ulog.GetLogger().Error("template API request failed", ulog.F("error", err), ulog.F("request_id", requestID))
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(apierror.Envelope{
+		Version:   apierror.EnvelopeVersion,
+		Code:      apierror.CodeInternalError,
+		Message:   "internal server error",
+		RequestID: requestID,
+	})
+}
+
+func requestCorrelationID(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get("X-Request-ID")); id != "" {
+		return id
+	}
+	var data [12]byte
+	if _, err := rand.Read(data[:]); err == nil {
+		return "req_" + hex.EncodeToString(data[:])
+	}
+	return "req_unknown"
 }
 
 func writeImageResults(w http.ResponseWriter, results map[string]string) {

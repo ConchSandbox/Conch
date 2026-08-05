@@ -11,7 +11,7 @@ from .sandbox import (
     WriteInfo,
 )
 from .client import AgentClient
-from .errors import AuthenticationError, InvalidArgumentError, NotFoundError, SandboxError, TimeoutException
+from .errors import AuthenticationError, InvalidArgumentError, NotFoundError, SandboxError, TemplateNotFoundError, TimeoutException
 
 __all__ = [
     "Sandbox",
@@ -28,6 +28,7 @@ __all__ = [
     "ProcessEvent",
     "ProcessInfo",
     "SandboxError",
+    "TemplateNotFoundError",
     "TimeoutException",
     "WriteInfo",
 ]

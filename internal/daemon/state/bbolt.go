@@ -200,6 +200,9 @@ func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry)
 func (s *BoltStore) GetTemplate(ctx context.Context, id string) (conchtemplate.Entry, error) {
 	var rec templateRecord
 	if err := s.get(ctx, []byte("templates"), id, &rec); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return conchtemplate.Entry{}, fmt.Errorf("%w: %w", conchtemplate.ErrNotFound, err)
+		}
 		return conchtemplate.Entry{}, err
 	}
 	return templateEntryFromRecord(rec)
