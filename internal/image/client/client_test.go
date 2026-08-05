@@ -437,3 +437,25 @@ func TestCreateSandboxIncludesNamespaceAndExplicitRAM(t *testing.T) {
 		t.Fatalf("unexpected client resource defaults = %#v", got)
 	}
 }
+
+func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
+	var body map[string]any
+	c := NewClient("http://example.invalid")
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"sandboxID":"sandbox-123","domain":"192.0.2.2"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	if err := c.CreateSandbox("", "sandbox-123", "team-a", 0); err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if _, ok := body["template_id"]; ok {
+		t.Fatalf("create request unexpectedly includes template_id: %#v", body)
+	}
+}

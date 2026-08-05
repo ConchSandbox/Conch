@@ -19,7 +19,7 @@ func TestPrintSandboxHelpListsSandboxCommands(t *testing.T) {
   conch sandbox <command> [options]
 
 Commands:
-  create      Create a sandbox from a Template ID.
+  create      Create a sandbox from a Template ID or the daemon default.
   checkpoint  Checkpoint a sandbox into a resumable template.
   suspend     Suspend a running sandbox.
   resume      Resume a suspended sandbox.
@@ -33,10 +33,17 @@ Run 'conch sandbox <command> --help' for command-specific usage.
 
 func TestRunSandboxCreateOmitsResourceOverridesByDefault(t *testing.T) {
 	got := captureSandboxCreateRequest(t)
-	for _, key := range []string{"vmm_name", "vcpu_num", "vcpu_max", "ram_mb"} {
+	for _, key := range []string{"template_id", "vmm_name", "vcpu_num", "vcpu_max", "ram_mb"} {
 		if value, ok := got[key]; ok {
 			t.Fatalf("create request unexpectedly overrides daemon defaults with %s=%v; request = %#v", key, value, got)
 		}
+	}
+}
+
+func TestRunSandboxCreateKeepsExplicitTemplateID(t *testing.T) {
+	got := captureSandboxCreateRequest(t, "--template-id", "tmpl-explicit")
+	if got["template_id"] != "tmpl-explicit" {
+		t.Fatalf("template_id = %v, want tmpl-explicit; request = %#v", got["template_id"], got)
 	}
 }
 
@@ -87,7 +94,7 @@ func captureSandboxCreateRequest(t *testing.T, resourceArgs ...string) map[strin
 	t.Cleanup(server.Close)
 	t.Setenv("CONCH_API_URL", server.URL)
 
-	args := []string{"create", "--template-id", "tmpl_123", "--sandbox-id", "sandbox-123"}
+	args := []string{"create", "--sandbox-id", "sandbox-123"}
 	args = append(args, resourceArgs...)
 	if err := RunSandbox(context.Background(), args); err != nil {
 		t.Fatalf("RunSandbox() error = %v", err)

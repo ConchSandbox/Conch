@@ -50,7 +50,7 @@ func ResolveBaseURL() string {
 // CreateRequest matches POST /api/v1/sandboxes.
 type CreateRequest struct {
 	Namespace    string        `json:"namespace,omitempty"`
-	TemplateID   string        `json:"template_id"`
+	TemplateID   string        `json:"template_id,omitempty"`
 	VmmName      string        `json:"vmm_name,omitempty"`
 	SandboxId    string        `json:"sandbox_id"`
 	VcpuNum      int64         `json:"vcpu_num,omitempty"`

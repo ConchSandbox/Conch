@@ -52,10 +52,12 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
                volume_mounts=None, env=None) -> Sandbox
 ```
 
-基于 Template 创建沙箱。连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
+基于 Template 创建沙箱。省略 `template_id` 时，由 conchd 使用
+`sandbox.default_template_id`；该默认值未配置或为空白时，conchd 返回明确的 HTTP 400。
+连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
 
 **参数：**
-- `template_id` (str): 要启动的 `tmpl_xxx`
+- `template_id` (str, 可选): 要启动的 `tmpl_xxx`；省略时使用 conchd 默认 Template
 - `sandbox_id` (str, 可选): 指定沙箱 ID，默认自动生成
 - `namespace` (str, 可选): 沙箱命名空间
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
@@ -64,13 +66,17 @@ Sandbox.create(template_id=None, sandbox_id=None, namespace=None,
 
 **返回：** 成功返回 `Sandbox` 对象。
 
-**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效或缺少 `template_id` 时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
+**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
 
 **示例：**
 ```python
 # 从指定 Template 创建
 sbx = Sandbox.create(template_id="tmpl_123")
 sbx.commands.run(cmd='python3', content='print("Hello")')
+sbx.delete()
+
+# 省略 Template，由 conchd 的 sandbox.default_template_id 决定
+sbx = Sandbox.create()
 sbx.delete()
 
 # 从 checkpoint 产生的可恢复 Template 创建

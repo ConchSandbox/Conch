@@ -394,6 +394,15 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Env:          req.Env,
 	})
 	if err != nil {
+		if errors.Is(err, conchruntime.ErrTemplateIDRequired) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "error",
+				"error":  err.Error(),
+			})
+			return
+		}
 		logger.Error("Failed to create sandbox",
 			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),

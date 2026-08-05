@@ -130,9 +130,9 @@ func TestPrintSandboxCreateHelpExplainsDaemonDefaults(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch sandbox create --template-id <template-id> [options]",
-		"VMM and vCPU settings are selected",
-		"memory also uses the conchd default unless --ram-mb is set",
+		"conch sandbox create [--template-id <template-id>] [options]",
+		"sandbox.default_template_id",
+		"Other unset resources also use conchd defaults",
 		"conchd sandbox.default_ram_mb",
 	} {
 		if !strings.Contains(got, want) {

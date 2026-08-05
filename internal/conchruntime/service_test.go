@@ -3,6 +3,7 @@ package conchruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sync/atomic"
@@ -507,10 +508,29 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsMissingOrWhitespaceDefaultTemplate(t *testing.T) {
+	for _, defaultTemplate := range []string{"", " \t "} {
+		t.Run(fmt.Sprintf("default %q", defaultTemplate), func(t *testing.T) {
+			sandboxOps := &fakeSandboxOps{}
+			svc := New(sandboxOps, nil, nil, nil, "default")
+			svc.SetSandboxDefaults(SandboxDefaults{TemplateID: defaultTemplate})
+
+			_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: " \n "})
+			if !errors.Is(err, ErrTemplateIDRequired) {
+				t.Fatalf("CreateSandbox() error = %v, want ErrTemplateIDRequired", err)
+			}
+			if sandboxOps.req.TemplateID != "" {
+				t.Fatalf("sandbox create was called with %#v", sandboxOps.req)
+			}
+		})
+	}
+}
+
 func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
 	store := newTestStore(t)
 	sandboxOps := &fakeSandboxOps{}
 	svc := New(sandboxOps, nil, nil, store, "default")
+	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
 
 	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{})
 	if err != nil {

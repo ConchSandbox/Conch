@@ -16,7 +16,7 @@ func printSandboxHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch sandbox <command> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
-	fmt.Fprintln(out, "  create      Create a sandbox from a Template ID.")
+	fmt.Fprintln(out, "  create      Create a sandbox from a Template ID or the daemon default.")
 	fmt.Fprintln(out, "  checkpoint  Checkpoint a sandbox into a resumable template.")
 	fmt.Fprintln(out, "  suspend     Suspend a running sandbox.")
 	fmt.Fprintln(out, "  resume      Resume a suspended sandbox.")
@@ -26,15 +26,15 @@ func printSandboxHelp(out io.Writer) {
 
 func PrintSandboxCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch sandbox create --template-id <template-id> [options]")
+	fmt.Fprintln(out, "  conch sandbox create [--template-id <template-id>] [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
-	fmt.Fprintln(out, "  Create a sandbox from a Template ID. VMM and vCPU settings are selected")
-	fmt.Fprintln(out, "  by conchd; memory also uses the conchd default unless --ram-mb is set.")
+	fmt.Fprintln(out, "  Create a sandbox from a Template ID. If omitted, conchd uses")
+	fmt.Fprintln(out, "  sandbox.default_template_id. Other unset resources also use conchd defaults.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  --template-id string")
-	fmt.Fprintln(out, "        template ID (required)")
+	fmt.Fprintln(out, "        template ID (default: conchd sandbox.default_template_id)")
 	fmt.Fprintln(out, "  --sandbox-id string")
 	fmt.Fprintln(out, "        sandbox ID (default: generated)")
 	fmt.Fprintln(out, "  --ram-mb int")
@@ -72,7 +72,7 @@ func RunSandbox(ctx context.Context, args []string) error {
 func runSandboxCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sandbox create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	templateID := fs.String("template-id", "", "template ID")
+	templateID := fs.String("template-id", "", "template ID (uses daemon default if omitted)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
 	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
@@ -84,9 +84,6 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("conch sandbox create: unexpected positional arguments: %v", fs.Args())
-	}
-	if *templateID == "" {
-		return fmt.Errorf("conch sandbox create: --template-id is required")
 	}
 	if *ramMB < 0 {
 		return fmt.Errorf("conch sandbox create: --ram-mb must not be negative")

@@ -652,7 +652,9 @@ class Sandbox:
         config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
         self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
         self.namespace = namespace or ""
-        self.template_id = template_id or sandbox_cfg.get(TEMPLATE_ID_KEY, "")
+        # Template defaulting belongs to conchd. SDK configuration must not
+        # override sandbox.default_template_id when the caller omits the ID.
+        self.template_id = template_id
 
         self.ip = None
         self.agent_token = None
@@ -730,20 +732,17 @@ class Sandbox:
         return {} if response.status_code == HTTP_NO_CONTENT else response.json()
 
     def _build_create_payload(self) -> Dict[str, Any]:
-        if not self.template_id:
-            raise ValueError("template_id is required")
-
-
         config = self._config[CFG_IMAGE_SECTION]
         payload = {
             NAMESPACE_KEY: self.namespace,
-            TEMPLATE_ID_KEY: self.template_id,
             VMM_NAME_KEY: self._get_vmm_name(),
             SANDBOX_ID_KEY: self.sandbox_id,
             VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
             VCPU_MAX_KEY: self.vcpu_max or config[VCPU_MAX_KEY],
             RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
+        if self.template_id and self.template_id.strip():
+            payload[TEMPLATE_ID_KEY] = self.template_id
         if self.volume_mounts:
             payload[VOLUME_MOUNTS_KEY] = self.volume_mounts
         if self.env is not None:

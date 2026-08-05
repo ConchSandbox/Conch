@@ -32,6 +32,10 @@ type SandboxOps interface {
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
+// ErrTemplateIDRequired reports that neither the request nor conchd supplied
+// a usable template ID for sandbox creation.
+var ErrTemplateIDRequired = errors.New("template_id is required and no default_template_id is configured")
+
 type ImageOps interface {
 	Pull(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error)
 	Push(context.Context, runtimeapi.PushImageOptions) error
@@ -150,6 +154,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		opts.LeaseID = containerdclient.RuntimeLeaseID(namespace)
 	}
 	s.applySandboxDefaults(&opts)
+	if opts.TemplateID == "" {
+		return SandboxCreateResult{}, ErrTemplateIDRequired
+	}
 	agentToken, err := sandbox.GenerateAgentToken()
 	if err != nil {
 		return SandboxCreateResult{}, err
@@ -247,8 +254,9 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 		return
 	}
 	defaults := s.SandboxDefaults
+	opts.TemplateID = strings.TrimSpace(opts.TemplateID)
 	if opts.TemplateID == "" {
-		opts.TemplateID = defaults.TemplateID
+		opts.TemplateID = strings.TrimSpace(defaults.TemplateID)
 	}
 	if opts.VMMName == "" {
 		opts.VMMName = defaults.VMMName
