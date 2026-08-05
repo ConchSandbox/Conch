@@ -42,21 +42,6 @@ func TestClassifyConchIndexKind(t *testing.T) {
 	}
 }
 
-func TestNewStoresConfig(t *testing.T) {
-	cfg := Config{
-		DefaultKernelImage:            "registry.example.invalid/conch/kernel:6.6.0",
-		DefaultKernelPlainHTTP:        true,
-		DefaultKernelRegistryUsername: "kernel-user",
-		DefaultKernelRegistryPassword: "kernel-pass",
-	}
-
-	svc := New(nil, cfg)
-
-	if svc.cfg != cfg {
-		t.Fatalf("config = %#v, want %#v", svc.cfg, cfg)
-	}
-}
-
 func TestInferComponentKindFromName(t *testing.T) {
 	cases := map[string]string{
 		"localhost/conch/rootfs-component:abc":       "boot-component-rootfs",

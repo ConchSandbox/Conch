@@ -3,7 +3,6 @@ package image
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,26 +42,14 @@ const (
 type Service struct {
 	client    *containerdclient.Client
 	converter erofsconvert.RootfsErofsConverter
-	cfg       Config
 }
 
 func namespaceContext(ctx context.Context) context.Context {
 	return namespaces.WithNamespace(ctx, containerdclient.Namespace)
 }
 
-type Config struct {
-	DefaultKernelImage            string `toml:"default_kernel_image" json:"defaultKernelImage"`
-	DefaultKernelPlainHTTP        bool   `toml:"default_kernel_plain_http" json:"defaultKernelPlainHTTP"`
-	DefaultKernelRegistryUsername string `toml:"default_kernel_registry_username" json:"defaultKernelRegistryUsername"`
-	DefaultKernelRegistryPassword string `toml:"default_kernel_registry_password" json:"defaultKernelRegistryPassword"`
-}
-
-func New(client *containerdclient.Client, cfg ...Config) *Service {
-	var imageCfg Config
-	if len(cfg) > 0 {
-		imageCfg = cfg[0]
-	}
-	svc := &Service{client: client, cfg: imageCfg}
+func New(client *containerdclient.Client) *Service {
+	svc := &Service{client: client}
 	if client != nil {
 		svc.converter = erofsconvert.NewToolkitConverter(client)
 	}
@@ -103,28 +90,8 @@ func (s *Service) Pull(ctx context.Context, req runtimeapi.PullImageOptions) (ru
 	}
 
 	results, err := conchimage.UnpackAllSubImages(pullCtx, s.client.Client, req.ImageName)
-	if err == nil {
-		return runtimeapi.PullImageResult{Refs: results}, nil
-	}
-	if !errors.Is(err, conchimage.ErrMissingSandbox) || s.cfg.DefaultKernelImage == "" {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
-	}
-
-	kernelResolver := docker.NewResolver(docker.ResolverOptions{
-		PlainHTTP: s.cfg.DefaultKernelPlainHTTP,
-		Credentials: func(string) (string, string, error) {
-			return s.cfg.DefaultKernelRegistryUsername, s.cfg.DefaultKernelRegistryPassword, nil
-		},
-	})
-	if _, err := s.client.Pull(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("pull default kernel image %s: %w", s.cfg.DefaultKernelImage, err)
-	}
-	if _, err := s.client.Fetch(pullCtx, s.cfg.DefaultKernelImage, containerd.WithResolver(kernelResolver)); err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch default kernel image %s content: %w", s.cfg.DefaultKernelImage, err)
-	}
-	results, err = conchimage.UnpackAllSubImagesWithDefaultSandbox(pullCtx, s.client.Client, req.ImageName, s.cfg.DefaultKernelImage)
 	if err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image with default kernel image %s: %w", s.cfg.DefaultKernelImage, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
 	}
 	return runtimeapi.PullImageResult{Refs: results}, nil
 }
@@ -845,12 +812,11 @@ func init() {
 	registry.Register(&plugin.Registration{
 		Type:   conchplugins.ImageServicePluginType,
 		ID:     conchplugins.ImageServiceID,
-		Config: &Config{},
+		Config: &struct{}{},
 		Requires: []plugin.Type{
 			conchplugins.HostPluginType,
 		},
 		InitFn: func(ic *plugin.InitContext) (any, error) {
-			cfg := ic.Config.(*Config)
 			inst, err := ic.GetByID(conchplugins.HostPluginType, conchplugins.HostPluginID)
 			if err != nil {
 				return nil, err
@@ -859,7 +825,7 @@ func init() {
 			if !ok {
 				return nil, fmt.Errorf("%s does not provide daemon client", conchplugins.HostPluginURI)
 			}
-			svc := New(provider.DaemonClient(), *cfg)
+			svc := New(provider.DaemonClient())
 			publishReady(svc)
 			return svc, nil
 		},

@@ -25,7 +25,6 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Network    NetworkConfig    `yaml:"network"`
 	Containerd ContainerdConfig `yaml:"containerd"`
-	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	Volume     VolumeConfig     `yaml:"volume"`
 	State      StateConfig      `yaml:"state"`
@@ -68,16 +67,7 @@ type ContainerdConfig struct {
 	StateDir string `yaml:"state_dir"`
 }
 
-// ImageConfig holds image workflow defaults.
-type ImageConfig struct {
-	DefaultKernelImage            string `yaml:"default_kernel_image"`
-	DefaultKernelPlainHTTP        bool   `yaml:"default_kernel_plain_http"`
-	DefaultKernelRegistryUsername string `yaml:"default_kernel_registry_username"`
-	DefaultKernelRegistryPassword string `yaml:"default_kernel_registry_password"`
-}
-
 const (
-	DefaultKernelImage   = "hub.oepkgs.net/conch/kernel:6.6.0"
 	DefaultVMMName       = "stratovirt"
 	defaultVolumeBackend = "virtiofs"
 )
@@ -141,12 +131,6 @@ func DefaultConfig() *Config {
 		Containerd: ContainerdConfig{
 			RootDir:  "/var/lib/conch/containerd",
 			StateDir: "/run/conch/containerd",
-		},
-		Image: ImageConfig{
-			DefaultKernelImage:            DefaultKernelImage,
-			DefaultKernelPlainHTTP:        false,
-			DefaultKernelRegistryUsername: "",
-			DefaultKernelRegistryPassword: "",
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,
@@ -269,9 +253,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Containerd.StateDir == "" {
 		cfg.Containerd.StateDir = defaultCfg.Containerd.StateDir
-	}
-	if cfg.Image.DefaultKernelImage == "" {
-		cfg.Image.DefaultKernelImage = defaultCfg.Image.DefaultKernelImage
 	}
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry

@@ -121,12 +121,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		RootDir:       cfg.Containerd.RootDir,
 		StateDir:      cfg.Containerd.StateDir,
 		TemplateStore: store,
-		Image: containerdhost.ImageConfig{
-			DefaultKernelImage:            cfg.Image.DefaultKernelImage,
-			DefaultKernelPlainHTTP:        cfg.Image.DefaultKernelPlainHTTP,
-			DefaultKernelRegistryUsername: cfg.Image.DefaultKernelRegistryUsername,
-			DefaultKernelRegistryPassword: cfg.Image.DefaultKernelRegistryPassword,
-		},
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
 		},

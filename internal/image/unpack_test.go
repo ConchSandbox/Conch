@@ -126,68 +126,6 @@ func TestValidateRequiredKindsRequiresRootfsAndSandbox(t *testing.T) {
 	}
 }
 
-func TestManifestsWithDefaultSandboxAppendsMissingSandbox(t *testing.T) {
-	rootfs := ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-		Annotations: map[string]string{"io.conch.kind": KindRootfs},
-	}
-	defaultSandbox := ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000002",
-		Annotations: map[string]string{"io.conch.kind": KindSandbox},
-	}
-
-	got := manifestsWithDefaultSandbox([]ocispec.Descriptor{rootfs}, &defaultSandbox)
-	if len(got) != 2 {
-		t.Fatalf("manifest count = %d, want 2", len(got))
-	}
-	if getKind(got[1]) != KindSandbox {
-		t.Fatalf("appended kind = %q, want %q", getKind(got[1]), KindSandbox)
-	}
-}
-
-func TestManifestsWithDefaultSandboxKeepsExistingSandbox(t *testing.T) {
-	rootfs := ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-		Annotations: map[string]string{"io.conch.kind": KindRootfs},
-	}
-	sandbox := ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000002",
-		Annotations: map[string]string{"io.conch.kind": KindSandbox},
-	}
-	defaultSandbox := ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000003",
-		Annotations: map[string]string{"io.conch.kind": KindSandbox},
-	}
-
-	got := manifestsWithDefaultSandbox([]ocispec.Descriptor{rootfs, sandbox}, &defaultSandbox)
-	if len(got) != 2 {
-		t.Fatalf("manifest count = %d, want 2", len(got))
-	}
-	if got[1].Digest != sandbox.Digest {
-		t.Fatalf("sandbox digest = %s, want %s", got[1].Digest, sandbox.Digest)
-	}
-}
-
-func TestDefaultSandboxDescriptorAnnotatesKind(t *testing.T) {
-	desc := defaultSandboxDescriptor(ocispec.Descriptor{
-		Digest:      "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-		Annotations: map[string]string{"existing": "value"},
-	}, "hub.oepkgs.net/conch/kernel:6.6.0")
-
-	if got := desc.Annotations["io.conch.kind"]; got != KindSandbox {
-		t.Fatalf("kind annotation = %q, want %q", got, KindSandbox)
-	}
-	if got := desc.Annotations["org.opencontainers.image.ref.name"]; got != "hub.oepkgs.net/conch/kernel:6.6.0" {
-		t.Fatalf("ref name = %q", got)
-	}
-	if got := desc.Annotations["existing"]; got != "value" {
-		t.Fatalf("existing annotation = %q", got)
-	}
-	if desc.Digest == "" {
-		t.Fatal("digest was cleared")
-	}
-}
-
 func TestValidateRequiredKindsAllowsOptionalMemSnapshot(t *testing.T) {
 	err := validateRequiredKinds(map[string]string{
 		KindRootfs:  "rootfs-id",

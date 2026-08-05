@@ -42,17 +42,9 @@ const (
 type Config struct {
 	RootDir       string
 	StateDir      string
-	Image         ImageConfig
 	Snapshot      SnapshotConfig
 	TemplateStore state.Store
 	Sandbox       *SandboxConfig
-}
-
-type ImageConfig struct {
-	DefaultKernelImage            string
-	DefaultKernelPlainHTTP        bool
-	DefaultKernelRegistryUsername string
-	DefaultKernelRegistryPassword string
 }
 
 type SnapshotConfig struct {
@@ -204,7 +196,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	pluginConfigs := map[string]any{
-		conchplugins.ImageServiceURI: imagePluginConfig(cfg.Image),
 		string(plugins.ServicePlugin) + "." + services.DiffService: map[string]any{
 			"default": []string{"erofs", "walking"},
 		},
@@ -291,15 +282,6 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
 		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
 		"request_timeout":      cfg.RequestTimeout.String(),
-	}
-}
-
-func imagePluginConfig(cfg ImageConfig) map[string]any {
-	return map[string]any{
-		"default_kernel_image":             cfg.DefaultKernelImage,
-		"default_kernel_plain_http":        cfg.DefaultKernelPlainHTTP,
-		"default_kernel_registry_username": cfg.DefaultKernelRegistryUsername,
-		"default_kernel_registry_password": cfg.DefaultKernelRegistryPassword,
 	}
 }
 

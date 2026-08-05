@@ -60,25 +60,3 @@ func TestStartAndClose(t *testing.T) {
 		t.Fatalf("close restarted host: %v", err)
 	}
 }
-
-func TestImagePluginConfig(t *testing.T) {
-	got := imagePluginConfig(ImageConfig{
-		DefaultKernelImage:            "registry.example.invalid/conch/kernel:6.6.0",
-		DefaultKernelPlainHTTP:        true,
-		DefaultKernelRegistryUsername: "kernel-user",
-		DefaultKernelRegistryPassword: "kernel-pass",
-	})
-
-	if got["default_kernel_image"] != "registry.example.invalid/conch/kernel:6.6.0" {
-		t.Fatalf("default_kernel_image = %#v", got["default_kernel_image"])
-	}
-	if got["default_kernel_plain_http"] != true {
-		t.Fatalf("default_kernel_plain_http = %#v", got["default_kernel_plain_http"])
-	}
-	if got["default_kernel_registry_username"] != "kernel-user" {
-		t.Fatalf("default_kernel_registry_username = %#v", got["default_kernel_registry_username"])
-	}
-	if got["default_kernel_registry_password"] != "kernel-pass" {
-		t.Fatalf("default_kernel_registry_password = %#v", got["default_kernel_registry_password"])
-	}
-}

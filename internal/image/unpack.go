@@ -91,40 +91,17 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 	if err != nil {
 		return nil, err
 	}
-	return unpackAllSubImagesFromDescriptor(ctx, client, desc, nil)
+	return unpackAllSubImagesFromDescriptor(ctx, client, desc)
 }
 
 // UnpackAllSubImagesFromDescriptor unpacks a Boot Index directly from its
 // immutable descriptor. It shares the exact validation and unpack path used by
 // the image-name entrypoint.
 func UnpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) (snapshotMap map[string]string, err error) {
-	return unpackAllSubImagesFromDescriptor(ctx, client, desc, nil)
+	return unpackAllSubImagesFromDescriptor(ctx, client, desc)
 }
 
-// UnpackAllSubImagesWithDefaultSandbox unpacks a Conch boot index, using
-// defaultSandboxImage as the sandbox component when the index only carries
-// rootfs/mem-snapshot components.
-func UnpackAllSubImagesWithDefaultSandbox(ctx context.Context, client *containerd.Client, imageName, defaultSandboxImage string) (map[string]string, error) {
-	if defaultSandboxImage == "" {
-		return UnpackAllSubImages(ctx, client, imageName)
-	}
-	img, err := client.GetImage(ctx, defaultSandboxImage)
-	if err != nil {
-		return nil, fmt.Errorf("get default sandbox image %s: %w", defaultSandboxImage, err)
-	}
-	manifestDesc, err := firstManifestDescriptorFromContent(ctx, client.ContentStore(), img.Target())
-	if err != nil {
-		return nil, fmt.Errorf("resolve default sandbox image %s manifest: %w", defaultSandboxImage, err)
-	}
-	desc := defaultSandboxDescriptor(manifestDesc, defaultSandboxImage)
-	indexDesc, err := getBootIndexDescriptor(ctx, client, imageName)
-	if err != nil {
-		return nil, err
-	}
-	return unpackAllSubImagesFromDescriptor(ctx, client, indexDesc, &desc)
-}
-
-func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Client, indexDesc ocispec.Descriptor, defaultSandbox *ocispec.Descriptor) (snapshotMap map[string]string, err error) {
+func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Client, indexDesc ocispec.Descriptor) (snapshotMap map[string]string, err error) {
 	if client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
@@ -147,19 +124,13 @@ func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Cl
 	if err != nil {
 		return nil, err
 	}
-	manifests := manifestsWithDefaultSandbox(index.Manifests, defaultSandbox)
+	manifests := index.Manifests
 	if _, err := validateBootIndexManifestKinds(manifests); err != nil {
 		return nil, err
 	}
 	if err := validateContentClosure(ctx, client.ContentStore(), indexDesc); err != nil {
 		return nil, fmt.Errorf("validate boot index %s closure: %w", indexDesc.Digest, err)
 	}
-	if defaultSandbox != nil {
-		if err := validateContentClosure(ctx, client.ContentStore(), *defaultSandbox); err != nil {
-			return nil, fmt.Errorf("validate default sandbox closure: %w", err)
-		}
-	}
-
 	ulog.Info("Found manifests in index, starting unpack",
 		ulog.F("count", len(manifests)))
 
@@ -198,40 +169,6 @@ func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Cl
 		return nil, err
 	}
 	return snapshotMap, nil
-}
-
-func manifestsWithDefaultSandbox(manifests []ocispec.Descriptor, defaultSandbox *ocispec.Descriptor) []ocispec.Descriptor {
-	next := make([]ocispec.Descriptor, 0, len(manifests)+1)
-	hasSandbox := false
-	for _, manifest := range manifests {
-		if getKind(manifest) == KindSandbox {
-			hasSandbox = true
-		}
-		next = append(next, manifest)
-	}
-	if !hasSandbox && defaultSandbox != nil {
-		next = append(next, *defaultSandbox)
-	}
-	return next
-}
-
-func defaultSandboxDescriptor(desc ocispec.Descriptor, imageName string) ocispec.Descriptor {
-	desc.Annotations = mergeDescriptorAnnotations(desc.Annotations, map[string]string{
-		"io.conch.kind":                     KindSandbox,
-		"org.opencontainers.image.ref.name": imageName,
-	})
-	return desc
-}
-
-func mergeDescriptorAnnotations(base map[string]string, values map[string]string) map[string]string {
-	merged := make(map[string]string, len(base)+len(values))
-	for k, v := range base {
-		merged[k] = v
-	}
-	for k, v := range values {
-		merged[k] = v
-	}
-	return merged
 }
 
 type createdSnapshot struct {
