@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func TestPrintTemplateHelpListsTemplateCommands(t *testing.T) {

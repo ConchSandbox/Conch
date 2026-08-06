@@ -10,7 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 type templateCreateOptions struct {
@@ -132,9 +132,12 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template pull: %w", err)
 	}
-	conchClient, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath)
+	conchClient, err := client.New(client.Options{
+		BaseURL:    ResolveConchAPIURL(opts.apiURL, opts.address),
+		ConfigPath: opts.configPath,
+	})
 	if err != nil {
-		return fmt.Errorf("conch template pull: %w", err)
+		return fmt.Errorf("conch template pull: create API client: %w", err)
 	}
 	result, err := conchClient.PullTemplate(ctx, client.TemplatePullRequest{
 		Reference: fs.Arg(0),
@@ -173,9 +176,13 @@ func runTemplatePush(ctx context.Context, args []string) error {
 			return fmt.Errorf("conch template push: invalid --timeout %q", opts.timeout)
 		}
 	}
-	conchClient, err := client.NewClientWithConfigAndTimeout(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath, apiTimeout)
+	conchClient, err := client.New(client.Options{
+		BaseURL:    ResolveConchAPIURL(opts.apiURL, opts.address),
+		ConfigPath: opts.configPath,
+		Timeout:    apiTimeout,
+	})
 	if err != nil {
-		return fmt.Errorf("conch template push: %w", err)
+		return fmt.Errorf("conch template push: create API client: %w", err)
 	}
 	if err := conchClient.PushTemplate(ctx, client.TemplatePushRequest{
 		TemplateID:      fs.Arg(0),
@@ -183,7 +190,6 @@ func runTemplatePush(ctx context.Context, args []string) error {
 		PlainHTTP:       opts.plainHTTP,
 		Username:        username,
 		Password:        password,
-		RegistryTimeout: opts.timeout,
 	}); err != nil {
 		return fmt.Errorf("conch template push: %w", err)
 	}
@@ -261,9 +267,12 @@ func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) 
 }
 
 func createTemplate(ctx context.Context, command string, opts templateCreateOptions) error {
-	conchClient, err := client.NewClientWithConfig(ResolveConchAPIURL(opts.apiURL, opts.address), opts.configPath)
+	conchClient, err := client.New(client.Options{
+		BaseURL:    ResolveConchAPIURL(opts.apiURL, opts.address),
+		ConfigPath: opts.configPath,
+	})
 	if err != nil {
-		return fmt.Errorf("%s: %w", command, err)
+		return fmt.Errorf("%s: create API client: %w", command, err)
 	}
 	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
 		Source:       opts.source,
@@ -300,9 +309,9 @@ func runTemplateList(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch template ls: %w", err)
+		return fmt.Errorf("conch template ls: create API client: %w", err)
 	}
 	items, err := conchClient.ListTemplates(ctx, client.TemplateListRequest{
 		Origin:   *origin,
@@ -325,9 +334,9 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch template inspect: exactly one template ID is required")
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch template inspect: %w", err)
+		return fmt.Errorf("conch template inspect: create API client: %w", err)
 	}
 	item, err := conchClient.InspectTemplate(ctx, fs.Arg(0))
 	if err != nil {
@@ -348,9 +357,9 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch template rm: exactly one template ID is required")
 	}
 	id := fs.Arg(0)
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch template rm: %w", err)
+		return fmt.Errorf("conch template rm: create API client: %w", err)
 	}
 	if err := conchClient.RemoveTemplate(ctx, id); err != nil {
 		return fmt.Errorf("conch template rm: %w", err)

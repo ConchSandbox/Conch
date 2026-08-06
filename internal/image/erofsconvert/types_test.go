@@ -1,12 +1,20 @@
 package erofsconvert
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+func TestConvertRootfsRequiresClient(t *testing.T) {
+	_, err := ConvertRootfs(context.Background(), nil, ConvertRootfsRequest{})
+	if err == nil || !strings.Contains(err.Error(), "containerd client is required") {
+		t.Fatalf("Convert() error = %v", err)
+	}
+}
 
 func TestNormalizeRequestDefaults(t *testing.T) {
 	req, err := NormalizeRequest(ConvertRootfsRequest{

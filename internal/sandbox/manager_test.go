@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+func TestDurationOrDefault(t *testing.T) {
+	const fallback = 10 * time.Millisecond
+	if got := durationOrDefault(0, fallback); got != fallback {
+		t.Fatalf("durationOrDefault(0) = %s, want %s", got, fallback)
+	}
+	if got := durationOrDefault(time.Second, fallback); got != time.Second {
+		t.Fatalf("durationOrDefault(1s) = %s, want 1s", got)
+	}
+}
+
 func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 	m := &Manager{}
 

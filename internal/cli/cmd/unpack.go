@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -53,9 +53,12 @@ func RunImageUnpack(ctx context.Context, args []string) error {
 	}
 	imageName := fs.Arg(0)
 
-	conchClient, err := client.NewClientWithConfig(ResolveConchAPIURL(*apiURL, *addr), *configPath)
+	conchClient, err := client.New(client.Options{
+		BaseURL:    ResolveConchAPIURL(*apiURL, *addr),
+		ConfigPath: *configPath,
+	})
 	if err != nil {
-		return fmt.Errorf("conch image unpack: %w", err)
+		return fmt.Errorf("conch image unpack: create API client: %w", err)
 	}
 	fmt.Println("------------------------------------------------------------")
 	results, err := conchClient.UnpackImage(ctx, client.UnpackImageRequest{

@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"time"
-
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/volume"
 )
@@ -16,12 +14,11 @@ type pullImageRequest struct {
 }
 
 type pushImageRequest struct {
-	LocalImage      string `json:"local_image"`
-	RemoteImage     string `json:"remote_image"`
-	PlainHTTP       bool   `json:"plain_http,omitempty"`
-	Username        string `json:"username,omitempty"`
-	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
+	LocalImage  string `json:"local_image"`
+	RemoteImage string `json:"remote_image"`
+	PlainHTTP   bool   `json:"plain_http,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
 }
 
 type listImageRequest struct {
@@ -37,20 +34,8 @@ type unpackImageRequest struct {
 	ImageName string `json:"image_name"`
 }
 
-type imageRecordResponse struct {
-	Name            string            `json:"name"`
-	TargetDigest    string            `json:"target_digest"`
-	RepoDigests     []string          `json:"repo_digests,omitempty"`
-	TargetMediaType string            `json:"target_media_type"`
-	Size            int64             `json:"size,omitempty"`
-	Kind            string            `json:"kind,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	CreatedAt       time.Time         `json:"created_at,omitempty"`
-	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
-}
-
 type listImageResponse struct {
-	Images []imageRecordResponse `json:"images"`
+	Images []runtimeapi.ImageRecord `json:"images"`
 }
 
 type importImageArchiveResponse struct {
@@ -70,18 +55,8 @@ type snapshotInfoRequest struct {
 	Key string `json:"key"`
 }
 
-type snapshotRecordResponse struct {
-	Key         string            `json:"key"`
-	Kind        string            `json:"kind,omitempty"`
-	Parent      string            `json:"parent,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	StoragePath string            `json:"storage_path,omitempty"`
-	CreatedAt   time.Time         `json:"created_at,omitempty"`
-	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
-}
-
 type listSnapshotResponse struct {
-	Snapshots []snapshotRecordResponse `json:"snapshots"`
+	Snapshots []runtimeapi.SnapshotRecord `json:"snapshots"`
 }
 
 type removeSnapshotResponse struct {
@@ -177,7 +152,6 @@ type templatePushRequest struct {
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
 
 type templateRecordResponse = runtimeapi.TemplateRecord
@@ -186,61 +160,9 @@ type templateListResponse struct {
 	Items []templateRecordResponse `json:"items"`
 }
 
-func imageRecordResponses(records []runtimeapi.ImageRecord) []imageRecordResponse {
-	out := make([]imageRecordResponse, 0, len(records))
-	for _, record := range records {
-		out = append(out, imageRecordResponse{
-			Name:            record.Name,
-			TargetDigest:    record.TargetDigest,
-			RepoDigests:     append([]string(nil), record.RepoDigests...),
-			TargetMediaType: record.TargetMediaType,
-			Size:            record.Size,
-			Kind:            record.Kind,
-			Labels:          copyStringMap(record.Labels),
-			CreatedAt:       record.CreatedAt,
-			UpdatedAt:       record.UpdatedAt,
-		})
-	}
-	return out
-}
-
 func importImageArchiveHTTPResponse(result runtimeapi.ImportImageArchiveResult) importImageArchiveResponse {
 	return importImageArchiveResponse{
 		SnapshotKey: result.SnapshotKey,
 		ImageName:   result.ImageName,
 	}
-}
-
-func snapshotRecordHTTPResponse(record runtimeapi.SnapshotRecord) snapshotRecordResponse {
-	return snapshotRecordResponse{
-		Key:         record.Key,
-		Kind:        record.Kind,
-		Parent:      record.Parent,
-		Labels:      copyStringMap(record.Labels),
-		StoragePath: record.StoragePath,
-		CreatedAt:   record.CreatedAt,
-		UpdatedAt:   record.UpdatedAt,
-	}
-}
-
-func snapshotRecordHTTPResponses(records []runtimeapi.SnapshotRecord) []snapshotRecordResponse {
-	if records == nil {
-		return nil
-	}
-	out := make([]snapshotRecordResponse, 0, len(records))
-	for _, record := range records {
-		out = append(out, snapshotRecordHTTPResponse(record))
-	}
-	return out
-}
-
-func copyStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }

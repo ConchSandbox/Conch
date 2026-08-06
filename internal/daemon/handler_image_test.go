@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,104 +10,14 @@ import (
 	"testing"
 
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
-	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
-func TestHandlePullImageForwardsTargetImageOptions(t *testing.T) {
-	svc := &fakeImageService{results: map[string]string{"rootfs": "rootfs-id"}}
-	server := newImageHandlerServer(svc)
-
-	body := bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest","plain_http":true,"username":"user","password":"pass","skip_unpack":true}`)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", body)
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if svc.pullReq.ImageName != "docker.io/library/nginx:latest" ||
-		!svc.pullReq.PlainHTTP ||
-		svc.pullReq.Username != "user" ||
-		svc.pullReq.Password != "pass" ||
-		!svc.pullReq.SkipUnpack {
-		t.Fatalf("pull request = %#v", svc.pullReq)
-	}
-	var got struct {
-		Results map[string]string `json:"results"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if got.Results["rootfs"] != "rootfs-id" {
-		t.Fatalf("results[rootfs] = %q", got.Results["rootfs"])
-	}
-}
-
-func TestHandleUnpackImage(t *testing.T) {
-	svc := &fakeImageService{results: map[string]string{"sandbox": "vm-id"}}
-	server := newImageHandlerServer(svc)
-
-	body := bytes.NewBufferString(`{"image_name":"hub.oepkgs.net/conch/conch-index:v0.1"}`)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/unpack", body)
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if svc.unpackReq.ImageName != "hub.oepkgs.net/conch/conch-index:v0.1" {
-		t.Fatalf("unpack image = %q", svc.unpackReq.ImageName)
-	}
-}
-
-func TestHandleListAndRemoveImage(t *testing.T) {
-	svc := &fakeImageService{
-		images: []runtimeapi.ImageRecord{{
-			Name:         "localhost/conch/demo:latest",
-			TargetDigest: "sha256:demo",
-			Size:         42,
-			Kind:         "boot-index-cold",
-		}},
-	}
-	server := newImageHandlerServer(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/list", bytes.NewBufferString(`{"filters":["name==localhost/conch/demo:latest"]}`))
-	server.router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if len(svc.listReq.Filters) != 1 {
-		t.Fatalf("list request = %#v", svc.listReq)
-	}
-	var listResp listImageResponse
-	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
-		t.Fatalf("decode list response: %v", err)
-	}
-	if len(listResp.Images) != 1 || listResp.Images[0].Name != "localhost/conch/demo:latest" {
-		t.Fatalf("list response = %#v", listResp)
-	}
-	if listResp.Images[0].TargetDigest != "sha256:demo" {
-		t.Fatalf("list response target digest = %q, want sha256:demo", listResp.Images[0].TargetDigest)
-	}
-	if listResp.Images[0].Kind != "boot-index-cold" {
-		t.Fatalf("list response kind = %q, want boot-index-cold", listResp.Images[0].Kind)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/image/remove", bytes.NewBufferString(`{"image_name":"localhost/conch/demo:latest","synchronous":true}`))
-	server.router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("remove status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if svc.removeReq.ImageName != "localhost/conch/demo:latest" || !svc.removeReq.Synchronous {
-		t.Fatalf("remove request = %#v", svc.removeReq)
-	}
-}
-
 func TestHandlePullImageUnavailable(t *testing.T) {
-	server := newImageHandlerServer(nil)
+	runtimeService := conchruntime.New(nil, nil, nil)
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"x"}`))
@@ -119,76 +28,44 @@ func TestHandlePullImageUnavailable(t *testing.T) {
 	}
 }
 
-func TestHandleImageServiceBadRequest(t *testing.T) {
-	svc := &fakeImageService{pullErr: fmtInvalidImageName()}
-	server := newImageHandlerServer(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":""}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+func TestWriteImageErrorClassifiesClientErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "invalid request", err: errors.Join(conchimage.ErrInvalidRequest, errors.New("image_name is required"))},
+		{name: "conversion failure", err: errors.Join(conchimage.ErrOCIConversionFailed, errors.New("convert rootfs"))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeImageError(rec, "Failed to pull image", test.err)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+		})
 	}
 }
 
-func TestHandlePullImageConversionFailureIsBadRequest(t *testing.T) {
-	svc := &fakeImageService{pullErr: errors.Join(conchimage.ErrOCIConversionFailed, errors.New("convert rootfs"))}
-	server := newImageHandlerServer(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"docker.io/library/nginx:latest"}`))
-	server.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandlePullImagePreservesRegistryAuthStatus(t *testing.T) {
+func TestWriteImageErrorPreservesRegistryAuthStatusWithoutLeakingCredentials(t *testing.T) {
 	const (
 		registryUsername = "registry-user"
 		registryPassword = "registry-password"
 	)
-	tests := []struct {
-		name       string
-		statusCode int
-		wrap       func(error) error
-	}{
-		{
-			name:       "unauthorized",
-			statusCode: http.StatusUnauthorized,
-			wrap: func(err error) error {
-				return fmt.Errorf("pull failed: resolve failed: %w", err)
-			},
-		},
-		{
-			name:       "forbidden",
-			statusCode: http.StatusForbidden,
-			wrap: func(err error) error {
-				return errors.Join(errors.New("pull failed"), fmt.Errorf("resolve failed: %w", err))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
 			registryErr := remoteerrors.ErrUnexpectedStatus{
-				Status:        fmt.Sprintf("%d %s", tt.statusCode, http.StatusText(tt.statusCode)),
-				StatusCode:    tt.statusCode,
+				Status:        fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
+				StatusCode:    statusCode,
 				RequestMethod: http.MethodGet,
 				RequestURL:    "https://" + registryUsername + ":" + registryPassword + "@registry.example.invalid/v2/conch/manifests/latest",
 			}
-			server := newImageHandlerServer(&fakeImageService{pullErr: tt.wrap(registryErr)})
-
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"registry.example.invalid/conch:latest"}`))
-			server.router.ServeHTTP(rec, req)
+			writeImageError(rec, "Failed to pull image", fmt.Errorf("pull failed: %w", registryErr))
 
-			if rec.Code != tt.statusCode {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.statusCode, rec.Body.String())
+			if rec.Code != statusCode {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, statusCode, rec.Body.String())
 			}
-			wantBody := "Failed to pull image: registry request failed: " + http.StatusText(tt.statusCode) + "\n"
+			wantBody := "Failed to pull image: registry request failed: " + http.StatusText(statusCode) + "\n"
 			if rec.Body.String() != wantBody {
 				t.Fatalf("body = %q, want %q", rec.Body.String(), wantBody)
 			}
@@ -199,8 +76,8 @@ func TestHandlePullImagePreservesRegistryAuthStatus(t *testing.T) {
 	}
 }
 
-func TestHandlePullImagePreservesRegistryStatus(t *testing.T) {
-	tests := []struct {
+func TestWriteImageErrorOnlyTrustsTypedRegistryStatus(t *testing.T) {
+	for _, test := range []struct {
 		name       string
 		err        error
 		wantStatus int
@@ -220,27 +97,20 @@ func TestHandlePullImagePreservesRegistryStatus(t *testing.T) {
 				RequestURL:    "https://registry.example.invalid/v2/conch/manifests/latest",
 			},
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := newImageHandlerServer(&fakeImageService{pullErr: tt.err})
-
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/image/pull", bytes.NewBufferString(`{"image_name":"registry.example.invalid/conch:latest"}`))
-			server.router.ServeHTTP(rec, req)
-
-			if rec.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			writeImageError(rec, "Failed to pull image", test.err)
+			if rec.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, test.wantStatus, rec.Body.String())
 			}
 		})
 	}
 }
 
 func TestConvertImageRouteRemoved(t *testing.T) {
-	imgSvc := &fakeImageService{}
-	snapSvc := &fakeSnapshotService{}
-	server := newConvertHandlerServer(imgSvc, imgSvc, snapSvc, nil)
+	server := &Daemon{router: http.NewServeMux()}
+	server.routes()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/image/convert", bytes.NewBufferString("{}"))
@@ -249,8 +119,4 @@ func TestConvertImageRouteRemoved(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
-}
-
-func fmtInvalidImageName() error {
-	return errors.Join(conchimage.ErrInvalidRequest, errors.New("image_name is required"))
 }

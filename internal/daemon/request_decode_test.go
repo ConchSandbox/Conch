@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/conchruntime"
 )
 
@@ -37,12 +38,15 @@ func TestDecodeStrictJSON(t *testing.T) {
 }
 
 func TestJSONHandlersRejectUnknownFields(t *testing.T) {
-	imageOps := &fakeImageService{}
 	snapshotOps := &fakeSnapshotService{}
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, imageOps, imageOps, nil)
+	runtimeService := conchruntime.New(sandboxOps, nil, nil)
 	runtimeService.Snapshot = snapshotOps
-	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server := &Daemon{
+		router:         http.NewServeMux(),
+		runtimeService: runtimeService,
+		daemonClient:   &containerdclient.Client{},
+	}
 	server.routes()
 
 	paths := []string{
@@ -84,10 +88,6 @@ func TestJSONHandlersRejectUnknownFields(t *testing.T) {
 		sandboxOps.resumeReq.SandboxID != "" || sandboxOps.checkpointReq.SandboxID != "" {
 		t.Fatalf("sandbox backend was called: %#v", sandboxOps)
 	}
-	if imageOps.pullReq.ImageName != "" || imageOps.pushReq.LocalImage != "" ||
-		imageOps.removeReq.ImageName != "" || imageOps.unpackReq.ImageName != "" {
-		t.Fatalf("image backend was called: %#v", imageOps)
-	}
 	if snapshotOps.infoReq.Key != "" || snapshotOps.removeReq.Key != "" {
 		t.Fatalf("snapshot backend was called: %#v", snapshotOps)
 	}
@@ -103,7 +103,7 @@ func TestTemplateCreateRejectsUnknownMetadataField(t *testing.T) {
 		t.Fatalf("close multipart body: %v", err)
 	}
 
-	server := &Daemon{router: http.NewServeMux(), runtimeService: conchruntime.New(nil, nil, nil, nil)}
+	server := &Daemon{router: http.NewServeMux(), runtimeService: conchruntime.New(nil, nil, nil)}
 	server.routes()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/template/create", &body)
@@ -160,7 +160,7 @@ func TestSandboxCreateRejectsUnknownFieldsWithoutSideEffects(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
-			runtimeService := conchruntime.New(sandboxOps, nil, nil, nil)
+			runtimeService := conchruntime.New(sandboxOps, nil, nil)
 			server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 			server.routes()
 

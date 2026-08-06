@@ -145,9 +145,12 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 		t.Fatalf("mem component memory size = %q", got)
 	}
 
-	info, err := InspectBootIndexContent(ctx, store, indexDesc)
+	resolved, info, err := inspectBootIndexByDigest(ctx, store, indexDesc.Digest.String())
 	if err != nil {
-		t.Fatalf("InspectBootIndexContent: %v", err)
+		t.Fatalf("inspectBootIndexByDigest: %v", err)
+	}
+	if resolved.Digest != indexDesc.Digest || resolved.Size != indexDesc.Size || resolved.MediaType != indexDesc.MediaType {
+		t.Fatalf("resolved descriptor = %#v, want %#v", resolved, indexDesc)
 	}
 	if !info.Resume || info.VMMName != "cloud-hypervisor" || info.MemorySizeMB != 512 {
 		t.Fatalf("boot index info = %#v", info)
@@ -157,14 +160,6 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	}
 	if info.SandboxDescriptor.Digest != sandboxDesc.Digest {
 		t.Fatalf("inspected sandbox digest = %s, want %s", info.SandboxDescriptor.Digest, sandboxDesc.Digest)
-	}
-
-	resolved, err := BootIndexDescriptorFromDigest(ctx, store, indexDesc.Digest.String())
-	if err != nil {
-		t.Fatalf("BootIndexDescriptorFromDigest: %v", err)
-	}
-	if resolved.Digest != indexDesc.Digest || resolved.Size != indexDesc.Size || resolved.MediaType != indexDesc.MediaType {
-		t.Fatalf("resolved descriptor = %#v, want %#v", resolved, indexDesc)
 	}
 }
 

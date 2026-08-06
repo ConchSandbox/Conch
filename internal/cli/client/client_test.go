@@ -19,13 +19,13 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
 
-func newTestClient(t *testing.T, baseURL string) *Client {
+func newTestClient(t *testing.T, opts Options) *Client {
 	t.Helper()
-	c, err := NewClient(baseURL)
+	client, err := New(opts)
 	if err != nil {
-		t.Fatalf("NewClient(%q): %v", baseURL, err)
+		t.Fatalf("New() error = %v", err)
 	}
-	return c
+	return client
 }
 
 func TestImageAPIMethods(t *testing.T) {
@@ -39,19 +39,20 @@ func TestImageAPIMethods(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&pullReq); err != nil {
 				t.Fatalf("decode pull request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(ImageResponse{Results: map[string]string{"rootfs": "rootfs-id"}})
+			_ = json.NewEncoder(w).Encode(imageResponse{Results: map[string]string{"rootfs": "rootfs-id"}})
 		case unpackImage:
 			if err := json.NewDecoder(r.Body).Decode(&unpackReq); err != nil {
 				t.Fatalf("decode unpack request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(ImageResponse{Results: map[string]string{"sandbox": "sandbox-id"}})
+			_ = json.NewEncoder(w).Encode(imageResponse{Results: map[string]string{"sandbox": "sandbox-id"}})
 		case listImages:
 			if err := json.NewDecoder(r.Body).Decode(&listReq); err != nil {
 				t.Fatalf("decode list request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(ListImagesResponse{Images: []ImageRecord{{
+			_ = json.NewEncoder(w).Encode(listImagesResponse{Images: []ImageRecord{{
 				Name:         "localhost/conch/demo:latest",
 				TargetDigest: "sha256:demo",
+				RepoDigests:  []string{"localhost/conch/demo@sha256:demo"},
 				Size:         42,
 				Kind:         "boot-index-cold",
 			}}})
@@ -66,7 +67,7 @@ func TestImageAPIMethods(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newTestClient(t, server.URL)
+	c := newTestClient(t, Options{BaseURL: server.URL})
 	pullResults, err := c.PullImage(context.Background(), PullImageRequest{
 		ImageName:  "docker.io/library/nginx:latest",
 		SkipUnpack: true,
@@ -109,6 +110,9 @@ func TestImageAPIMethods(t *testing.T) {
 	if images[0].Kind != "boot-index-cold" {
 		t.Fatalf("image kind = %q, want boot-index-cold", images[0].Kind)
 	}
+	if len(images[0].RepoDigests) != 1 || images[0].RepoDigests[0] != "localhost/conch/demo@sha256:demo" {
+		t.Fatalf("image repo digests = %#v", images[0].RepoDigests)
+	}
 
 	if err := c.RemoveImage(context.Background(), RemoveImageRequest{
 		ImageName:   "localhost/conch/demo:latest",
@@ -127,7 +131,7 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newTestClient(t, server.URL)
+	c := newTestClient(t, Options{BaseURL: server.URL})
 	_, err := c.PullImage(context.Background(), PullImageRequest{ImageName: "bad"})
 	if err == nil {
 		t.Fatal("PullImage() error = nil")
@@ -139,13 +143,13 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 
 func TestConchAPITimeoutEnv(t *testing.T) {
 	t.Setenv("CONCH_API_TIMEOUT", "5m")
-	c := newTestClient(t, "http://127.0.0.1:4063")
+	c := newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063"})
 	if c.httpClient.Timeout != 5*time.Minute {
 		t.Fatalf("timeout = %s, want 5m", c.httpClient.Timeout)
 	}
 
 	t.Setenv("CONCH_API_TIMEOUT", "bad")
-	c = newTestClient(t, "http://127.0.0.1:4063")
+	c = newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063"})
 	if c.httpClient.Timeout != defaultHTTPTimeout {
 		t.Fatalf("timeout = %s, want default %s", c.httpClient.Timeout, defaultHTTPTimeout)
 	}
@@ -153,41 +157,38 @@ func TestConchAPITimeoutEnv(t *testing.T) {
 
 func TestConchAPITimeoutOverride(t *testing.T) {
 	t.Setenv("CONCH_API_TIMEOUT", "5m")
-	c, err := NewClientWithConfigAndTimeout("http://127.0.0.1:4063", "", 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewClientWithConfigAndTimeout: %v", err)
-	}
+	c := newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063", Timeout: 10 * time.Minute})
 	if c.httpClient.Timeout != 10*time.Minute {
 		t.Fatalf("timeout = %s, want 10m", c.httpClient.Timeout)
 	}
 }
 
-func TestNewClientWithConfigRejectsInvalidYAML(t *testing.T) {
+func TestNewRejectsInvalidYAML(t *testing.T) {
 	configPath := t.TempDir() + "/config.yaml"
 	if err := os.WriteFile(configPath, []byte("server: [\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	c, err := NewClientWithConfig("http://127.0.0.1:4063", configPath)
+	c, err := New(Options{BaseURL: "http://127.0.0.1:4063", ConfigPath: configPath})
 	if err == nil {
-		t.Fatal("NewClientWithConfig() error = nil")
+		t.Fatal("New() error = nil")
 	}
 	if c != nil {
-		t.Fatalf("NewClientWithConfig() client = %#v, want nil", c)
+		t.Fatalf("New() client = %#v, want nil", c)
 	}
 	if !strings.Contains(err.Error(), "failed to parse config file") {
 		t.Fatalf("NewClientWithConfig() error = %v, want YAML parse error", err)
 	}
 }
 
-func TestNewClientWithConfigAllowsMissingFile(t *testing.T) {
+func TestNewAllowsMissingConfigFile(t *testing.T) {
 	configPath := t.TempDir() + "/missing.yaml"
-	c, err := NewClientWithConfig("", configPath)
+	c, err := New(Options{ConfigPath: configPath})
 	if err != nil {
-		t.Fatalf("NewClientWithConfig() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	if c == nil {
-		t.Fatal("NewClientWithConfig() client = nil")
+		t.Fatal("New() client = nil")
 	}
 }
 
@@ -257,7 +258,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&listSnapshotsReq); err != nil {
 				t.Fatalf("decode snapshot list request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(ListSnapshotsResponse{Snapshots: []SnapshotRecord{{
+			_ = json.NewEncoder(w).Encode(listSnapshotsResponse{Snapshots: []SnapshotRecord{{
 				Key:    "sha256:rootfs",
 				Kind:   "committed",
 				Parent: "sha256:parent",
@@ -273,7 +274,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newTestClient(t, server.URL)
+	c := newTestClient(t, Options{BaseURL: server.URL})
 	templateResp, err := c.CreateTemplate(context.Background(), TemplateCreateRequest{
 		Source:       "docker.io/library/busybox:latest",
 		KernelPath:   kernel.Name(),
@@ -322,7 +323,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 
 func TestCheckpointSandboxRequest(t *testing.T) {
 	var got SandboxCheckpointRequest
-	c := newTestClient(t, "http://example.invalid")
+	c := newTestClient(t, Options{BaseURL: "http://example.invalid"})
 	c.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Path != checkpointSandbox {
@@ -339,15 +340,17 @@ func TestCheckpointSandboxRequest(t *testing.T) {
 		}),
 	}
 
-	templateID, err := c.CheckpointSandbox(context.Background(), "sandbox-123")
+	resp, err := c.CheckpointSandbox(context.Background(), SandboxCheckpointRequest{
+		SandboxID: "sandbox-123",
+	})
 	if err != nil {
 		t.Fatalf("CheckpointSandbox: %v", err)
 	}
-	if templateID != "tmpl_test" {
-		t.Fatalf("templateID = %q, want %q", templateID, "tmpl_test")
+	if resp.TemplateID != "tmpl_test" {
+		t.Fatalf("templateID = %q, want %q", resp.TemplateID, "tmpl_test")
 	}
-	if got.SandboxId != "sandbox-123" {
-		t.Fatalf("sandbox_id = %q, want %q", got.SandboxId, "sandbox-123")
+	if got.SandboxID != "sandbox-123" {
+		t.Fatalf("sandbox_id = %q, want %q", got.SandboxID, "sandbox-123")
 	}
 }
 
@@ -399,7 +402,7 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	c := newTestClient(t, server.URL)
+	c := newTestClient(t, Options{BaseURL: server.URL})
 
 	pulled, err := c.PullTemplate(context.Background(), TemplatePullRequest{
 		Reference: "registry.example.invalid/conch/template:latest",
@@ -421,19 +424,17 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 		PlainHTTP:       true,
 		Username:        "push-user",
 		Password:        "push-pass",
-		RegistryTimeout: "10m",
 	}); err != nil {
 		t.Fatalf("PushTemplate() error = %v", err)
 	}
-	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" ||
-		!pushReq.PlainHTTP || pushReq.RegistryTimeout != "10m" {
+	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 }
 
 func TestCreateSandboxIncludesExplicitRAM(t *testing.T) {
-	var got CreateRequest
-	c := newTestClient(t, "http://example.invalid")
+	var got SandboxCreateRequest
+	c := newTestClient(t, Options{BaseURL: "http://example.invalid"})
 	c.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Path != createSandbox {
@@ -450,23 +451,28 @@ func TestCreateSandboxIncludesExplicitRAM(t *testing.T) {
 		}),
 	}
 
-	if err := c.CreateSandbox("tmpl_123", "sandbox-123", 4096); err != nil {
+	_, err := c.CreateSandbox(context.Background(), SandboxCreateRequest{
+		TemplateID: "tmpl_123",
+		SandboxID:  "sandbox-123",
+		RAMMB:      4096,
+	})
+	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if got.TemplateID != "tmpl_123" || got.SandboxId != "sandbox-123" {
+	if got.TemplateID != "tmpl_123" || got.SandboxID != "sandbox-123" {
 		t.Fatalf("create request = %#v", got)
 	}
-	if got.RamMB != 4096 {
-		t.Fatalf("ram_mb = %d, want 4096", got.RamMB)
+	if got.RAMMB != 4096 {
+		t.Fatalf("ram_mb = %d, want 4096", got.RAMMB)
 	}
-	if got.VmmName != "" || got.VcpuNum != 0 {
+	if got.VMMName != "" || got.VCPUNum != 0 {
 		t.Fatalf("unexpected client resource defaults = %#v", got)
 	}
 }
 
 func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 	var body map[string]any
-	c := newTestClient(t, "http://example.invalid")
+	c := newTestClient(t, Options{BaseURL: "http://example.invalid"})
 	c.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -478,7 +484,7 @@ func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 		}, nil
 	})}
 
-	if err := c.CreateSandbox("", "sandbox-123", 0); err != nil {
+	if _, err := c.CreateSandbox(context.Background(), SandboxCreateRequest{SandboxID: "sandbox-123"}); err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if _, ok := body["template_id"]; ok {

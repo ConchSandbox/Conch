@@ -18,6 +18,17 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
+type Config struct {
+	WarmPoolSize       int
+	TapIP              string
+	TapMask            int
+	CNI                netstack.CNIManagerConfig
+	VsockSignalRetry   time.Duration
+	VsockSignalTimeout time.Duration
+	RequestTimeout     time.Duration
+	VolumeManager      *volume.Manager
+}
+
 type Manager struct {
 	sandboxes          sync.Map // map[string]*sandboxEntry
 	pool               *netstack.Pool
@@ -55,7 +66,49 @@ type sandboxEntry struct {
 	sbx   *Sandbox
 }
 
-func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, bootPreparer BootPreparer, vsockSignalRetry, vsockSignalTimeout, requestTimeout time.Duration) (*Manager, error) {
+func New(
+	ctx context.Context,
+	client *containerdclient.Client,
+	templates TemplateReader,
+	snapshots SnapshotBackend,
+	cfg Config,
+) (*Manager, error) {
+	boot, err := NewBootPreparer(templates, snapshots, client)
+	if err != nil {
+		return nil, err
+	}
+	vsockSignalRetry := durationOrDefault(cfg.VsockSignalRetry, 10*time.Millisecond)
+	vsockSignalTimeout := durationOrDefault(cfg.VsockSignalTimeout, 60*time.Second)
+	requestTimeout := durationOrDefault(cfg.RequestTimeout, 60*time.Second)
+
+	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.TapIP, cfg.TapMask, cfg.CNI)
+	if err != nil {
+		return nil, err
+	}
+	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager)
+	if err != nil {
+		return nil, err
+	}
+	pool.Start(ctx)
+	return manager, nil
+}
+
+func durationOrDefault(value, fallback time.Duration) time.Duration {
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
+func NewManager(
+	p *netstack.Pool,
+	daemonClient *containerdclient.Client,
+	bootPreparer BootPreparer,
+	vsockSignalRetry time.Duration,
+	vsockSignalTimeout time.Duration,
+	requestTimeout time.Duration,
+	volumeManager *volume.Manager,
+) (*Manager, error) {
 	if bootPreparer == nil {
 		return nil, fmt.Errorf("sandbox boot preparer is required")
 	}
@@ -67,12 +120,19 @@ func NewManager(p *netstack.Pool, daemonClient *containerdclient.Client, bootPre
 		vsockSignalRetry:   vsockSignalRetry,
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
+		volumeManager:      volumeManager,
 		cidAllocator:       NewCIDAllocator(),
 	}, nil
 }
 
-func (m *Manager) SetVolumeManager(volumeManager *volume.Manager) {
-	m.volumeManager = volumeManager
+func (m *Manager) Close() error {
+	if m == nil {
+		return nil
+	}
+	if m.pool != nil {
+		m.pool.Close()
+	}
+	return nil
 }
 
 type CreateRequest struct {
@@ -663,13 +723,6 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	}
 
 	return captured, nil
-}
-
-func (m *Manager) Close() {
-	if m == nil || m.pool == nil {
-		return
-	}
-	m.pool.Close()
 }
 
 func (m *Manager) AllocateUniqueCID(sandboxId string) (uint32, error) {

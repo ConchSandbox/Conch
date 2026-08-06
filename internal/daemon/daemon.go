@@ -145,9 +145,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 
-	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), host.ImageService(), store)
-	s.runtimeService.Snapshot = host.SnapshotService()
-	s.runtimeService.Templates = host.TemplateService()
+	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), store)
+	s.runtimeService.Snapshot = host.SnapshotServer()
+	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateID: cfg.Sandbox.DefaultTemplateID,
 		VMMName:    cfg.Sandbox.DefaultVMMName,
@@ -750,7 +750,6 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 		PlainHTTP:       req.PlainHTTP,
 		Username:        req.Username,
 		Password:        req.Password,
-		RegistryTimeout: req.RegistryTimeout,
 	}); err != nil {
 		http.Error(w, "Failed to push template: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -807,7 +806,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -824,7 +823,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		SkipUnpack: req.SkipUnpack,
 	}
 
-	result, err := s.runtimeService.PullImage(r.Context(), opts)
+	result, err := conchimage.Pull(r.Context(), s.daemonClient, opts)
 	if err != nil {
 		logger.Error("Failed to pull image",
 			ulog.F("image_name", opts.ImageName),
@@ -846,7 +845,7 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -856,14 +855,13 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.PushImageOptions{
-		LocalImage:      req.LocalImage,
-		RemoteImage:     req.RemoteImage,
-		PlainHTTP:       req.PlainHTTP,
-		Username:        req.Username,
-		Password:        req.Password,
-		RegistryTimeout: req.RegistryTimeout,
+		LocalImage:  req.LocalImage,
+		RemoteImage: req.RemoteImage,
+		PlainHTTP:   req.PlainHTTP,
+		Username:    req.Username,
+		Password:    req.Password,
 	}
-	if err := s.runtimeService.PushImage(r.Context(), opts); err != nil {
+	if err := conchimage.Push(r.Context(), s.daemonClient, opts); err != nil {
 		logger.Error("Failed to push image",
 			ulog.F("local_image", opts.LocalImage),
 			ulog.F("remote_image", opts.RemoteImage),
@@ -888,7 +886,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -897,7 +895,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	images, err := s.runtimeService.ListImages(r.Context(), runtimeapi.ListImagesOptions{
+	images, err := conchimage.List(r.Context(), s.daemonClient, runtimeapi.ListImagesOptions{
 		Filters: req.Filters,
 	})
 	if err != nil {
@@ -906,7 +904,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(listImageResponse{Images: imageRecordResponses(images)})
+	_ = json.NewEncoder(w).Encode(listImageResponse{Images: images})
 }
 
 func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
@@ -917,7 +915,7 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -930,7 +928,7 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		ImageName:   req.ImageName,
 		Synchronous: req.Synchronous,
 	}
-	if err := s.runtimeService.RemoveImage(r.Context(), opts); err != nil {
+	if err := conchimage.Remove(r.Context(), s.daemonClient, opts); err != nil {
 		logger.Error("Failed to remove image",
 			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
@@ -950,7 +948,7 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -963,7 +961,7 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 	opts := runtimeapi.UnpackImageOptions{
 		ImageName: req.ImageName,
 	}
-	results, err := s.runtimeService.UnpackImage(r.Context(), opts)
+	results, err := conchimage.Unpack(r.Context(), s.daemonClient, opts)
 	if err != nil {
 		logger.Error("Failed to unpack image",
 			ulog.F("image_name", opts.ImageName),
@@ -985,7 +983,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1001,7 +999,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	resp, err := s.runtimeService.ImportImageArchive(r.Context(), file, runtimeapi.ImportImageArchiveOptions{
+	resp, err := conchimage.ImportArchive(r.Context(), s.daemonClient, file, runtimeapi.ImportImageArchiveOptions{
 		ImportedTag: r.FormValue("imported_tag"),
 	})
 	if err != nil {
@@ -1131,7 +1129,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(snapshotRecordHTTPResponse(info))
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1160,7 +1158,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshotRecordHTTPResponses(snapshots)})
+	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshots})
 }
 
 func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {

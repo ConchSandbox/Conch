@@ -12,7 +12,7 @@
 - `conch image pull`
 - `conch image unpack`
 
-conchd 会在进程内初始化 containerd v2 服务和 Conch 插件，不要求单独启动系统 `containerd` 守护进程。
+conchd 会在进程内初始化 containerd v2 built-in plugin graph，通过 Host bootstrap plugin 获取 in-memory client；image workflow 直接使用该 client，Host 只显式装配 snapshot server、sandbox manager 和 template store，不要求单独启动系统 `containerd` 守护进程。
 
 ## 2. 镜像与组件
 
@@ -21,6 +21,8 @@ Conch 原生镜像使用 OCI image/index 作为外层结构，内部组件通过
 - `io.conch.kind=rootfs`
 - `io.conch.kind=sandbox`
 - `io.conch.kind=mem-snapshot`
+
+containerd image record 使用本地 label `io.conch.image.kind` 记录面向用户的分类，例如 `boot-index-cold`、`boot-index-resume` 和 `boot-component-rootfs`。image label 不随 registry 分发；拉取或导入时会根据已下载的 OCI 内容识别一次并写入本地 record，后续镜像列表只读取该 label，不再逐项解析 content store。
 
 最终产物分为两类：
 

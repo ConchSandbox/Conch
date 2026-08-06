@@ -16,10 +16,13 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	continuityfs "github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ispec "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 )
 
@@ -127,10 +130,10 @@ func buildKernelComponentInContent(ctx context.Context, store content.Store, ker
 	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	if err := copyFile(kernelPath, filepath.Join(root, "boot", "vmlinuz")); err != nil {
+	if err := continuityfs.CopyFile(filepath.Join(root, "boot", "vmlinuz"), kernelPath); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	if err := copyFile(initrdPath, filepath.Join(root, "data", "conch.initrd")); err != nil {
+	if err := continuityfs.CopyFile(filepath.Join(root, "data", "conch.initrd"), initrdPath); err != nil {
 		return ocispec.Descriptor{}, err
 	}
 	return BuildNativeComponentInContent(ctx, store, []string{root}, KindSandbox, tag)
@@ -189,11 +192,8 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 			return ocispec.Descriptor{}, fmt.Errorf("%s component path %s is not a regular file or directory", kind, path)
 		}
 
-		desc, err := fileDescriptor(layerPath, erofsconvert.NativeLayerMediaType)
+		desc, err := writeFileBlobToContent(ctx, store, layerPath, erofsconvert.NativeLayerMediaType)
 		if err != nil {
-			return ocispec.Descriptor{}, err
-		}
-		if err := writeFileBlobToContent(ctx, store, layerPath, desc); err != nil {
 			return ocispec.Descriptor{}, err
 		}
 		layerDescs = append(layerDescs, desc)
@@ -336,42 +336,117 @@ func writeBlobJSONToContent(ctx context.Context, store content.Store, value any,
 	return desc, nil
 }
 
-func writeFileBlobToContent(ctx context.Context, store content.Store, path string, desc ocispec.Descriptor) error {
+func writeFileBlobToContent(ctx context.Context, store content.Store, path, mediaType string) (ocispec.Descriptor, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return ocispec.Descriptor{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer file.Close()
-	if err := content.WriteBlob(ctx, store, contentRef("file", desc.Digest), file, desc); err != nil {
-		return fmt.Errorf("write blob %s: %w", desc.Digest, err)
+	info, err := file.Stat()
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return nil
+
+	desc := ocispec.Descriptor{MediaType: mediaType, Size: info.Size()}
+	writer, err := content.OpenWriter(
+		ctx,
+		store,
+		content.WithRef(contentRef("file-upload", digest.FromString(path))),
+		content.WithDescriptor(desc),
+	)
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("open content writer for %s: %w", path, err)
+	}
+	defer writer.Close()
+	if err := writer.Truncate(0); err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("truncate content writer for %s: %w", path, err)
+	}
+	if _, err := io.Copy(writer, file); err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("write %s to content store: %w", path, err)
+	}
+	desc.Digest = writer.Digest()
+	if err := writer.Commit(ctx, desc.Size, desc.Digest); err != nil && !errdefs.IsAlreadyExists(err) {
+		return ocispec.Descriptor{}, fmt.Errorf("commit blob %s: %w", desc.Digest, err)
+	}
+	return desc, nil
 }
 
 func contentRef(kind string, dgst digest.Digest) string {
 	return "conch-" + kind + "-" + dgst.String()
 }
 
-// BootIndexDescriptorFromDigest resolves the descriptor metadata needed to
-// read a Boot Index directly from the content store, without relying on a
-// mutable containerd image name.
-func BootIndexDescriptorFromDigest(ctx context.Context, store content.Store, rawDigest string) (ocispec.Descriptor, error) {
+// InspectBootIndex resolves and validates a Boot Index directly by digest. It
+// does not create image records or snapshots.
+func InspectBootIndex(ctx context.Context, client *containerdclient.Client, bootIndexDigest string) (BootIndexInfo, error) {
+	_, info, err := inspectBootIndex(ctx, client, bootIndexDigest)
+	return info, err
+}
+
+// InspectBootIndexReference validates the complete Boot Index closure named
+// by a local image record without unpacking any component snapshots.
+func InspectBootIndexReference(ctx context.Context, client *containerdclient.Client, reference string) (BootIndexInfo, error) {
+	if client == nil || client.Client == nil {
+		return BootIndexInfo{}, fmt.Errorf("containerd client is required")
+	}
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidRequest)
+	}
+	inspectCtx := containerdclient.NewNamespaceContext(ctx)
+	img, err := client.GetImage(inspectCtx, reference)
+	if err != nil {
+		return BootIndexInfo{}, fmt.Errorf("lookup boot index reference %s: %w", reference, err)
+	}
+	info, err := InspectBootIndexContent(inspectCtx, client.ContentStore(), img.Target())
+	if err != nil {
+		return BootIndexInfo{}, fmt.Errorf("inspect boot index reference %s: %w", reference, err)
+	}
+	return info, nil
+}
+
+func inspectBootIndex(
+	ctx context.Context,
+	client *containerdclient.Client,
+	bootIndexDigest string,
+) (context.Context, BootIndexInfo, error) {
+	if client == nil || client.Client == nil {
+		return nil, BootIndexInfo{}, fmt.Errorf("containerd client is required")
+	}
+	if strings.TrimSpace(bootIndexDigest) == "" {
+		return nil, BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", ErrInvalidRequest)
+	}
+	resolveCtx := containerdclient.NewNamespaceContext(ctx)
+	_, info, err := inspectBootIndexByDigest(resolveCtx, client.ContentStore(), bootIndexDigest)
+	if err != nil {
+		return nil, BootIndexInfo{}, err
+	}
+	return resolveCtx, info, nil
+}
+
+// inspectBootIndexByDigest resolves and validates a Boot Index directly from
+// the content store, without relying on a mutable containerd image name.
+func inspectBootIndexByDigest(ctx context.Context, store content.Store, rawDigest string) (ocispec.Descriptor, BootIndexInfo, error) {
 	if store == nil {
-		return ocispec.Descriptor{}, fmt.Errorf("content store is required")
+		return ocispec.Descriptor{}, BootIndexInfo{}, fmt.Errorf("content store is required")
 	}
 	dgst, err := digest.Parse(strings.TrimSpace(rawDigest))
 	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
+		return ocispec.Descriptor{}, BootIndexInfo{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
 	}
-	info, err := store.Info(ctx, dgst)
+	contentInfo, err := store.Info(ctx, dgst)
 	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("resolve boot index content %s: %w", dgst, err)
+		return ocispec.Descriptor{}, BootIndexInfo{}, fmt.Errorf("resolve boot index content %s: %w", dgst, err)
 	}
-	return ocispec.Descriptor{
+	desc := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageIndex,
 		Digest:    dgst,
-		Size:      info.Size,
-	}, nil
+		Size:      contentInfo.Size,
+	}
+	info, err := InspectBootIndexContent(ctx, store, desc)
+	if err != nil {
+		return ocispec.Descriptor{}, BootIndexInfo{}, err
+	}
+	return desc, info, nil
 }
 
 // InspectBootIndexContent validates the complete descriptor closure rooted at
@@ -526,57 +601,6 @@ func buildErofsLayer(ctx context.Context, srcDir, outPath string) error {
 	if err != nil {
 		return fmt.Errorf("mkfs.erofs %s: %s: %w", srcDir, strings.TrimSpace(string(out)), err)
 	}
-	return nil
-}
-
-func fileDescriptor(path, mediaType string) (ocispec.Descriptor, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("stat %s: %w", path, err)
-	}
-	digester := digest.Canonical.Digester()
-	if _, err := io.Copy(digester.Hash(), file); err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("hash %s: %w", path, err)
-	}
-	return ocispec.Descriptor{MediaType: mediaType, Digest: digester.Digest(), Size: info.Size()}, nil
-}
-
-func copyFile(srcPath, dstPath string) error {
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", srcPath, err)
-	}
-	defer src.Close()
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(dstPath), "."+filepath.Base(dstPath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp for %s: %w", dstPath, err)
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := io.Copy(tmp, src); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("copy %s -> %s: %w", srcPath, dstPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, dstPath, err)
-	}
-	cleanup = false
 	return nil
 }
 

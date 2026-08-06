@@ -164,6 +164,9 @@ func getMemViewSnapshotKey(sandboxID string) string {
 
 // NewServer initializes the snapshot server with containerd client.
 func NewServer(workDir string, daemonClient *containerdclient.Client) (*Server, error) {
+	if strings.TrimSpace(workDir) == "" {
+		return nil, fmt.Errorf("snapshot work dir is required")
+	}
 	if daemonClient == nil {
 		return nil, fmt.Errorf("containerd client is nil")
 	}

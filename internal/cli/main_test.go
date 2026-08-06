@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openeuler/Conch/internal/cli/client"
 	cmd "github.com/openeuler/Conch/internal/cli/cmd"
-	"github.com/openeuler/Conch/internal/image/client"
 )
 
 func TestPrintHelpListsSubcommands(t *testing.T) {
@@ -39,7 +39,6 @@ func TestPrintHelpListsSubcommands(t *testing.T) {
 	}
 	for _, unwanted := range []string{
 		"CONCH_API_TIMEOUT",
-		"CONCH_REGISTRY_TIMEOUT",
 		"CONCH_API_URL",
 		"conch image push [options]",
 		"conch sandbox create",
@@ -219,13 +218,10 @@ func TestRunImagePushPassesRequest(t *testing.T) {
 	if got.LocalImage != "localhost/demo:latest" || got.RemoteImage != "remote/demo:latest" {
 		t.Fatalf("push request = %#v", got)
 	}
-	if got.RegistryTimeout != "" {
-		t.Fatalf("registry timeout = %q, want empty", got.RegistryTimeout)
-	}
 }
 
-func TestRunImagePushPassesTimeout(t *testing.T) {
-	var got client.PushImageRequest
+func TestRunImagePushAcceptsOperationTimeout(t *testing.T) {
+	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode push request: %v", err)
@@ -239,8 +235,8 @@ func TestRunImagePushPassesTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPush: %v", err)
 	}
-	if got.RegistryTimeout != "30m" {
-		t.Fatalf("registry timeout = %q, want 30m", got.RegistryTimeout)
+	if _, ok := got["registry_timeout"]; ok {
+		t.Fatalf("push request unexpectedly contains registry_timeout: %#v", got)
 	}
 }
 

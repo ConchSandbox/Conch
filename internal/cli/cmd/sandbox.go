@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func printSandboxHelp(out io.Writer) {
@@ -88,11 +88,15 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	if id == "" {
 		id = fmt.Sprintf("sandbox-%d", time.Now().UnixNano())
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch sandbox create: %w", err)
+		return fmt.Errorf("conch sandbox create: create API client: %w", err)
 	}
-	if err := conchClient.CreateSandbox(*templateID, id, *ramMB); err != nil {
+	if _, err := conchClient.CreateSandbox(ctx, client.SandboxCreateRequest{
+		TemplateID: *templateID,
+		SandboxID:  id,
+		RAMMB:      *ramMB,
+	}); err != nil {
 		return fmt.Errorf("conch sandbox create: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "Sandbox: %s\n", id)
@@ -109,15 +113,20 @@ func runSandboxCheckpoint(ctx context.Context, args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch sandbox checkpoint: exactly one sandbox ID is required")
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch sandbox checkpoint: create API client: %w", err)
+	}
+	checkpoint, err := conchClient.CheckpointSandbox(ctx, client.SandboxCheckpointRequest{
+		SandboxID: fs.Arg(0),
+	})
 	if err != nil {
 		return fmt.Errorf("conch sandbox checkpoint: %w", err)
 	}
-	templateID, err := conchClient.CheckpointSandbox(ctx, fs.Arg(0))
-	if err != nil {
-		return fmt.Errorf("conch sandbox checkpoint: %w", err)
+	if checkpoint.Status != "ok" {
+		return fmt.Errorf("conch sandbox checkpoint: unexpected status %q", checkpoint.Status)
 	}
-	fmt.Fprintf(os.Stdout, "Template: %s\n", templateID)
+	fmt.Fprintf(os.Stdout, "Template: %s\n", checkpoint.TemplateID)
 	return nil
 }
 
@@ -131,16 +140,17 @@ func runSandboxLifecycle(ctx context.Context, args []string, op string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch sandbox %s: exactly one sandbox ID is required", op)
 	}
-	c, err := client.NewClientWithConfig("", *configPath)
+	c, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch sandbox %s: %w", op, err)
+		return fmt.Errorf("conch sandbox %s: create API client: %w", op, err)
 	}
 	id := fs.Arg(0)
+	req := client.SandboxLifecycleRequest{SandboxID: id}
 	switch op {
 	case "suspend":
-		err = c.SuspendSandbox(ctx, id)
+		err = c.SuspendSandbox(ctx, req)
 	case "resume":
-		err = c.ResumeSandbox(ctx, id)
+		err = c.ResumeSandbox(ctx, req)
 	}
 	if err != nil {
 		return fmt.Errorf("conch sandbox %s: %w", op, err)

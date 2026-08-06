@@ -8,6 +8,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 
+	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/template"
 )
@@ -275,15 +276,15 @@ type bootResolverCall struct {
 }
 
 type fakeBootResolver struct {
-	result   ResolvedBoot
+	result   conchimage.ResolvedBoot
 	err      error
 	requests []bootResolverCall
 }
 
-func (f *fakeBootResolver) ResolveBoot(_ context.Context, bootIndexDigest string) (ResolvedBoot, error) {
+func (f *fakeBootResolver) ResolveBoot(_ context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
 	f.requests = append(f.requests, bootResolverCall{BootIndexDigest: bootIndexDigest})
 	if f.err != nil {
-		return ResolvedBoot{}, f.err
+		return conchimage.ResolvedBoot{}, f.err
 	}
 	return f.result, nil
 }
@@ -333,8 +334,8 @@ func (f *fakeSnapshotBackend) callCount() int {
 	return len(f.creates) + len(f.restores) + len(f.releases)
 }
 
-func resolvedBoot(bootDigest string, resume bool, vmmName string) ResolvedBoot {
-	result := ResolvedBoot{
+func resolvedBoot(bootDigest string, resume bool, vmmName string) conchimage.ResolvedBoot {
+	result := conchimage.ResolvedBoot{
 		BootIndexDigest: bootDigest,
 		RootfsKey:       "rootfs-committed",
 		VMKey:           "vm-committed",
@@ -360,9 +361,9 @@ func newBootTemplate(t *testing.T, origin template.Origin, mode template.BootMod
 	return &fakeTemplateReader{entry: entry}, entry, bootDigest
 }
 
-func mustBootPreparer(t *testing.T, templates TemplateReader, snapshots SnapshotBackend, resolver BootResolver) BootPreparer {
+func mustBootPreparer(t *testing.T, templates TemplateReader, snapshots SnapshotBackend, resolver *fakeBootResolver) BootPreparer {
 	t.Helper()
-	preparer, err := NewBootPreparer(templates, snapshots, resolver)
+	preparer, err := newBootPreparer(templates, snapshots, resolver.ResolveBoot)
 	if err != nil {
 		t.Fatalf("NewBootPreparer() error = %v", err)
 	}

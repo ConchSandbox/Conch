@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/template"
@@ -20,25 +22,6 @@ type SnapshotBackend interface {
 	CreateBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
 	RestoreBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
 	ReleaseBootLayout(ctx context.Context, key string) error
-}
-
-// BootResolver resolves immutable Boot Index content into the committed
-// snapshot parents needed to prepare one Sandbox runtime.
-type BootResolver interface {
-	ResolveBoot(ctx context.Context, bootIndexDigest string) (ResolvedBoot, error)
-}
-
-// ResolvedBoot is the Sandbox-owned view of a resolved Boot Index. Image
-// adapters populate it without leaking image-domain transport types into the
-// Sandbox boot path.
-type ResolvedBoot struct {
-	BootIndexDigest string
-	RootfsKey       string
-	MemKey          string
-	VMKey           string
-	Resume          bool
-	VMMName         string
-	MemorySizeMB    int64
 }
 
 type BootSpec struct {
@@ -86,30 +69,43 @@ type BootPreparer interface {
 }
 
 type bootPreparer struct {
-	templates TemplateReader
-	snapshots SnapshotBackend
-	resolver  BootResolver
+	templates   TemplateReader
+	snapshots   SnapshotBackend
+	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error)
 }
 
-func NewBootPreparer(templates TemplateReader, snapshots SnapshotBackend, resolver BootResolver) (BootPreparer, error) {
+func NewBootPreparer(templates TemplateReader, snapshots SnapshotBackend, client *containerdclient.Client) (BootPreparer, error) {
+	if client == nil || client.Client == nil {
+		return nil, fmt.Errorf("containerd client is required")
+	}
+	return newBootPreparer(templates, snapshots, func(ctx context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
+		return conchimage.ResolveBoot(ctx, client, bootIndexDigest)
+	})
+}
+
+func newBootPreparer(
+	templates TemplateReader,
+	snapshots SnapshotBackend,
+	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error),
+) (BootPreparer, error) {
 	if templates == nil {
 		return nil, fmt.Errorf("template reader is required")
 	}
 	if snapshots == nil {
 		return nil, fmt.Errorf("snapshot backend is required")
 	}
-	if resolver == nil {
+	if resolveBoot == nil {
 		return nil, fmt.Errorf("boot resolver is required")
 	}
 	return &bootPreparer{
-		templates: templates,
-		snapshots: snapshots,
-		resolver:  resolver,
+		templates:   templates,
+		snapshots:   snapshots,
+		resolveBoot: resolveBoot,
 	}, nil
 }
 
 func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (PreparedBoot, error) {
-	if p == nil || p.templates == nil || p.snapshots == nil || p.resolver == nil {
+	if p == nil || p.templates == nil || p.snapshots == nil || p.resolveBoot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
 	key := strings.TrimSpace(req.SandboxID)
@@ -129,22 +125,22 @@ func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (Pre
 func (p *bootPreparer) resolveTemplate(
 	ctx context.Context,
 	templateID string,
-) (ResolvedBoot, template.Entry, error) {
+) (conchimage.ResolvedBoot, template.Entry, error) {
 	templateID = strings.TrimSpace(templateID)
 	if templateID == "" {
-		return ResolvedBoot{}, template.Entry{}, fmt.Errorf("template_id is required")
+		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template_id is required")
 	}
 	entry, err := p.templates.Get(ctx, templateID)
 	if err != nil {
-		return ResolvedBoot{}, template.Entry{}, err
+		return conchimage.ResolvedBoot{}, template.Entry{}, err
 	}
 	bootIndexDigest := strings.TrimSpace(entry.BootIndexDigest)
 	if bootIndexDigest == "" {
-		return ResolvedBoot{}, template.Entry{}, fmt.Errorf("template %s has no boot index digest", entry.ID)
+		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template %s has no boot index digest", entry.ID)
 	}
-	resolved, err := p.resolver.ResolveBoot(ctx, bootIndexDigest)
+	resolved, err := p.resolveBoot(ctx, bootIndexDigest)
 	if err != nil {
-		return ResolvedBoot{}, template.Entry{}, fmt.Errorf(
+		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
 			"resolve template %s boot index %s: %w",
 			entry.ID,
 			bootIndexDigest,
@@ -152,7 +148,7 @@ func (p *bootPreparer) resolveTemplate(
 		)
 	}
 	if resolved.BootIndexDigest != bootIndexDigest {
-		return ResolvedBoot{}, template.Entry{}, fmt.Errorf(
+		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
 			"resolved boot index digest %s does not match template digest %s",
 			resolved.BootIndexDigest,
 			bootIndexDigest,
@@ -166,7 +162,7 @@ func (p *bootPreparer) prepareResolvedBoot(
 	key string,
 	requestedVMM string,
 	ramMB int64,
-	resolved ResolvedBoot,
+	resolved conchimage.ResolvedBoot,
 ) (PreparedBoot, error) {
 	parents := snapshot.ParentSnapshotIDs{
 		Rootfs: strings.TrimSpace(resolved.RootfsKey),
@@ -246,7 +242,7 @@ func memoryLayoutForVMM(vmmName string, resume bool) (snapshot.MemoryLayoutMode,
 	}
 }
 
-func validateResolvedBoot(resolved ResolvedBoot, expectedMode template.BootMode, requestedVMM string) error {
+func validateResolvedBoot(resolved conchimage.ResolvedBoot, expectedMode template.BootMode, requestedVMM string) error {
 	if strings.TrimSpace(resolved.RootfsKey) == "" || strings.TrimSpace(resolved.VMKey) == "" {
 		return fmt.Errorf("boot index unpack returned incomplete parents")
 	}

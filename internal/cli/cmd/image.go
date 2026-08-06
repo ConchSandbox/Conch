@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
@@ -85,9 +85,9 @@ func runImageList(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("conch image ls: unexpected positional arguments: %v", fs.Args())
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch image ls: %w", err)
+		return fmt.Errorf("conch image ls: create API client: %w", err)
 	}
 	images, err := conchClient.ListImages(ctx, client.ListImagesRequest{
 		Filters: filters,
@@ -141,9 +141,9 @@ func runImageRemove(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch image rm: exactly one image name is required")
 	}
 	imageName := fs.Arg(0)
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch image rm: %w", err)
+		return fmt.Errorf("conch image rm: create API client: %w", err)
 	}
 	if err := conchClient.RemoveImage(ctx, client.RemoveImageRequest{
 		ImageName:   imageName,

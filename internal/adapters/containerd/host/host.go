@@ -20,21 +20,19 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
-	imageSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
-	sandboxSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
-	snapshotSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
-	templateSvc "github.com/openeuler/Conch/internal/adapters/containerd/plugins/template"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
-	"github.com/openeuler/Conch/internal/conchplugins"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/netstack"
+	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/volume"
 )
 
 const (
-	PluginType = conchplugins.HostPluginType
-	PluginID   = conchplugins.HostPluginID
-	PluginURI  = conchplugins.HostPluginURI
+	pluginType plugin.Type = "io.conch.internal.v1"
+	pluginID               = "containerd-host"
+	pluginURI              = string(pluginType) + "." + pluginID
 
 	startTimeout = 10 * time.Second
 )
@@ -63,34 +61,29 @@ type SandboxConfig struct {
 }
 
 type Host struct {
-	server          *containerdserver.Server
-	client          *containerdclient.Client
-	imageService    *imageSvc.Service
-	snapshotService *snapshotSvc.Service
-	templateService *templateSvc.Service
-	sandboxService  *sandboxSvc.Service
-	cancel          context.CancelFunc
-	once            sync.Once
+	server         *containerdserver.Server
+	client         *containerdclient.Client
+	snapshotServer *conchsnapshot.Server
+	templateStore  conchtemplate.Store
+	sandboxManager *conchsandbox.Manager
+	cancel         context.CancelFunc
+	once           sync.Once
 }
 
 func (h *Host) Client() *containerdclient.Client {
 	return h.client
 }
 
-func (h *Host) ImageService() *imageSvc.Service {
-	return h.imageService
+func (h *Host) SnapshotServer() *conchsnapshot.Server {
+	return h.snapshotServer
 }
 
-func (h *Host) SnapshotService() *snapshotSvc.Service {
-	return h.snapshotService
+func (h *Host) TemplateStore() conchtemplate.Store {
+	return h.templateStore
 }
 
-func (h *Host) TemplateService() *templateSvc.Service {
-	return h.templateService
-}
-
-func (h *Host) SandboxService() *sandboxSvc.Service {
-	return h.sandboxService
+func (h *Host) SandboxManager() *conchsandbox.Manager {
+	return h.sandboxManager
 }
 
 func (h *Host) Close() error {
@@ -109,15 +102,15 @@ func (h *Host) Close() error {
 			h.cancel()
 			finish(nil)
 		}
-		if h.sandboxService != nil {
-			finish := cleanupdiag.Start("containerd_host.sandbox_service.close")
-			err := h.sandboxService.Close()
+		if h.sandboxManager != nil {
+			finish := cleanupdiag.Start("containerd_host.sandbox_manager.close")
+			err := h.sandboxManager.Close()
 			finish(err)
 			errs = append(errs, err)
 		}
-		if h.snapshotService != nil {
-			finish := cleanupdiag.Start("containerd_host.snapshot_service.close")
-			err := h.snapshotService.Close()
+		if h.snapshotServer != nil {
+			finish := cleanupdiag.Start("containerd_host.snapshot_server.close")
+			err := h.snapshotServer.Close()
 			finish(err)
 			errs = append(errs, err)
 		}
@@ -144,7 +137,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		return nil, errors.New("containerd state dir is required")
 	}
 	if cfg.Sandbox != nil && cfg.TemplateStore == nil {
-		return nil, errors.New("template store is required when sandbox service is enabled")
+		return nil, errors.New("template store is required when sandbox manager is enabled")
 	}
 	if err := os.MkdirAll(cfg.RootDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create containerd root dir: %w", err)
@@ -153,47 +146,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("create containerd state dir: %w", err)
 	}
 
-	ready := make(chan *bootstrapInstance, 1)
-	imageReady := make(chan *imageSvc.Service, 1)
-	snapshotReady := make(chan *snapshotSvc.Service, 1)
-	templateReady := make(chan *templateSvc.Service, 1)
-	sandboxReady := make(chan *sandboxSvc.Service, 1)
-	setBootstrapChannel(ready)
-	imageSvc.SetReadyChannel(imageReady)
-	snapshotSvc.SetReadyChannel(snapshotReady)
-	templateSvc.SetReadyChannel(templateReady)
-	sandboxSvc.SetReadyChannel(sandboxReady)
-	defer setBootstrapChannel(nil)
-	defer imageSvc.SetReadyChannel(nil)
-	defer snapshotSvc.SetReadyChannel(nil)
-	defer templateSvc.SetReadyChannel(nil)
-	defer sandboxSvc.SetReadyChannel(nil)
-	if cfg.TemplateStore != nil {
-		templateSvc.SetStateStore(cfg.TemplateStore)
-		defer templateSvc.SetStateStore(nil)
-	}
-	if cfg.Sandbox != nil {
-		sandboxSvc.SetVolumeManager(cfg.Sandbox.VolumeManager)
-		defer sandboxSvc.SetVolumeManager(nil)
-	}
 	hostCtx, cancel := context.WithCancel(ctx)
-
-	requiredPlugins := []string{
-		PluginURI,
-		conchplugins.ImageServiceURI,
-		conchplugins.SnapshotServiceURI,
-	}
-	var disabledPlugins []string
-	if cfg.TemplateStore != nil {
-		requiredPlugins = append(requiredPlugins, conchplugins.TemplateServiceURI)
-	} else {
-		disabledPlugins = append(disabledPlugins, conchplugins.TemplateServiceURI)
-	}
-	if cfg.Sandbox != nil {
-		requiredPlugins = append(requiredPlugins, conchplugins.SandboxServiceURI)
-	} else {
-		disabledPlugins = append(disabledPlugins, conchplugins.SandboxServiceURI)
-	}
 
 	pluginConfigs := map[string]any{
 		string(plugins.ServicePlugin) + "." + services.DiffService: map[string]any{
@@ -211,77 +164,100 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		string(plugins.DiffPlugin) + ".erofs": map[string]any{
 			"mkfs_options": []string{"--fsalignblks=512"},
 		},
-		conchplugins.SnapshotServiceURI: map[string]any{
-			"work_dir": cfg.Snapshot.WorkDir,
-		},
-	}
-	if cfg.Sandbox != nil {
-		pluginConfigs[conchplugins.SandboxServiceURI] = sandboxPluginConfig(cfg.Sandbox)
 	}
 	serverCfg := &serverconfig.Config{
 		Version:         version.ConfigVersion,
 		Root:            filepath.Clean(cfg.RootDir),
 		State:           filepath.Clean(cfg.StateDir),
 		TempDir:         filepath.Join(filepath.Clean(cfg.StateDir), "tmp"),
-		DisabledPlugins: disabledPlugins,
-		RequiredPlugins: requiredPlugins,
+		RequiredPlugins: []string{pluginURI},
 		Plugins:         pluginConfigs,
 	}
 
-	srv, err := containerdserver.New(hostCtx, serverCfg)
+	srv, inst, err := startContainerdPluginGraph(hostCtx, serverCfg)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("start containerd plugin graph: %w", err)
+		return nil, err
 	}
 
-	var (
-		inst     *bootstrapInstance
-		image    *imageSvc.Service
-		snapshot *snapshotSvc.Service
-		template *templateSvc.Service
-		sandbox  *sandboxSvc.Service
-		timeout  = time.After(startTimeout)
-	)
-	for inst == nil || image == nil || snapshot == nil || (cfg.TemplateStore != nil && template == nil) || (cfg.Sandbox != nil && sandbox == nil) {
-		select {
-		case inst = <-ready:
-		case image = <-imageReady:
-		case snapshot = <-snapshotReady:
-		case template = <-templateReady:
-		case sandbox = <-sandboxReady:
-		case <-ctx.Done():
-			cancel()
-			srv.Stop()
-			return nil, ctx.Err()
-		case <-timeout:
-			cancel()
-			srv.Stop()
-			return nil, fmt.Errorf("containerd host required plugins did not initialize")
+	host := &Host{
+		server: srv,
+		client: inst.client,
+		cancel: cancel,
+	}
+	fail := func(component string, initErr error) (*Host, error) {
+		cleanupErr := host.Close()
+		return nil, errors.Join(
+			fmt.Errorf("initialize %s: %w", component, initErr),
+			cleanupErr,
+		)
+	}
+
+	host.snapshotServer, err = conchsnapshot.NewServer(cfg.Snapshot.WorkDir, inst.client)
+	if err != nil {
+		return fail("snapshot server", err)
+	}
+
+	if cfg.TemplateStore != nil {
+		host.templateStore = conchtemplate.NewStore(cfg.TemplateStore)
+	}
+
+	if cfg.Sandbox != nil {
+		host.sandboxManager, err = conchsandbox.New(
+			hostCtx,
+			inst.client,
+			host.templateStore,
+			host.snapshotServer,
+			sandboxManagerConfig(cfg.Sandbox),
+		)
+		if err != nil {
+			return fail("sandbox manager", err)
 		}
 	}
-	return &Host{
-		server:          srv,
-		client:          inst.client,
-		imageService:    image,
-		snapshotService: snapshot,
-		templateService: template,
-		sandboxService:  sandbox,
-		cancel:          cancel,
-	}, nil
+
+	return host, nil
 }
 
-func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
-	if cfg == nil {
-		return nil
+func startContainerdPluginGraph(ctx context.Context, cfg *serverconfig.Config) (*containerdserver.Server, *bootstrapInstance, error) {
+	bootstrapStartMu.Lock()
+	defer bootstrapStartMu.Unlock()
+
+	ready := make(chan *bootstrapInstance, 1)
+	setBootstrapChannel(ready)
+	defer setBootstrapChannel(nil)
+
+	srv, err := containerdserver.New(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("start containerd plugin graph: %w", err)
 	}
-	return map[string]any{
-		"warm_pool_size":       cfg.WarmPoolSize,
-		"tap_ip":               cfg.TapIP,
-		"tap_mask":             cfg.TapMask,
-		"cni":                  cfg.CNI,
-		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
-		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
-		"request_timeout":      cfg.RequestTimeout.String(),
+
+	timer := time.NewTimer(startTimeout)
+	defer timer.Stop()
+	select {
+	case inst := <-ready:
+		return srv, inst, nil
+	case <-ctx.Done():
+		srv.Stop()
+		return nil, nil, ctx.Err()
+	case <-timer.C:
+		srv.Stop()
+		return nil, nil, fmt.Errorf("containerd host bootstrap plugin did not initialize")
+	}
+}
+
+func sandboxManagerConfig(cfg *SandboxConfig) conchsandbox.Config {
+	if cfg == nil {
+		return conchsandbox.Config{}
+	}
+	return conchsandbox.Config{
+		WarmPoolSize:       cfg.WarmPoolSize,
+		TapIP:              cfg.TapIP,
+		TapMask:            cfg.TapMask,
+		CNI:                cfg.CNI,
+		VsockSignalRetry:   cfg.VsockSignalRetry,
+		VsockSignalTimeout: cfg.VsockSignalTimeout,
+		RequestTimeout:     cfg.RequestTimeout,
+		VolumeManager:      cfg.VolumeManager,
 	}
 }
 
@@ -292,13 +268,10 @@ type bootstrapInstance struct {
 	client *containerdclient.Client
 }
 
-func (b *bootstrapInstance) DaemonClient() *containerdclient.Client {
-	return b.client
-}
-
 var (
-	bootstrapMu sync.Mutex
-	bootstrapCh chan<- *bootstrapInstance
+	bootstrapStartMu sync.Mutex
+	bootstrapMu      sync.Mutex
+	bootstrapCh      chan<- *bootstrapInstance
 )
 
 func setBootstrapChannel(ch chan<- *bootstrapInstance) {
@@ -322,8 +295,8 @@ func publishBootstrapInstance(inst *bootstrapInstance) {
 
 func init() {
 	registry.Register(&plugin.Registration{
-		Type:   PluginType,
-		ID:     PluginID,
+		Type:   pluginType,
+		ID:     pluginID,
 		Config: &bootstrapConfig{},
 		Requires: []plugin.Type{
 			plugins.EventPlugin,

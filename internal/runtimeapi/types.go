@@ -95,7 +95,6 @@ type TemplatePushOptions struct {
 	PlainHTTP       bool
 	Username        string
 	Password        string
-	RegistryTimeout string
 }
 
 type TemplateListOptions struct {
@@ -129,12 +128,11 @@ type PullImageResult struct {
 }
 
 type PushImageOptions struct {
-	LocalImage      string
-	RemoteImage     string
-	PlainHTTP       bool
-	Username        string
-	Password        string
-	RegistryTimeout string
+	LocalImage  string
+	RemoteImage string
+	PlainHTTP   bool
+	Username    string
+	Password    string
 }
 
 type ListImagesOptions struct {
@@ -164,15 +162,15 @@ type ExportImageArchiveOptions struct {
 }
 
 type ImageRecord struct {
-	Name            string
-	TargetDigest    string
-	RepoDigests     []string
-	TargetMediaType string
-	Size            int64
-	Kind            string
-	Labels          map[string]string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	Name            string            `json:"name"`
+	TargetDigest    string            `json:"target_digest"`
+	RepoDigests     []string          `json:"repo_digests,omitempty"`
+	TargetMediaType string            `json:"target_media_type"`
+	Size            int64             `json:"size,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 }
 
 type ListSnapshotsOptions struct {
@@ -188,11 +186,11 @@ type SnapshotInfoOptions struct {
 }
 
 type SnapshotRecord struct {
-	Key         string
-	Kind        string
-	Parent      string
-	Labels      map[string]string
-	StoragePath string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	Key         string            `json:"key"`
+	Kind        string            `json:"kind,omitempty"`
+	Parent      string            `json:"parent,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	StoragePath string            `json:"storage_path,omitempty"`
+	CreatedAt   time.Time         `json:"created_at,omitempty"`
+	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
 }

@@ -6,13 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	digestpkg "github.com/opencontainers/go-digest"
+	"github.com/containerd/errdefs"
+
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -35,30 +35,6 @@ type SandboxOps interface {
 // a usable template ID for sandbox creation.
 var ErrTemplateIDRequired = errors.New("template_id is required and no default_template_id is configured")
 
-type ImageOps interface {
-	Pull(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error)
-	Push(context.Context, runtimeapi.PushImageOptions) error
-	List(context.Context, runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error)
-	Remove(context.Context, runtimeapi.RemoveImageOptions) error
-	Unpack(context.Context, runtimeapi.UnpackImageOptions) (map[string]string, error)
-	ImportArchive(context.Context, io.Reader, runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error)
-	ExportArchive(context.Context, io.Writer, runtimeapi.ExportImageArchiveOptions) error
-}
-
-// TemplateBootIndexOps groups image operations that produce, inspect, or
-// distribute Boot Indexes for Templates. These still run through the containerd
-// image service, but they are conceptually separate from generic OCI image
-// lifecycle operations.
-type TemplateBootIndexOps interface {
-	PushBootIndex(context.Context, conchimage.PushBootIndexOptions) error
-	PrepareRootfsSource(context.Context, conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error)
-	PublishBootImage(context.Context, conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error)
-	InspectBootIndex(ctx context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error)
-	InspectBootIndexReference(ctx context.Context, reference string) (conchimage.BootIndexInfo, error)
-	PublishCheckpointBootImage(context.Context, conchimage.PublishCheckpointBootImageOptions) (conchimage.PublishCheckpointBootImageResult, error)
-	ConvertRootfsToErofs(context.Context, erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error)
-}
-
 type SnapshotOps interface {
 	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
 	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
@@ -66,14 +42,13 @@ type SnapshotOps interface {
 }
 
 type Service struct {
-	Sandbox           SandboxOps
-	Image             ImageOps
-	TemplateBootIndex TemplateBootIndexOps
-	Snapshot          SnapshotOps
-	Store             state.Store
-	Templates         conchtemplate.Store
-	SandboxDefaults   SandboxDefaults
-	lifecycleLocks    sandboxLifecycleLocks
+	Sandbox         SandboxOps
+	Containerd      *containerdclient.Client
+	Snapshot        SnapshotOps
+	Store           state.Store
+	Templates       conchtemplate.Store
+	SandboxDefaults SandboxDefaults
+	lifecycleLocks  sandboxLifecycleLocks
 }
 
 var ErrSandboxAlreadyExists = errors.New("sandbox already exists")
@@ -113,13 +88,12 @@ func (l *sandboxLifecycleLocks) lock(id string) func() {
 	}
 }
 
-func New(sandboxOps SandboxOps, imageOps ImageOps, templateBootIndexOps TemplateBootIndexOps, store state.Store) *Service {
+func New(sandboxOps SandboxOps, client *containerdclient.Client, store state.Store) *Service {
 	return &Service{
-		Sandbox:           sandboxOps,
-		Image:             imageOps,
-		TemplateBootIndex: templateBootIndexOps,
-		Store:             store,
-		Templates:         conchtemplate.NewStore(store),
+		Sandbox:    sandboxOps,
+		Containerd: client,
+		Store:      store,
+		Templates:  conchtemplate.NewStore(store),
 	}
 }
 
@@ -304,8 +278,8 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	if s.TemplateBootIndex == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("template boot index service is not configured")
+	if s.Containerd == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("containerd client is not configured")
 	}
 	if s.Store == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint publisher is not configured")
@@ -334,7 +308,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	defer os.RemoveAll(captured.MemRootPath)
 
 	bootIndexTag := "localhost/conch/template:" + templateID
-	published, err := s.TemplateBootIndex.PublishCheckpointBootImage(ctx, conchimage.PublishCheckpointBootImageOptions{
+	published, err := conchimage.PublishCheckpointBootIndex(ctx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
 		SourceBootIndexDigest: parentBootIndexDigest,
 		BootIndexTag:          bootIndexTag,
 		MemRoot:               captured.MemRootPath,
@@ -344,7 +318,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndex(ctx, published.BootIndexDigest)
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, published.BootIndexDigest)
 	if err != nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("validate published checkpoint boot index: %w", err)
 	}
@@ -391,166 +365,12 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	}, nil
 }
 
-func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullImageResult, error) {
-	if s == nil || s.Image == nil {
-		return PullImageResult{}, fmt.Errorf("image service is not configured")
-	}
-	result, err := s.Image.Pull(ctx, opts)
-	if err != nil {
-		return PullImageResult{}, err
-	}
-	return result, nil
-}
-
-func (s *Service) PushImage(ctx context.Context, opts runtimeapi.PushImageOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Push(ctx, opts)
-}
-
-func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	items, err := s.Image.List(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]runtimeapi.ImageRecord, 0, len(items))
-	for _, item := range items {
-		item.RepoDigests = imageRepoDigests(item.Name, item.TargetDigest)
-		item.Kind = firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels))
-		out = append(out, item)
-	}
-	return out, nil
-}
-
-func imageRepoDigests(name, digest string) []string {
-	name = strings.TrimSpace(name)
-	digest = strings.TrimSpace(digest)
-	if name == "" || digest == "" {
-		return nil
-	}
-	if isDigestOnlyRef(name) {
-		return nil
-	}
-	base := name
-	if repo, _, ok := strings.Cut(base, "@"); ok {
-		base = repo
-	} else {
-		lastSlash := strings.LastIndex(base, "/")
-		lastColon := strings.LastIndex(base, ":")
-		if lastColon > lastSlash {
-			base = base[:lastColon]
-		}
-	}
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return nil
-	}
-	return []string{base + "@" + digest}
-}
-
-func isDigestOnlyRef(ref string) bool {
-	if _, err := digestpkg.Parse(ref); err == nil {
-		return true
-	}
-	algo, _, ok := strings.Cut(ref, ":")
-	if !ok || strings.Contains(algo, "/") {
-		return false
-	}
-	switch algo {
-	case "sha256", "sha384", "sha512":
-		return true
-	default:
-		return false
-	}
-}
-
-func imageKindFromLabels(labels map[string]string) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	if kind := strings.TrimSpace(labels["io.conch.kind"]); kind != "" {
-		return kind
-	}
-	if kind := strings.TrimSpace(labels["kind"]); kind != "" {
-		return kind
-	}
-	if kind := strings.TrimSpace(labels["conch.io/kind"]); kind != "" {
-		return kind
-	}
-	return ""
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Remove(ctx, opts)
-}
-
-func (s *Service) UnpackImage(ctx context.Context, req runtimeapi.UnpackImageOptions) (map[string]string, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Unpack(ctx, req)
-}
-
-func (s *Service) ImportImageArchive(ctx context.Context, reader io.Reader, req runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error) {
-	if s == nil || s.Image == nil {
-		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.ImportArchive(ctx, reader, req)
-}
-
-func (s *Service) ExportImageArchive(ctx context.Context, writer io.Writer, req runtimeapi.ExportImageArchiveOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.ExportArchive(ctx, writer, req)
-}
-
-func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return conchimage.PublishBootImageResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.PublishBootImage(ctx, req)
-}
-
-func (s *Service) PrepareRootfsSource(ctx context.Context, req conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.PrepareRootfsSource(ctx, req)
-}
-
-func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.ConvertRootfsToErofs(ctx, req)
-}
-
 // PullTemplate fetches and statically validates a registry Boot Index before
 // creating the local Template entry. Runtime boot validation belongs to
 // integration tests, not the pull request path.
 func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (TemplatePullResult, error) {
-	if s == nil || s.Image == nil {
-		return TemplatePullResult{}, fmt.Errorf("image service is required")
-	}
-	if s.TemplateBootIndex == nil {
-		return TemplatePullResult{}, fmt.Errorf("template boot index service is not configured")
+	if s == nil || s.Containerd == nil {
+		return TemplatePullResult{}, fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return TemplatePullResult{}, fmt.Errorf("template store is not configured")
@@ -559,7 +379,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, fmt.Errorf("template reference is required")
 	}
-	if _, err := s.Image.Pull(ctx, runtimeapi.PullImageOptions{
+	if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
 		ImageName:  reference,
 		PlainHTTP:  opts.PlainHTTP,
 		Username:   opts.Username,
@@ -568,7 +388,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	}); err != nil {
 		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndexReference(ctx, reference)
+	info, err := conchimage.InspectBootIndexReference(ctx, s.Containerd, reference)
 	if err != nil {
 		return TemplatePullResult{}, fmt.Errorf("validate pulled template boot index %s: %w", reference, err)
 	}
@@ -605,8 +425,8 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 // immutable BootIndexDigest. BuildRef is provenance only and may have been
 // retargeted since the Template was created.
 func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) error {
-	if s == nil || s.TemplateBootIndex == nil {
-		return fmt.Errorf("template boot index service is required")
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
@@ -627,25 +447,21 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if bootIndexDigest == "" {
 		return fmt.Errorf("template %s has no boot index digest", rec.ID)
 	}
-	return s.TemplateBootIndex.PushBootIndex(ctx, conchimage.PushBootIndexOptions{
+	return conchimage.PushBootIndex(ctx, s.Containerd, conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
 		RemoteReference: remoteReference,
 		PlainHTTP:       opts.PlainHTTP,
 		Username:        opts.Username,
 		Password:        opts.Password,
-		RegistryTimeout: opts.RegistryTimeout,
 	})
 }
 
 func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions) (TemplateCreateResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return TemplateCreateResult{}, fmt.Errorf("template boot index service is required")
+	if s == nil || s.Containerd == nil {
+		return TemplateCreateResult{}, fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return TemplateCreateResult{}, fmt.Errorf("template store is not configured")
-	}
-	if s.Image == nil {
-		return TemplateCreateResult{}, fmt.Errorf("image service is required")
 	}
 	source := strings.TrimSpace(opts.Source)
 	if source == "" {
@@ -662,7 +478,7 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	if err != nil {
 		return TemplateCreateResult{}, err
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndex(ctx, result.bootIndexDigest)
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, result.bootIndexDigest)
 	if err != nil {
 		return TemplateCreateResult{}, fmt.Errorf("validate published boot index: %w", err)
 	}
@@ -702,19 +518,36 @@ type templateBuildResult struct {
 }
 
 func (s *Service) createTemplateFromSource(ctx context.Context, templateID string, opts TemplateCreateOptions) (templateBuildResult, error) {
-	prepared, err := s.TemplateBootIndex.PrepareRootfsSource(ctx, conchimage.PrepareRootfsSourceOptions{
-		Source:    opts.Source,
-		PlainHTTP: opts.PlainHTTP,
-		Username:  opts.Username,
-		Password:  opts.Password,
-	})
+	sourceCtx, err := s.Containerd.WithNamespace(ctx)
 	if err != nil {
-		return templateBuildResult{}, fmt.Errorf("prepare rootfs source: %w", err)
+		return templateBuildResult{}, fmt.Errorf("prepare rootfs source namespace: %w", err)
+	}
+	sourceImage, err := s.Containerd.GetImage(sourceCtx, opts.Source)
+	if err != nil {
+		if !errdefs.IsNotFound(err) {
+			return templateBuildResult{}, fmt.Errorf("lookup rootfs source image %s: %w", opts.Source, err)
+		}
+		if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
+			ImageName:  opts.Source,
+			PlainHTTP:  opts.PlainHTTP,
+			Username:   opts.Username,
+			Password:   opts.Password,
+			SkipUnpack: true,
+		}); err != nil {
+			return templateBuildResult{}, fmt.Errorf("pull rootfs source image %s: %w", opts.Source, err)
+		}
+		sourceImage, err = s.Containerd.GetImage(sourceCtx, opts.Source)
+		if err != nil {
+			return templateBuildResult{}, fmt.Errorf("resolve pulled rootfs source image %s: %w", opts.Source, err)
+		}
+	}
+	if err := conchimage.SetImageKindLabel(sourceCtx, s.Containerd.ImageService(), sourceImage.Name(), conchimage.ImageKindOCIImage); err != nil {
+		return templateBuildResult{}, fmt.Errorf("label rootfs source image: %w", err)
 	}
 
 	convertTarget := fmt.Sprintf("conch-erofs-rootfs:%s", templateID)
-	converted, err := s.TemplateBootIndex.ConvertRootfsToErofs(ctx, erofsconvert.ConvertRootfsRequest{
-		SourceImage: prepared.ImageName,
+	converted, err := erofsconvert.ConvertRootfs(ctx, s.Containerd, erofsconvert.ConvertRootfsRequest{
+		SourceImage: sourceImage.Name(),
 		TargetImage: convertTarget,
 		MkfsOptions: []string{erofsconvert.DefaultMkfsOption},
 		AlignBytes:  erofsconvert.DefaultAlignBytes,
@@ -727,7 +560,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, templateID strin
 	if bootIndexTag == "" {
 		bootIndexTag = "localhost/conch/template:" + templateID
 	}
-	published, err := s.TemplateBootIndex.PublishBootImage(ctx, conchimage.PublishBootImageOptions{
+	published, err := conchimage.PublishBootIndex(ctx, s.Containerd, conchimage.PublishBootIndexOptions{
 		RootfsImageName: converted.ImageName,
 		KernelPath:      opts.KernelPath,
 		InitrdPath:      opts.InitrdPath,
@@ -742,7 +575,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, templateID strin
 	// the authoritative references to its content.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := s.Image.Remove(cleanupCtx, runtimeapi.RemoveImageOptions{
+	if err := conchimage.Remove(cleanupCtx, s.Containerd, runtimeapi.RemoveImageOptions{
 		ImageName: converted.ImageName,
 	}); err != nil {
 		ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",

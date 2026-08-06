@@ -1,7 +1,6 @@
 package erofsconvert
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -14,10 +13,6 @@ const (
 	DefaultAlignBytes           = int64(2 * 1024 * 1024)
 	DefaultMkfsOption           = "--fsalignblks=512"
 )
-
-type RootfsErofsConverter interface {
-	Convert(ctx context.Context, req ConvertRootfsRequest) (ConvertRootfsResult, error)
-}
 
 type ConvertRootfsRequest struct {
 	SourceImage string   `json:"source_image"`

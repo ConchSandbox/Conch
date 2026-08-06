@@ -12,5 +12,3 @@ type TemplateCreateResult = runtimeapi.TemplateCreateResult
 type TemplatePullOptions = runtimeapi.TemplatePullOptions
 type TemplatePullResult = runtimeapi.TemplatePullResult
 type TemplatePushOptions = runtimeapi.TemplatePushOptions
-type PullImageOptions = runtimeapi.PullImageOptions
-type PullImageResult = runtimeapi.PullImageResult

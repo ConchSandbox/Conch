@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func PrintSnapshotHelp(out io.Writer) {
@@ -54,9 +54,9 @@ func runSnapshotList(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("conch debug snapshot ls: unexpected positional arguments: %v", fs.Args())
 	}
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch debug snapshot ls: %w", err)
+		return fmt.Errorf("conch debug snapshot ls: create API client: %w", err)
 	}
 	snapshots, err := conchClient.ListSnapshots(ctx, client.ListSnapshotsRequest{
 		Filters: filters,
@@ -86,9 +86,9 @@ func runSnapshotRemove(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch debug snapshot rm: exactly one snapshot key is required")
 	}
 	key := fs.Arg(0)
-	conchClient, err := client.NewClientWithConfig("", *configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch debug snapshot rm: %w", err)
+		return fmt.Errorf("conch debug snapshot rm: create API client: %w", err)
 	}
 	if err := conchClient.RemoveSnapshot(ctx, client.RemoveSnapshotRequest{
 		Key: key,

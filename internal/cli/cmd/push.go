@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 type ImagePushOptions struct {
@@ -58,17 +58,16 @@ func RunImagePush(ctx context.Context, args []string) error {
 			return fmt.Errorf("conch image push: invalid --timeout %q", opts.Timeout)
 		}
 	}
-	conchClient, err := client.NewClientWithConfigAndTimeout("", opts.ConfigPath, apiTimeout)
+	conchClient, err := client.New(client.Options{ConfigPath: opts.ConfigPath, Timeout: apiTimeout})
 	if err != nil {
-		return fmt.Errorf("conch image push: %w", err)
+		return fmt.Errorf("conch image push: create API client: %w", err)
 	}
 	if err := conchClient.PushImage(ctx, client.PushImageRequest{
-		LocalImage:      opts.LocalImage,
-		RemoteImage:     opts.RemoteImage,
-		PlainHTTP:       opts.PlainHTTP,
-		Username:        opts.Username,
-		Password:        opts.Password,
-		RegistryTimeout: opts.Timeout,
+		LocalImage:  opts.LocalImage,
+		RemoteImage: opts.RemoteImage,
+		PlainHTTP:   opts.PlainHTTP,
+		Username:    opts.Username,
+		Password:    opts.Password,
 	}); err != nil {
 		return fmt.Errorf("conch image push: %w", err)
 	}
