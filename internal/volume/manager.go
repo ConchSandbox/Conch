@@ -30,6 +30,18 @@ func NewManager(cfg Config) (*Manager, error) {
 }
 
 func (m *Manager) PrepareSandbox(namespace, sandboxID string, mounts []Mount) ([]Device, error) {
+	return m.prepareSandbox(namespace, sandboxID, mounts, nil)
+}
+
+// PrepareSandboxWithHealth prepares the sandbox volume and reports an
+// unexpected backend exit after preparation completes. The callback must not
+// call CleanupSandbox inline before the backend monitor has published exit
+// completion; the built-in backend guarantees that publication happens first.
+func (m *Manager) PrepareSandboxWithHealth(namespace, sandboxID string, mounts []Mount, onUnhealthy func(error)) ([]Device, error) {
+	return m.prepareSandbox(namespace, sandboxID, mounts, onUnhealthy)
+}
+
+func (m *Manager) prepareSandbox(namespace, sandboxID string, mounts []Mount, onUnhealthy func(error)) ([]Device, error) {
 	if len(mounts) == 0 {
 		return nil, nil
 	}
@@ -62,9 +74,10 @@ func (m *Manager) PrepareSandbox(namespace, sandboxID string, mounts []Mount) ([
 		}
 	}
 	return m.backend.Prepare(PrepareRequest{
-		Namespace: namespace,
-		SandboxID: sandboxID,
-		Mounts:    mounts,
+		Namespace:   namespace,
+		SandboxID:   sandboxID,
+		Mounts:      mounts,
+		OnUnhealthy: onUnhealthy,
 	})
 }
 
@@ -74,6 +87,23 @@ func (m *Manager) CleanupSandbox(namespace, sandboxID string, devices []Device) 
 
 func (m *Manager) RestoreSandbox(namespace, sandboxID string, devices []Device) error {
 	return m.backend.Restore(namespace, sandboxID, devices)
+}
+
+func (m *Manager) RestoreSandboxWithHealth(namespace, sandboxID string, devices []Device, onUnhealthy func(error)) error {
+	return m.backend.RestoreWithHealth(namespace, sandboxID, devices, onUnhealthy)
+}
+
+// CheckSandboxHealth returns a typed backend failure without mutating volume
+// state. Sandbox lifecycle code uses it before teardown consumes the record.
+func (m *Manager) CheckSandboxHealth(namespace, sandboxID string) error {
+	return m.backend.CheckHealth(namespace, sandboxID)
+}
+
+// ClearSandboxHealth begins a new observation lifecycle for a sandbox ID.
+// Unexpected health remains readable through automatic cleanup until an
+// explicit delete or a new create/rehydrate acknowledges the old lifecycle.
+func (m *Manager) ClearSandboxHealth(namespace, sandboxID string) {
+	m.backend.ClearHealth(namespace, sandboxID)
 }
 
 func isBlockedTarget(target string) bool {

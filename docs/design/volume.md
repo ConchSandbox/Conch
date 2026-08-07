@@ -58,7 +58,16 @@ path 绝对路径与系统路径保护、path 去重），协调 volume dir 与 
 `Shared Dir Backend` 定义可替换后端边界。当前 virtiofs 后端负责：创建 per-sandbox
 runtime 目录与 `volume` 子目录、执行 host 侧 `mount --bind`、写 `config.json`、启动
 单个 virtiofsd、等待 socket ready、生成 VMM 所需 socket/tag，并在 sandbox 删除或创建
-失败时清理 virtiofsd 与 bind。
+失败时清理 virtiofsd 与 bind。每个由 conchd 启动的 virtiofsd 都由单一 monitor goroutine
+负责 `Wait`/回收；socket ready 前退出会立即让创建失败，ready 后意外退出会产生带 sandbox
+身份和进程错误的 unhealthy 信号，并进入与 VMM 意外退出相同的 sandbox 清理路径。正常
+Cleanup 会先把退出标为预期，再终止进程并等待 monitor 完成，不产生 unhealthy 信号。
+conchd 重启后恢复的 virtiofsd 不是新进程的子进程，因此恢复路径不调用 `Wait`；它会在
+校验 PID/start-time 前后打开 pidfd，以 pidfd poll 监测退出，并只通过该 pidfd 发信号，
+避免 PID 复用时误杀无关进程。Cleanup 会先停止并等待 watcher，再执行安全终止。意外退出
+的 typed unhealthy 状态在自动清理后仍可只读查询，直到显式删除或同一 sandbox ID 开始
+新的 create/rehydrate 生命周期。该修复不在 live VMM 上自动重启 virtiofsd，也不量化或
+承诺 guest 侧 FUSE I/O stall 的持续时间。
 
 `VMM Adapter` 把后端返回的 virtiofs 设备转换为具体 VMM 参数。当前 stratovirt 使用
 **单个** `vhost-user-fs-pci`，并在 kernel cmdline 追加极小 sharefs 开关。
@@ -276,4 +285,3 @@ SDK 发送 payload：
 - 挂卷与快照互斥：带挂载的 sandbox 不支持 snapshot start、pause、resume、export；相关
   调用直接报错。
 - 用户 host-path 不随 sandbox 删除而删除。
-

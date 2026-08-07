@@ -30,7 +30,16 @@ type Manager struct {
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
-	volumeManager      *volume.Manager
+	volumeManager      sandboxVolumeManager
+	attachSandbox      func(state.SandboxRecord, *netstack.Pool) (*Sandbox, error)
+}
+
+type sandboxVolumeManager interface {
+	PrepareSandboxWithHealth(namespace, sandboxID string, mounts []volume.Mount, onUnhealthy func(error)) ([]volume.Device, error)
+	RestoreSandboxWithHealth(namespace, sandboxID string, devices []volume.Device, onUnhealthy func(error)) error
+	CleanupSandbox(namespace, sandboxID string, devices []volume.Device) error
+	CheckSandboxHealth(namespace, sandboxID string) error
+	ClearSandboxHealth(namespace, sandboxID string)
 }
 
 type sandboxLifecycleState uint8
@@ -253,8 +262,11 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		return CreateResult{}, fmt.Errorf("agent token is required")
 	}
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
-	defer cancel()
+	requestCtx, cancelRequest := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	defer cancelRequest()
+	ctx, cancelVolumeHealth := context.WithCancelCause(requestCtx)
+	defer cancelVolumeHealth(nil)
+	volumeHealth := newVolumeHealthRelay(cancelVolumeHealth)
 
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey, entry, err := m.reserveSandboxEntry(namespace, req.SandboxID)
@@ -267,6 +279,9 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 			m.sandboxes.CompareAndDelete(mapKey, entry)
 		}
 	}()
+	if m.volumeManager != nil {
+		m.volumeManager.ClearSandboxHealth(namespace, req.SandboxID)
+	}
 
 	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, namespace, req)
 	if err != nil {
@@ -306,14 +321,14 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	}()
 
 	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
-	volumeDevices, err := m.prepareVolumes(namespace, req, boot.Runtime.Resume)
+	volumeDevices, err := m.prepareVolumes(namespace, req, boot.Runtime.Resume, volumeHealth.report)
 	if err != nil {
 		return CreateResult{}, err
 	}
 
-	volumesPrepared := len(volumeDevices) > 0
+	volumesNeedFallbackCleanup := len(volumeDevices) > 0
 	defer func() {
-		if err == nil || !volumesPrepared || m.volumeManager == nil {
+		if err == nil || !volumesNeedFallbackCleanup || m.volumeManager == nil {
 			return
 		}
 		if cleanupErr := m.volumeManager.CleanupSandbox(namespace, req.SandboxID, volumeDevices); cleanupErr != nil {
@@ -327,21 +342,31 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	sbx, err := m.startSandbox(ctx, namespace, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
 	if err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxID)
+		if healthErr := volumeHealth.err(); healthErr != nil {
+			err = errors.Join(err, healthErr)
+		}
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
-	registerSandboxVolumeCleanup(sbx, m.volumeManager, namespace, req.SandboxID, volumeDevices)
+	transferSandboxVolumeCleanup(sbx, m.volumeManager, namespace, req.SandboxID, volumeDevices, &volumesNeedFallbackCleanup)
 
-	entry.sbx = sbx
-	entry.state = sandboxReady
-	m.trackSandbox(ctx, mapKey, entry, req.SandboxID, sbx)
+	if healthErr := volumeHealth.activate(func(healthErr error) {
+		m.handleSandboxUnhealthy(mapKey, entry, req.SandboxID, sbx, healthErr)
+	}, func() {
+		entry.sbx = sbx
+		entry.state = sandboxReady
+		m.trackSandbox(ctx, mapKey, entry, req.SandboxID, sbx)
+	}); healthErr != nil {
+		m.cleanupCreateFailure(sbx, req.SandboxID)
+		return CreateResult{}, fmt.Errorf("volume backend became unhealthy while creating sandbox %s: %w", req.SandboxID, healthErr)
+	}
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
 	return buildSandboxCreateResult(namespace, leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
 }
 
-func (m *Manager) prepareVolumes(namespace string, req CreateRequest, resume bool) ([]volume.Device, error) {
+func (m *Manager) prepareVolumes(namespace string, req CreateRequest, resume bool, onUnhealthy func(error)) ([]volume.Device, error) {
 	if len(req.VolumeMounts) == 0 {
 		return nil, nil
 	}
@@ -351,7 +376,7 @@ func (m *Manager) prepareVolumes(namespace string, req CreateRequest, resume boo
 	if m.volumeManager == nil {
 		return nil, fmt.Errorf("volume manager is not configured")
 	}
-	return m.volumeManager.PrepareSandbox(namespace, req.SandboxID, req.VolumeMounts)
+	return m.volumeManager.PrepareSandboxWithHealth(namespace, req.SandboxID, req.VolumeMounts, onUnhealthy)
 }
 
 func volumeDevicesToDriver(devices []volume.Device) []driver.VirtioFSDevice {
@@ -479,6 +504,29 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 	m.sandboxes.CompareAndDelete(mapKey, entry)
 }
 
+func (m *Manager) handleSandboxUnhealthy(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox, healthErr error) {
+	if m.volumeManager != nil {
+		if recordedErr := m.volumeManager.CheckSandboxHealth(sbx.namespace, sandboxID); recordedErr != nil {
+			healthErr = recordedErr
+		}
+	}
+	ulog.GetLogger().Warn("sandbox volume backend unhealthy, cleaning up",
+		ulog.F("sandbox_id", sandboxID),
+		ulog.F("error", healthErr),
+	)
+	m.handleSandboxExit(mapKey, entry, sandboxID, sbx)
+}
+
+func (m *Manager) ensureSandboxVolumeHealthy(namespace, sandboxID string) error {
+	if m.volumeManager == nil {
+		return nil
+	}
+	if err := m.volumeManager.CheckSandboxHealth(namespace, sandboxID); err != nil {
+		return fmt.Errorf("sandbox %s volume backend is unhealthy: %w", sandboxID, err)
+	}
+	return nil
+}
+
 func buildSandboxCreateResult(namespace, leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
@@ -521,7 +569,10 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 		if rec.SandboxID == "" {
 			continue
 		}
-		sb, err := attachSandboxFromRecord(rec, m.pool)
+		if m.volumeManager != nil {
+			m.volumeManager.ClearSandboxHealth(rec.Namespace, rec.SandboxID)
+		}
+		sb, err := m.attachSandboxFromRecord(rec)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("attach sandbox %s: %w", rec.SandboxID, err))
 			continue
@@ -546,6 +597,7 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 			}
 		}
 		volumeDevices := volumeDevicesFromState(rec.VolumeDevices)
+		var volumeHealth *volumeHealthRelay
 		if len(volumeDevices) > 0 && m.volumeManager == nil {
 			err := fmt.Errorf("volume manager is not configured")
 			if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
@@ -558,8 +610,9 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 			namespace := rec.Namespace
 			sandboxID := rec.SandboxID
 			volumeManager := m.volumeManager
+			volumeHealth = newVolumeHealthRelay(nil)
 			registerSandboxVolumeCleanup(sb, volumeManager, namespace, sandboxID, volumeDevices)
-			if err := volumeManager.RestoreSandbox(namespace, sandboxID, volumeDevices); err != nil {
+			if err := volumeManager.RestoreSandboxWithHealth(namespace, sandboxID, volumeDevices, volumeHealth.report); err != nil {
 				if cleanupErr := m.cleanupSandbox(context.Background(), sb, sandboxID); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 				}
@@ -567,17 +620,49 @@ func (m *Manager) Rehydrate(records []state.SandboxRecord) (int, map[string]stru
 				continue
 			}
 		}
-		m.sandboxes.Store(sandboxMapKey(rec.Namespace, rec.SandboxID), &sandboxEntry{
+		mapKey := sandboxMapKey(rec.Namespace, rec.SandboxID)
+		entry := &sandboxEntry{
 			state: sandboxReady,
 			sbx:   sb,
-		})
-		restoredSandboxIDs[rec.SandboxID] = struct{}{}
-		restored++
+		}
+		if healthErr := m.publishRehydratedSandbox(mapKey, entry, volumeHealth, func(healthErr error) {
+			m.handleSandboxUnhealthy(mapKey, entry, rec.SandboxID, sb, healthErr)
+		}, func() {
+			restoredSandboxIDs[rec.SandboxID] = struct{}{}
+			restored++
+		}); healthErr != nil {
+			if cleanupErr := m.cleanupSandbox(context.Background(), sb, rec.SandboxID); cleanupErr != nil {
+				healthErr = errors.Join(healthErr, cleanupErr)
+			}
+			errs = append(errs, fmt.Errorf("restored volume backend unhealthy for %s: %w", rec.SandboxID, healthErr))
+			continue
+		}
 	}
 	return restored, restoredSandboxIDs, errors.Join(errs...)
 }
 
-func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, namespace, sandboxID string, devices []volume.Device) {
+func (m *Manager) attachSandboxFromRecord(rec state.SandboxRecord) (*Sandbox, error) {
+	if m.attachSandbox != nil {
+		return m.attachSandbox(rec, m.pool)
+	}
+	return attachSandboxFromRecord(rec, m.pool)
+}
+
+func (m *Manager) publishRehydratedSandbox(mapKey string, entry *sandboxEntry, volumeHealth *volumeHealthRelay, onUnhealthy func(error), afterPublish func()) error {
+	publish := func() {
+		m.sandboxes.Store(mapKey, entry)
+		if afterPublish != nil {
+			afterPublish()
+		}
+	}
+	if volumeHealth == nil {
+		publish()
+		return nil
+	}
+	return volumeHealth.activate(onUnhealthy, publish)
+}
+
+func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager sandboxVolumeManager, namespace, sandboxID string, devices []volume.Device) {
 	if sb == nil || volumeManager == nil || len(devices) == 0 {
 		return
 	}
@@ -585,6 +670,16 @@ func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, na
 	sb.cleanup.Add(func(ctx context.Context) error {
 		return volumeManager.CleanupSandbox(namespace, sandboxID, volumeDevices)
 	})
+}
+
+func transferSandboxVolumeCleanup(sb *Sandbox, volumeManager sandboxVolumeManager, namespace, sandboxID string, devices []volume.Device, needsFallback *bool) {
+	if sb == nil || volumeManager == nil || len(devices) == 0 {
+		return
+	}
+	registerSandboxVolumeCleanup(sb, volumeManager, namespace, sandboxID, devices)
+	if needsFallback != nil {
+		*needsFallback = false
+	}
 }
 
 func (m *Manager) cleanupStaleVolumeState(rec state.SandboxRecord, errs *[]error) {
@@ -717,27 +812,52 @@ func (m *Manager) Delete(req DeleteRequest) error {
 	mapKey := sandboxMapKey(namespace, req.SandboxID)
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
+		// Automatic unhealthy cleanup may already have removed the sandbox.
+		// Only a retained typed failure proves that convergence case; preserve
+		// the ordinary unknown-sandbox error when no such record exists.
+		if m.acknowledgeRetainedVolumeHealth(namespace, req.SandboxID) {
+			return nil
+		}
 		return err
 	}
+	return m.deleteLoadedSandbox(namespace, mapKey, req.SandboxID, entry)
+}
 
+func (m *Manager) deleteLoadedSandbox(namespace, mapKey, sandboxID string, entry *sandboxEntry) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		m.acknowledgeRetainedVolumeHealth(namespace, sandboxID)
 		return nil
 	}
 
 	if entry.state != sandboxReady && entry.state != sandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return fmt.Errorf("sandbox %s is %s", sandboxID, entry.state)
 	}
 	sbx := entry.sbx
 	if sbx == nil {
-		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", sandboxID)
 	}
 
 	entry.state = sandboxDeleting
-	err = m.cleanupSandbox(context.Background(), sbx, req.SandboxID)
+	err := m.cleanupSandbox(context.Background(), sbx, sandboxID)
+	if m.volumeManager != nil {
+		m.volumeManager.ClearSandboxHealth(namespace, sandboxID)
+	}
 	m.sandboxes.CompareAndDelete(mapKey, entry)
 	return err
+}
+
+func (m *Manager) acknowledgeRetainedVolumeHealth(namespace, sandboxID string) bool {
+	if m.volumeManager == nil {
+		return false
+	}
+	healthErr := m.volumeManager.CheckSandboxHealth(namespace, sandboxID)
+	if !errors.Is(healthErr, volume.ErrBackendUnhealthy) {
+		return false
+	}
+	m.volumeManager.ClearSandboxHealth(namespace, sandboxID)
+	return true
 }
 
 func (m *Manager) Suspend(req LifecycleRequest) error {
@@ -746,6 +866,9 @@ func (m *Manager) Suspend(req LifecycleRequest) error {
 
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return err
+	}
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
@@ -763,7 +886,9 @@ func (m *Manager) Suspend(req LifecycleRequest) error {
 	if sbx == nil {
 		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
 	}
-
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return err
+	}
 	entry.state = sandboxSuspending
 	if err := sbx.Suspend(ctx); err != nil {
 		entry.state = sandboxReady
@@ -779,6 +904,9 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return err
+	}
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
@@ -796,6 +924,9 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	if sbx == nil {
 		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
 	}
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return err
+	}
 	entry.state = sandboxResuming
 	if err := sbx.Resume(ctx); err != nil {
 		entry.state = sandboxSuspended
@@ -811,6 +942,9 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 
 	namespace := m.resolveNamespace(req.Namespace)
 	mapKey := sandboxMapKey(namespace, req.SandboxID)
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return CheckpointResult{}, err
+	}
 	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return CheckpointResult{}, err
@@ -828,6 +962,9 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	sbx := entry.sbx
 	if sbx == nil {
 		return CheckpointResult{}, fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
+	}
+	if err := m.ensureSandboxVolumeHealthy(namespace, req.SandboxID); err != nil {
+		return CheckpointResult{}, err
 	}
 	if len(sbx.vmStartSpec.VirtioFS) > 0 {
 		return CheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", req.SandboxID)

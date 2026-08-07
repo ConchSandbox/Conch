@@ -1,6 +1,38 @@
 package volume
 
-import "regexp"
+import (
+	"errors"
+	"fmt"
+	"regexp"
+)
+
+// ErrBackendUnhealthy marks the unexpected loss of a sandbox volume backend.
+var ErrBackendUnhealthy = errors.New("volume backend unhealthy")
+
+// UnhealthyError reports the unexpected loss of a sandbox's volume backend.
+// Cause contains the process wait result when the daemon exited non-zero.
+type UnhealthyError struct {
+	Backend   string
+	Namespace string
+	SandboxID string
+	PID       int
+	Cause     error
+}
+
+func (e *UnhealthyError) Error() string {
+	detail := "process exited successfully"
+	if e.Cause != nil {
+		detail = e.Cause.Error()
+	}
+	return fmt.Sprintf("%s %s for sandbox %s (pid %d): %s", ErrBackendUnhealthy, e.Backend, e.SandboxID, e.PID, detail)
+}
+
+func (e *UnhealthyError) Unwrap() []error {
+	if e.Cause == nil {
+		return []error{ErrBackendUnhealthy}
+	}
+	return []error{ErrBackendUnhealthy, e.Cause}
+}
 
 // Mount is a single user-declared volume mount: the host Source directory is
 // bind-mounted into the sandbox shared dir and exposed to the guest at Path.
@@ -37,16 +69,20 @@ type Device struct {
 }
 
 type PrepareRequest struct {
-	Namespace string
-	SandboxID string
-	Mounts    []Mount
+	Namespace   string
+	SandboxID   string
+	Mounts      []Mount
+	OnUnhealthy func(error)
 }
 
 type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) ([]Device, error)
 	Restore(namespace, sandboxID string, devices []Device) error
+	RestoreWithHealth(namespace, sandboxID string, devices []Device, onUnhealthy func(error)) error
 	Cleanup(namespace, sandboxID string, devices []Device) error
+	CheckHealth(namespace, sandboxID string) error
+	ClearHealth(namespace, sandboxID string)
 }
 
 var safeSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
