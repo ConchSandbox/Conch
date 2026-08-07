@@ -221,7 +221,6 @@ func TestVirtiofsdCleanupRetainsHealthPublishedAtStopBoundary(t *testing.T) {
 	}
 	key := newSandboxProcessKey(request.Namespace, request.SandboxID)
 	healthErr := &UnhealthyError{
-		Backend:   DefaultBackend,
 		Namespace: request.Namespace,
 		SandboxID: request.SandboxID,
 		PID:       devices[0].PID,
@@ -722,7 +721,7 @@ func assertUnhealthyExit(t *testing.T, err error, request PrepareRequest, exitCo
 	if !errors.As(err, &unhealthy) {
 		t.Fatalf("error type = %T, want *UnhealthyError", err)
 	}
-	if unhealthy.Backend != DefaultBackend || unhealthy.Namespace != request.Namespace || unhealthy.SandboxID != request.SandboxID || unhealthy.PID <= 0 {
+	if unhealthy.Namespace != request.Namespace || unhealthy.SandboxID != request.SandboxID || unhealthy.PID <= 0 {
 		t.Fatalf("unhealthy error metadata = %#v", unhealthy)
 	}
 	var exitErr *exec.ExitError
@@ -743,7 +742,7 @@ func assertRestoredUnhealthy(t *testing.T, err error, fixture *issue083RestoredF
 	if !errors.As(err, &unhealthy) {
 		t.Fatalf("error type = %T, want *UnhealthyError", err)
 	}
-	if unhealthy.Backend != DefaultBackend || unhealthy.Namespace != fixture.namespace || unhealthy.SandboxID != fixture.sandboxID || unhealthy.PID != fixture.device.PID {
+	if unhealthy.Namespace != fixture.namespace || unhealthy.SandboxID != fixture.sandboxID || unhealthy.PID != fixture.device.PID {
 		t.Fatalf("unhealthy error metadata = %#v", unhealthy)
 	}
 }

@@ -305,7 +305,6 @@ func (p *virtiofsProcess) unhealthyErrorLocked() error {
 		cause = errVirtiofsdExited
 	}
 	return &UnhealthyError{
-		Backend:   DefaultBackend,
 		Namespace: p.key.namespace,
 		SandboxID: p.key.sandboxID,
 		PID:       p.pid,

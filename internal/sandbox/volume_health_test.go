@@ -202,7 +202,6 @@ func TestRehydratedVolumeDeathUsesSandboxCleanupLifecycle(t *testing.T) {
 		t.Fatalf("restored = %d, callback installed = %v", restored, volumeManager.restoreCallback != nil)
 	}
 	healthErr := &volume.UnhealthyError{
-		Backend:   volume.DefaultBackend,
 		Namespace: record.Namespace,
 		SandboxID: record.SandboxID,
 		PID:       1234,
@@ -225,7 +224,6 @@ func TestRehydratedVolumeDeathUsesSandboxCleanupLifecycle(t *testing.T) {
 
 func TestRehydrateRollsBackVolumeDeathBeforePublication(t *testing.T) {
 	healthErr := &volume.UnhealthyError{
-		Backend:   volume.DefaultBackend,
 		Namespace: "ns",
 		SandboxID: "sandbox-dies-restoring",
 		PID:       1234,
@@ -251,6 +249,7 @@ func TestRehydrateRollsBackVolumeDeathBeforePublication(t *testing.T) {
 		State:     state.SandboxReady,
 		VolumeDevices: []state.VolumeDevice{{
 			SandboxID: "sandbox-dies-restoring",
+			Namespace: "ns",
 			Backend:   volume.DefaultBackend,
 			PID:       1234,
 			StartTime: 5678,
@@ -277,7 +276,6 @@ func TestRehydrateRollsBackVolumeDeathBeforePublication(t *testing.T) {
 
 func TestLifecycleOperationsReturnRetainedVolumeHealthPromptly(t *testing.T) {
 	healthErr := &volume.UnhealthyError{
-		Backend:   volume.DefaultBackend,
 		Namespace: "ns",
 		SandboxID: "sandbox-dead-volume",
 		PID:       1234,
@@ -319,7 +317,6 @@ func TestLifecycleOperationsReturnRetainedVolumeHealthPromptly(t *testing.T) {
 
 func TestDeleteAfterAutomaticVolumeCleanupConvergesAndClearsHealth(t *testing.T) {
 	volumeManager := &healthTestVolumeManager{health: &volume.UnhealthyError{
-		Backend:   volume.DefaultBackend,
 		Namespace: "ns",
 		SandboxID: "already-cleaned",
 		PID:       1234,
@@ -357,7 +354,6 @@ func TestDeleteUnknownSandboxWithoutHealthPreservesNotFound(t *testing.T) {
 
 func TestDeleteLoadedEntryRemovedByUnhealthyCleanupClearsHealth(t *testing.T) {
 	healthErr := &volume.UnhealthyError{
-		Backend:   volume.DefaultBackend,
 		Namespace: "ns",
 		SandboxID: "stale-entry",
 		PID:       1234,

@@ -12,7 +12,6 @@ var ErrBackendUnhealthy = errors.New("volume backend unhealthy")
 // UnhealthyError reports the unexpected loss of a sandbox's volume backend.
 // Cause contains the process wait result when the daemon exited non-zero.
 type UnhealthyError struct {
-	Backend   string
 	Namespace string
 	SandboxID string
 	PID       int
@@ -24,7 +23,7 @@ func (e *UnhealthyError) Error() string {
 	if e.Cause != nil {
 		detail = e.Cause.Error()
 	}
-	return fmt.Sprintf("%s %s for sandbox %s (pid %d): %s", ErrBackendUnhealthy, e.Backend, e.SandboxID, e.PID, detail)
+	return fmt.Sprintf("%s for sandbox %s (pid %d): %s", ErrBackendUnhealthy, e.SandboxID, e.PID, detail)
 }
 
 func (e *UnhealthyError) Unwrap() []error {
