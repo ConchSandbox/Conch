@@ -30,7 +30,7 @@ const (
 	defaultCloudHypervisorPci = 1
 )
 
-const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
+const startScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 {{ if .PlatformArgs }}{{ .PlatformArgs }} \
 {{ end }}\
@@ -51,13 +51,14 @@ const startScriptCLH = `ip netns exec {{ .NamespaceID }} \
 // -vv use for printing log when test
 // Current VM lifecycle is bound to Conch; Conch exit causes VM process termination. Detachment needed for follow-up.
 
-const resumeScriptCLH = `ip netns exec {{ .NamespaceID }} \
+const resumeScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 --api-socket fd={{ .ApiSocketFd }} \
 --event-monitor fd={{ .EventMonitorFd }} \
 --seccomp false`
 
 type StartScriptCLHArgs struct {
+	NSenterPath     string
 	VmmBinaryPath   string
 	CPUBoot         int64
 	CPUMax          int64
@@ -69,7 +70,7 @@ type StartScriptCLHArgs struct {
 	PmemArgs        string
 	FsArgs          string
 	SharefsCmdline  string
-	NamespaceID     string
+	NetNSPath       string
 	TapName         string
 	VsockCID        uint32
 	VsockSocketPath string
@@ -377,6 +378,10 @@ func buildRequest(method, fullCommand, requestBody string) string {
 
 func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
 	logger := ulog.GetLogger()
+	nsenterPath, err := exec.LookPath("nsenter")
+	if err != nil {
+		return "", fmt.Errorf("resolve nsenter binary: %w", err)
+	}
 
 	vmmBinaryPath := defaultVmmBinary
 	if path, err := exec.LookPath("cloud-hypervisor"); err == nil {
@@ -392,6 +397,7 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 	}
 
 	clhArgs := StartScriptCLHArgs{
+		NSenterPath:     nsenterPath,
 		VmmBinaryPath:   vmmBinaryPath,
 		CPUBoot:         args.CPUBoot,
 		CPUMax:          args.CPUMax,
@@ -403,7 +409,7 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 		PmemArgs:        buildPmemArgs(args.PmemPaths),
 		FsArgs:          fsArgs,
 		SharefsCmdline:  sharefsCmdline,
-		NamespaceID:     args.NamespaceID,
+		NetNSPath:       args.NetNSPath,
 		TapName:         args.TapName,
 		VsockCID:        args.VsockCID,
 		VsockSocketPath: args.VsockSocketPath,
@@ -412,7 +418,7 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 		ApiSocketFd:     args.ApiSocketFd,
 	}
 
-	_, err := os.Stat(clhArgs.VmmBinaryPath)
+	_, err = os.Stat(clhArgs.VmmBinaryPath)
 	if err != nil {
 		logger.Error("Error stating VMM binary",
 			ulog.F("path", clhArgs.VmmBinaryPath),

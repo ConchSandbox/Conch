@@ -33,7 +33,7 @@ Conch 是一个基于 Go 开发的容器沙箱引擎，能够适用于 Agent 对
 
 网络设计细节与验证步骤见 [Conch Network Guide](docs/guide/net_usage.md)。
 
-Conchd 会在进程内初始化 containerd 服务和 Conch 插件，不需要单独启动系统 `containerd` 守护进程。
+Conchd 会在进程内初始化 containerd built-in plugin graph，通过唯一的 Host bootstrap plugin 获取 in-memory client；image workflow 直接使用该 client，Host 只显式装配 snapshot server、sandbox manager 和 template store，不需要单独启动系统 `containerd` 守护进程。
 
 ### 一键编译安装
 

@@ -9,10 +9,20 @@ import (
 	"time"
 )
 
+func TestDurationOrDefault(t *testing.T) {
+	const fallback = 10 * time.Millisecond
+	if got := durationOrDefault(0, fallback); got != fallback {
+		t.Fatalf("durationOrDefault(0) = %s, want %s", got, fallback)
+	}
+	if got := durationOrDefault(time.Second, fallback); got != time.Second {
+		t.Fatalf("durationOrDefault(1s) = %s, want 1s", got)
+	}
+}
+
 func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 	m := &Manager{}
 
-	key, entry, err := m.reserveSandboxEntry("ns", "sandbox-a")
+	key, entry, err := m.reserveSandboxEntry("sandbox-a")
 	if err != nil {
 		t.Fatalf("reserveSandboxEntry() error = %v", err)
 	}
@@ -21,7 +31,7 @@ func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		otherKey, otherEntry, err := m.reserveSandboxEntry("ns", "sandbox-b")
+		otherKey, otherEntry, err := m.reserveSandboxEntry("sandbox-b")
 		if err == nil {
 			m.sandboxes.CompareAndDelete(otherKey, otherEntry)
 			otherEntry.mu.Unlock()
@@ -43,15 +53,14 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	boot := &recordingBootPreparer{}
 	m := &Manager{
 		boot:         boot,
-		cidAllocator: NewCIDAllocatorInDir(t.TempDir()),
+		cidAllocator: NewCIDAllocator(),
 	}
 	sbx := &Sandbox{
 		cleanup:   NewCleanup(),
-		namespace: "ns",
 		sandboxID: "sandbox-a",
 	}
 	entry := &sandboxEntry{state: sandboxSuspended, sbx: sbx}
-	mapKey := sandboxMapKey("ns", "sandbox-a")
+	mapKey := "sandbox-a"
 	m.sandboxes.Store(mapKey, entry)
 
 	m.handleSandboxExit(mapKey, entry, "sandbox-a", sbx)
@@ -84,7 +93,7 @@ func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
 			capture := &recordingCheckpointCapture{result: want}
 			m, entry, sbx := checkpointTestManager(tt.initialState, capture)
 
-			got, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
+			got, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"})
 			if err != nil {
 				t.Fatalf("Checkpoint() error = %v", err)
 			}
@@ -122,7 +131,7 @@ func TestCheckpointCaptureErrorRestoresPreviousLifecycleState(t *testing.T) {
 			capture := &recordingCheckpointCapture{err: errCapture}
 			m, entry, _ := checkpointTestManager(tt.initialState, capture)
 
-			_, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
+			_, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"})
 			if !errors.Is(err, errCapture) {
 				t.Fatalf("Checkpoint() error = %v, want errors.Is(capture error)", err)
 			}
@@ -138,7 +147,7 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	capture := &recordingCheckpointCapture{err: errors.Join(ErrCheckpointResume, errResume)}
 	m, entry, _ := checkpointTestManager(sandboxReady, capture)
 
-	_, err := m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
+	_, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"})
 	if !errors.Is(err, ErrCheckpointResume) || !errors.Is(err, errResume) {
 		t.Fatalf("Checkpoint() error = %v, want joined resume failure", err)
 	}
@@ -161,11 +170,10 @@ func (r *recordingCheckpointCapture) Capture(_ context.Context, req RuntimeCaptu
 func checkpointTestManager(initialState sandboxLifecycleState, capture CheckpointCapture) (*Manager, *sandboxEntry, *Sandbox) {
 	m := &Manager{checkpointCapture: capture, requestTimeout: time.Second}
 	sbx := &Sandbox{
-		namespace: "ns",
 		sandboxID: "sandbox-a",
 	}
 	entry := &sandboxEntry{state: initialState, sbx: sbx}
-	m.sandboxes.Store(sandboxMapKey("ns", "sandbox-a"), entry)
+	m.sandboxes.Store("sandbox-a", entry)
 	return m, entry, sbx
 }
 
@@ -185,7 +193,7 @@ func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootReques
 func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 	m := &Manager{}
 
-	key, entry, err := m.reserveSandboxEntry("ns", "sandbox-a")
+	key, entry, err := m.reserveSandboxEntry("sandbox-a")
 	if err != nil {
 		t.Fatalf("reserveSandboxEntry() error = %v", err)
 	}
@@ -193,7 +201,7 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := m.reserveSandboxEntry("ns", "sandbox-a")
+		_, _, err := m.reserveSandboxEntry("sandbox-a")
 		done <- err
 	}()
 
@@ -203,7 +211,6 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	entry.state = sandboxReady
 	entry.mu.Unlock()
 
 	select {
@@ -211,37 +218,10 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 		if err == nil {
 			t.Fatal("same sandbox reserve succeeded while an entry already existed")
 		}
-		if !strings.Contains(err.Error(), "ready") {
-			t.Fatalf("same sandbox reserve error = %v, want ready state", err)
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("same sandbox reserve error = %v, want already exists", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("same sandbox reserve did not unblock after entry lock was released")
-	}
-}
-
-func TestLifecycleOperationsRejectCreatingSandbox(t *testing.T) {
-	m := &Manager{}
-
-	key, entry, err := m.reserveSandboxEntry("ns", "sandbox-a")
-	if err != nil {
-		t.Fatalf("reserveSandboxEntry() error = %v", err)
-	}
-	entry.mu.Unlock()
-	defer m.sandboxes.CompareAndDelete(key, entry)
-
-	err = m.Delete(DeleteRequest{Namespace: "ns", SandboxID: "sandbox-a"})
-	if err == nil {
-		t.Fatal("Delete() succeeded for creating sandbox")
-	}
-	if !strings.Contains(err.Error(), "creating") {
-		t.Fatalf("Delete() error = %v, want creating state", err)
-	}
-
-	_, err = m.Checkpoint(CheckpointRequest{Namespace: "ns", SandboxID: "sandbox-a"})
-	if err == nil {
-		t.Fatal("Checkpoint() succeeded for creating sandbox")
-	}
-	if !strings.Contains(err.Error(), "creating") {
-		t.Fatalf("Checkpoint() error = %v, want creating state", err)
 	}
 }

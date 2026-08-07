@@ -50,8 +50,6 @@ func SandboxSocketPath(subDir, sandboxId string) (string, error) {
 
 type Process struct {
 	cmd             *exec.Cmd
-	pid             int
-	attached        bool
 	VmmSocketPath   string
 	VsockSocketPath string
 	apiReadyMu      sync.Mutex
@@ -137,23 +135,6 @@ func NewProcess(
 	p.cmd = cmd
 
 	return &p, nil
-}
-
-func NewAttachedProcess(vmmName, vmmSocketPath, vsockSocketPath string, pid int) (*Process, error) {
-	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
-	if err != nil {
-		return nil, err
-	}
-	// Rehydrated processes are already ready; startup-only event-monitor fds cannot be restored.
-	return &Process{
-		pid:             pid,
-		attached:        true,
-		VmmSocketPath:   vmmSocketPath,
-		VsockSocketPath: vsockSocketPath,
-		apiReady:        true,
-		adapter:         adapter,
-		exitSignal:      make(chan error, 1),
-	}, nil
 }
 
 func (p *Process) startCmd(
@@ -294,23 +275,6 @@ func (p *Process) Stop() error {
 	var errs []error
 
 	if p.cmd == nil || p.cmd.Process == nil {
-		if p.attached {
-			if p.isAPIReady() {
-				if _, err := os.Stat(p.VmmSocketPath); err == nil {
-					if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
-						errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
-					}
-				}
-			}
-			if p.pid > 0 {
-				if err := syscall.Kill(p.pid, syscall.SIGTERM); err != nil {
-					if !errors.Is(err, syscall.ESRCH) {
-						errs = append(errs, fmt.Errorf("failed to send SIGTERM to attached vmm process, %d: %w", p.pid, err))
-					}
-				}
-			}
-			return errors.Join(errs...)
-		}
 		p.adapter.Cleanup()
 		logger.Warn("VMM process not started")
 		return fmt.Errorf("vmm process not started")
@@ -362,9 +326,6 @@ func (p *Process) Stop() error {
 }
 
 func (p *Process) Pid() int {
-	if p.pid > 0 {
-		return p.pid
-	}
 	if p.cmd == nil || p.cmd.Process == nil {
 		logger := ulog.GetLogger()
 		logger.Warn("VMM process not started")

@@ -2,23 +2,22 @@ package image
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/snapshots"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -77,19 +76,23 @@ func (locks *keyedUnpackLocks) acquire(ctx context.Context, key string) (func(),
 	}
 }
 
-func bootIndexUnpackKey(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) string {
-	namespace, ok := namespaces.Namespace(ctx)
-	if !ok || namespace == "" {
-		namespace = client.DefaultNamespace()
-	}
-	if namespace == "" {
-		namespace = namespaces.Default
-	}
-	return namespace + "\x00" + desc.Digest.String()
+func bootIndexUnpackKey(bootIndexDigest string) string {
+	return bootIndexDigest
 }
 
-// UnpackAllSubImages parses OCI Image Index, unpacks all child manifests,
-// returns sub-image type (io.conch.kind) to snapshot ChainID mapping.
+func Unpack(ctx context.Context, client *containerdclient.Client, req runtimeapi.UnpackImageOptions) (map[string]string, error) {
+	if client == nil || client.Client == nil {
+		return nil, fmt.Errorf("containerd client is required")
+	}
+	if req.ImageName == "" {
+		return nil, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+	}
+	unpackCtx := containerdclient.NewNamespaceContext(ctx)
+	return UnpackAllSubImages(unpackCtx, client.Client, req.ImageName)
+}
+
+// UnpackAllSubImages validates an OCI Boot Index, unpacks all component
+// manifests, and returns component kind to snapshot ChainID mapping.
 // On error, cleans up any snapshots already unpacked to avoid resource leakage.
 //
 // The image must be fully pulled before calling: all content (manifests, configs,
@@ -99,46 +102,20 @@ func UnpackAllSubImages(ctx context.Context, client *containerd.Client, imageNam
 	if err != nil {
 		return nil, err
 	}
-	return unpackAllSubImagesFromDescriptor(ctx, client, desc, nil)
-}
-
-// UnpackAllSubImagesFromDescriptor unpacks a Boot Index directly from its
-// immutable descriptor. It shares the exact validation and unpack path used by
-// the image-name entrypoint.
-func UnpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) (snapshotMap map[string]string, err error) {
-	return unpackAllSubImagesFromDescriptor(ctx, client, desc, nil)
-}
-
-// UnpackAllSubImagesWithDefaultSandbox unpacks a Conch boot index, using
-// defaultSandboxImage as the sandbox component when the index only carries
-// rootfs/mem-snapshot components.
-func UnpackAllSubImagesWithDefaultSandbox(ctx context.Context, client *containerd.Client, imageName, defaultSandboxImage string) (map[string]string, error) {
-	if defaultSandboxImage == "" {
-		return UnpackAllSubImages(ctx, client, imageName)
-	}
-	img, err := client.GetImage(ctx, defaultSandboxImage)
-	if err != nil {
-		return nil, fmt.Errorf("get default sandbox image %s: %w", defaultSandboxImage, err)
-	}
-	manifestDesc, err := firstManifestDescriptorFromContent(ctx, client.ContentStore(), img.Target())
-	if err != nil {
-		return nil, fmt.Errorf("resolve default sandbox image %s manifest: %w", defaultSandboxImage, err)
-	}
-	desc := defaultSandboxDescriptor(manifestDesc, defaultSandboxImage)
-	indexDesc, err := getBootIndexDescriptor(ctx, client, imageName)
+	info, err := InspectBootIndexContent(ctx, client.ContentStore(), desc)
 	if err != nil {
 		return nil, err
 	}
-	return unpackAllSubImagesFromDescriptor(ctx, client, indexDesc, &desc)
+	return unpackBootIndexComponents(ctx, client, info)
 }
 
-func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Client, indexDesc ocispec.Descriptor, defaultSandbox *ocispec.Descriptor) (snapshotMap map[string]string, err error) {
+func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, info BootIndexInfo) (snapshotMap map[string]string, err error) {
 	if client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
-	release, err := bootIndexUnpackLocks.acquire(ctx, bootIndexUnpackKey(ctx, client, indexDesc))
+	release, err := bootIndexUnpackLocks.acquire(ctx, bootIndexUnpackKey(info.BootIndexDigest))
 	if err != nil {
-		return nil, fmt.Errorf("wait to unpack boot index %s: %w", indexDesc.Digest, err)
+		return nil, fmt.Errorf("wait to unpack boot index %s: %w", info.BootIndexDigest, err)
 	}
 	defer release()
 
@@ -151,48 +128,30 @@ func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Cl
 		}
 	}()
 
-	index, err := readBootIndex(ctx, client, indexDesc)
-	if err != nil {
-		return nil, err
+	components := []ocispec.Descriptor{info.RootfsDescriptor}
+	if info.MemDescriptor.Digest != "" {
+		components = append(components, info.MemDescriptor)
 	}
-	manifests := manifestsWithDefaultSandbox(index.Manifests, defaultSandbox)
-	if _, err := validateBootIndexManifestKinds(manifests); err != nil {
-		return nil, err
-	}
-	if err := validateContentClosure(ctx, client.ContentStore(), indexDesc); err != nil {
-		return nil, fmt.Errorf("validate boot index %s closure: %w", indexDesc.Digest, err)
-	}
-	if defaultSandbox != nil {
-		if err := validateContentClosure(ctx, client.ContentStore(), *defaultSandbox); err != nil {
-			return nil, fmt.Errorf("validate default sandbox closure: %w", err)
-		}
-	}
-
-	ulog.Info("Found manifests in index, starting unpack",
-		ulog.F("count", len(manifests)))
+	components = append(components, info.SandboxDescriptor)
+	ulog.Info("Found components in Boot Index, starting unpack",
+		ulog.F("count", len(components)))
 
 	rootfsImageName := ""
 	rootfsManifestDigest := ""
-	for _, manifestDesc := range manifests {
+	for _, manifestDesc := range components {
 		kind := getKind(manifestDesc)
-		snapshotter := erofsSnapshotter
-		snapshotterName := "erofs"
 		subImageName := componentImageName(kind, manifestDesc)
-		if isNativeErofsKind(kind) {
-			if err := validateNativeComponentManifest(ctx, client, kind, manifestDesc); err != nil {
-				return nil, err
-			}
-			if err := ensureSubImage(ctx, client, subImageName, manifestDesc); err != nil {
-				return nil, err
-			}
-			if kind == KindRootfs {
-				rootfsImageName = subImageName
-				rootfsManifestDigest = manifestDesc.Digest.String()
-			}
-		} else {
-			return nil, fmt.Errorf("unsupported boot index component kind %q", kind)
+		if err := validateNativeComponentManifest(ctx, client, kind, manifestDesc); err != nil {
+			return nil, err
 		}
-		snapshotID, err := unpackOneSubImage(ctx, client, snapshotter, snapshotterName, manifestDesc, kind, subImageName, &createdSnapshots)
+		if err := ensureSubImage(ctx, client, subImageName, manifestDesc, kind); err != nil {
+			return nil, err
+		}
+		if kind == KindRootfs {
+			rootfsImageName = subImageName
+			rootfsManifestDigest = manifestDesc.Digest.String()
+		}
+		snapshotID, err := unpackOneSubImage(ctx, client, erofsSnapshotter, "erofs", manifestDesc, kind, subImageName, &createdSnapshots)
 		if err != nil {
 			return nil, err
 		}
@@ -206,40 +165,6 @@ func unpackAllSubImagesFromDescriptor(ctx context.Context, client *containerd.Cl
 		return nil, err
 	}
 	return snapshotMap, nil
-}
-
-func manifestsWithDefaultSandbox(manifests []ocispec.Descriptor, defaultSandbox *ocispec.Descriptor) []ocispec.Descriptor {
-	next := make([]ocispec.Descriptor, 0, len(manifests)+1)
-	hasSandbox := false
-	for _, manifest := range manifests {
-		if getKind(manifest) == KindSandbox {
-			hasSandbox = true
-		}
-		next = append(next, manifest)
-	}
-	if !hasSandbox && defaultSandbox != nil {
-		next = append(next, *defaultSandbox)
-	}
-	return next
-}
-
-func defaultSandboxDescriptor(desc ocispec.Descriptor, imageName string) ocispec.Descriptor {
-	desc.Annotations = mergeDescriptorAnnotations(desc.Annotations, map[string]string{
-		"io.conch.kind":                     KindSandbox,
-		"org.opencontainers.image.ref.name": imageName,
-	})
-	return desc
-}
-
-func mergeDescriptorAnnotations(base map[string]string, values map[string]string) map[string]string {
-	merged := make(map[string]string, len(base)+len(values))
-	for k, v := range base {
-		merged[k] = v
-	}
-	for k, v := range values {
-		merged[k] = v
-	}
-	return merged
 }
 
 type createdSnapshot struct {
@@ -271,25 +196,6 @@ func getBootIndexDescriptor(ctx context.Context, client *containerd.Client, imag
 		return ocispec.Descriptor{}, fmt.Errorf("image %s is not an OCI Image Index (mediaType: %s)", imageName, target.MediaType)
 	}
 	return target, nil
-}
-
-func readBootIndex(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) (*ocispec.Index, error) {
-	if desc.MediaType != ocispec.MediaTypeImageIndex {
-		return nil, fmt.Errorf("descriptor %s is not an OCI Image Index (mediaType: %s)", desc.Digest, desc.MediaType)
-	}
-	if err := validateDescriptor(desc, "boot index"); err != nil {
-		return nil, err
-	}
-	indexData, err := content.ReadBlob(ctx, client.ContentStore(), desc)
-	if err != nil {
-		return nil, fmt.Errorf("read index content: %w", err)
-	}
-
-	var index ocispec.Index
-	if err := json.Unmarshal(indexData, &index); err != nil {
-		return nil, fmt.Errorf("unmarshal index JSON: %w", err)
-	}
-	return &index, nil
 }
 
 // ValidateBootIndexContent verifies that the image named by imageName is a
@@ -503,11 +409,17 @@ func componentImageName(kind string, manifestDesc ocispec.Descriptor) string {
 	return fmt.Sprintf("localhost/conch/%s-component:%s", kind, manifestDesc.Digest.Encoded())
 }
 
-func ensureSubImage(ctx context.Context, client *containerd.Client, imageName string, target ocispec.Descriptor) error {
+func ensureSubImage(ctx context.Context, client *containerd.Client, imageName string, target ocispec.Descriptor, componentKind string) error {
 	if imageName == "" {
 		return fmt.Errorf("sub-image name is required")
 	}
-	_, err := client.ImageService().Create(ctx, images.Image{Name: imageName, Target: target})
+	_, err := client.ImageService().Create(ctx, images.Image{
+		Name:   imageName,
+		Target: target,
+		Labels: map[string]string{
+			ImageKindLabel: componentImageKind(componentKind),
+		},
+	})
 	if err == nil || errdefs.IsAlreadyExists(err) {
 		return nil
 	}

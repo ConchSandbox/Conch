@@ -5,27 +5,22 @@ import (
 	"fmt"
 	"strings"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	imageconverter "github.com/containerd/containerd/v2/core/images/converter"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/platforms"
 	toolkit "github.com/erofs/erofs-container-toolkit/pkg/converter"
+	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-type ToolkitConverter struct {
-	client imageconverter.Client
-}
-
-func NewToolkitConverter(client imageconverter.Client) *ToolkitConverter {
-	return &ToolkitConverter{
-		client: client,
-	}
-}
-
-func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest) (ConvertRootfsResult, error) {
-	if c == nil || c.client == nil {
+func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req ConvertRootfsRequest) (ConvertRootfsResult, error) {
+	if client == nil || client.Client == nil {
 		return ConvertRootfsResult{}, fmt.Errorf("containerd client is required")
 	}
 	req, err := NormalizeRequest(req)
@@ -33,10 +28,10 @@ func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest
 		return ConvertRootfsResult{}, err
 	}
 
-	convertCtx := namespaces.WithNamespace(ctx, req.Namespace)
+	convertCtx := containerdclient.NewNamespaceContext(ctx)
 	converted, err := imageconverter.Convert(
 		convertCtx,
-		c.client,
+		client,
 		req.TargetImage,
 		req.SourceImage,
 		imageconverter.WithDockerToOCI(true),
@@ -45,21 +40,46 @@ func (c *ToolkitConverter) Convert(ctx context.Context, req ConvertRootfsRequest
 		imageconverter.WithUpdateManifest(normalizeToolkitErofsManifest),
 	)
 	if err != nil {
-		return ConvertRootfsResult{}, err
+		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 
-	manifest, err := images.Manifest(convertCtx, c.client.ContentStore(), converted.Target, platforms.DefaultStrict())
+	manifest, err := images.Manifest(convertCtx, client.ContentStore(), converted.Target, platforms.DefaultStrict())
 	if err != nil {
-		return ConvertRootfsResult{}, err
+		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 	layers, err := ValidateNativeLayers(manifest.Layers, req.AlignBytes)
 	if err != nil {
-		return ConvertRootfsResult{}, err
+		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 
+	convertedImage := containerd.NewImage(client.Client, *converted)
+	if err := convertedImage.Unpack(convertCtx, "erofs"); err != nil {
+		return ConvertRootfsResult{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
+	}
+	diffIDs, err := convertedImage.RootFS(convertCtx)
+	if err != nil {
+		return ConvertRootfsResult{}, fmt.Errorf("resolve converted rootfs diff IDs: %w", err)
+	}
+	if len(diffIDs) == 0 {
+		return ConvertRootfsResult{}, fmt.Errorf("converted rootfs diff IDs are empty")
+	}
+	snapshotKey := identity.ChainID(diffIDs).String()
+	if snapshotKey == "" {
+		return ConvertRootfsResult{}, fmt.Errorf("converted rootfs snapshot key is empty")
+	}
+	if _, err := client.SnapshotService("erofs").Update(convertCtx, snapshots.Info{
+		Name: snapshotKey,
+		Labels: map[string]string{
+			common.SnapshotLabelRootfsImage:    converted.Name,
+			common.SnapshotLabelRootfsManifest: converted.Target.Digest.String(),
+		},
+	}, "labels."+common.SnapshotLabelRootfsImage, "labels."+common.SnapshotLabelRootfsManifest); err != nil {
+		return ConvertRootfsResult{}, fmt.Errorf("label converted rootfs snapshot: %w", err)
+	}
 	return ConvertRootfsResult{
 		ImageName:      converted.Name,
 		ManifestDigest: converted.Target.Digest.String(),
+		SnapshotKey:    snapshotKey,
 		Layers:         layers,
 	}, nil
 }

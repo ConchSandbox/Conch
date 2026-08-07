@@ -15,6 +15,7 @@ limitations under the License.
 
 [MODIFIED] - Changes made on 2025-12-24 by Team conch: Simplify slot config and init bridge
 [MODIFIED] - Changes made on 2026-05-13 by Team conch: Add slot-owned CNI state for reusable sandbox network slots.
+[MODIFIED] - Changes made on 2026-08-05 by Team conch: Keep mutable Slot state private to netstack.
 */
 package netstack
 
@@ -27,115 +28,25 @@ import (
 )
 
 const (
-	defaultTapIP      = "192.168.100.2"
-	defaultTapMask    = 24
-	vrtMask           = 20
-	invaildSlotSize   = 0
-	vrtAddressPerSlot = 1
-	// Index 1 is reserved for the bridge IP, so sandbox slots start from index 2.
-	firstSlotIndex    = 2
-	tapInterfaceName  = "tap0"
-	loopbackInterface = "lo"
-	namespaceIPIndex  = 21
+	firstSlotID = 2
+	maxSlots    = 4000
+
+	defaultTapIP           = "192.168.100.2"
+	defaultTapMask         = 24
+	networkNamespaceDir    = "/run/conch/netns"
+	networkNamespacePrefix = "slot-"
+	tapInterfaceName       = "tap0"
+	namespaceIPIndex       = 21
 )
 
-var (
-	configuredTapIP   = defaultTapIP
-	configuredTapMask = defaultTapMask
-)
-
-type Slot struct {
-	Key string
-	Idx int
-
-	sandboxID string
-	cniID     string
-	netnsPath string
-	cniResult *CNIResult
-	cniOpts   []NamespaceOpts
-
-	bridgeOrdinal int
-	vPeerIp       net.IP
-	vrtMask       net.IPMask
-	bridgeIp      net.IP
-
-	tapIp       net.IP
+// slotConfig contains the immutable network addressing shared by Slots in a Pool.
+type slotConfig struct {
+	tapIP       net.IP
 	tapMask     net.IPMask
 	namespaceIP net.IP
 }
 
-func NewSlot(key string, idx int) (*Slot, error) {
-	if !bridgeLayoutReady {
-		return nil, fmt.Errorf("bridge layout is not configured")
-	}
-
-	if idx < firstSlotIndex || idx > maxVrtSlotIndex {
-		return nil, fmt.Errorf("slot index %d is out of range [%d, %d]", idx, firstSlotIndex, maxVrtSlotIndex)
-	}
-
-	if vrtNetworkCIDR == nil {
-		return nil, fmt.Errorf("invaild vrt network CIDR IP")
-	}
-
-	slotNumber := idx - firstSlotIndex
-	slotsPerBridge := getSlotsPerBridge()
-	if slotsPerBridge == invaildSlotSize {
-		return nil, fmt.Errorf("invalid bridge slot size")
-	}
-
-	// Round-robin bridges first, then advance the host offset inside that bridge.
-	bridgeOrdinal := slotNumber % configuredBridgeCount
-	bridgeLocalIndex := slotNumber / configuredBridgeCount
-	hostOffset := bridgeHostOffset(bridgeLocalIndex)
-
-	bridgeNet, err := getBridgeSubnet(bridgeOrdinal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get bridge subnet: %w", err)
-	}
-
-	vPeerIp, err := netutils.GetIndexedIP(bridgeNet, hostOffset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get vpeer indexed IP: %w", err)
-	}
-
-	vrtCIDR := fmt.Sprintf("%s/%d", vPeerIp.String(), vrtMask)
-	_, vrtNet, err := net.ParseCIDR(vrtCIDR)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse vrt CIDR: %w", err)
-	}
-
-	tapCIDR := fmt.Sprintf("%s/%d", configuredTapIP, configuredTapMask)
-	tapIP, tapNet, err := net.ParseCIDR(tapCIDR)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse tap CIDR: %w", err)
-	}
-	namespaceIP, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive namespace IP from tap CIDR: %w", err)
-	}
-
-	bridgeIP, err := netutils.GetIndexedIP(bridgeNet, vrtAddressPerSlot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get bridge IP: %w", err)
-	}
-
-	slot := &Slot{
-		Key:           key,
-		Idx:           idx,
-		bridgeOrdinal: bridgeOrdinal,
-
-		vPeerIp:  vPeerIp,
-		vrtMask:  vrtNet.Mask,
-		bridgeIp: bridgeIP,
-
-		tapIp:       tapIP,
-		tapMask:     tapNet.Mask,
-		namespaceIP: namespaceIP,
-	}
-	return slot, nil
-}
-
-func configureTapNetwork(tapIP string, tapMask int) error {
+func newSlotConfig(tapIP string, tapMask int) (slotConfig, error) {
 	if tapIP == "" {
 		tapIP = defaultTapIP
 	}
@@ -144,48 +55,80 @@ func configureTapNetwork(tapIP string, tapMask int) error {
 	}
 
 	tapCIDR := fmt.Sprintf("%s/%d", tapIP, tapMask)
-	_, tapNet, err := net.ParseCIDR(tapCIDR)
+	parsedTapIP, tapNet, err := net.ParseCIDR(tapCIDR)
 	if err != nil {
-		return fmt.Errorf("failed to parse tap CIDR %q: %w", tapCIDR, err)
+		return slotConfig{}, fmt.Errorf("failed to parse tap CIDR %q: %w", tapCIDR, err)
 	}
-	if _, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex); err != nil {
-		return fmt.Errorf("failed to derive namespace IP from tap CIDR %q: %w", tapCIDR, err)
+	namespaceIP, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex)
+	if err != nil {
+		return slotConfig{}, fmt.Errorf("failed to derive namespace IP from tap CIDR %q: %w", tapCIDR, err)
 	}
 
-	configuredTapIP = tapIP
-	configuredTapMask = tapMask
+	return slotConfig{
+		tapIP:       parsedTapIP,
+		tapMask:     tapNet.Mask,
+		namespaceIP: namespaceIP,
+	}, nil
+}
+
+// Slot describes one reusable network slot. Callers outside netstack receive
+// read-only access; Pool owns all assignment and CNI state transitions.
+type Slot struct {
+	id int
+
+	sandboxID string
+	cniIP     string
+
+	tapIP       net.IP
+	tapMask     net.IPMask
+	namespaceIP net.IP
+}
+
+func newSlot(id int, cfg slotConfig) (*Slot, error) {
+	if err := validateSlotID(id); err != nil {
+		return nil, err
+	}
+	if cfg.tapIP == nil || cfg.tapMask == nil || cfg.namespaceIP == nil {
+		return nil, fmt.Errorf("slot config is not initialized")
+	}
+
+	return &Slot{
+		id:          id,
+		tapIP:       append(net.IP(nil), cfg.tapIP...),
+		tapMask:     append(net.IPMask(nil), cfg.tapMask...),
+		namespaceIP: append(net.IP(nil), cfg.namespaceIP...),
+	}, nil
+}
+
+func validateSlotID(id int) error {
+	if id < firstSlotID || id >= firstSlotID+maxSlots {
+		return fmt.Errorf("slot ID %d is outside supported range [%d, %d)", id, firstSlotID, firstSlotID+maxSlots)
+	}
 	return nil
 }
 
-func (s *Slot) NamespaceID() string {
-	return fmt.Sprintf("ns-%d", s.Idx)
+func (s *Slot) ID() int {
+	return s.id
+}
+
+func (s *Slot) namespaceID() string {
+	return fmt.Sprintf("%s%d", networkNamespacePrefix, s.id)
 }
 
 func (s *Slot) NetNSPath() string {
-	if s.netnsPath != "" {
-		return s.netnsPath
-	}
-	return filepath.Join(netNamespacesDir, s.NamespaceID())
+	return filepath.Join(networkNamespaceDir, s.namespaceID())
 }
 
-func (s *Slot) setNetNSPath(netnsPath string) {
-	s.netnsPath = netnsPath
+func (s *Slot) cniContainerID() string {
+	return fmt.Sprintf("conch-slot-%d", s.id)
 }
 
-func (s *Slot) CNIContainerID() string {
-	if s.cniID != "" {
-		return s.cniID
-	}
-	return fmt.Sprintf("conch-slot-%s", s.Key)
+func (s *Slot) recordCNIIP(cniIP string) {
+	s.cniIP = cniIP
 }
 
-func (s *Slot) setSlotNetwork(cniID string, cniResult *CNIResult, cniOpts []NamespaceOpts) {
-	s.cniID = cniID
-	s.cniResult = cniResult
-	s.cniOpts = cniOpts
-	if cniResult != nil && cniResult.IP != "" {
-		s.vPeerIp = parseCNIResultIP(cniResult.IP)
-	}
+func (s *Slot) clearCNIIP() {
+	s.cniIP = ""
 }
 
 func (s *Slot) assignSandbox(sandboxID string) {
@@ -196,70 +139,22 @@ func (s *Slot) clearSandboxAssignment() {
 	s.sandboxID = ""
 }
 
-func (s *Slot) clearSlotNetwork() {
-	s.cniID = ""
-	s.cniResult = nil
-	s.cniOpts = nil
-}
-
-func (s *Slot) SandboxID() string {
-	return s.sandboxID
-}
-
-func (s *Slot) CNIResult() *CNIResult {
-	return s.cniResult
-}
-
-func (s *Slot) VethName() string {
-	return fmt.Sprintf("veth-%d", s.Idx)
-}
-
-func (s *Slot) VpeerName() string {
-	return fmt.Sprintf("ns-veth-%d", s.Idx)
-}
-
-func (s *Slot) BridgeName() string {
-	return getBridgeName(s.bridgeOrdinal)
-}
-
-func (s *Slot) VpeerIP() net.IP {
-	return s.vPeerIp
-}
-
-func (s *Slot) BridgeIP() net.IP {
-	return s.bridgeIp
-}
-
-func (s *Slot) VpeerIPString() string {
-	return s.VpeerIP().String()
-}
-
-func (s *Slot) VrtMask() net.IPMask {
-	return s.vrtMask
+func (s *Slot) CNIIP() string {
+	return s.cniIP
 }
 
 func (s *Slot) TapName() string {
 	return tapInterfaceName
 }
 
-func (s *Slot) TapIP() net.IP {
-	return s.tapIp
+func (s *Slot) tapAddress() net.IP {
+	return append(net.IP(nil), s.tapIP...)
 }
 
-func (s *Slot) TapCIDR() net.IPMask {
-	return s.tapMask
+func (s *Slot) tapMaskValue() net.IPMask {
+	return append(net.IPMask(nil), s.tapMask...)
 }
 
-func (s *Slot) NamespaceIP() string {
+func (s *Slot) namespaceAddress() string {
 	return s.namespaceIP.String()
-}
-
-func (s *Slot) VrtNetworkCIDRString() string {
-	return vrtNetworkCIDR.String()
-}
-
-func bridgeHostOffset(bridgeLocalIndex int) int {
-	// Offset 0 is the subnet address, 1 is reserved for the bridge IP, so slot
-	// addresses start at host offset 2 inside each bridge-local subnet.
-	return bridgeLocalIndex + 2
 }

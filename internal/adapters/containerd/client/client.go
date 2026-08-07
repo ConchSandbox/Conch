@@ -3,7 +3,6 @@ package containerdclient
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/containerd/containerd/v2/core/leases"
 
@@ -11,6 +10,12 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
 )
+
+const Namespace = "conch"
+
+func NewNamespaceContext(ctx context.Context) context.Context {
+	return namespaces.WithNamespace(ctx, Namespace)
+}
 
 // Client wraps containerd client connection and provides namespace management
 type Client struct {
@@ -28,46 +33,27 @@ func NewInMemory(ic *plugin.InitContext, opts ...containerd.Opt) (*Client, error
 	return &Client{Client: cli}, nil
 }
 
-func RuntimeLeaseID(namespace string) string {
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		ns = "default"
-	}
-	return "conch.runtime." + ns
+func RuntimeLeaseID() string {
+	return "conch.runtime"
 }
 
-func (c *Client) WithNamespace(ctx context.Context, namespace string) (context.Context, error) {
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		if c == nil || c.Client == nil {
-			return nil, fmt.Errorf("containerd client is nil")
-		}
-		ns = c.Client.DefaultNamespace()
+func (c *Client) WithNamespace(ctx context.Context) (context.Context, error) {
+	if c == nil || c.Client == nil {
+		return nil, fmt.Errorf("containerd client is nil")
 	}
-	if ns == "" {
-		ns = "default"
-	}
-	return namespaces.WithNamespace(ctx, ns), nil
+	return NewNamespaceContext(ctx), nil
 }
 
-func (c *Client) WithRuntimeLease(ctx context.Context, namespace, leaseID string) (context.Context, string, error) {
+func (c *Client) WithRuntimeLease(ctx context.Context, leaseID string) (context.Context, string, error) {
 	if c == nil || c.Client == nil {
 		return nil, "", fmt.Errorf("containerd client is nil")
 	}
-	ns := namespace
-	if ns == "" {
-		ns = c.Client.DefaultNamespace()
-	}
-	if ns == "" {
-		ns = "default"
-	}
 	if leaseID == "" {
-		leaseID = RuntimeLeaseID(ns)
+		leaseID = RuntimeLeaseID()
 	}
-	namespaceCtx := namespaces.WithNamespace(ctx, ns)
+	namespaceCtx := NewNamespaceContext(ctx)
 	if err := c.ensureLease(namespaceCtx, leaseID, map[string]string{
-		"io.conch.lease.kind":      "runtime",
-		"io.conch.lease.namespace": ns,
+		"io.conch.lease.kind": "runtime",
 	}); err != nil {
 		return nil, "", err
 	}
@@ -97,9 +83,4 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.Client.Close()
-}
-
-// DefaultNamespace returns the default namespace
-func (c *Client) DefaultNamespace() string {
-	return c.Client.DefaultNamespace()
 }

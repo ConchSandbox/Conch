@@ -24,9 +24,4 @@ import (
 	_ "github.com/containerd/containerd/v2/plugins/services/warning"
 	_ "github.com/containerd/containerd/v2/plugins/snapshots/erofs/plugin"
 	_ "github.com/containerd/containerd/v2/plugins/transfer"
-
-	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/image"
-	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/sandbox"
-	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/snapshot"
-	_ "github.com/openeuler/Conch/internal/adapters/containerd/plugins/template"
 )

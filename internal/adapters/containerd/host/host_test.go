@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/containerd/plugin/registry"
 )
 
 func TestStartAndClose(t *testing.T) {
@@ -11,16 +13,14 @@ func TestStartAndClose(t *testing.T) {
 	stateDir := t.TempDir()
 
 	host, err := Start(context.Background(), Config{
-		RootDir:          rootDir,
-		StateDir:         stateDir,
-		DefaultNamespace: "test",
+		RootDir:  rootDir,
+		StateDir: stateDir,
 		Snapshot: SnapshotConfig{
 			WorkDir: t.TempDir(),
 		},
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "containerd snapshotter is nil") ||
-			strings.Contains(err.Error(), "EROFS unsupported") {
+		if embeddedEROFSUnavailable(err) {
 			t.Skipf("erofs snapshotter unavailable in test environment: %v", err)
 		}
 		t.Fatalf("start host: %v", err)
@@ -28,14 +28,8 @@ func TestStartAndClose(t *testing.T) {
 	if host.Client() == nil {
 		t.Fatal("client is nil")
 	}
-	if host.ImageService() == nil {
-		t.Fatal("image service is nil")
-	}
-	if host.SnapshotService() == nil {
-		t.Fatal("snapshot service is nil")
-	}
-	if got := host.Client().DefaultNamespace(); got != "test" {
-		t.Fatalf("default namespace = %q, want %q", got, "test")
+	if host.SnapshotServer() == nil {
+		t.Fatal("snapshot server is nil")
 	}
 	if _, err := host.Client().NamespaceService().List(context.Background()); err != nil {
 		t.Fatalf("list namespaces: %v", err)
@@ -45,16 +39,14 @@ func TestStartAndClose(t *testing.T) {
 	}
 
 	host, err = Start(context.Background(), Config{
-		RootDir:          t.TempDir(),
-		StateDir:         t.TempDir(),
-		DefaultNamespace: "test",
+		RootDir:  t.TempDir(),
+		StateDir: t.TempDir(),
 		Snapshot: SnapshotConfig{
 			WorkDir: t.TempDir(),
 		},
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "containerd snapshotter is nil") ||
-			strings.Contains(err.Error(), "EROFS unsupported") {
+		if embeddedEROFSUnavailable(err) {
 			t.Skipf("erofs snapshotter unavailable in test environment: %v", err)
 		}
 		t.Fatalf("restart host: %v", err)
@@ -64,24 +56,24 @@ func TestStartAndClose(t *testing.T) {
 	}
 }
 
-func TestImagePluginConfig(t *testing.T) {
-	got := imagePluginConfig(ImageConfig{
-		DefaultKernelImage:            "registry.example.invalid/conch/kernel:6.6.0",
-		DefaultKernelPlainHTTP:        true,
-		DefaultKernelRegistryUsername: "kernel-user",
-		DefaultKernelRegistryPassword: "kernel-pass",
-	})
+func embeddedEROFSUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "containerd snapshotter is nil") ||
+		strings.Contains(message, "EROFS unsupported") ||
+		strings.Contains(message, "no plugins registered for io.containerd.snapshotter.v1")
+}
 
-	if got["default_kernel_image"] != "registry.example.invalid/conch/kernel:6.6.0" {
-		t.Fatalf("default_kernel_image = %#v", got["default_kernel_image"])
+func TestOnlyHostConchPluginRegistered(t *testing.T) {
+	var got []string
+	for _, registration := range registry.Graph(nil) {
+		if strings.HasPrefix(registration.Type.String(), "io.conch.") {
+			got = append(got, registration.URI())
+		}
 	}
-	if got["default_kernel_plain_http"] != true {
-		t.Fatalf("default_kernel_plain_http = %#v", got["default_kernel_plain_http"])
-	}
-	if got["default_kernel_registry_username"] != "kernel-user" {
-		t.Fatalf("default_kernel_registry_username = %#v", got["default_kernel_registry_username"])
-	}
-	if got["default_kernel_registry_password"] != "kernel-pass" {
-		t.Fatalf("default_kernel_registry_password = %#v", got["default_kernel_registry_password"])
+	if len(got) != 1 || got[0] != pluginURI {
+		t.Fatalf("registered Conch plugins = %v, want [%s]", got, pluginURI)
 	}
 }

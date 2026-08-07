@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	connectrpc.com/connect v1.20.0
 	github.com/containerd/containerd/v2 v2.3.0
+	github.com/containerd/continuity v0.5.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/go-cni v1.1.13
 	github.com/containerd/platforms v1.0.0-rc.4
@@ -38,7 +39,6 @@ require (
 	github.com/containerd/cgroups/v3 v3.1.3 // indirect
 	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/containerd/api v1.11.0 // indirect
-	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/go-dmverity v0.1.0 // indirect

@@ -19,7 +19,6 @@ var ErrNotFound = errors.New("state record not found")
 
 var buckets = [][]byte{
 	[]byte("sandboxes"),
-	[]byte("network_slots"),
 	[]byte("templates"),
 }
 
@@ -32,7 +31,6 @@ type templateRecord struct {
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
 	BootIndexDigest  string            `json:"boot_index_digest"`
-	Namespace        string            `json:"namespace"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
@@ -125,6 +123,15 @@ func (s *BoltStore) delete(_ context.Context, bucket []byte, key string) error {
 }
 
 func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error {
+	if strings.TrimSpace(rec.SandboxID) == "" {
+		return fmt.Errorf("sandbox id is required")
+	}
+	if strings.TrimSpace(rec.CheckpointHeadTemplateID) == "" {
+		return fmt.Errorf("sandbox checkpoint head template id is required")
+	}
+	if strings.TrimSpace(rec.CheckpointHeadBootIndexDigest) == "" {
+		return fmt.Errorf("sandbox checkpoint head boot index digest is required")
+	}
 	return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
 }
 
@@ -149,33 +156,6 @@ func (s *BoltStore) ListSandboxes(ctx context.Context) ([]SandboxRecord, error) 
 
 func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 	return s.delete(ctx, []byte("sandboxes"), id)
-}
-
-func (s *BoltStore) UpsertNetworkSlot(ctx context.Context, rec NetworkSlotRecord) error {
-	return s.upsert(ctx, []byte("network_slots"), rec.SlotKey, rec)
-}
-
-func (s *BoltStore) GetNetworkSlot(ctx context.Context, slotKey string) (NetworkSlotRecord, error) {
-	var rec NetworkSlotRecord
-	err := s.get(ctx, []byte("network_slots"), slotKey, &rec)
-	return rec, err
-}
-
-func (s *BoltStore) ListNetworkSlots(ctx context.Context) ([]NetworkSlotRecord, error) {
-	var out []NetworkSlotRecord
-	err := s.list(ctx, []byte("network_slots"), func(data []byte) error {
-		var rec NetworkSlotRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			return err
-		}
-		out = append(out, rec)
-		return nil
-	})
-	return out, err
-}
-
-func (s *BoltStore) DeleteNetworkSlot(ctx context.Context, slotKey string) error {
-	return s.delete(ctx, []byte("network_slots"), slotKey)
 }
 
 func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry) error {
@@ -230,23 +210,19 @@ func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
 // and advances the Sandbox checkpoint head. Content publication and validation
 // happen before this transaction, so a failed transaction can only leave safe
 // orphaned content.
-func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointPublication) error {
-	entry, err := conchtemplate.NormalizeEntry(publication.Entry)
+func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplate.Entry) error {
+	entry, err := conchtemplate.NormalizeEntry(checkpoint)
 	if err != nil {
 		return err
 	}
 	templateID := entry.ID
-	sandboxID := strings.TrimSpace(publication.SandboxID)
+	sandboxID := strings.TrimSpace(entry.SourceSandboxID)
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
-	expectedHeadID := strings.TrimSpace(publication.ExpectedHeadTemplateID)
+	expectedHeadID := strings.TrimSpace(entry.ParentTemplateID)
 	if expectedHeadID == "" {
 		return fmt.Errorf("expected checkpoint head template id is required")
-	}
-	expectedHeadDigest := strings.TrimSpace(publication.ExpectedHeadBootIndexDigest)
-	if expectedHeadDigest == "" {
-		return fmt.Errorf("expected checkpoint head boot index digest is required")
 	}
 	if entry.Origin != conchtemplate.OriginCheckpoint {
 		return fmt.Errorf(
@@ -291,28 +267,9 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, publication CheckpointP
 		if currentHeadID != expectedHeadID {
 			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", sandboxID, expectedHeadID, currentHeadID)
 		}
-		if currentHeadDigest != expectedHeadDigest {
-			return fmt.Errorf("sandbox %s checkpoint head digest changed from %s to %s", sandboxID, expectedHeadDigest, currentHeadDigest)
-		}
-		if parentID := entry.ParentTemplateID; parentID != currentHeadID {
-			return fmt.Errorf("template %s parent %s does not match sandbox %s checkpoint head %s", templateID, parentID, sandboxID, currentHeadID)
-		}
 		if sourceID := entry.SourceSandboxID; sourceID != strings.TrimSpace(sandboxRecord.SandboxID) {
 			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)
 		}
-		sandboxNamespace := strings.TrimSpace(sandboxRecord.Namespace)
-		if sandboxNamespace == "" {
-			return fmt.Errorf("sandbox %s has no namespace", sandboxID)
-		}
-		if entry.Namespace != sandboxNamespace {
-			return fmt.Errorf(
-				"template %s belongs to namespace %s, not sandbox namespace %s",
-				templateID,
-				entry.Namespace,
-				sandboxNamespace,
-			)
-		}
-
 		sandboxRecord.CheckpointHeadTemplateID = templateID
 		sandboxRecord.CheckpointHeadBootIndexDigest = entry.BootIndexDigest
 		sandboxData, err := json.Marshal(sandboxRecord)
@@ -332,7 +289,6 @@ func templateRecordFromEntry(entry conchtemplate.Entry) templateRecord {
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),
 		BootIndexDigest:  entry.BootIndexDigest,
-		Namespace:        entry.Namespace,
 		ParentTemplateID: entry.ParentTemplateID,
 		SourceSandboxID:  entry.SourceSandboxID,
 		ImageName:        entry.ImageName,
@@ -348,7 +304,6 @@ func templateEntryFromRecord(rec templateRecord) (conchtemplate.Entry, error) {
 		Origin:           conchtemplate.Origin(rec.Origin),
 		BootMode:         conchtemplate.BootMode(rec.BootMode),
 		BootIndexDigest:  rec.BootIndexDigest,
-		Namespace:        rec.Namespace,
 		ParentTemplateID: rec.ParentTemplateID,
 		SourceSandboxID:  rec.SourceSandboxID,
 		ImageName:        rec.ImageName,

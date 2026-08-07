@@ -27,12 +27,12 @@ func TestHandleListAndRemoveSnapshot(t *testing.T) {
 	server := newSnapshotHandlerServer(svc)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/list", bytes.NewBufferString(`{"namespace":"team-a","filters":["kind==committed"]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/list", bytes.NewBufferString(`{"filters":["kind==committed"]}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.listReq.Namespace != "team-a" || len(svc.listReq.Filters) != 1 {
+	if len(svc.listReq.Filters) != 1 {
 		t.Fatalf("list request = %#v", svc.listReq)
 	}
 	wantListJSON := "{\"snapshots\":[{\"key\":\"sha256:rootfs\",\"kind\":\"committed\",\"parent\":\"sha256:parent\",\"labels\":{\"purpose\":\"rootfs\"},\"storage_path\":\"/snap/rootfs\",\"created_at\":\"2026-07-25T01:02:03Z\",\"updated_at\":\"2026-07-25T01:02:04Z\"}]}\n"
@@ -41,12 +41,12 @@ func TestHandleListAndRemoveSnapshot(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{"namespace":"team-a","key":"sha256:rootfs"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{"key":"sha256:rootfs"}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remove status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.removeReq.Namespace != "team-a" || svc.removeReq.Key != "sha256:rootfs" {
+	if svc.removeReq.Key != "sha256:rootfs" {
 		t.Fatalf("remove request = %#v", svc.removeReq)
 	}
 	if got, want := rec.Body.String(), "{\"status\":\"ok\"}\n"; got != want {
@@ -73,12 +73,12 @@ func TestHandleSnapshotInfo(t *testing.T) {
 	recordJSON := "{\"key\":\"sha256:rootfs\",\"kind\":\"committed\",\"parent\":\"sha256:parent\",\"labels\":{\"purpose\":\"rootfs\"},\"storage_path\":\"/snap/rootfs\",\"created_at\":\"2026-07-25T01:02:03Z\",\"updated_at\":\"2026-07-25T01:02:04Z\"}"
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"namespace":"team-a","key":"sha256:rootfs"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"key":"sha256:rootfs"}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("info status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if svc.infoReq.Namespace != "team-a" || svc.infoReq.Key != "sha256:rootfs" {
+	if svc.infoReq.Key != "sha256:rootfs" {
 		t.Fatalf("info request = %#v", svc.infoReq)
 	}
 	if got, want := rec.Body.String(), recordJSON+"\n"; got != want {
@@ -91,7 +91,7 @@ func TestHandleRemoveSnapshotInvalidRequest(t *testing.T) {
 	server := newSnapshotHandlerServer(svc)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{"namespace":"team-a"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/remove", bytes.NewBufferString(`{}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("remove status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
@@ -108,7 +108,7 @@ func TestHandleSnapshotInfoRequiresKey(t *testing.T) {
 	server := newSnapshotHandlerServer(&fakeSnapshotService{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{"namespace":"team-a"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/info", bytes.NewBufferString(`{}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
@@ -122,7 +122,7 @@ func TestSnapshotChainRouteRemoved(t *testing.T) {
 	server := newSnapshotHandlerServer(&fakeSnapshotService{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/chain", bytes.NewBufferString(`{"namespace":"team-a","key":"sha256:rootfs"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/snapshot/chain", bytes.NewBufferString(`{"key":"sha256:rootfs"}`))
 	server.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())

@@ -43,7 +43,7 @@ func stratovirtConsoleDevice() (string, error) {
 	}
 }
 
-const startScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
+const startScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 -machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
@@ -60,7 +60,7 @@ const startScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp`
 
-const resumeScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
+const resumeScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
 -machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
@@ -78,6 +78,7 @@ const resumeScriptStratovirt = `ip netns exec {{ .NamespaceID }} \
 -incoming file:{{ .SnapfilePath }},mapped=true`
 
 type StartScriptStratovirtArgs struct {
+	NSenterPath     string
 	VmmBinaryPath   string
 	CPUBoot         int64
 	CPUMax          int64
@@ -86,7 +87,7 @@ type StartScriptStratovirtArgs struct {
 	ConsoleDevice   string
 	KernelPath      string
 	RootfsPath      string
-	NamespaceID     string
+	NetNSPath       string
 	TapName         string
 	VmmSocket       string
 	SerialSocket    string
@@ -166,6 +167,10 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited <-ch
 
 func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (string, error) {
 	logger := ulog.GetLogger()
+	nsenterPath, err := exec.LookPath("nsenter")
+	if err != nil {
+		return "", fmt.Errorf("resolve nsenter binary: %w", err)
+	}
 
 	vmmBinaryPath := defaultStratovirtBinary
 	if path, err := exec.LookPath("stratovirt"); err == nil {
@@ -184,6 +189,7 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 	}
 
 	stArgs := StartScriptStratovirtArgs{
+		NSenterPath:     nsenterPath,
 		VmmBinaryPath:   vmmBinaryPath,
 		CPUBoot:         args.CPUBoot,
 		CPUMax:          args.CPUMax,
@@ -192,7 +198,7 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 		ConsoleDevice:   consoleDevice,
 		KernelPath:      args.KernelPath,
 		RootfsPath:      args.InitrdPath,
-		NamespaceID:     args.NamespaceID,
+		NetNSPath:       args.NetNSPath,
 		TapName:         args.TapName,
 		VmmSocket:       s.socketPath,
 		SerialSocket:    s.socketPath + ".serial",

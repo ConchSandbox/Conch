@@ -46,22 +46,20 @@
 
 ```yaml
 network:
-  pool_size: 250
-  dynamic_reservation: false
-  # bridge_count: 1 # deprecated for the current CNI path
+  warm_pool_size: 250
   tap_ip: 192.168.100.2
   tap_mask: 24
   cni:
     plugin_bin_dirs:
       - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
-    plugin_max_conf: 1
     if_name: eth0
-    setup_serially: false
 ```
 
 Conch 网络配置需要注意如下事项：
-- `pool_size` 给定了网络池的槽位数目，以及宿主机上可同时运行的沙箱最大数目。
+- `warm_pool_size` 给定了预先创建并保持可用的空闲网络 Slot 数量，不能超过代码内置的 4000 Slot 总容量上限。
+- Conch 每次启动都会创建新的内存 Slot ID 分配器和 warm pool，不会从 BoltDB 恢复或接管旧 Slot；实际可用数量还会受到 CNI/IPAM 地址容量限制。
+- Conch 启动时会并发预填充空闲 Slot，运行期间持续补充到 `warm_pool_size`；CNI 分配失败会回滚本次创建并以指数退避方式重试。池为空时，新建沙箱会返回资源不可用错误。
 - `tap_ip` 和 `tap_mask` 给定了每个沙箱内部面向虚拟机的 `tap` 子网。
 - `plugin_bin_dirs` 指向 CNI 插件目录, `plugin_conf_dir` 指向 Conch CNI 配置目录。
 - `if_name` 给定了 CNI 创建的沙箱网络接口名称，通常是 `eth0`；当前 go-cni 会把第一个接口生成为 `<prefix>0`，因此该配置需要与这一命名方式一致。
@@ -73,19 +71,19 @@ Conch 网络配置需要注意如下事项：
 
 ```bash
 sudo ./bin/conchd -config config/config.yaml
-ip netns list
+sudo ls -1 /run/conch/netns
 ```
 
-- 预期结果：可以看到用于预填充 slot 的 namespace，例如 `ns-2`。
+- 预期结果：可以看到用于预填充 slot 的 namespace 句柄，例如 `slot-2`。这些句柄由 Conch 独占管理，不会出现在默认扫描 `/run/netns` 的 `ip netns list` 中。
 
 检查其中一个 namespace：
 
 ```bash
-sudo ip netns exec ns-2 ip addr show eth0
-sudo ip netns exec ns-2 ip route
-sudo ip netns exec ns-2 ip addr show tap0
-sudo ip netns exec ns-2 sysctl net.ipv4.ip_forward
-sudo ip netns exec ns-2 iptables -t nat -S
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show eth0
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip route
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show tap0
+sudo nsenter --net=/run/conch/netns/slot-2 -- sysctl net.ipv4.ip_forward
+sudo nsenter --net=/run/conch/netns/slot-2 -- iptables -t nat -S
 ```
 
 - 预期结果：
@@ -109,22 +107,29 @@ ls /var/lib/cni/networks/conch-bridge
 conchd 正常关闭后：
 
 ```bash
-ip netns list
+sudo ls -1 /run/conch/netns
 ip link show cni-conch0
 ip route show table main | grep 10.12
 ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- 预期结果：正常退出（包括 `SIGTERM`, `SIGINT` 等）会保留网络资源，以便重启后重新接管。netns、CNI IPAM 分发文件以及 CNI bridge 都可能继续存在。重启 `conchd` 后，保留下来的预热槽位应被接管，而已分配给沙箱的应根据沙箱的具体状态进行恢复。
+- 预期结果：正常退出（包括 `SIGTERM`、`SIGINT`）会关闭内存 warm pool，并尽力清理队列中空闲 Slot 的 tap、CNI 分配和网络命名空间。单个 Slot 清理失败只记录日志，不阻止进程退出。重启 `conchd` 后会从空池重新预热，不会接管旧 Slot。当前不处理异常退出留下的资源，也不会恢复旧 sandbox；重启前应先删除所有活跃 sandbox。
 
 
 ## 手动清理流程
 
-正常退出 `conchd` 会保留所有的网络资源，如果需要完全重置（即不保留任何沙箱、快照、网络等记录），可在退出 `conchd` 后删除数据记录 `/var/lib/conch/state.db`，并使用如下指令手动删除命名空间、网桥以及 IPAM 目录：
+正常退出 `conchd` 会尽力清理内存 warm pool。异常退出或单项清理失败后若仍有网络残留，可在退出 `conchd` 后使用如下指令手动删除命名空间、网桥以及 IPAM 目录。网络 Slot 不再写入 `/var/lib/conch/state.db`，删除该数据库不会代替网络清理：
 
 ```bash
-sudo ip netns delete ns-X
+sudo sh -c '
+for ns in /run/conch/netns/slot-*; do
+  [ -e "$ns" ] || continue
+  umount -l "$ns"
+  rm -f "$ns"
+done
+rmdir /run/conch/netns 2>/dev/null || true
+'
 sudo ip link delete cni-conch0 2>/dev/null || true
 sudo rm -rf /var/lib/cni/networks/conch-bridge
 ```

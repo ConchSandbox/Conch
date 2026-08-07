@@ -22,7 +22,6 @@ func TestStoreCRUDAndList(t *testing.T) {
 		Origin:          OriginImage,
 		BootMode:        BootModeCold,
 		BootIndexDigest: bootIndexDigest,
-		Namespace:       "team-a",
 		ImageName:       "image-ref",
 		Labels:          map[string]string{"purpose": "test"},
 	})
@@ -42,9 +41,8 @@ func TestStoreCRUDAndList(t *testing.T) {
 	}
 
 	items, err := store.List(ctx, Filter{
-		Origin:    OriginImage,
-		BootMode:  BootModeCold,
-		Namespace: "team-a",
+		Origin:   OriginImage,
+		BootMode: BootModeCold,
 	})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)

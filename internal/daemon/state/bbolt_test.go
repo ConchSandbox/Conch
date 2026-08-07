@@ -20,22 +20,24 @@ func TestBoltStoreSandboxCRUD(t *testing.T) {
 
 	ctx := context.Background()
 	sandbox := SandboxRecord{
-		SandboxID: "sandbox-1",
-		Namespace: "default",
-		State:     SandboxReady,
-		CreatedAt: 123,
-		IP:        "192.0.2.10",
-		VMMName:   "stratovirt",
+		SandboxID:                     "sandbox-1",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: digest.FromString("boot-index").String(),
 	}
 	if err := store.UpsertSandbox(ctx, sandbox); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+	duplicate := sandbox
+	duplicate.CheckpointHeadTemplateID = "tmpl-replacement"
+	if err := store.UpsertSandbox(ctx, duplicate); err != nil {
+		t.Fatalf("UpsertSandbox(duplicate) error = %v", err)
 	}
 	gotSandbox, err := store.GetSandbox(ctx, sandbox.SandboxID)
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if gotSandbox.SandboxID != sandbox.SandboxID || gotSandbox.IP != sandbox.IP || gotSandbox.VMMName != sandbox.VMMName {
-		t.Fatalf("GetSandbox() = %#v, want %#v", gotSandbox, sandbox)
+	if gotSandbox != duplicate {
+		t.Fatalf("GetSandbox() = %#v, want %#v", gotSandbox, duplicate)
 	}
 
 	if err := store.DeleteSandbox(ctx, sandbox.SandboxID); err != nil {
@@ -46,15 +48,34 @@ func TestBoltStoreSandboxCRUD(t *testing.T) {
 	}
 }
 
-func TestBoltStoreRejectsEmptySandboxID(t *testing.T) {
+func TestBoltStoreRejectsIncompleteSandboxRecord(t *testing.T) {
 	store, err := OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {
 		t.Fatalf("OpenBolt() error = %v", err)
 	}
 	defer store.Close()
 
-	if err := store.UpsertSandbox(context.Background(), SandboxRecord{}); err == nil {
-		t.Fatal("UpsertSandbox() error = nil, want empty id rejection")
+	valid := SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		CheckpointHeadTemplateID:      "tmpl-1",
+		CheckpointHeadBootIndexDigest: digest.FromString("boot-index").String(),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*SandboxRecord)
+	}{
+		{name: "sandbox id", mutate: func(rec *SandboxRecord) { rec.SandboxID = "" }},
+		{name: "checkpoint head template", mutate: func(rec *SandboxRecord) { rec.CheckpointHeadTemplateID = "" }},
+		{name: "checkpoint head digest", mutate: func(rec *SandboxRecord) { rec.CheckpointHeadBootIndexDigest = "" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := valid
+			tc.mutate(&rec)
+			if err := store.UpsertSandbox(context.Background(), rec); err == nil {
+				t.Fatal("UpsertSandbox() error = nil, want incomplete record rejection")
+			}
+		})
 	}
 }
 
@@ -71,67 +92,9 @@ func TestBoltStoreInitializesCurrentBuckets(t *testing.T) {
 				t.Fatalf("bucket %q is missing", bucket)
 			}
 		}
-		if tx.Bucket([]byte("containers")) != nil {
-			t.Fatal("containers bucket was created")
-		}
 		return nil
 	}); err != nil {
 		t.Fatalf("inspect state schema: %v", err)
-	}
-}
-
-func TestBoltStoreNetworkSlotCRUD(t *testing.T) {
-	store, err := OpenBolt(t.TempDir() + "/state.db")
-	if err != nil {
-		t.Fatalf("OpenBolt() error = %v", err)
-	}
-	defer store.Close()
-
-	ctx := context.Background()
-	slot := NetworkSlotRecord{
-		SlotKey:   "2",
-		SlotIndex: 2,
-		State:     NetworkSlotWarmIdle,
-		SandboxID: "sandbox-a",
-		NetNSPath: "/var/run/netns/ns-2",
-		CNIID:     "conch-slot-2",
-		CNIIP:     "10.12.0.2",
-		LastError: "initial error",
-	}
-	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
-		t.Fatalf("UpsertNetworkSlot() error = %v", err)
-	}
-	got, err := store.GetNetworkSlot(ctx, slot.SlotKey)
-	if err != nil {
-		t.Fatalf("GetNetworkSlot() error = %v", err)
-	}
-	if got.State != NetworkSlotWarmIdle || got.CNIID != slot.CNIID || got.SandboxID != slot.SandboxID || got.LastError != slot.LastError {
-		t.Fatalf("GetNetworkSlot() = %#v, want %#v", got, slot)
-	}
-	slot.State = NetworkSlotCleaning
-	slot.LastError = "cleanup pending"
-	if err := store.UpsertNetworkSlot(ctx, slot); err != nil {
-		t.Fatalf("UpsertNetworkSlot(update) error = %v", err)
-	}
-	got, err = store.GetNetworkSlot(ctx, slot.SlotKey)
-	if err != nil {
-		t.Fatalf("GetNetworkSlot() after update error = %v", err)
-	}
-	if got.State != NetworkSlotCleaning || got.LastError != "cleanup pending" || got.SandboxID != slot.SandboxID {
-		t.Fatalf("GetNetworkSlot() after update = %#v, want cleaning slot", got)
-	}
-	slots, err := store.ListNetworkSlots(ctx)
-	if err != nil {
-		t.Fatalf("ListNetworkSlots() error = %v", err)
-	}
-	if len(slots) != 1 || slots[0].SlotKey != slot.SlotKey {
-		t.Fatalf("ListNetworkSlots() = %#v, want one slot", slots)
-	}
-	if err := store.DeleteNetworkSlot(ctx, slot.SlotKey); err != nil {
-		t.Fatalf("DeleteNetworkSlot() error = %v", err)
-	}
-	if _, err := store.GetNetworkSlot(ctx, slot.SlotKey); err == nil {
-		t.Fatalf("GetNetworkSlot() after delete got nil error")
 	}
 }
 
@@ -148,7 +111,6 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
 		BootIndexDigest: digest.FromString("template-1").String(),
-		Namespace:       "default",
 		Labels:          map[string]string{"purpose": "test"},
 		CreatedAt:       1,
 	}
@@ -200,26 +162,20 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 	ctx := context.Background()
 	checkpointDigest := digest.FromString("checkpoint").String()
 	if err := store.UpsertSandbox(ctx, SandboxRecord{
-		SandboxID:        "sb-1",
-		Namespace:        "default",
-		SourceTemplateID: "t0", SourceBootIndexDigest: "sha256:source",
-		CheckpointHeadTemplateID: "t0", CheckpointHeadBootIndexDigest: "sha256:source",
+		SandboxID:                     "sb-1",
+		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadBootIndexDigest: "sha256:source",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
-		Entry: conchtemplate.Entry{
-			ID:               "t1",
-			Origin:           conchtemplate.OriginCheckpoint,
-			BootMode:         conchtemplate.BootModeResume,
-			BootIndexDigest:  checkpointDigest,
-			Namespace:        "default",
-			ParentTemplateID: "t0",
-			SourceSandboxID:  "sb-1",
-		},
-		SandboxID: "sb-1", ExpectedHeadTemplateID: "t0",
-		ExpectedHeadBootIndexDigest: "sha256:source",
+	if err := store.PublishCheckpoint(ctx, conchtemplate.Entry{
+		ID:               "t1",
+		Origin:           conchtemplate.OriginCheckpoint,
+		BootMode:         conchtemplate.BootModeResume,
+		BootIndexDigest:  checkpointDigest,
+		ParentTemplateID: "t0",
+		SourceSandboxID:  "sb-1",
 	}); err != nil {
 		t.Fatalf("PublishCheckpoint() error = %v", err)
 	}
@@ -250,25 +206,18 @@ func TestBoltStorePublishCheckpointCASFailureLeavesBothRecordsUnchanged(t *testi
 	ctx := context.Background()
 	if err := store.UpsertSandbox(ctx, SandboxRecord{
 		SandboxID:                     "sandbox-1",
-		Namespace:                     "default",
 		CheckpointHeadTemplateID:      "new-head",
 		CheckpointHeadBootIndexDigest: "sha256:new-head",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PublishCheckpoint(ctx, CheckpointPublication{
-		Entry: conchtemplate.Entry{
-			ID:               "t1",
-			Origin:           conchtemplate.OriginCheckpoint,
-			BootMode:         conchtemplate.BootModeResume,
-			BootIndexDigest:  digest.FromString("checkpoint").String(),
-			Namespace:        "default",
-			ParentTemplateID: "old-head",
-			SourceSandboxID:  "sandbox-1",
-		},
-		SandboxID:                   "sandbox-1",
-		ExpectedHeadTemplateID:      "old-head",
-		ExpectedHeadBootIndexDigest: "sha256:old-head",
+	if err := store.PublishCheckpoint(ctx, conchtemplate.Entry{
+		ID:               "t1",
+		Origin:           conchtemplate.OriginCheckpoint,
+		BootMode:         conchtemplate.BootModeResume,
+		BootIndexDigest:  digest.FromString("checkpoint").String(),
+		ParentTemplateID: "old-head",
+		SourceSandboxID:  "sandbox-1",
 	}); err == nil {
 		t.Fatal("PublishCheckpoint() error = nil, want CAS failure")
 	}

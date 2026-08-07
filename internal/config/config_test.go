@@ -126,12 +126,11 @@ func TestLoadConfig(t *testing.T) {
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
-			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
-			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n  default_kernel_plain_http: true\n  default_kernel_registry_username: kernel-user\n  default_kernel_registry_password: kernel-pass\n" +
+			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n" +
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
-			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
-			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
+			"network:\n  warm_pool_size: 123\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
+			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    if_name: net1\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -166,14 +165,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Server.WorkDir != "/tmp/conch" {
 		t.Errorf("LoadConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/tmp/conch")
 	}
-	if cfg.Network.PoolSize != 123 {
-		t.Errorf("LoadConfig().Network.PoolSize = %d, want %d", cfg.Network.PoolSize, 123)
-	}
-	if !cfg.Network.DynamicReservation {
-		t.Errorf("LoadConfig().Network.DynamicReservation = %v, want true", cfg.Network.DynamicReservation)
-	}
-	if cfg.Network.BridgeCount != 7 {
-		t.Errorf("LoadConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 7)
+	if cfg.Network.WarmPoolSize != 123 {
+		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want %d", cfg.Network.WarmPoolSize, 123)
 	}
 	if cfg.Network.TapIP != "192.168.100.10" {
 		t.Errorf("LoadConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.10")
@@ -187,35 +180,14 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Network.CNI.PluginConfDir != "/custom/cni/net.d" {
 		t.Errorf("LoadConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/custom/cni/net.d")
 	}
-	if cfg.Network.CNI.PluginMaxConf != 2 {
-		t.Errorf("LoadConfig().Network.CNI.PluginMaxConf = %d, want 2", cfg.Network.CNI.PluginMaxConf)
-	}
 	if cfg.Network.CNI.IfName != "net1" {
 		t.Errorf("LoadConfig().Network.CNI.IfName = %q, want %q", cfg.Network.CNI.IfName, "net1")
-	}
-	if !cfg.Network.CNI.SetupSerially {
-		t.Errorf("LoadConfig().Network.CNI.SetupSerially = %v, want true", cfg.Network.CNI.SetupSerially)
 	}
 	if cfg.Containerd.RootDir != "/tmp/conch-containerd-root" {
 		t.Errorf("LoadConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/tmp/conch-containerd-root")
 	}
 	if cfg.Containerd.StateDir != "/tmp/conch-containerd-state" {
 		t.Errorf("LoadConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/tmp/conch-containerd-state")
-	}
-	if cfg.Containerd.DefaultNamespace != "team-a" {
-		t.Errorf("LoadConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "team-a")
-	}
-	if cfg.Image.DefaultKernelImage != "registry.example.invalid/conch/kernel:6.6.0" {
-		t.Errorf("LoadConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, "registry.example.invalid/conch/kernel:6.6.0")
-	}
-	if !cfg.Image.DefaultKernelPlainHTTP {
-		t.Errorf("LoadConfig().Image.DefaultKernelPlainHTTP = false, want true")
-	}
-	if cfg.Image.DefaultKernelRegistryUsername != "kernel-user" {
-		t.Errorf("LoadConfig().Image.DefaultKernelRegistryUsername = %q, want %q", cfg.Image.DefaultKernelRegistryUsername, "kernel-user")
-	}
-	if cfg.Image.DefaultKernelRegistryPassword != "kernel-pass" {
-		t.Errorf("LoadConfig().Image.DefaultKernelRegistryPassword = %q, want %q", cfg.Image.DefaultKernelRegistryPassword, "kernel-pass")
 	}
 	if cfg.Sandbox.DefaultTemplateID != "registry.example.invalid/conch/sandbox:latest" {
 		t.Errorf("LoadConfig().Sandbox.DefaultTemplateID = %q, want %q", cfg.Sandbox.DefaultTemplateID, "registry.example.invalid/conch/sandbox:latest")
@@ -261,8 +233,8 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	}{
 		{
 			name:    "negative network pool size",
-			data:    "network:\n  pool_size: -1\n",
-			wantErr: "network.pool_size",
+			data:    "network:\n  warm_pool_size: -1\n",
+			wantErr: "network.warm_pool_size",
 		},
 		{
 			name:    "negative volume max mounts",
@@ -311,7 +283,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("network:\n  pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
+	data := []byte("network:\n  warm_pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -321,8 +293,8 @@ func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	want := DefaultConfig()
-	if cfg.Network.PoolSize != want.Network.PoolSize {
-		t.Errorf("LoadConfig().Network.PoolSize = %d, want default %d", cfg.Network.PoolSize, want.Network.PoolSize)
+	if cfg.Network.WarmPoolSize != want.Network.WarmPoolSize {
+		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want default %d", cfg.Network.WarmPoolSize, want.Network.WarmPoolSize)
 	}
 	if cfg.Network.TapMask != want.Network.TapMask {
 		t.Errorf("LoadConfig().Network.TapMask = %d, want default %d", cfg.Network.TapMask, want.Network.TapMask)
@@ -408,11 +380,11 @@ func TestResolveCNIPluginConfDirFallback(t *testing.T) {
 func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	cfg := DefaultConfig()
 
+	if cfg.Network.WarmPoolSize != netstack.DefaultWarmPoolSize {
+		t.Errorf("DefaultConfig().Network.WarmPoolSize = %d, want %d", cfg.Network.WarmPoolSize, netstack.DefaultWarmPoolSize)
+	}
 	if cfg.Network.TapIP != "192.168.100.2" {
 		t.Errorf("DefaultConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.2")
-	}
-	if cfg.Network.BridgeCount != 1 {
-		t.Errorf("DefaultConfig().Network.BridgeCount = %d, want %d", cfg.Network.BridgeCount, 1)
 	}
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
@@ -422,9 +394,6 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	}
 	if cfg.Network.CNI.PluginConfDir != netstack.DefaultCNIPluginConfDir {
 		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, netstack.DefaultCNIPluginConfDir)
-	}
-	if cfg.Network.CNI.PluginMaxConf != netstack.DefaultCNIPluginMaxConf {
-		t.Errorf("DefaultConfig().Network.CNI.PluginMaxConf = %d, want %d", cfg.Network.CNI.PluginMaxConf, netstack.DefaultCNIPluginMaxConf)
 	}
 	if cfg.Network.CNI.IfName != netstack.DefaultCNIIfName {
 		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want %s", cfg.Network.CNI.IfName, netstack.DefaultCNIIfName)
@@ -448,21 +417,6 @@ func TestDefaultConfigContainerdSettings(t *testing.T) {
 	}
 	if cfg.Containerd.StateDir != "/run/conch/containerd" {
 		t.Errorf("DefaultConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/run/conch/containerd")
-	}
-	if cfg.Containerd.DefaultNamespace != "default" {
-		t.Errorf("DefaultConfig().Containerd.DefaultNamespace = %q, want %q", cfg.Containerd.DefaultNamespace, "default")
-	}
-	if cfg.Image.DefaultKernelImage != DefaultKernelImage {
-		t.Errorf("DefaultConfig().Image.DefaultKernelImage = %q, want %q", cfg.Image.DefaultKernelImage, DefaultKernelImage)
-	}
-	if cfg.Image.DefaultKernelPlainHTTP {
-		t.Errorf("DefaultConfig().Image.DefaultKernelPlainHTTP = true, want false")
-	}
-	if cfg.Image.DefaultKernelRegistryUsername != "" {
-		t.Errorf("DefaultConfig().Image.DefaultKernelRegistryUsername = %q, want empty", cfg.Image.DefaultKernelRegistryUsername)
-	}
-	if cfg.Image.DefaultKernelRegistryPassword != "" {
-		t.Errorf("DefaultConfig().Image.DefaultKernelRegistryPassword = %q, want empty", cfg.Image.DefaultKernelRegistryPassword)
 	}
 	if cfg.State.Path != "/var/lib/conch/state.db" {
 		t.Errorf("DefaultConfig().State.Path = %q, want %q", cfg.State.Path, "/var/lib/conch/state.db")

@@ -25,7 +25,6 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Network    NetworkConfig    `yaml:"network"`
 	Containerd ContainerdConfig `yaml:"containerd"`
-	Image      ImageConfig      `yaml:"image"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	Volume     VolumeConfig     `yaml:"volume"`
 	State      StateConfig      `yaml:"state"`
@@ -53,12 +52,10 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int       `yaml:"pool_size"`
-	DynamicReservation bool      `yaml:"dynamic_reservation"`
-	BridgeCount        int       `yaml:"bridge_count"`
-	TapIP              string    `yaml:"tap_ip"`
-	TapMask            int       `yaml:"tap_mask"`
-	CNI                CNIConfig `yaml:"cni"`
+	WarmPoolSize int       `yaml:"warm_pool_size"`
+	TapIP        string    `yaml:"tap_ip"`
+	TapMask      int       `yaml:"tap_mask"`
+	CNI          CNIConfig `yaml:"cni"`
 }
 
 // CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
@@ -66,21 +63,11 @@ type CNIConfig = netstack.CNIManagerConfig
 
 // ContainerdConfig holds containerd runtime configuration
 type ContainerdConfig struct {
-	RootDir          string `yaml:"root_dir"`
-	StateDir         string `yaml:"state_dir"`
-	DefaultNamespace string `yaml:"default_namespace"`
-}
-
-// ImageConfig holds image workflow defaults.
-type ImageConfig struct {
-	DefaultKernelImage            string `yaml:"default_kernel_image"`
-	DefaultKernelPlainHTTP        bool   `yaml:"default_kernel_plain_http"`
-	DefaultKernelRegistryUsername string `yaml:"default_kernel_registry_username"`
-	DefaultKernelRegistryPassword string `yaml:"default_kernel_registry_password"`
+	RootDir  string `yaml:"root_dir"`
+	StateDir string `yaml:"state_dir"`
 }
 
 const (
-	DefaultKernelImage   = "hub.oepkgs.net/conch/kernel:6.6.0"
 	DefaultVMMName       = "stratovirt"
 	defaultVolumeBackend = "virtiofs"
 )
@@ -132,28 +119,18 @@ func DefaultConfig() *Config {
 			WorkDir:    defaultWorkDir,
 		},
 		Network: NetworkConfig{
-			PoolSize:           250,
-			DynamicReservation: false,
-			BridgeCount:        1,
-			TapIP:              "192.168.100.2",
-			TapMask:            24,
+			WarmPoolSize: netstack.DefaultWarmPoolSize,
+			TapIP:        "192.168.100.2",
+			TapMask:      24,
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
-				PluginMaxConf: netstack.DefaultCNIPluginMaxConf,
 				IfName:        netstack.DefaultCNIIfName,
 			},
 		},
 		Containerd: ContainerdConfig{
-			RootDir:          "/var/lib/conch/containerd",
-			StateDir:         "/run/conch/containerd",
-			DefaultNamespace: "default",
-		},
-		Image: ImageConfig{
-			DefaultKernelImage:            DefaultKernelImage,
-			DefaultKernelPlainHTTP:        false,
-			DefaultKernelRegistryUsername: "",
-			DefaultKernelRegistryPassword: "",
+			RootDir:  "/var/lib/conch/containerd",
+			StateDir: "/run/conch/containerd",
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,
@@ -252,11 +229,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.WorkDir == "" {
 		cfg.Server.WorkDir = defaultCfg.Server.WorkDir
 	}
-	if cfg.Network.PoolSize == 0 {
-		cfg.Network.PoolSize = defaultCfg.Network.PoolSize
-	}
-	if cfg.Network.BridgeCount == 0 {
-		cfg.Network.BridgeCount = defaultCfg.Network.BridgeCount
+	if cfg.Network.WarmPoolSize == 0 {
+		cfg.Network.WarmPoolSize = defaultCfg.Network.WarmPoolSize
 	}
 	if cfg.Network.TapIP == "" {
 		cfg.Network.TapIP = defaultCfg.Network.TapIP
@@ -271,9 +245,6 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
 	}
 	cfg.Network.CNI.PluginConfDir = resolveCNIPluginConfDir(configPath, cfg.Network.CNI.PluginConfDir, defaultCfg.Network.CNI.PluginConfDir)
-	if cfg.Network.CNI.PluginMaxConf == 0 {
-		cfg.Network.CNI.PluginMaxConf = defaultCfg.Network.CNI.PluginMaxConf
-	}
 	if cfg.Network.CNI.IfName == "" {
 		cfg.Network.CNI.IfName = defaultCfg.Network.CNI.IfName
 	}
@@ -282,12 +253,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Containerd.StateDir == "" {
 		cfg.Containerd.StateDir = defaultCfg.Containerd.StateDir
-	}
-	if cfg.Containerd.DefaultNamespace == "" {
-		cfg.Containerd.DefaultNamespace = defaultCfg.Containerd.DefaultNamespace
-	}
-	if cfg.Image.DefaultKernelImage == "" {
-		cfg.Image.DefaultKernelImage = defaultCfg.Image.DefaultKernelImage
 	}
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
@@ -339,8 +304,8 @@ func LoadConfig(configPath string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
-	if cfg.Network.PoolSize < 0 {
-		return fmt.Errorf("invalid network.pool_size=%d: must be greater than or equal to 0", cfg.Network.PoolSize)
+	if cfg.Network.WarmPoolSize < 0 {
+		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}
 	if cfg.Network.TapMask < 1 || cfg.Network.TapMask > 32 {
 		return fmt.Errorf("invalid network.tap_mask=%d: must be between 1 and 32", cfg.Network.TapMask)

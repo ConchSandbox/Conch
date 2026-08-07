@@ -5,34 +5,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
-
-func LoadConchConfig(configPath string) (*config.Config, error) {
-	cfgPath := configPath
-	if cfgPath == "" {
-		cfgPath = config.FindConfigFile()
-	}
-	return config.LoadConfig(cfgPath)
-}
 
 func ResolveConchAPIURL(apiURLOverride, addressAlias string) string {
 	if apiURLOverride != "" {
 		return apiURLOverride
 	}
 	return addressAlias
-}
-
-func ResolveConchNamespace(cfg *config.Config, namespaceOverride string) string {
-	namespace := cfg.Containerd.DefaultNamespace
-	if namespaceOverride != "" {
-		namespace = namespaceOverride
-	}
-	if namespace == "" {
-		namespace = "default"
-	}
-	return namespace
 }
 
 func ParseRegistryUser(user string) (string, string, error) {

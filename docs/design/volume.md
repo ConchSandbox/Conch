@@ -227,7 +227,6 @@ from conch import Sandbox
 
 sandbox = Sandbox.create(
     template_id="tmpl_8f3a2c1b9d4e6a7f0c2b5d8e1a4f7c9d",
-    namespace="team-a",
     volume_mounts=[
         {"source": "/host/path/cache",   "path": "/mnt/cache"},
         {"source": "/host/path/dataset", "path": "/data", "readonly": True},
@@ -258,7 +257,6 @@ SDK 发送 payload：
 
 ```json
 {
-  "namespace": "team-a",
   "template_id": "tmpl_8f3a2c1b9d4e6a7f0c2b5d8e1a4f7c9d",
   "volumeMounts": [
     {"source": "/host/path/cache",   "path": "/mnt/cache", "readonly": false},
@@ -276,4 +274,3 @@ SDK 发送 payload：
 - 挂卷与快照互斥：带挂载的 sandbox 不支持 snapshot start、pause、resume、export；相关
   调用直接报错。
 - 用户 host-path 不随 sandbox 删除而删除。
-

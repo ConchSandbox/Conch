@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func PrintSnapshotHelp(out io.Writer) {
@@ -45,10 +45,8 @@ func runSnapshot(ctx context.Context, args []string) error {
 func runSnapshotList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("debug snapshot ls", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	var filters stringSliceFlag
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	fs.Var(&filters, "filter", "containerd snapshot filter")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -56,13 +54,12 @@ func runSnapshotList(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("conch debug snapshot ls: unexpected positional arguments: %v", fs.Args())
 	}
-	cfg, err := LoadConchConfig(*configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch debug snapshot ls: load config: %w", err)
+		return fmt.Errorf("conch debug snapshot ls: create API client: %w", err)
 	}
-	snapshots, err := client.NewClientWithConfig("", *configPath).ListSnapshots(ctx, client.ListSnapshotsRequest{
-		Namespace: ResolveConchNamespace(cfg, *namespace),
-		Filters:   filters,
+	snapshots, err := conchClient.ListSnapshots(ctx, client.ListSnapshotsRequest{
+		Filters: filters,
 	})
 	if err != nil {
 		return fmt.Errorf("conch debug snapshot ls: %w", err)
@@ -81,23 +78,20 @@ func runSnapshotList(ctx context.Context, args []string) error {
 func runSnapshotRemove(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("debug snapshot rm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch debug snapshot rm: exactly one snapshot key is required")
 	}
-	cfg, err := LoadConchConfig(*configPath)
-	if err != nil {
-		return fmt.Errorf("conch debug snapshot rm: load config: %w", err)
-	}
 	key := fs.Arg(0)
-	if err := client.NewClientWithConfig("", *configPath).RemoveSnapshot(ctx, client.RemoveSnapshotRequest{
-		Key:       key,
-		Namespace: ResolveConchNamespace(cfg, *namespace),
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch debug snapshot rm: create API client: %w", err)
+	}
+	if err := conchClient.RemoveSnapshot(ctx, client.RemoveSnapshotRequest{
+		Key: key,
 	}); err != nil {
 		return fmt.Errorf("conch debug snapshot rm: %w", err)
 	}

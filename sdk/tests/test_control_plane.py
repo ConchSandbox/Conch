@@ -25,7 +25,6 @@ class FakeSession:
             return FakeResponse(data=[{"sandboxID": "sandbox-1"}])
         return FakeResponse(data={
             "sandboxID": "sandbox-1",
-            "namespace": "default",
             "templateID": "tmpl-1",
             "domain": "192.0.2.10",
             "metadata": {"owner": "test"},

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
@@ -75,11 +75,9 @@ func RunImage(ctx context.Context, args []string) error {
 func runImageList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("image ls", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	showAll := fs.Bool("all", false, "show internal containerd image records")
 	var filters stringSliceFlag
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	fs.Var(&filters, "filter", "containerd image filter")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -87,13 +85,12 @@ func runImageList(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("conch image ls: unexpected positional arguments: %v", fs.Args())
 	}
-	cfg, err := LoadConchConfig(*configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch image ls: load config: %w", err)
+		return fmt.Errorf("conch image ls: create API client: %w", err)
 	}
-	images, err := client.NewClientWithConfig("", *configPath).ListImages(ctx, client.ListImagesRequest{
-		Namespace: ResolveConchNamespace(cfg, *namespace),
-		Filters:   filters,
+	images, err := conchClient.ListImages(ctx, client.ListImagesRequest{
+		Filters: filters,
 	})
 	if err != nil {
 		return fmt.Errorf("conch image ls: %w", err)
@@ -135,24 +132,21 @@ func displayImageKind(kind string) string {
 func runImageRemove(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("image rm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	synchronous := fs.Bool("sync", true, "delete the containerd image record synchronously")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch image rm: exactly one image name is required")
 	}
-	cfg, err := LoadConchConfig(*configPath)
-	if err != nil {
-		return fmt.Errorf("conch image rm: load config: %w", err)
-	}
 	imageName := fs.Arg(0)
-	if err := client.NewClientWithConfig("", *configPath).RemoveImage(ctx, client.RemoveImageRequest{
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch image rm: create API client: %w", err)
+	}
+	if err := conchClient.RemoveImage(ctx, client.RemoveImageRequest{
 		ImageName:   imageName,
-		Namespace:   ResolveConchNamespace(cfg, *namespace),
 		Synchronous: *synchronous,
 	}); err != nil {
 		return fmt.Errorf("conch image rm: %w", err)

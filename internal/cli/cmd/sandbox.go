@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func printSandboxHelp(out io.Writer) {
@@ -39,8 +39,6 @@ func PrintSandboxCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        sandbox ID (default: generated)")
 	fmt.Fprintln(out, "  --ram-mb int")
 	fmt.Fprintln(out, "        memory size in MiB (default: conchd sandbox.default_ram_mb)")
-	fmt.Fprintln(out, "  -n, --namespace string")
-	fmt.Fprintln(out, "        containerd namespace")
 	fmt.Fprintln(out, "  --config string")
 	fmt.Fprintln(out, "        config file path")
 }
@@ -74,10 +72,8 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	templateID := fs.String("template-id", "", "template ID (uses daemon default if omitted)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
 	ramMB := fs.Int64("ram-mb", 0, "memory size in MiB")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	fs.Usage = func() { PrintSandboxCreateHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -88,15 +84,19 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	if *ramMB < 0 {
 		return fmt.Errorf("conch sandbox create: --ram-mb must not be negative")
 	}
-	cfg, err := LoadConchConfig(*configPath)
-	if err != nil {
-		return fmt.Errorf("conch sandbox create: load config: %w", err)
-	}
 	id := *sandboxID
 	if id == "" {
 		id = fmt.Sprintf("sandbox-%d", time.Now().UnixNano())
 	}
-	if err := client.NewClientWithConfig("", *configPath).CreateSandbox(*templateID, id, ResolveConchNamespace(cfg, *namespace), *ramMB); err != nil {
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	if err != nil {
+		return fmt.Errorf("conch sandbox create: create API client: %w", err)
+	}
+	if _, err := conchClient.CreateSandbox(ctx, client.SandboxCreateRequest{
+		TemplateID: *templateID,
+		SandboxID:  id,
+		RAMMB:      *ramMB,
+	}); err != nil {
 		return fmt.Errorf("conch sandbox create: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "Sandbox: %s\n", id)
@@ -106,51 +106,51 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 func runSandboxCheckpoint(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sandbox checkpoint", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch sandbox checkpoint: exactly one sandbox ID is required")
 	}
-	cfg, err := LoadConchConfig(*configPath)
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch sandbox checkpoint: load config: %w", err)
+		return fmt.Errorf("conch sandbox checkpoint: create API client: %w", err)
 	}
-	templateID, err := client.NewClientWithConfig("", *configPath).CheckpointSandbox(ctx, fs.Arg(0), ResolveConchNamespace(cfg, *namespace))
+	checkpoint, err := conchClient.CheckpointSandbox(ctx, client.SandboxCheckpointRequest{
+		SandboxID: fs.Arg(0),
+	})
 	if err != nil {
 		return fmt.Errorf("conch sandbox checkpoint: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Template: %s\n", templateID)
+	if checkpoint.Status != "ok" {
+		return fmt.Errorf("conch sandbox checkpoint: unexpected status %q", checkpoint.Status)
+	}
+	fmt.Fprintf(os.Stdout, "Template: %s\n", checkpoint.TemplateID)
 	return nil
 }
 
 func runSandboxLifecycle(ctx context.Context, args []string, op string) error {
 	fs := flag.NewFlagSet("sandbox "+op, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	namespace := fs.String("namespace", "", "containerd namespace")
 	configPath := fs.String("config", "", "config file path")
-	fs.StringVar(namespace, "n", "", "containerd namespace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch sandbox %s: exactly one sandbox ID is required", op)
 	}
-	cfg, err := LoadConchConfig(*configPath)
+	c, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
-		return fmt.Errorf("conch sandbox %s: load config: %w", op, err)
+		return fmt.Errorf("conch sandbox %s: create API client: %w", op, err)
 	}
-	c := client.NewClientWithConfig("", *configPath)
-	ns := ResolveConchNamespace(cfg, *namespace)
 	id := fs.Arg(0)
+	req := client.SandboxLifecycleRequest{SandboxID: id}
 	switch op {
 	case "suspend":
-		err = c.SuspendSandbox(ctx, id, ns)
+		err = c.SuspendSandbox(ctx, req)
 	case "resume":
-		err = c.ResumeSandbox(ctx, id, ns)
+		err = c.ResumeSandbox(ctx, req)
 	}
 	if err != nil {
 		return fmt.Errorf("conch sandbox %s: %w", op, err)

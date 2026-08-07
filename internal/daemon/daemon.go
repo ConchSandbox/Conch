@@ -25,7 +25,6 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
-	"github.com/openeuler/Conch/internal/daemon/recovery"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -119,27 +118,17 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
-		RootDir:          cfg.Containerd.RootDir,
-		StateDir:         cfg.Containerd.StateDir,
-		DefaultNamespace: cfg.Containerd.DefaultNamespace,
-		TemplateStore:    store,
-		Image: containerdhost.ImageConfig{
-			DefaultKernelImage:            cfg.Image.DefaultKernelImage,
-			DefaultKernelPlainHTTP:        cfg.Image.DefaultKernelPlainHTTP,
-			DefaultKernelRegistryUsername: cfg.Image.DefaultKernelRegistryUsername,
-			DefaultKernelRegistryPassword: cfg.Image.DefaultKernelRegistryPassword,
-		},
+		RootDir:       cfg.Containerd.RootDir,
+		StateDir:      cfg.Containerd.StateDir,
+		TemplateStore: store,
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
 		},
 		Sandbox: &containerdhost.SandboxConfig{
-			PoolSize:           cfg.Network.PoolSize,
-			DynamicReservation: cfg.Network.DynamicReservation,
-			BridgeCount:        cfg.Network.BridgeCount,
+			WarmPoolSize:       cfg.Network.WarmPoolSize,
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
 			CNI:                cfg.Network.CNI,
-			NetworkSlotStore:   store,
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
@@ -156,9 +145,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 
-	s.runtimeService = conchruntime.New(host.SandboxService(), host.ImageService(), host.ImageService(), store, cfg.Containerd.DefaultNamespace)
-	s.runtimeService.Snapshot = host.SnapshotService()
-	s.runtimeService.Templates = host.TemplateService()
+	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), store)
+	s.runtimeService.Snapshot = host.SnapshotServer()
+	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateID: cfg.Sandbox.DefaultTemplateID,
 		VMMName:    cfg.Sandbox.DefaultVMMName,
@@ -166,27 +155,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
-	recoveryResult, err := recovery.Reconcile(ctx, recovery.Config{
-		Store:             store,
-		LeaseClient:       daemonClient,
-		SandboxRehydrator: host.SandboxService(),
-		DefaultNamespace:  cfg.Containerd.DefaultNamespace,
-	})
-	if err != nil {
-		cancel()
-		_ = host.Close()
-		_ = store.Close()
-		return nil, fmt.Errorf("reconcile state: %w", err)
-	}
-	logger.Info("State recovery reconciled",
-		ulog.F("sandboxes_checked", recoveryResult.SandboxesChecked),
-		ulog.F("sandboxes_downgraded", recoveryResult.SandboxesDowngraded),
-		ulog.F("runtime_leases_checked", recoveryResult.RuntimeLeasesChecked),
-		ulog.F("lease_errors", recoveryResult.LeaseErrors),
-		ulog.F("sandboxes_rehydrated", recoveryResult.SandboxesRehydrated),
-		ulog.F("rehydrate_errors", recoveryResult.RehydrateErrors),
-		ulog.F("rehydrate_error", recoveryResult.RehydrateError),
-	)
 
 	handleSignals(ctx, cancel, s)
 
@@ -380,7 +348,6 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
-		Namespace:    req.Namespace,
 		SandboxID:    req.SandboxID,
 		LeaseID:      req.LeaseID,
 		TemplateID:   req.TemplateID,
@@ -405,13 +372,16 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			ulog.F("sandbox_id", req.SandboxID),
 			ulog.F("error", err),
 		)
-		http.Error(w, "Failed to create sandbox: "+err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, conchruntime.ErrSandboxAlreadyExists) {
+			status = http.StatusConflict
+		}
+		http.Error(w, "Failed to create sandbox: "+err.Error(), status)
 		return
 	}
 
 	logger.Info("Sandbox created successfully",
 		ulog.F("sandbox_id", result.SandboxID),
-		ulog.F("namespace", result.Namespace),
 		ulog.F("peer_ip", result.IP),
 	)
 
@@ -437,8 +407,7 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	namespace := s.resolveNamespace(r.URL.Query().Get("namespace"))
-	record, err := s.findSandboxRecord(r.Context(), sandboxID, namespace)
+	record, err := s.findSandboxRecord(r.Context(), sandboxID)
 	if err != nil {
 		logger.Error("Failed to resolve sandbox for deletion",
 			ulog.F("sandbox_id", sandboxID),
@@ -451,7 +420,7 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sandbox not found", http.StatusNotFound)
 		return
 	}
-	if err := s.runtimeService.RemoveSandbox(r.Context(), record.Namespace, record.SandboxID); err != nil {
+	if err := s.runtimeService.RemoveSandbox(r.Context(), record.SandboxID); err != nil {
 		logger.Error("Failed to delete sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -466,7 +435,6 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	namespace := s.resolveNamespace(r.URL.Query().Get("namespace"))
 	states, err := parseSandboxStates(r.URL.Query()["state"])
 	if err != nil {
 		http.Error(w, "Invalid state filter: "+err.Error(), http.StatusBadRequest)
@@ -484,7 +452,7 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	sandboxes := make([]sandboxInspectResponse, 0, len(records))
 	for _, record := range records {
-		if record.Namespace == namespace && matchesSandboxState(record, states) {
+		if matchesSandboxState(record, states) {
 			sandboxes = append(sandboxes, sandboxResponseFromRecord(record, false))
 		}
 	}
@@ -500,7 +468,7 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	record, err := s.findSandboxRecord(r.Context(), sandboxID, s.resolveNamespace(r.URL.Query().Get("namespace")))
+	record, err := s.findSandboxRecord(r.Context(), sandboxID)
 	if err != nil {
 		http.Error(w, "Failed to get sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -512,7 +480,7 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sandboxResponseFromRecord(*record, true))
 }
 
-func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID, namespace string) (*state.SandboxRecord, error) {
+func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID string) (*state.SandboxRecord, error) {
 	records, err := s.stateStore.ListSandboxes(ctx)
 	if err != nil {
 		return nil, err
@@ -521,24 +489,9 @@ func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID, namespace str
 		if records[i].SandboxID != sandboxID {
 			continue
 		}
-		if namespace != "" && records[i].Namespace != namespace {
-			continue
-		}
 		return &records[i], nil
 	}
 	return nil, nil
-}
-
-func (s *Daemon) resolveNamespace(namespace string) string {
-	if namespace = strings.TrimSpace(namespace); namespace != "" {
-		return namespace
-	}
-	if s.daemonClient != nil {
-		if namespace = strings.TrimSpace(s.daemonClient.DefaultNamespace()); namespace != "" {
-			return namespace
-		}
-	}
-	return "default"
 }
 
 func parseSandboxStates(values []string) (map[string]bool, error) {
@@ -581,7 +534,6 @@ func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandbo
 		ImageName:    "",
 		SnapshotID:   "",
 		SandboxID:    record.SandboxID,
-		Namespace:    record.Namespace,
 		StartedAt:    formatUnixNanoRFC3339(record.CreatedAt),
 		CPUCount:     record.VCPUNum,
 		MemoryMB:     record.RamMB,
@@ -605,7 +557,6 @@ func sandboxResponseFromCreate(result runtimeapi.SandboxCreateResult) createSand
 	return createSandboxResponse{
 		TemplateID:           result.TemplateID,
 		SandboxID:            result.SandboxID,
-		Namespace:            result.Namespace,
 		ConchInitAccessToken: result.AgentToken,
 		Domain:               result.IP,
 	}
@@ -632,7 +583,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID)
 	if err != nil {
 		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -641,7 +592,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sandbox not found", http.StatusNotFound)
 		return
 	}
-	err = s.runtimeService.SuspendSandbox(r.Context(), record.Namespace, record.SandboxID)
+	err = s.runtimeService.SuspendSandbox(r.Context(), record.SandboxID)
 	if err != nil {
 		logger.Error("Failed to suspend sandbox",
 			ulog.F("sandbox_id", req.SandboxID),
@@ -666,7 +617,7 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	record, err := s.findSandboxRecord(r.Context(), req.SandboxID, s.resolveNamespace(req.Namespace))
+	record, err := s.findSandboxRecord(r.Context(), req.SandboxID)
 	if err != nil {
 		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -675,7 +626,7 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sandbox not found", http.StatusNotFound)
 		return
 	}
-	if err := s.runtimeService.ResumeSandbox(r.Context(), record.Namespace, record.SandboxID); err != nil {
+	if err := s.runtimeService.ResumeSandbox(r.Context(), record.SandboxID); err != nil {
 		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -693,7 +644,6 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
-		Namespace: req.Namespace,
 		SandboxID: req.SandboxID,
 		Labels:    req.Labels,
 	})
@@ -754,7 +704,6 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
-		Namespace:    req.Namespace,
 		Source:       req.Source,
 		KernelPath:   kernelPath,
 		InitrdPath:   initrdPath,
@@ -773,7 +722,6 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.runtimeService.PullTemplate(r.Context(), runtimeapi.TemplatePullOptions{
 		Reference: req.Reference,
-		Namespace: req.Namespace,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
 		Password:  req.Password,
@@ -799,11 +747,9 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 	if err := s.runtimeService.PushTemplate(r.Context(), runtimeapi.TemplatePushOptions{
 		TemplateID:      req.TemplateID,
 		RemoteReference: req.RemoteReference,
-		Namespace:       req.Namespace,
 		PlainHTTP:       req.PlainHTTP,
 		Username:        req.Username,
 		Password:        req.Password,
-		RegistryTimeout: req.RegistryTimeout,
 	}); err != nil {
 		http.Error(w, "Failed to push template: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -817,9 +763,8 @@ func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, err := s.runtimeService.ListTemplates(r.Context(), runtimeapi.TemplateListOptions{
-		Namespace: req.Namespace,
-		Origin:    req.Origin,
-		BootMode:  req.BootMode,
+		Origin:   req.Origin,
+		BootMode: req.BootMode,
 	})
 	if err != nil {
 		http.Error(w, "Failed to list templates: "+err.Error(), http.StatusInternalServerError)
@@ -861,7 +806,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -872,14 +817,13 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := runtimeapi.PullImageOptions{
 		ImageName:  req.ImageName,
-		Namespace:  req.Namespace,
 		PlainHTTP:  req.PlainHTTP,
 		Username:   req.Username,
 		Password:   req.Password,
 		SkipUnpack: req.SkipUnpack,
 	}
 
-	result, err := s.runtimeService.PullImage(r.Context(), opts)
+	result, err := conchimage.Pull(r.Context(), s.daemonClient, opts)
 	if err != nil {
 		logger.Error("Failed to pull image",
 			ulog.F("image_name", opts.ImageName),
@@ -901,7 +845,7 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -911,15 +855,13 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.PushImageOptions{
-		LocalImage:      req.LocalImage,
-		RemoteImage:     req.RemoteImage,
-		Namespace:       req.Namespace,
-		PlainHTTP:       req.PlainHTTP,
-		Username:        req.Username,
-		Password:        req.Password,
-		RegistryTimeout: req.RegistryTimeout,
+		LocalImage:  req.LocalImage,
+		RemoteImage: req.RemoteImage,
+		PlainHTTP:   req.PlainHTTP,
+		Username:    req.Username,
+		Password:    req.Password,
 	}
-	if err := s.runtimeService.PushImage(r.Context(), opts); err != nil {
+	if err := conchimage.Push(r.Context(), s.daemonClient, opts); err != nil {
 		logger.Error("Failed to push image",
 			ulog.F("local_image", opts.LocalImage),
 			ulog.F("remote_image", opts.RemoteImage),
@@ -944,7 +886,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -953,9 +895,8 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	images, err := s.runtimeService.ListImages(r.Context(), runtimeapi.ListImagesOptions{
-		Namespace: req.Namespace,
-		Filters:   req.Filters,
+	images, err := conchimage.List(r.Context(), s.daemonClient, runtimeapi.ListImagesOptions{
+		Filters: req.Filters,
 	})
 	if err != nil {
 		logger.Error("Failed to list images", ulog.F("error", err))
@@ -963,7 +904,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(listImageResponse{Images: imageRecordResponses(images)})
+	_ = json.NewEncoder(w).Encode(listImageResponse{Images: images})
 }
 
 func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +915,7 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -984,11 +925,10 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.RemoveImageOptions{
-		Namespace:   req.Namespace,
 		ImageName:   req.ImageName,
 		Synchronous: req.Synchronous,
 	}
-	if err := s.runtimeService.RemoveImage(r.Context(), opts); err != nil {
+	if err := conchimage.Remove(r.Context(), s.daemonClient, opts); err != nil {
 		logger.Error("Failed to remove image",
 			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
@@ -1008,7 +948,7 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1020,9 +960,8 @@ func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
 
 	opts := runtimeapi.UnpackImageOptions{
 		ImageName: req.ImageName,
-		Namespace: req.Namespace,
 	}
-	results, err := s.runtimeService.UnpackImage(r.Context(), opts)
+	results, err := conchimage.Unpack(r.Context(), s.daemonClient, opts)
 	if err != nil {
 		logger.Error("Failed to unpack image",
 			ulog.F("image_name", opts.ImageName),
@@ -1044,7 +983,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.runtimeService == nil || s.runtimeService.Image == nil {
+	if s.daemonClient == nil {
 		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1060,8 +999,7 @@ func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	resp, err := s.runtimeService.ImportImageArchive(r.Context(), file, runtimeapi.ImportImageArchiveOptions{
-		Namespace:   r.FormValue("namespace"),
+	resp, err := conchimage.ImportArchive(r.Context(), s.daemonClient, file, runtimeapi.ImportImageArchiveOptions{
 		ImportedTag: r.FormValue("imported_tag"),
 	})
 	if err != nil {
@@ -1184,15 +1122,14 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info, err := s.runtimeService.SnapshotInfo(r.Context(), runtimeapi.SnapshotInfoOptions{
-		Key:       req.Key,
-		Namespace: req.Namespace,
+		Key: req.Key,
 	})
 	if err != nil {
 		http.Error(w, "Failed to get snapshot info: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(snapshotRecordHTTPResponse(info))
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1213,8 +1150,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshots, err := s.runtimeService.ListSnapshots(r.Context(), runtimeapi.ListSnapshotsOptions{
-		Namespace: req.Namespace,
-		Filters:   req.Filters,
+		Filters: req.Filters,
 	})
 	if err != nil {
 		logger.Error("Failed to list snapshots", ulog.F("error", err))
@@ -1222,7 +1158,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshotRecordHTTPResponses(snapshots)})
+	_ = json.NewEncoder(w).Encode(listSnapshotResponse{Snapshots: snapshots})
 }
 
 func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1247,8 +1183,7 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.RemoveSnapshotOptions{
-		Key:       req.Key,
-		Namespace: req.Namespace,
+		Key: req.Key,
 	}
 	if err := s.runtimeService.RemoveSnapshot(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove snapshot",

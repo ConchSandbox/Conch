@@ -29,7 +29,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) PrepareSandbox(namespace, sandboxID string, mounts []Mount) ([]Device, error) {
+func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, error) {
 	if len(mounts) == 0 {
 		return nil, nil
 	}
@@ -62,18 +62,13 @@ func (m *Manager) PrepareSandbox(namespace, sandboxID string, mounts []Mount) ([
 		}
 	}
 	return m.backend.Prepare(PrepareRequest{
-		Namespace: namespace,
 		SandboxID: sandboxID,
 		Mounts:    mounts,
 	})
 }
 
-func (m *Manager) CleanupSandbox(namespace, sandboxID string, devices []Device) error {
-	return m.backend.Cleanup(namespace, sandboxID, devices)
-}
-
-func (m *Manager) RestoreSandbox(namespace, sandboxID string, devices []Device) error {
-	return m.backend.Restore(namespace, sandboxID, devices)
+func (m *Manager) CleanupSandbox(sandboxID string, devices []Device) error {
+	return m.backend.Cleanup(sandboxID, devices)
 }
 
 func isBlockedTarget(target string) bool {

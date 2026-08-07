@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 func TestPrintImageHelpListsImageCommands(t *testing.T) {
@@ -66,6 +66,22 @@ func TestRunImageListPrintsKind(t *testing.T) {
 	}
 	if !strings.Contains(output, "boot-index-resume") {
 		t.Fatalf("output missing kind value:\n%s", output)
+	}
+}
+
+func TestRunImageListRejectsInvalidConfig(t *testing.T) {
+	configPath := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(configPath, []byte("server: [\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("CONCH_API_URL", "http://127.0.0.1:4063")
+
+	err := runImageList(context.Background(), []string{"--config", configPath})
+	if err == nil {
+		t.Fatal("runImageList() error = nil")
+	}
+	if !strings.Contains(err.Error(), "failed to parse config file") {
+		t.Fatalf("runImageList() error = %v, want YAML parse error", err)
 	}
 }
 

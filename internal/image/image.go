@@ -2,165 +2,171 @@ package image
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
-	"github.com/containerd/containerd/v2/core/content"
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/platforms"
-	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/identity"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	digestpkg "github.com/opencontainers/go-digest"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
-// GetSnapshotID resolves image name and returns rootfs snapshot ID (chainID)
-// Supports both regular images and OCI Image Index (multi-architecture images)
-func GetSnapshotID(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (string, error) {
-	nsCtx, err := client.WithNamespace(ctx, namespace)
+func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
+	if client == nil || client.Client == nil {
+		return runtimeapi.PullImageResult{}, fmt.Errorf("containerd client is required")
+	}
+	if req.ImageName == "" {
+		return runtimeapi.PullImageResult{}, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+	}
+
+	pullCtx := containerdclient.NewNamespaceContext(ctx)
+	resolver := docker.NewResolver(docker.ResolverOptions{
+		PlainHTTP: req.PlainHTTP,
+		Credentials: func(string) (string, string, error) {
+			return req.Username, req.Password, nil
+		},
+	})
+	if _, err := client.Pull(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
+		return runtimeapi.PullImageResult{}, fmt.Errorf("pull image %s: %w", req.ImageName, err)
+	}
+
+	fetched, err := client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver))
 	if err != nil {
-		return "", fmt.Errorf("create namespace context: %w", err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
+	}
+	kind := DetectImageKind(pullCtx, client.ContentStore(), fetched.Target)
+	if err := SetImageKindLabel(pullCtx, client.ImageService(), fetched.Name, kind); err != nil {
+		return runtimeapi.PullImageResult{}, err
+	}
+	if req.SkipUnpack {
+		return runtimeapi.PullImageResult{}, nil
 	}
 
-	imageMeta, err := client.ImageService().Get(nsCtx, imageName)
+	results, err := UnpackAllSubImages(pullCtx, client.Client, req.ImageName)
 	if err != nil {
-		return "", fmt.Errorf("get image by name %s: %w", imageName, err)
+		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
 	}
-
-	imageID := imageMeta.Target.Digest.String()
-	if imageID == "" {
-		return "", fmt.Errorf("image digest empty for image name %s", imageName)
-	}
-
-	imageDigest, err := digest.Parse(imageID)
-	if err != nil {
-		return "", fmt.Errorf("parse image digest: %w", err)
-	}
-
-	// Try to get layer chain IDs from RootFS
-	desc := ocispec.Descriptor{Digest: imageDigest}
-	rootfs, rootfsErr := images.RootFS(nsCtx, client.ContentStore(), desc)
-
-	// If RootFS is empty, try parsing from config (handles Image Index scenario)
-	if len(rootfs) == 0 {
-		configDesc, err := resolveConfigDesc(nsCtx, client.ContentStore(), desc)
-		if err != nil {
-			if rootfsErr != nil {
-				return "", fmt.Errorf("get rootfs from image %s: %w", imageID, rootfsErr)
-			}
-			return "", err
-		}
-
-		configBlob, err := content.ReadBlob(nsCtx, client.ContentStore(), configDesc)
-		if err != nil {
-			return "", fmt.Errorf("read image config for %s: %w", imageID, err)
-		}
-
-		var img ocispec.Image
-		if err := json.Unmarshal(configBlob, &img); err != nil {
-			return "", fmt.Errorf("unmarshal image config for %s: %w", imageID, err)
-		}
-		rootfs = img.RootFS.DiffIDs
-	}
-
-	if len(rootfs) == 0 {
-		return "", fmt.Errorf("image %s rootfs diffIDs empty", imageID)
-	}
-
-	chainID := identity.ChainID(rootfs)
-	snapshotID := chainID.String()
-	if snapshotID == "" {
-		return "", fmt.Errorf("snapshot id empty for image %s", imageID)
-	}
-	return snapshotID, nil
+	return runtimeapi.PullImageResult{Refs: results}, nil
 }
 
-type BootParentSnapshotIDs struct {
-	Rootfs string
-	Mem    string
-	VM     string
+func Push(ctx context.Context, client *containerdclient.Client, req runtimeapi.PushImageOptions) error {
+	if client == nil || client.Client == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	if req.LocalImage == "" {
+		return fmt.Errorf("%w: local_image is required", ErrInvalidRequest)
+	}
+	if req.RemoteImage == "" {
+		return fmt.Errorf("%w: remote_image is required", ErrInvalidRequest)
+	}
+
+	pushCtx := containerdclient.NewNamespaceContext(ctx)
+	img, err := client.GetImage(pushCtx, req.LocalImage)
+	if err != nil {
+		return fmt.Errorf("lookup image %s: %w", req.LocalImage, err)
+	}
+	resolver := docker.NewResolver(docker.ResolverOptions{
+		PlainHTTP: req.PlainHTTP,
+		Credentials: func(string) (string, string, error) {
+			return req.Username, req.Password, nil
+		},
+	})
+	if err := client.Push(pushCtx, req.RemoteImage, img.Target(), containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
+		return fmt.Errorf("push image %s -> %s: %w", req.LocalImage, req.RemoteImage, err)
+	}
+	return nil
 }
 
-func ResolveBootParentSnapshotIDs(ctx context.Context, client *containerdclient.Client, namespace, imageName string) (BootParentSnapshotIDs, bool, error) {
-	nsCtx, err := client.WithNamespace(ctx, namespace)
+func List(ctx context.Context, client *containerdclient.Client, req runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
+	if client == nil || client.Client == nil {
+		return nil, fmt.Errorf("containerd client is required")
+	}
+	listCtx := containerdclient.NewNamespaceContext(ctx)
+	items, err := client.ImageService().List(listCtx, req.Filters...)
 	if err != nil {
-		return BootParentSnapshotIDs{}, false, fmt.Errorf("create namespace context: %w", err)
+		return nil, fmt.Errorf("list images: %w", err)
 	}
-
-	imageMeta, err := client.ImageService().Get(nsCtx, imageName)
-	if err != nil {
-		return BootParentSnapshotIDs{}, false, fmt.Errorf("get image by name %s: %w", imageName, err)
+	out := make([]runtimeapi.ImageRecord, 0, len(items))
+	for _, item := range items {
+		kind := strings.TrimSpace(item.Labels[ImageKindLabel])
+		if kind == "" {
+			kind = ImageKindOCIImage
+		}
+		out = append(out, runtimeapi.ImageRecord{
+			Name:            item.Name,
+			TargetDigest:    item.Target.Digest.String(),
+			RepoDigests:     imageRepoDigests(item.Name, item.Target.Digest.String()),
+			TargetMediaType: item.Target.MediaType,
+			Size:            item.Target.Size,
+			Kind:            kind,
+			Labels:          item.Labels,
+			CreatedAt:       item.CreatedAt,
+			UpdatedAt:       item.UpdatedAt,
+		})
 	}
-	if imageMeta.Target.MediaType != ocispec.MediaTypeImageIndex {
-		return BootParentSnapshotIDs{}, false, nil
-	}
-	if err := ValidateBootIndexContent(nsCtx, client.Client, imageName); err != nil {
-		return BootParentSnapshotIDs{}, false, nil
-	}
-
-	snapshotMap, err := UnpackAllSubImages(nsCtx, client.Client, imageName)
-	if err != nil {
-		return BootParentSnapshotIDs{}, true, fmt.Errorf("unpack boot image %s: %w", imageName, err)
-	}
-	parents := BootParentSnapshotIDs{
-		Rootfs: snapshotMap[KindRootfs],
-		Mem:    snapshotMap[KindMemSnapshot],
-		VM:     snapshotMap[KindSandbox],
-	}
-	if parents.Rootfs == "" || parents.VM == "" {
-		return BootParentSnapshotIDs{}, true, fmt.Errorf("boot image %s missing required parent snapshots", imageName)
-	}
-	return parents, true, nil
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
-// manifestProbe parses manifest blob for platform and config info
-type manifestProbe struct {
-	MediaType string               `json:"mediaType"`
-	Config    ocispec.Descriptor   `json:"config"`
-	Manifests []ocispec.Descriptor `json:"manifests"`
+func imageRepoDigests(name, digest string) []string {
+	name = strings.TrimSpace(name)
+	digest = strings.TrimSpace(digest)
+	if name == "" || digest == "" || isDigestOnlyRef(name) {
+		return nil
+	}
+	base := name
+	if repo, _, ok := strings.Cut(base, "@"); ok {
+		base = repo
+	} else {
+		lastSlash := strings.LastIndex(base, "/")
+		lastColon := strings.LastIndex(base, ":")
+		if lastColon > lastSlash {
+			base = base[:lastColon]
+		}
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return nil
+	}
+	return []string{base + "@" + digest}
 }
 
-// resolveConfigDesc parses image manifest and returns config descriptor
-// Handles OCI Image Index (multi-architecture manifest lists)
-func resolveConfigDesc(ctx context.Context, store content.Store, desc ocispec.Descriptor) (ocispec.Descriptor, error) {
-	blob, err := content.ReadBlob(ctx, store, desc)
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("read manifest blob: %w", err)
+func isDigestOnlyRef(ref string) bool {
+	if _, err := digestpkg.Parse(ref); err == nil {
+		return true
 	}
+	algo, _, ok := strings.Cut(ref, ":")
+	if !ok || strings.Contains(algo, "/") {
+		return false
+	}
+	switch algo {
+	case "sha256", "sha384", "sha512":
+		return true
+	default:
+		return false
+	}
+}
 
-	var probe manifestProbe
-	if err := json.Unmarshal(blob, &probe); err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("unmarshal manifest blob: %w", err)
+func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi.RemoveImageOptions) error {
+	if client == nil || client.Client == nil {
+		return fmt.Errorf("containerd client is required")
 	}
-
-	// Handle image index (multi-architecture manifests)
-	if len(probe.Manifests) > 0 {
-		matcher := platforms.Default()
-		var chosen *ocispec.Descriptor
-		for i := range probe.Manifests {
-			m := probe.Manifests[i]
-			if m.Annotations["io.conch.kind"] == "rootfs" {
-				chosen = &m
-				break
-			}
-			if m.Platform != nil && matcher.Match(*m.Platform) {
-				chosen = &m
-				break
-			}
-		}
-		// If no matching platform and only one manifest, use it
-		if chosen == nil && len(probe.Manifests) == 1 {
-			chosen = &probe.Manifests[0]
-		}
-		if chosen == nil {
-			return ocispec.Descriptor{}, fmt.Errorf("no matching manifest for platform %s", platforms.Format(platforms.DefaultSpec()))
-		}
-		return resolveConfigDesc(ctx, store, ocispec.Descriptor{Digest: chosen.Digest, MediaType: chosen.MediaType})
+	if req.ImageName == "" {
+		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
 	}
-
-	if probe.Config.Digest == "" {
-		return ocispec.Descriptor{}, fmt.Errorf("config digest empty in manifest %s", desc.Digest.String())
+	removeCtx := containerdclient.NewNamespaceContext(ctx)
+	opts := []images.DeleteOpt{}
+	if req.Synchronous {
+		opts = append(opts, images.SynchronousDelete())
 	}
-	return probe.Config, nil
+	if err := client.ImageService().Delete(removeCtx, req.ImageName, opts...); err != nil {
+		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
+	}
+	return nil
 }

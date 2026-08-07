@@ -1,15 +1,12 @@
 package daemon
 
 import (
-	"time"
-
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/volume"
 )
 
 type pullImageRequest struct {
 	ImageName  string `json:"image_name"`
-	Namespace  string `json:"namespace,omitempty"`
 	PlainHTTP  bool   `json:"plain_http,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"password,omitempty"`
@@ -17,45 +14,28 @@ type pullImageRequest struct {
 }
 
 type pushImageRequest struct {
-	LocalImage      string `json:"local_image"`
-	RemoteImage     string `json:"remote_image"`
-	Namespace       string `json:"namespace,omitempty"`
-	PlainHTTP       bool   `json:"plain_http,omitempty"`
-	Username        string `json:"username,omitempty"`
-	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
+	LocalImage  string `json:"local_image"`
+	RemoteImage string `json:"remote_image"`
+	PlainHTTP   bool   `json:"plain_http,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
 }
 
 type listImageRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type removeImageRequest struct {
-	Namespace   string `json:"namespace,omitempty"`
 	ImageName   string `json:"image_name"`
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
 type unpackImageRequest struct {
 	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type imageRecordResponse struct {
-	Name            string            `json:"name"`
-	TargetDigest    string            `json:"target_digest"`
-	RepoDigests     []string          `json:"repo_digests,omitempty"`
-	TargetMediaType string            `json:"target_media_type"`
-	Size            int64             `json:"size,omitempty"`
-	Kind            string            `json:"kind,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	CreatedAt       time.Time         `json:"created_at,omitempty"`
-	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 }
 
 type listImageResponse struct {
-	Images []imageRecordResponse `json:"images"`
+	Images []runtimeapi.ImageRecord `json:"images"`
 }
 
 type importImageArchiveResponse struct {
@@ -64,32 +44,19 @@ type importImageArchiveResponse struct {
 }
 
 type listSnapshotRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type removeSnapshotRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
+	Key string `json:"key"`
 }
 
 type snapshotInfoRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
-}
-
-type snapshotRecordResponse struct {
-	Key         string            `json:"key"`
-	Kind        string            `json:"kind,omitempty"`
-	Parent      string            `json:"parent,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	StoragePath string            `json:"storage_path,omitempty"`
-	CreatedAt   time.Time         `json:"created_at,omitempty"`
-	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
+	Key string `json:"key"`
 }
 
 type listSnapshotResponse struct {
-	Snapshots []snapshotRecordResponse `json:"snapshots"`
+	Snapshots []runtimeapi.SnapshotRecord `json:"snapshots"`
 }
 
 type removeSnapshotResponse struct {
@@ -97,7 +64,6 @@ type removeSnapshotResponse struct {
 }
 
 type sandboxCreateRequest struct {
-	Namespace    string            `json:"namespace"`
 	TemplateID   string            `json:"template_id"`
 	VMMName      string            `json:"vmm_name"`
 	SandboxID    string            `json:"sandbox_id"`
@@ -121,7 +87,6 @@ type sandboxLifecycleResponse struct {
 type createSandboxResponse struct {
 	TemplateID           string `json:"templateID"`
 	SandboxID            string `json:"sandboxID"`
-	Namespace            string `json:"namespace"`
 	ConchInitVersion     string `json:"conchInitVersion"`
 	Alias                string `json:"alias"`
 	ConchInitAccessToken string `json:"conchInitAccessToken"`
@@ -133,7 +98,6 @@ type sandboxInspectResponse struct {
 	ImageName        string                       `json:"imageName"`
 	SnapshotID       string                       `json:"snapshotID"`
 	SandboxID        string                       `json:"sandboxID"`
-	Namespace        string                       `json:"namespace"`
 	StartedAt        string                       `json:"startedAt"`
 	EndAt            string                       `json:"endAt"`
 	CPUCount         int64                        `json:"cpuCount"`
@@ -148,20 +112,17 @@ type sandboxInspectResponse struct {
 }
 
 type sandboxLifecycleRequest struct {
-	Namespace string `json:"namespace,omitempty"`
 	SandboxID string `json:"sandbox_id"`
 }
 
 type sandboxCheckpointRequest struct {
-	Namespace string            `json:"namespace,omitempty"`
 	SandboxID string            `json:"sandbox_id"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type templateListRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	Origin    string `json:"origin,omitempty"`
-	BootMode  string `json:"boot_mode,omitempty"`
+	Origin   string `json:"origin,omitempty"`
+	BootMode string `json:"boot_mode,omitempty"`
 }
 
 type templateIDRequest struct {
@@ -170,7 +131,6 @@ type templateIDRequest struct {
 
 type templateCreateRequest struct {
 	Source       string            `json:"source"`
-	Namespace    string            `json:"namespace,omitempty"`
 	BootIndexTag string            `json:"boot_index_tag,omitempty"`
 	PlainHTTP    bool              `json:"plain_http,omitempty"`
 	Username     string            `json:"username,omitempty"`
@@ -180,7 +140,6 @@ type templateCreateRequest struct {
 
 type templatePullRequest struct {
 	Reference string            `json:"reference"`
-	Namespace string            `json:"namespace,omitempty"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
 	Password  string            `json:"password,omitempty"`
@@ -190,11 +149,9 @@ type templatePullRequest struct {
 type templatePushRequest struct {
 	TemplateID      string `json:"template_id"`
 	RemoteReference string `json:"remote_reference"`
-	Namespace       string `json:"namespace,omitempty"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
 
 type templateRecordResponse = runtimeapi.TemplateRecord
@@ -203,61 +160,9 @@ type templateListResponse struct {
 	Items []templateRecordResponse `json:"items"`
 }
 
-func imageRecordResponses(records []runtimeapi.ImageRecord) []imageRecordResponse {
-	out := make([]imageRecordResponse, 0, len(records))
-	for _, record := range records {
-		out = append(out, imageRecordResponse{
-			Name:            record.Name,
-			TargetDigest:    record.TargetDigest,
-			RepoDigests:     append([]string(nil), record.RepoDigests...),
-			TargetMediaType: record.TargetMediaType,
-			Size:            record.Size,
-			Kind:            record.Kind,
-			Labels:          copyStringMap(record.Labels),
-			CreatedAt:       record.CreatedAt,
-			UpdatedAt:       record.UpdatedAt,
-		})
-	}
-	return out
-}
-
 func importImageArchiveHTTPResponse(result runtimeapi.ImportImageArchiveResult) importImageArchiveResponse {
 	return importImageArchiveResponse{
 		SnapshotKey: result.SnapshotKey,
 		ImageName:   result.ImageName,
 	}
-}
-
-func snapshotRecordHTTPResponse(record runtimeapi.SnapshotRecord) snapshotRecordResponse {
-	return snapshotRecordResponse{
-		Key:         record.Key,
-		Kind:        record.Kind,
-		Parent:      record.Parent,
-		Labels:      copyStringMap(record.Labels),
-		StoragePath: record.StoragePath,
-		CreatedAt:   record.CreatedAt,
-		UpdatedAt:   record.UpdatedAt,
-	}
-}
-
-func snapshotRecordHTTPResponses(records []runtimeapi.SnapshotRecord) []snapshotRecordResponse {
-	if records == nil {
-		return nil
-	}
-	out := make([]snapshotRecordResponse, 0, len(records))
-	for _, record := range records {
-		out = append(out, snapshotRecordHTTPResponse(record))
-	}
-	return out
-}
-
-func copyStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }

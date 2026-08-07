@@ -8,9 +8,8 @@ import (
 )
 
 type Filter struct {
-	Origin    Origin
-	BootMode  BootMode
-	Namespace string
+	Origin   Origin
+	BootMode BootMode
 }
 
 type Store interface {
@@ -87,7 +86,6 @@ func (s *PersistentStore) List(ctx context.Context, filter Filter) ([]Entry, err
 			return nil, fmt.Errorf("unknown template boot mode %q", filter.BootMode)
 		}
 	}
-	namespace := strings.TrimSpace(filter.Namespace)
 	items, err := s.store.ListTemplates(ctx)
 	if err != nil {
 		return nil, err
@@ -104,9 +102,6 @@ func (s *PersistentStore) List(ctx context.Context, filter Filter) ([]Entry, err
 		if filter.BootMode != "" && item.BootMode != filter.BootMode {
 			continue
 		}
-		if namespace != "" && item.Namespace != namespace {
-			continue
-		}
 		out = append(out, item)
 	}
 	return out, nil
@@ -117,13 +112,6 @@ func (s *PersistentStore) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("template store is not configured")
 	}
 	return s.store.DeleteTemplate(ctx, strings.TrimSpace(id))
-}
-
-func normalizeNamespace(namespace string) string {
-	if ns := strings.TrimSpace(namespace); ns != "" {
-		return ns
-	}
-	return "default"
 }
 
 func copyMap(in map[string]string) map[string]string {

@@ -6,13 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	digestpkg "github.com/opencontainers/go-digest"
+	"github.com/containerd/errdefs"
+
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -20,7 +20,6 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
-	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -36,30 +35,6 @@ type SandboxOps interface {
 // a usable template ID for sandbox creation.
 var ErrTemplateIDRequired = errors.New("template_id is required and no default_template_id is configured")
 
-type ImageOps interface {
-	Pull(context.Context, runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error)
-	Push(context.Context, runtimeapi.PushImageOptions) error
-	List(context.Context, runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error)
-	Remove(context.Context, runtimeapi.RemoveImageOptions) error
-	Unpack(context.Context, runtimeapi.UnpackImageOptions) (map[string]string, error)
-	ImportArchive(context.Context, io.Reader, runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error)
-	ExportArchive(context.Context, io.Writer, runtimeapi.ExportImageArchiveOptions) error
-}
-
-// TemplateBootIndexOps groups image operations that produce, inspect, or
-// distribute Boot Indexes for Templates. These still run through the containerd
-// image service, but they are conceptually separate from generic OCI image
-// lifecycle operations.
-type TemplateBootIndexOps interface {
-	PushBootIndex(context.Context, conchimage.PushBootIndexOptions) error
-	PrepareRootfsSource(context.Context, conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error)
-	PublishBootImage(context.Context, conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error)
-	InspectBootIndex(ctx context.Context, namespace, bootIndexDigest string) (conchimage.BootIndexInfo, error)
-	InspectBootIndexReference(ctx context.Context, namespace, reference string) (conchimage.BootIndexInfo, error)
-	PublishCheckpointBootImage(context.Context, conchimage.PublishCheckpointBootImageOptions) (conchimage.PublishCheckpointBootImageResult, error)
-	ConvertRootfsToErofs(context.Context, erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error)
-}
-
 type SnapshotOps interface {
 	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
 	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
@@ -67,16 +42,16 @@ type SnapshotOps interface {
 }
 
 type Service struct {
-	Sandbox           SandboxOps
-	Image             ImageOps
-	TemplateBootIndex TemplateBootIndexOps
-	Snapshot          SnapshotOps
-	Store             state.Store
-	Templates         conchtemplate.Store
-	DefaultNamespace  string
-	SandboxDefaults   SandboxDefaults
-	lifecycleLocks    sandboxLifecycleLocks
+	Sandbox         SandboxOps
+	Containerd      *containerdclient.Client
+	Snapshot        SnapshotOps
+	Store           state.Store
+	Templates       conchtemplate.Store
+	SandboxDefaults SandboxDefaults
+	lifecycleLocks  sandboxLifecycleLocks
 }
+
+var ErrSandboxAlreadyExists = errors.New("sandbox already exists")
 
 type sandboxLifecycleLock struct {
 	mu   sync.Mutex
@@ -113,18 +88,12 @@ func (l *sandboxLifecycleLocks) lock(id string) func() {
 	}
 }
 
-func New(sandboxOps SandboxOps, imageOps ImageOps, templateBootIndexOps TemplateBootIndexOps, store state.Store, defaultNamespace ...string) *Service {
-	namespace := "default"
-	if len(defaultNamespace) > 0 && strings.TrimSpace(defaultNamespace[0]) != "" {
-		namespace = strings.TrimSpace(defaultNamespace[0])
-	}
+func New(sandboxOps SandboxOps, client *containerdclient.Client, store state.Store) *Service {
 	return &Service{
-		Sandbox:           sandboxOps,
-		Image:             imageOps,
-		TemplateBootIndex: templateBootIndexOps,
-		Store:             store,
-		Templates:         conchtemplate.NewStore(store),
-		DefaultNamespace:  namespace,
+		Sandbox:    sandboxOps,
+		Containerd: client,
+		Store:      store,
+		Templates:  conchtemplate.NewStore(store),
 	}
 }
 
@@ -149,9 +118,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
-	namespace := s.normalizeNamespace(opts.Namespace)
+	if s.Store != nil {
+		if _, err := s.Store.GetSandbox(ctx, opts.SandboxID); err == nil {
+			return SandboxCreateResult{}, fmt.Errorf("%w: %s", ErrSandboxAlreadyExists, opts.SandboxID)
+		} else if !errors.Is(err, state.ErrNotFound) {
+			return SandboxCreateResult{}, fmt.Errorf("get sandbox state: %w", err)
+		}
+	}
 	if opts.LeaseID == "" {
-		opts.LeaseID = containerdclient.RuntimeLeaseID(namespace)
+		opts.LeaseID = containerdclient.RuntimeLeaseID()
 	}
 	s.applySandboxDefaults(&opts)
 	if opts.TemplateID == "" {
@@ -163,7 +138,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	req := sandbox.CreateRequest{
-		Namespace:    namespace,
 		TemplateID:   opts.TemplateID,
 		VMMName:      opts.VMMName,
 		SandboxID:    opts.SandboxID,
@@ -178,47 +152,29 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 
 	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
-		Namespace:                     namespace,
 		State:                         state.SandboxReady,
 		CreatedAt:                     createdAt,
-		LeaseID:                       opts.LeaseID,
 		SourceTemplateID:              opts.TemplateID,
-		SourceBootIndexDigest:         createResult.BootIndexDigest,
 		CheckpointHeadTemplateID:      opts.TemplateID,
 		CheckpointHeadBootIndexDigest: createResult.BootIndexDigest,
 		IP:                            createResult.IP,
-		VMMName:                       opts.VMMName,
 		VCPUNum:                       opts.VCPUNum,
 		RamMB:                         opts.RamMB,
-		VMMPID:                        createResult.VMMPID,
-		VMMSocketPath:                 createResult.VMMSocketPath,
-		VsockCID:                      createResult.VsockCID,
-		VsockSocketPath:               createResult.VsockSocketPath,
-		NetworkSlotKey:                createResult.NetworkSlotKey,
-		NetworkNS:                     createResult.NetworkNS,
-		RootfsKey:                     createResult.RootfsKey,
-		MemKey:                        createResult.MemKey,
-		RootfsMount:                   createResult.RootfsMount,
-		RootfsPmemPaths:               append([]string(nil), createResult.RootfsPmemPaths...),
-		MemMount:                      createResult.MemMount,
-		VMMount:                       createResult.VMMount,
-		SnapshotRootDir:               createResult.RootDir,
-		VolumeDevices:                 volumeDevicesToState(createResult.VolumeDevices),
-	}
-	if err != nil {
-		rec.State = state.SandboxUnknown
-		rec.LastError = err.Error()
-		_ = s.upsertSandbox(ctx, rec)
-		return SandboxCreateResult{}, err
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
+		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
+		if cleanupErr != nil {
+			return SandboxCreateResult{}, errors.Join(err, fmt.Errorf("clean up sandbox after state create failed: %w", cleanupErr))
+		}
 		return SandboxCreateResult{}, err
 	}
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,
-		Namespace:  namespace,
 		IP:         createResult.IP,
 		AgentToken: createResult.AgentToken,
 		TemplateID: opts.TemplateID,
@@ -226,27 +182,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:      opts.RamMB,
 		CreatedAt:  createdAt,
 	}, nil
-}
-
-func volumeDevicesToState(devices []volume.Device) []state.VolumeDevice {
-	if len(devices) == 0 {
-		return nil
-	}
-	out := make([]state.VolumeDevice, 0, len(devices))
-	for _, device := range devices {
-		out = append(out, state.VolumeDevice{
-			SandboxID:  device.SandboxID,
-			Namespace:  device.Namespace,
-			Backend:    device.Backend,
-			Tag:        device.Tag,
-			Socket:     device.Socket,
-			VolumeDir:  device.VolumeDir,
-			ConfigPath: device.ConfigPath,
-			PID:        device.PID,
-			StartTime:  device.StartTime,
-		})
-	}
-	return out
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -272,31 +207,17 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 	}
 }
 
-func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string) error {
+func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	rec, recErr := s.getSandbox(ctx, sandboxID)
-	stateFound := recErr == nil
-	if recErr != nil && !errors.Is(recErr, state.ErrNotFound) {
-		return fmt.Errorf("get sandbox state: %w", recErr)
-	}
-	if namespace == "" {
-		namespace = rec.Namespace
-	}
-	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Delete(sandbox.DeleteRequest{Namespace: namespace, SandboxID: sandboxID})
+	err := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
 	if err != nil && strings.Contains(err.Error(), "not found") {
 		err = nil
 	}
 	if err != nil {
-		if stateFound {
-			rec.State = state.SandboxUnknown
-			rec.LastError = err.Error()
-			_ = s.upsertSandbox(ctx, rec)
-		}
 		return err
 	}
 	if s.Store != nil {
@@ -305,41 +226,35 @@ func (s *Service) RemoveSandbox(ctx context.Context, namespace, sandboxID string
 	return nil
 }
 
-func (s *Service) SuspendSandbox(ctx context.Context, namespace, sandboxID string) error {
+func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
-	if namespace == "" {
-		namespace = rec.Namespace
-	}
-	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
+	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: sandboxID})
 	if rec.SandboxID != "" {
 		rec.State = state.SandboxSuspended
 		if err != nil {
 			rec.State = state.SandboxUnknown
 			rec.LastError = err.Error()
+		} else {
+			rec.LastError = ""
 		}
 		_ = s.upsertSandbox(ctx, rec)
 	}
 	return err
 }
 
-func (s *Service) ResumeSandbox(ctx context.Context, namespace, sandboxID string) error {
+func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
-	if namespace == "" {
-		namespace = rec.Namespace
-	}
-	namespace = s.normalizeNamespace(namespace)
-	err := s.Sandbox.Resume(sandbox.LifecycleRequest{Namespace: namespace, SandboxID: sandboxID})
+	err := s.Sandbox.Resume(sandbox.LifecycleRequest{SandboxID: sandboxID})
 	if rec.SandboxID != "" {
 		rec.State = state.SandboxReady
 		if err != nil {
@@ -363,24 +278,13 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	if s.TemplateBootIndex == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("template boot index service is not configured")
+	if s.Containerd == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("containerd client is not configured")
 	}
 	if s.Store == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint publisher is not configured")
 	}
 	sandboxID := rec.SandboxID
-	namespace := opts.Namespace
-	if namespace == "" {
-		namespace = rec.Namespace
-	}
-	namespace = s.normalizeNamespace(namespace)
-	if recordNamespace := s.normalizeNamespace(rec.Namespace); recordNamespace != namespace {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s belongs to namespace %s, not %s", sandboxID, recordNamespace, namespace)
-	}
-	if len(rec.VolumeDevices) > 0 {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", sandboxID)
-	}
 	parentTemplateID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if parentTemplateID == "" {
 		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has no checkpoint head template", sandboxID)
@@ -396,7 +300,6 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	}
 
 	captured, err := s.Sandbox.Checkpoint(sandbox.CheckpointRequest{
-		Namespace: namespace,
 		SandboxID: sandboxID,
 	})
 	if err != nil {
@@ -405,8 +308,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	defer os.RemoveAll(captured.MemRootPath)
 
 	bootIndexTag := "localhost/conch/template:" + templateID
-	published, err := s.TemplateBootIndex.PublishCheckpointBootImage(ctx, conchimage.PublishCheckpointBootImageOptions{
-		Namespace:             namespace,
+	published, err := conchimage.PublishCheckpointBootIndex(ctx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
 		SourceBootIndexDigest: parentBootIndexDigest,
 		BootIndexTag:          bootIndexTag,
 		MemRoot:               captured.MemRootPath,
@@ -416,7 +318,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndex(ctx, namespace, published.BootIndexDigest)
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, published.BootIndexDigest)
 	if err != nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("validate published checkpoint boot index: %w", err)
 	}
@@ -444,22 +346,16 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	if err := s.Store.PublishCheckpoint(ctx, state.CheckpointPublication{
-		Entry: conchtemplate.Entry{
-			ID:               templateID,
-			Origin:           conchtemplate.OriginCheckpoint,
-			BootMode:         conchtemplate.BootModeResume,
-			BootIndexDigest:  info.BootIndexDigest,
-			Namespace:        namespace,
-			ParentTemplateID: parentTemplateID,
-			SourceSandboxID:  sandboxID,
-			BuildRef:         published.ImageName,
-			Labels:           copyMap(opts.Labels),
-			CreatedAt:        time.Now().UnixNano(),
-		},
-		SandboxID:                   rec.SandboxID,
-		ExpectedHeadTemplateID:      parentTemplateID,
-		ExpectedHeadBootIndexDigest: parentBootIndexDigest,
+	if err := s.Store.PublishCheckpoint(ctx, conchtemplate.Entry{
+		ID:               templateID,
+		Origin:           conchtemplate.OriginCheckpoint,
+		BootMode:         conchtemplate.BootModeResume,
+		BootIndexDigest:  info.BootIndexDigest,
+		ParentTemplateID: parentTemplateID,
+		SourceSandboxID:  sandboxID,
+		BuildRef:         published.ImageName,
+		Labels:           copyMap(opts.Labels),
+		CreatedAt:        time.Now().UnixNano(),
 	}); err != nil {
 		return SandboxCheckpointResult{}, err
 	}
@@ -469,166 +365,12 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	}, nil
 }
 
-func (s *Service) PullImage(ctx context.Context, opts PullImageOptions) (PullImageResult, error) {
-	if s == nil || s.Image == nil {
-		return PullImageResult{}, fmt.Errorf("image service is not configured")
-	}
-	result, err := s.Image.Pull(ctx, opts)
-	if err != nil {
-		return PullImageResult{}, err
-	}
-	return result, nil
-}
-
-func (s *Service) PushImage(ctx context.Context, opts runtimeapi.PushImageOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Push(ctx, opts)
-}
-
-func (s *Service) ListImages(ctx context.Context, opts runtimeapi.ListImagesOptions) ([]runtimeapi.ImageRecord, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	items, err := s.Image.List(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]runtimeapi.ImageRecord, 0, len(items))
-	for _, item := range items {
-		item.RepoDigests = imageRepoDigests(item.Name, item.TargetDigest)
-		item.Kind = firstNonEmpty(strings.TrimSpace(item.Kind), imageKindFromLabels(item.Labels))
-		out = append(out, item)
-	}
-	return out, nil
-}
-
-func imageRepoDigests(name, digest string) []string {
-	name = strings.TrimSpace(name)
-	digest = strings.TrimSpace(digest)
-	if name == "" || digest == "" {
-		return nil
-	}
-	if isDigestOnlyRef(name) {
-		return nil
-	}
-	base := name
-	if repo, _, ok := strings.Cut(base, "@"); ok {
-		base = repo
-	} else {
-		lastSlash := strings.LastIndex(base, "/")
-		lastColon := strings.LastIndex(base, ":")
-		if lastColon > lastSlash {
-			base = base[:lastColon]
-		}
-	}
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return nil
-	}
-	return []string{base + "@" + digest}
-}
-
-func isDigestOnlyRef(ref string) bool {
-	if _, err := digestpkg.Parse(ref); err == nil {
-		return true
-	}
-	algo, _, ok := strings.Cut(ref, ":")
-	if !ok || strings.Contains(algo, "/") {
-		return false
-	}
-	switch algo {
-	case "sha256", "sha384", "sha512":
-		return true
-	default:
-		return false
-	}
-}
-
-func imageKindFromLabels(labels map[string]string) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	if kind := strings.TrimSpace(labels["io.conch.kind"]); kind != "" {
-		return kind
-	}
-	if kind := strings.TrimSpace(labels["kind"]); kind != "" {
-		return kind
-	}
-	if kind := strings.TrimSpace(labels["conch.io/kind"]); kind != "" {
-		return kind
-	}
-	return ""
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Remove(ctx, opts)
-}
-
-func (s *Service) UnpackImage(ctx context.Context, req runtimeapi.UnpackImageOptions) (map[string]string, error) {
-	if s == nil || s.Image == nil {
-		return nil, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.Unpack(ctx, req)
-}
-
-func (s *Service) ImportImageArchive(ctx context.Context, reader io.Reader, req runtimeapi.ImportImageArchiveOptions) (runtimeapi.ImportImageArchiveResult, error) {
-	if s == nil || s.Image == nil {
-		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("image service is not configured")
-	}
-	return s.Image.ImportArchive(ctx, reader, req)
-}
-
-func (s *Service) ExportImageArchive(ctx context.Context, writer io.Writer, req runtimeapi.ExportImageArchiveOptions) error {
-	if s == nil || s.Image == nil {
-		return fmt.Errorf("image service is not configured")
-	}
-	return s.Image.ExportArchive(ctx, writer, req)
-}
-
-func (s *Service) PublishBootImage(ctx context.Context, req conchimage.PublishBootImageOptions) (conchimage.PublishBootImageResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return conchimage.PublishBootImageResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.PublishBootImage(ctx, req)
-}
-
-func (s *Service) PrepareRootfsSource(ctx context.Context, req conchimage.PrepareRootfsSourceOptions) (conchimage.PrepareRootfsSourceResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return conchimage.PrepareRootfsSourceResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.PrepareRootfsSource(ctx, req)
-}
-
-func (s *Service) ConvertRootfsToErofs(ctx context.Context, req erofsconvert.ConvertRootfsRequest) (erofsconvert.ConvertRootfsResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return erofsconvert.ConvertRootfsResult{}, fmt.Errorf("template boot index service is not configured")
-	}
-	return s.TemplateBootIndex.ConvertRootfsToErofs(ctx, req)
-}
-
 // PullTemplate fetches and statically validates a registry Boot Index before
 // creating the local Template entry. Runtime boot validation belongs to
 // integration tests, not the pull request path.
 func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (TemplatePullResult, error) {
-	if s == nil || s.Image == nil {
-		return TemplatePullResult{}, fmt.Errorf("image service is required")
-	}
-	if s.TemplateBootIndex == nil {
-		return TemplatePullResult{}, fmt.Errorf("template boot index service is not configured")
+	if s == nil || s.Containerd == nil {
+		return TemplatePullResult{}, fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return TemplatePullResult{}, fmt.Errorf("template store is not configured")
@@ -637,10 +379,8 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, fmt.Errorf("template reference is required")
 	}
-	namespace := s.normalizeNamespace(opts.Namespace)
-	if _, err := s.Image.Pull(ctx, runtimeapi.PullImageOptions{
+	if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
 		ImageName:  reference,
-		Namespace:  namespace,
 		PlainHTTP:  opts.PlainHTTP,
 		Username:   opts.Username,
 		Password:   opts.Password,
@@ -648,7 +388,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	}); err != nil {
 		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndexReference(ctx, namespace, reference)
+	info, err := conchimage.InspectBootIndexReference(ctx, s.Containerd, reference)
 	if err != nil {
 		return TemplatePullResult{}, fmt.Errorf("validate pulled template boot index %s: %w", reference, err)
 	}
@@ -667,7 +407,6 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		Origin:          origin,
 		BootMode:        bootMode,
 		BootIndexDigest: info.BootIndexDigest,
-		Namespace:       namespace,
 		ImageName:       reference,
 		BuildRef:        reference,
 		Labels:          opts.Labels,
@@ -686,8 +425,8 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 // immutable BootIndexDigest. BuildRef is provenance only and may have been
 // retargeted since the Template was created.
 func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) error {
-	if s == nil || s.TemplateBootIndex == nil {
-		return fmt.Errorf("template boot index service is required")
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
@@ -708,36 +447,22 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if bootIndexDigest == "" {
 		return fmt.Errorf("template %s has no boot index digest", rec.ID)
 	}
-	namespace := strings.TrimSpace(opts.Namespace)
-	if namespace == "" {
-		namespace = rec.Namespace
-	}
-	namespace = s.normalizeNamespace(namespace)
-	if recordNamespace := s.normalizeNamespace(rec.Namespace); namespace != recordNamespace {
-		return fmt.Errorf("template %s belongs to namespace %s, not %s", rec.ID, recordNamespace, namespace)
-	}
-	return s.TemplateBootIndex.PushBootIndex(ctx, conchimage.PushBootIndexOptions{
+	return conchimage.PushBootIndex(ctx, s.Containerd, conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
 		RemoteReference: remoteReference,
-		Namespace:       namespace,
 		PlainHTTP:       opts.PlainHTTP,
 		Username:        opts.Username,
 		Password:        opts.Password,
-		RegistryTimeout: opts.RegistryTimeout,
 	})
 }
 
 func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions) (TemplateCreateResult, error) {
-	if s == nil || s.TemplateBootIndex == nil {
-		return TemplateCreateResult{}, fmt.Errorf("template boot index service is required")
+	if s == nil || s.Containerd == nil {
+		return TemplateCreateResult{}, fmt.Errorf("containerd client is required")
 	}
 	if s.Templates == nil {
 		return TemplateCreateResult{}, fmt.Errorf("template store is not configured")
 	}
-	if s.Image == nil {
-		return TemplateCreateResult{}, fmt.Errorf("image service is required")
-	}
-	namespace := s.normalizeNamespace(opts.Namespace)
 	source := strings.TrimSpace(opts.Source)
 	if source == "" {
 		return TemplateCreateResult{}, fmt.Errorf("template source is required")
@@ -749,11 +474,11 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 		return TemplateCreateResult{}, err
 	}
 
-	result, err := s.createTemplateFromSource(ctx, namespace, templateID, opts)
+	result, err := s.createTemplateFromSource(ctx, templateID, opts)
 	if err != nil {
 		return TemplateCreateResult{}, err
 	}
-	info, err := s.TemplateBootIndex.InspectBootIndex(ctx, namespace, result.bootIndexDigest)
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, result.bootIndexDigest)
 	if err != nil {
 		return TemplateCreateResult{}, fmt.Errorf("validate published boot index: %w", err)
 	}
@@ -773,7 +498,6 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        bootMode,
 		BootIndexDigest: info.BootIndexDigest,
-		Namespace:       namespace,
 		ImageName:       source,
 		BuildRef:        result.bootIndexTag,
 		Labels:          opts.Labels,
@@ -793,22 +517,37 @@ type templateBuildResult struct {
 	bootIndexTag    string
 }
 
-func (s *Service) createTemplateFromSource(ctx context.Context, namespace, templateID string, opts TemplateCreateOptions) (templateBuildResult, error) {
-	prepared, err := s.TemplateBootIndex.PrepareRootfsSource(ctx, conchimage.PrepareRootfsSourceOptions{
-		Source:    opts.Source,
-		Namespace: namespace,
-		PlainHTTP: opts.PlainHTTP,
-		Username:  opts.Username,
-		Password:  opts.Password,
-	})
+func (s *Service) createTemplateFromSource(ctx context.Context, templateID string, opts TemplateCreateOptions) (templateBuildResult, error) {
+	sourceCtx, err := s.Containerd.WithNamespace(ctx)
 	if err != nil {
-		return templateBuildResult{}, fmt.Errorf("prepare rootfs source: %w", err)
+		return templateBuildResult{}, fmt.Errorf("prepare rootfs source namespace: %w", err)
+	}
+	sourceImage, err := s.Containerd.GetImage(sourceCtx, opts.Source)
+	if err != nil {
+		if !errdefs.IsNotFound(err) {
+			return templateBuildResult{}, fmt.Errorf("lookup rootfs source image %s: %w", opts.Source, err)
+		}
+		if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
+			ImageName:  opts.Source,
+			PlainHTTP:  opts.PlainHTTP,
+			Username:   opts.Username,
+			Password:   opts.Password,
+			SkipUnpack: true,
+		}); err != nil {
+			return templateBuildResult{}, fmt.Errorf("pull rootfs source image %s: %w", opts.Source, err)
+		}
+		sourceImage, err = s.Containerd.GetImage(sourceCtx, opts.Source)
+		if err != nil {
+			return templateBuildResult{}, fmt.Errorf("resolve pulled rootfs source image %s: %w", opts.Source, err)
+		}
+	}
+	if err := conchimage.SetImageKindLabel(sourceCtx, s.Containerd.ImageService(), sourceImage.Name(), conchimage.ImageKindOCIImage); err != nil {
+		return templateBuildResult{}, fmt.Errorf("label rootfs source image: %w", err)
 	}
 
 	convertTarget := fmt.Sprintf("conch-erofs-rootfs:%s", templateID)
-	converted, err := s.TemplateBootIndex.ConvertRootfsToErofs(ctx, erofsconvert.ConvertRootfsRequest{
-		Namespace:   namespace,
-		SourceImage: prepared.ImageName,
+	converted, err := erofsconvert.ConvertRootfs(ctx, s.Containerd, erofsconvert.ConvertRootfsRequest{
+		SourceImage: sourceImage.Name(),
 		TargetImage: convertTarget,
 		MkfsOptions: []string{erofsconvert.DefaultMkfsOption},
 		AlignBytes:  erofsconvert.DefaultAlignBytes,
@@ -821,8 +560,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, namespace, templ
 	if bootIndexTag == "" {
 		bootIndexTag = "localhost/conch/template:" + templateID
 	}
-	published, err := s.TemplateBootIndex.PublishBootImage(ctx, conchimage.PublishBootImageOptions{
-		Namespace:       namespace,
+	published, err := conchimage.PublishBootIndex(ctx, s.Containerd, conchimage.PublishBootIndexOptions{
 		RootfsImageName: converted.ImageName,
 		KernelPath:      opts.KernelPath,
 		InitrdPath:      opts.InitrdPath,
@@ -837,8 +575,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, namespace, templ
 	// the authoritative references to its content.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := s.Image.Remove(cleanupCtx, runtimeapi.RemoveImageOptions{
-		Namespace: namespace,
+	if err := conchimage.Remove(cleanupCtx, s.Containerd, runtimeapi.RemoveImageOptions{
 		ImageName: converted.ImageName,
 	}); err != nil {
 		ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",
@@ -857,9 +594,8 @@ func (s *Service) ListTemplates(ctx context.Context, opts runtimeapi.TemplateLis
 		return nil, fmt.Errorf("template store is not configured")
 	}
 	items, err := s.Templates.List(ctx, conchtemplate.Filter{
-		Namespace: strings.TrimSpace(opts.Namespace),
-		Origin:    conchtemplate.Origin(strings.TrimSpace(opts.Origin)),
-		BootMode:  conchtemplate.BootMode(strings.TrimSpace(opts.BootMode)),
+		Origin:   conchtemplate.Origin(strings.TrimSpace(opts.Origin)),
+		BootMode: conchtemplate.BootMode(strings.TrimSpace(opts.BootMode)),
 	})
 	if err != nil {
 		return nil, err
@@ -895,7 +631,6 @@ func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),
 		BootIndexDigest:  entry.BootIndexDigest,
-		Namespace:        entry.Namespace,
 		ParentTemplateID: entry.ParentTemplateID,
 		SourceSandboxID:  entry.SourceSandboxID,
 		ImageName:        entry.ImageName,
@@ -938,16 +673,6 @@ func (s *Service) getSandbox(ctx context.Context, id string) (state.SandboxRecor
 		return state.SandboxRecord{}, state.ErrNotFound
 	}
 	return s.Store.GetSandbox(ctx, id)
-}
-
-func (s *Service) normalizeNamespace(namespace string) string {
-	if ns := strings.TrimSpace(namespace); ns != "" {
-		return ns
-	}
-	if s != nil && strings.TrimSpace(s.DefaultNamespace) != "" {
-		return strings.TrimSpace(s.DefaultNamespace)
-	}
-	return "default"
 }
 
 func NewID() (string, error) {

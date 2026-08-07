@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openeuler/Conch/internal/image/client"
+	"github.com/openeuler/Conch/internal/cli/client"
 )
 
 type ImagePushOptions struct {
@@ -17,7 +17,6 @@ type ImagePushOptions struct {
 	PlainHTTP   bool
 	Username    string
 	Password    string
-	Namespace   string
 	ConfigPath  string
 	Timeout     string
 }
@@ -38,8 +37,6 @@ func PrintImagePushHelp(out io.Writer) {
 	fmt.Fprintln(out, "        registry password")
 	fmt.Fprintln(out, "  --timeout duration")
 	fmt.Fprintln(out, "        timeout for this push operation")
-	fmt.Fprintln(out, "  -n, --namespace string")
-	fmt.Fprintln(out, "        containerd namespace (default: config containerd.default_namespace or default)")
 	fmt.Fprintln(out, "  --config string")
 	fmt.Fprintln(out, "        config file path for conchd API discovery")
 	fmt.Fprintln(out, "")
@@ -61,20 +58,16 @@ func RunImagePush(ctx context.Context, args []string) error {
 			return fmt.Errorf("conch image push: invalid --timeout %q", opts.Timeout)
 		}
 	}
-	cfg, err := LoadConchConfig(opts.ConfigPath)
+	conchClient, err := client.New(client.Options{ConfigPath: opts.ConfigPath, Timeout: apiTimeout})
 	if err != nil {
-		return fmt.Errorf("conch image push: load config: %w", err)
+		return fmt.Errorf("conch image push: create API client: %w", err)
 	}
-	ns := ResolveConchNamespace(cfg, opts.Namespace)
-	conchClient := client.NewClientWithConfigAndTimeout("", opts.ConfigPath, apiTimeout)
 	if err := conchClient.PushImage(ctx, client.PushImageRequest{
-		LocalImage:      opts.LocalImage,
-		RemoteImage:     opts.RemoteImage,
-		Namespace:       ns,
-		PlainHTTP:       opts.PlainHTTP,
-		Username:        opts.Username,
-		Password:        opts.Password,
-		RegistryTimeout: opts.Timeout,
+		LocalImage:  opts.LocalImage,
+		RemoteImage: opts.RemoteImage,
+		PlainHTTP:   opts.PlainHTTP,
+		Username:    opts.Username,
+		Password:    opts.Password,
 	}); err != nil {
 		return fmt.Errorf("conch image push: %w", err)
 	}
@@ -115,16 +108,6 @@ func ParseImagePushArgs(args []string) (ImagePushOptions, error) {
 			i++
 		case strings.HasPrefix(arg, "--timeout="):
 			opts.Timeout = strings.TrimPrefix(arg, "--timeout=")
-		case arg == "--namespace" || arg == "-n":
-			if i+1 >= len(args) {
-				return ImagePushOptions{}, fmt.Errorf("conch image push: missing value for %s", arg)
-			}
-			opts.Namespace = args[i+1]
-			i++
-		case strings.HasPrefix(arg, "--namespace="):
-			opts.Namespace = strings.TrimPrefix(arg, "--namespace=")
-		case strings.HasPrefix(arg, "-n="):
-			opts.Namespace = strings.TrimPrefix(arg, "-n=")
 		case arg == "--config":
 			if i+1 >= len(args) {
 				return ImagePushOptions{}, fmt.Errorf("conch image push: missing value for %s", arg)

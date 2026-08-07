@@ -46,23 +46,21 @@ The network-related section in `config/config.yaml` is:
 
 ```yaml
 network:
-  pool_size: 250
-  dynamic_reservation: false
-  # bridge_count: 1 # deprecated for the current CNI path
+  warm_pool_size: 250
   tap_ip: 192.168.100.2
   tap_mask: 24
   cni:
     plugin_bin_dirs:
       - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
-    plugin_max_conf: 1
     if_name: eth0
-    setup_serially: false
 ```
 
 Pay attention to the following network config items:
 
-- `pool_size` sets the number of network pool slots and the maximum number of sandboxes that can run on the host at the same time.
+- `warm_pool_size` sets the number of ready-to-use idle network slots to pre-create and maintain and cannot exceed the code-defined total capacity of 4000 slots.
+- On every startup, Conch creates a fresh in-memory slot ID allocator and warm pool. It does not restore or adopt old slots from BoltDB; CNI/IPAM address capacity may impose a lower effective limit.
+- Conch concurrently prefills idle slots at startup and continuously refills the pool to `warm_pool_size` during normal operation. A failed CNI allocation is rolled back and retried with exponential backoff. Sandbox creation reports an unavailable resource when the pool is empty.
 - `tap_ip` and `tap_mask` define the VM-facing `tap` subnet inside each sandbox.
 - `plugin_bin_dirs` points to the CNI plugin directory, and `plugin_conf_dir` points to the Conch CNI config directory.
 - `if_name` sets the sandbox network interface name created by CNI, normally `eth0`; current go-cni creates the first interface as `<prefix>0`, so this value must match that naming pattern.
@@ -73,19 +71,19 @@ Start `conchd` as root and verify network pool prefill:
 
 ```bash
 sudo ./bin/conchd -config config/config.yaml
-ip netns list
+sudo ls -1 /run/conch/netns
 ```
 
-- Expected result: namespaces for prefilling slots are visible, such as `ns-2`.
+- Expected result: namespace handles for prefilled slots are visible, such as `slot-2`. Conch owns this directory exclusively, so these handles do not appear in `ip netns list`, which scans `/run/netns`.
 
 Inspect one namespace:
 
 ```bash
-sudo ip netns exec ns-2 ip addr show eth0
-sudo ip netns exec ns-2 ip route
-sudo ip netns exec ns-2 ip addr show tap0
-sudo ip netns exec ns-2 sysctl net.ipv4.ip_forward
-sudo ip netns exec ns-2 iptables -t nat -S
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show eth0
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip route
+sudo nsenter --net=/run/conch/netns/slot-2 -- ip addr show tap0
+sudo nsenter --net=/run/conch/netns/slot-2 -- sysctl net.ipv4.ip_forward
+sudo nsenter --net=/run/conch/netns/slot-2 -- iptables -t nat -S
 ```
 
 - Expected result:
@@ -107,21 +105,28 @@ ls /var/lib/cni/networks/conch-bridge
 After normal `conchd` shutdown:
 
 ```bash
-ip netns list
+sudo ls -1 /run/conch/netns
 ip link show cni-conch0
 ip route show table main | grep 10.12
 ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- Expected result: normal exit, including `SIGTERM` and `SIGINT`, preserves network resources so they can be adopted again after restart. Netns entries, CNI IPAM allocation files, and the CNI bridge may continue to exist. After restarting `conchd`, preserved warm slots should be adopted, and slots assigned to sandboxes should be restored according to the sandbox state.
+- Expected result: a normal exit, including `SIGTERM` and `SIGINT`, closes the in-memory warm pool and makes a best-effort attempt to remove each queued idle slot's tap, CNI allocation, and network namespace. A cleanup failure is logged and does not prevent process exit. After restart, `conchd` prefills a fresh pool and does not adopt old slots. Resources left by an abnormal exit are not remediated, and old sandboxes are not restored; delete all active sandboxes before restarting the daemon.
 
 ## Manual Cleanup
 
-Normal `conchd` exit preserves all network resources. If a full reset is needed, meaning no sandbox, snapshot, network, or other state should be kept, stop `conchd`, delete data record `/var/lib/conch/state.db`, and manually remove the namespace, bridge, and IPAM directory:
+Normal `conchd` exit makes a best-effort attempt to clean the in-memory warm pool. If network resources remain after an abnormal exit or an individual cleanup failure, stop `conchd` and manually remove the namespaces, bridge, and IPAM directory with the commands below. Network slots are no longer stored in `/var/lib/conch/state.db`, so deleting that database is not a substitute for network cleanup:
 
 ```bash
-sudo ip netns delete ns-X
+sudo sh -c '
+for ns in /run/conch/netns/slot-*; do
+  [ -e "$ns" ] || continue
+  umount -l "$ns"
+  rm -f "$ns"
+done
+rmdir /run/conch/netns 2>/dev/null || true
+'
 sudo ip link delete cni-conch0 2>/dev/null || true
 sudo rm -rf /var/lib/cni/networks/conch-bridge
 ```

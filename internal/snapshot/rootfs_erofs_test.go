@@ -10,6 +10,8 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
 
 func TestBootLayoutSnapDirTreatsSnapshotDirAsMemRelative(t *testing.T) {
@@ -27,12 +29,12 @@ func TestSnapshotInfoReturnsActiveSnapshotBeforeSnapshotterLookup(t *testing.T) 
 		snt:             statMissingSnapshotter{},
 		activeSnapshots: make(map[runtimeSnapshotKey]*snapshots.Info),
 	}
-	srv.addActiveSnapshot("default", "active-rootfs", &snapshots.Info{
+	srv.addActiveSnapshot(containerdclient.Namespace, "active-rootfs", &snapshots.Info{
 		Name:   "active-rootfs",
 		Parent: "parent-rootfs",
 	})
 
-	info, err := srv.SnapshotInfo(context.Background(), "default", "active-rootfs")
+	info, err := srv.SnapshotInfo(context.Background(), "active-rootfs")
 	if err != nil {
 		t.Fatalf("SnapshotInfo active snapshot: %v", err)
 	}
@@ -128,40 +130,36 @@ func TestPmemFilesFromErofsMountsRejectsRelativePath(t *testing.T) {
 
 type statMissingSnapshotter struct{}
 
-func (statMissingSnapshotter) Prepare(context.Context, string, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (statMissingSnapshotter) Prepare(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
 	return nil, fmt.Errorf("unexpected Prepare")
 }
 
-func (statMissingSnapshotter) View(context.Context, string, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (statMissingSnapshotter) View(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
 	return nil, fmt.Errorf("unexpected View")
 }
 
-func (statMissingSnapshotter) Mounts(context.Context, string, string) ([]mount.Mount, error) {
+func (statMissingSnapshotter) Mounts(context.Context, string) ([]mount.Mount, error) {
 	return nil, fmt.Errorf("unexpected Mounts")
 }
 
-func (statMissingSnapshotter) Commit(context.Context, string, string, string, ...snapshots.Opt) error {
+func (statMissingSnapshotter) Commit(context.Context, string, string, ...snapshots.Opt) error {
 	return fmt.Errorf("unexpected Commit")
 }
 
-func (statMissingSnapshotter) Update(context.Context, string, snapshots.Info, ...string) (snapshots.Info, error) {
+func (statMissingSnapshotter) Update(context.Context, snapshots.Info, ...string) (snapshots.Info, error) {
 	return snapshots.Info{}, fmt.Errorf("unexpected Update")
 }
 
-func (statMissingSnapshotter) Remove(context.Context, string, string) error {
+func (statMissingSnapshotter) Remove(context.Context, string) error {
 	return fmt.Errorf("unexpected Remove")
 }
 
-func (statMissingSnapshotter) Stat(context.Context, string, string) (snapshots.Info, error) {
+func (statMissingSnapshotter) Stat(context.Context, string) (snapshots.Info, error) {
 	return snapshots.Info{}, fmt.Errorf("snapshot does not exist")
 }
 
-func (statMissingSnapshotter) List(context.Context, string, map[string]*snapshots.Info, ...string) error {
+func (statMissingSnapshotter) List(context.Context, map[string]*snapshots.Info, ...string) error {
 	return fmt.Errorf("unexpected List")
-}
-
-func (statMissingSnapshotter) ListNamespaces(context.Context) ([]string, error) {
-	return nil, fmt.Errorf("unexpected ListNamespaces")
 }
 
 func (statMissingSnapshotter) Close() error {

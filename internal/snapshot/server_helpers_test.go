@@ -98,7 +98,7 @@ func TestReleaseBootLayoutDoesNotRemoveCommittedSnapshotWithSandboxKey(t *testin
 	}
 	srv := &Server{snt: snapshotter, workDir: t.TempDir()}
 
-	if err := srv.ReleaseBootLayout(context.Background(), "default", "sandbox-1"); err != nil {
+	if err := srv.ReleaseBootLayout(context.Background(), "sandbox-1"); err != nil {
 		t.Fatalf("ReleaseBootLayout() error = %v", err)
 	}
 	if len(snapshotter.removedKeys) != 0 {
@@ -142,7 +142,7 @@ func TestReleaseBootLayoutReleasesCheckpointMemoryView(t *testing.T) {
 	}}
 	srv := &Server{snt: snapshotter, workDir: t.TempDir()}
 
-	if err := srv.ReleaseBootLayout(context.Background(), "default", key); err != nil {
+	if err := srv.ReleaseBootLayout(context.Background(), key); err != nil {
 		t.Fatalf("ReleaseBootLayout() error = %v", err)
 	}
 	want := []string{getRootfsViewSnapshotKey(key), getMemViewSnapshotKey(key), getVMViewSnapshotKey(key)}
@@ -162,35 +162,35 @@ type recordingServerSnapshotter struct {
 	removedKeys   []string
 }
 
-func (r *recordingServerSnapshotter) Prepare(context.Context, string, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (r *recordingServerSnapshotter) Prepare(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
 	if r.prepareErr != nil {
 		return nil, r.prepareErr
 	}
 	return append([]mount.Mount(nil), r.prepareMounts...), nil
 }
 
-func (r *recordingServerSnapshotter) View(context.Context, string, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (r *recordingServerSnapshotter) View(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
 	return nil, nil
 }
 
-func (r *recordingServerSnapshotter) Mounts(context.Context, string, string) ([]mount.Mount, error) {
+func (r *recordingServerSnapshotter) Mounts(context.Context, string) ([]mount.Mount, error) {
 	return nil, nil
 }
 
-func (r *recordingServerSnapshotter) Commit(context.Context, string, string, string, ...snapshots.Opt) error {
+func (r *recordingServerSnapshotter) Commit(context.Context, string, string, ...snapshots.Opt) error {
 	return nil
 }
 
-func (r *recordingServerSnapshotter) Update(context.Context, string, snapshots.Info, ...string) (snapshots.Info, error) {
+func (r *recordingServerSnapshotter) Update(context.Context, snapshots.Info, ...string) (snapshots.Info, error) {
 	return snapshots.Info{}, nil
 }
 
-func (r *recordingServerSnapshotter) Remove(_ context.Context, _, key string) error {
+func (r *recordingServerSnapshotter) Remove(_ context.Context, key string) error {
 	r.removedKeys = append(r.removedKeys, key)
 	return nil
 }
 
-func (r *recordingServerSnapshotter) Stat(_ context.Context, _, key string) (snapshots.Info, error) {
+func (r *recordingServerSnapshotter) Stat(_ context.Context, key string) (snapshots.Info, error) {
 	if r.statErr != nil {
 		return snapshots.Info{}, r.statErr
 	}
@@ -204,12 +204,8 @@ func (r *recordingServerSnapshotter) Stat(_ context.Context, _, key string) (sna
 	return r.statInfo, nil
 }
 
-func (r *recordingServerSnapshotter) List(context.Context, string, map[string]*snapshots.Info, ...string) error {
+func (r *recordingServerSnapshotter) List(context.Context, map[string]*snapshots.Info, ...string) error {
 	return nil
-}
-
-func (r *recordingServerSnapshotter) ListNamespaces(context.Context) ([]string, error) {
-	return nil, nil
 }
 
 func (r *recordingServerSnapshotter) Close() error {

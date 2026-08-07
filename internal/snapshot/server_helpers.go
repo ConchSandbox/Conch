@@ -90,7 +90,7 @@ func (s *Server) viewSnapshotMount(
 	if parentID == "" {
 		return nil, fmt.Errorf("view %s requires parent snapshot", viewSnapshotKey)
 	}
-	mounts, err := s.snt.View(ctx, namespace, viewSnapshotKey, parentID, opts...)
+	mounts, err := s.snt.View(ctx, viewSnapshotKey, parentID, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (s *Server) viewSnapshotMount(
 		if err == nil || s.snt == nil {
 			return
 		}
-		if removeErr := s.snt.Remove(ctx, namespace, viewSnapshotKey); removeErr != nil && !errdefs.IsNotFound(removeErr) {
+		if removeErr := s.snt.Remove(ctx, viewSnapshotKey); removeErr != nil && !errdefs.IsNotFound(removeErr) {
 			err = errors.Join(err, fmt.Errorf("remove view snapshot %s: %w", viewSnapshotKey, removeErr))
 		}
 	}()
@@ -171,7 +171,7 @@ func (s *Server) activeSnapshotExists(ctx context.Context, namespace, key string
 	if s.snt == nil {
 		return false
 	}
-	info, err := s.snt.Stat(ctx, namespace, key)
+	info, err := s.snt.Stat(ctx, key)
 	return err == nil && info.Kind == snapshots.KindActive
 }
 
@@ -179,7 +179,7 @@ func (s *Server) snapshotKindExists(ctx context.Context, namespace, key string, 
 	if s.snt == nil {
 		return false
 	}
-	info, err := s.snt.Stat(ctx, namespace, key)
+	info, err := s.snt.Stat(ctx, key)
 	return err == nil && info.Kind == kind
 }
 
@@ -193,7 +193,7 @@ func (s *Server) prepareAndMountActiveSnapshot(
 ) (_ string, err error) {
 	accessPath := mountPoint
 
-	mounts, err := s.snt.Prepare(ctx, namespace, key, parent, opts...)
+	mounts, err := s.snt.Prepare(ctx, key, parent, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -201,7 +201,7 @@ func (s *Server) prepareAndMountActiveSnapshot(
 		if err == nil || s.snt == nil {
 			return
 		}
-		if removeErr := s.snt.Remove(ctx, namespace, key); removeErr != nil && !errdefs.IsNotFound(removeErr) {
+		if removeErr := s.snt.Remove(ctx, key); removeErr != nil && !errdefs.IsNotFound(removeErr) {
 			err = errors.Join(err, fmt.Errorf("remove snapshot %s: %w", key, removeErr))
 		}
 	}()
@@ -236,7 +236,7 @@ func (s *Server) prepareAndMountActiveSnapshot(
 		accessPath = mounts[0].Source
 	}
 
-	result, statErr := s.snt.Stat(ctx, namespace, key)
+	result, statErr := s.snt.Stat(ctx, key)
 	if statErr != nil {
 		err = statErr
 		return "", err
@@ -252,18 +252,18 @@ func (s *Server) prepareRootfsSnapshot(ctx context.Context, namespace, key, pare
 	if layout == nil {
 		return fmt.Errorf("rootfs snapshot layout is nil")
 	}
-	mounts, err := s.snt.Prepare(ctx, namespace, key, parent, opts...)
+	mounts, err := s.snt.Prepare(ctx, key, parent, opts...)
 	if err != nil {
 		return err
 	}
-	result, statErr := s.snt.Stat(ctx, namespace, key)
+	result, statErr := s.snt.Stat(ctx, key)
 	if statErr != nil {
-		_ = s.snt.Remove(ctx, namespace, key)
+		_ = s.snt.Remove(ctx, key)
 		return statErr
 	}
 	pmemFiles, err := pmemFilesFromErofsMounts(mounts)
 	if err != nil {
-		_ = s.snt.Remove(ctx, namespace, key)
+		_ = s.snt.Remove(ctx, key)
 		return err
 	}
 	layout.pmemFiles = pmemFiles
@@ -318,7 +318,7 @@ func (s *Server) loadCommittedBootLayoutMetadata(ctx context.Context, namespace 
 	if s.snt == nil {
 		return false, fmt.Errorf("rootfs erofs snapshotter is not configured")
 	}
-	rootfsInfo, err := s.snt.Stat(ctx, namespace, parents.Rootfs)
+	rootfsInfo, err := s.snt.Stat(ctx, parents.Rootfs)
 	if err != nil {
 		return false, fmt.Errorf("stat rootfs snapshot metadata %s: %w", parents.Rootfs, err)
 	}
@@ -339,8 +339,8 @@ func (s *Server) loadCommittedBootLayoutMetadata(ctx context.Context, namespace 
 
 // tryRemoveSnapshot attempts to remove a snapshot if it exists.
 func (s *Server) tryRemoveSnapshot(ctx context.Context, namespace, key string) error {
-	if _, err := s.snt.Stat(ctx, namespace, key); err == nil {
-		if err := s.snt.Remove(ctx, namespace, key); err != nil {
+	if _, err := s.snt.Stat(ctx, key); err == nil {
+		if err := s.snt.Remove(ctx, key); err != nil {
 			return fmt.Errorf("remove snapshot %s: %w", key, err)
 		}
 	}
@@ -350,7 +350,7 @@ func (s *Server) tryRemoveSnapshot(ctx context.Context, namespace, key string) e
 
 func (s *Server) tryRemoveSnapshotKind(ctx context.Context, namespace, key string, allowed ...snapshots.Kind) error {
 	activeCached := s.getActiveSnapshot(namespace, key) != nil
-	info, err := s.snt.Stat(ctx, namespace, key)
+	info, err := s.snt.Stat(ctx, key)
 	if err != nil {
 		s.removeActiveSnapshot(namespace, key)
 		return nil
@@ -365,7 +365,7 @@ func (s *Server) tryRemoveSnapshotKind(ctx context.Context, namespace, key strin
 	if !allowedKind {
 		return nil
 	}
-	if err := s.snt.Remove(ctx, namespace, key); err != nil {
+	if err := s.snt.Remove(ctx, key); err != nil {
 		return fmt.Errorf("remove snapshot %s: %w", key, err)
 	}
 	s.removeActiveSnapshot(namespace, key)

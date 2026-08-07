@@ -11,29 +11,14 @@ var (
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
 )
 
-type PrepareRootfsSourceOptions struct {
-	Source      string `json:"source"`
-	Namespace   string `json:"namespace,omitempty"`
-	TargetImage string `json:"target_image,omitempty"`
-	PlainHTTP   bool   `json:"plain_http,omitempty"`
-	Username    string `json:"username,omitempty"`
-	Password    string `json:"password,omitempty"`
-}
-
-type PrepareRootfsSourceResult struct {
-	ImageName      string `json:"image_name"`
-	ManifestDigest string `json:"manifest_digest"`
-}
-
-type PublishBootImageOptions struct {
-	Namespace       string `json:"namespace,omitempty"`
+type PublishBootIndexOptions struct {
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`
 	InitrdPath      string `json:"initrd_path"`
 	BootIndexTag    string `json:"boot_index_tag"`
 }
 
-type PublishBootImageResult struct {
+type PublishBootIndexResult struct {
 	BootIndexDigest string `json:"boot_index_digest"`
 	ImageName       string `json:"image_name"`
 }
@@ -51,12 +36,11 @@ type BootIndexInfo struct {
 	MemorySizeMB      int64              `json:"memory_size_mb,omitempty"`
 }
 
-// PublishCheckpointBootImageOptions publishes captured memory and VMM state as
+// PublishCheckpointBootIndexOptions publishes captured memory and VMM state as
 // a new Boot Index while reusing the source Boot Index's immutable rootfs and
 // sandbox components. MemRoot is a self-contained directory whose artifact
 // layout is defined by VMMName.
-type PublishCheckpointBootImageOptions struct {
-	Namespace             string `json:"namespace,omitempty"`
+type PublishCheckpointBootIndexOptions struct {
 	SourceBootIndexDigest string `json:"source_boot_index_digest"`
 	BootIndexTag          string `json:"boot_index_tag"`
 	MemRoot               string `json:"mem_root"`
@@ -64,9 +48,9 @@ type PublishCheckpointBootImageOptions struct {
 	MemorySizeMB          int64  `json:"memory_size_mb"`
 }
 
-// PublishCheckpointBootImageResult deliberately contains no snapshot keys:
+// PublishCheckpointBootIndexResult deliberately contains no snapshot keys:
 // publishing checkpoint content must not create checkpoint snapshots.
-type PublishCheckpointBootImageResult struct {
+type PublishCheckpointBootIndexResult struct {
 	BootIndexDigest string `json:"boot_index_digest"`
 	ImageName       string `json:"image_name"`
 }
@@ -75,11 +59,9 @@ type PublishCheckpointBootImageResult struct {
 // immutable Boot Index digest. RemoteReference is only the registry name
 // assigned at the destination and never participates in content identity.
 type PushBootIndexOptions struct {
-	Namespace       string `json:"namespace,omitempty"`
 	BootIndexDigest string `json:"boot_index_digest"`
 	RemoteReference string `json:"remote_reference"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
-	RegistryTimeout string `json:"registry_timeout,omitempty"`
 }
