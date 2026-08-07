@@ -25,6 +25,7 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Network    NetworkConfig    `yaml:"network"`
 	Containerd ContainerdConfig `yaml:"containerd"`
+	VMM        VMMConfig        `yaml:"vmm"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	Volume     VolumeConfig     `yaml:"volume"`
 	State      StateConfig      `yaml:"state"`
@@ -65,6 +66,29 @@ type CNIConfig = netstack.CNIManagerConfig
 type ContainerdConfig struct {
 	RootDir  string `yaml:"root_dir"`
 	StateDir string `yaml:"state_dir"`
+}
+
+// VMMConfig holds the optional configuration for each supported VMM.
+// A nil entry means that the corresponding VMM is unavailable.
+type VMMConfig struct {
+	CloudHypervisor *VMMBinaryConfig `yaml:"cloud_hypervisor"`
+	Stratovirt      *VMMBinaryConfig `yaml:"stratovirt"`
+}
+
+type VMMBinaryConfig struct {
+	Binary string `yaml:"binary"`
+}
+
+// BinaryPaths returns the explicitly configured binary for each available VMM.
+func (c VMMConfig) BinaryPaths() map[string]string {
+	paths := make(map[string]string, 2)
+	if c.CloudHypervisor != nil {
+		paths["cloud-hypervisor"] = c.CloudHypervisor.Binary
+	}
+	if c.Stratovirt != nil {
+		paths["stratovirt"] = c.Stratovirt.Binary
+	}
+	return paths
 }
 
 const (
@@ -317,6 +341,27 @@ func validateConfig(cfg *Config) error {
 	if backend != "" && backend != defaultVolumeBackend {
 		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)
 	}
+	if err := validateVMMBinaryConfig("cloud_hypervisor", cfg.VMM.CloudHypervisor); err != nil {
+		return err
+	}
+	if err := validateVMMBinaryConfig("stratovirt", cfg.VMM.Stratovirt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateVMMBinaryConfig(name string, cfg *VMMBinaryConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	binary := strings.TrimSpace(cfg.Binary)
+	if binary == "" {
+		return fmt.Errorf("vmm.%s.binary is required when vmm.%s is configured", name, name)
+	}
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("invalid vmm.%s.binary=%q: must be an absolute path", name, cfg.Binary)
+	}
+	cfg.Binary = filepath.Clean(binary)
 	return nil
 }
 

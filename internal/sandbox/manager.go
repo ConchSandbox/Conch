@@ -23,6 +23,7 @@ type Config struct {
 	TapIP              string
 	TapMask            int
 	CNI                netstack.CNIManagerConfig
+	VMMBinaries        map[string]string
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
@@ -40,6 +41,7 @@ type Manager struct {
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
 	volumeManager      *volume.Manager
+	vmmBinaries        map[string]string
 }
 
 type sandboxLifecycleState uint8
@@ -85,7 +87,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager)
+	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager, cfg.VMMBinaries)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +110,7 @@ func NewManager(
 	vsockSignalTimeout time.Duration,
 	requestTimeout time.Duration,
 	volumeManager *volume.Manager,
+	vmmBinaries map[string]string,
 ) (*Manager, error) {
 	if bootPreparer == nil {
 		return nil, fmt.Errorf("sandbox boot preparer is required")
@@ -121,8 +124,17 @@ func NewManager(
 		vsockSignalTimeout: vsockSignalTimeout,
 		requestTimeout:     requestTimeout,
 		volumeManager:      volumeManager,
+		vmmBinaries:        cloneStringMap(vmmBinaries),
 		cidAllocator:       NewCIDAllocator(),
 	}, nil
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func (m *Manager) Close() error {
@@ -230,7 +242,7 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 	readyOpts := hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
@@ -249,9 +261,9 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	var sbx *Sandbox
 	var createErr error
 	if resume {
-		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -447,10 +459,15 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, run
 }
 
 func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
+	vmmBinary, ok := m.vmmBinaries[req.VMMName]
+	if !ok {
+		return nil, fmt.Errorf("vmm %q is not configured", req.VMMName)
+	}
 	return createSandboxWithVsockSend(
 		ctx,
 		vmStartSpec,
 		req.VMMName,
+		vmmBinary,
 		req.SandboxID,
 		req.AgentToken,
 		req.Env,

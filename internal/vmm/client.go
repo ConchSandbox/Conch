@@ -32,23 +32,26 @@ func GetVmmType(vmmName string) (int, bool) {
 type ResourceArgs = driver.ResourceArgs
 type vmmAdapter = driver.Adapter
 
-func newVmmAdapter(vmmName, vmmSocketPath string) (vmmAdapter, error) {
+func newVmmAdapter(vmmName, vmmSocketPath, vmmBinary string) (vmmAdapter, error) {
 	vmmType, exists := GetVmmType(vmmName)
 	if !exists {
 		return nil, fmt.Errorf("invalid vmm type: %s", vmmName)
 	}
-	return newVmmAdapterByType(vmmType, vmmSocketPath)
+	if vmmBinary == "" {
+		return nil, fmt.Errorf("vmm %q binary is not configured", vmmName)
+	}
+	return newVmmAdapterByType(vmmType, vmmSocketPath, vmmBinary)
 }
 
-func newVmmAdapterByType(vmmType int, vmmSocketPath string) (vmmAdapter, error) {
+func newVmmAdapterByType(vmmType int, vmmSocketPath, vmmBinary string) (vmmAdapter, error) {
 	switch vmmType {
 	case CLHVmmType:
 		logger := ulog.GetLogger()
 		logger.Info("Creating CLH client", ulog.F("socket", vmmSocketPath))
-		return clh.NewCLHClient(vmmType, vmmSocketPath), nil
+		return clh.NewCLHClient(vmmType, vmmSocketPath, vmmBinary), nil
 	case StratovirtVmmType:
 		ulog.GetLogger().Info("Creating Stratovirt client", ulog.F("socket", vmmSocketPath))
-		return stratovirt.NewStratovirtClient(vmmType, vmmSocketPath), nil
+		return stratovirt.NewStratovirtClient(vmmType, vmmSocketPath, vmmBinary), nil
 	default:
 		ulog.GetLogger().Error("Unknown VMM type",
 			ulog.F("type", vmmType),

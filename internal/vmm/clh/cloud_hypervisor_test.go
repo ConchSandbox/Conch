@@ -13,14 +13,19 @@ import (
 )
 
 func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "cloud-hypervisor")
+	configuredDir := t.TempDir()
+	binPath := filepath.Join(configuredDir, "cloud-hypervisor")
 	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pathDir := t.TempDir()
+	pathBinary := filepath.Join(pathDir, "cloud-hypervisor")
+	if err := os.WriteFile(pathBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() PATH binary error = %v", err)
+	}
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	client := NewCLHClient(1, "/tmp/conch-clh.sock")
+	client := NewCLHClient(1, "/tmp/conch-clh.sock", binPath)
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:         2,
 		CPUMax:          4,
@@ -49,6 +54,9 @@ func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, pathBinary) {
+		t.Fatalf("script used PATH binary %q instead of configured binary:\n%s", pathBinary, script)
 	}
 }
 

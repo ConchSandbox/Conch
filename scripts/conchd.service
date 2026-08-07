@@ -19,7 +19,8 @@ ExecStart=/usr/bin/conchd --config ${CONCHD_CONFIG} $CONCHD_OPTS
 
 Type=notify
 Delegate=yes
-# Sandbox VMM processes outlive conchd and are re-adopted on the next start.
+# VMM processes are not killed with conchd and are not re-adopted on restart.
+# Delete active sandboxes before stopping or restarting this service.
 KillMode=process
 Restart=on-failure
 RestartSec=2

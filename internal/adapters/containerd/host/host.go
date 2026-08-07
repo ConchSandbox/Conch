@@ -54,6 +54,7 @@ type SandboxConfig struct {
 	TapIP              string
 	TapMask            int
 	CNI                netstack.CNIManagerConfig
+	VMMBinaries        map[string]string
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
@@ -254,6 +255,7 @@ func sandboxManagerConfig(cfg *SandboxConfig) conchsandbox.Config {
 		TapIP:              cfg.TapIP,
 		TapMask:            cfg.TapMask,
 		CNI:                cfg.CNI,
+		VMMBinaries:        cfg.VMMBinaries,
 		VsockSignalRetry:   cfg.VsockSignalRetry,
 		VsockSignalTimeout: cfg.VsockSignalTimeout,
 		RequestTimeout:     cfg.RequestTimeout,

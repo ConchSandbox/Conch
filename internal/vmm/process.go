@@ -76,7 +76,7 @@ func (p *Process) isAPIReady() bool {
 }
 
 func NewProcess(
-	vmmName, sandboxId string,
+	vmmName, vmmBinary, sandboxId string,
 	vmmResourceArgs *ResourceArgs, isResume bool,
 ) (*Process, error) {
 	logger := ulog.GetLogger()
@@ -87,7 +87,7 @@ func NewProcess(
 		return nil, err
 	}
 
-	adapter, err := newVmmAdapter(vmmName, vmmSocketPath)
+	adapter, err := newVmmAdapter(vmmName, vmmSocketPath, vmmBinary)
 	if err != nil {
 		logger.Error("Failed to create VMM adapter", ulog.F("error", err))
 		return nil, err
