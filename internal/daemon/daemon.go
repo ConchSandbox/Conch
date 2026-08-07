@@ -1027,20 +1027,19 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
 	var req removeImageRequest
 	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Containerd == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	opts := runtimeapi.RemoveImageOptions{
 		ImageName:   req.ImageName,
 		Synchronous: req.Synchronous,
 	}
-	if err := conchimage.Remove(r.Context(), s.daemonClient, opts); err != nil {
+	if err := s.runtimeService.RemoveImage(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove image",
 			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),

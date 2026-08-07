@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/openeuler/Conch/internal/cli/client"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -32,7 +33,7 @@ func printImageHelp(out io.Writer) {
 	fmt.Fprintln(out, "  pull    Pull an image into the local content store.")
 	fmt.Fprintln(out, "  push    Push an image to a registry.")
 	fmt.Fprintln(out, "  ls      List images from conchd/containerd.")
-	fmt.Fprintln(out, "  rm      Remove an image from conchd/containerd.")
+	fmt.Fprintln(out, "  rm      Remove an OCI image or an unowned Boot Index.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch image <command> --help' for command-specific usage.")
 }
@@ -69,7 +70,7 @@ func runImageList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("image ls", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
-	showAll := fs.Bool("all", false, "show internal containerd image records")
+	showAll := fs.Bool("all", false, "show internal component image records (not content, snapshots, leases, or disk usage)")
 	var filters stringSliceFlag
 	fs.Var(&filters, "filter", "containerd image filter")
 	if err := fs.Parse(args); err != nil {
@@ -127,14 +128,18 @@ func runImageRemove(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
 	synchronous := fs.Bool("sync", true, "delete the containerd image record synchronously")
+	timeout := fs.Duration("timeout", 15*time.Minute, "timeout for image resource cleanup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch image rm: exactly one image name is required")
 	}
+	if *timeout <= 0 {
+		return fmt.Errorf("conch image rm: --timeout must be positive")
+	}
 	imageName := fs.Arg(0)
-	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath, Timeout: *timeout})
 	if err != nil {
 		return fmt.Errorf("conch image rm: create API client: %w", err)
 	}

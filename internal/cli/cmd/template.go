@@ -49,7 +49,7 @@ func printTemplateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  unpack   Unpack a Template's Boot Index into snapshots.")
 	fmt.Fprintln(out, "  ls       List templates.")
 	fmt.Fprintln(out, "  inspect  Inspect a template.")
-	fmt.Fprintln(out, "  rm       Remove a template.")
+	fmt.Fprintln(out, "  rm       Remove a template and its unshared resources.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch template <command> --help' for command-specific usage.")
 }
@@ -357,14 +357,18 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("template rm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
+	timeout := fs.Duration("timeout", 15*time.Minute, "timeout for template resource cleanup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch template rm: exactly one template ID is required")
 	}
+	if *timeout <= 0 {
+		return fmt.Errorf("conch template rm: --timeout must be positive")
+	}
 	id := fs.Arg(0)
-	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
+	conchClient, err := client.New(client.Options{ConfigPath: *configPath, Timeout: *timeout})
 	if err != nil {
 		return fmt.Errorf("conch template rm: create API client: %w", err)
 	}

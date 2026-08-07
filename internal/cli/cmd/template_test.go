@@ -23,7 +23,7 @@ Commands:
   unpack   Unpack a Template's Boot Index into snapshots.
   ls       List templates.
   inspect  Inspect a template.
-  rm       Remove a template.
+  rm       Remove a template and its unshared resources.
 
 Run 'conch template <command> --help' for command-specific usage.
 `
