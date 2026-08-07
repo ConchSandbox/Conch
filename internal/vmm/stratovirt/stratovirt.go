@@ -19,8 +19,6 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-const defaultStratovirtBinary = "/usr/bin/stratovirt"
-
 func stratovirtMachineType() (string, error) {
 	switch runtime.GOARCH {
 	case "amd64", "x86_64":
@@ -106,12 +104,14 @@ type StartScriptStratovirtArgs struct {
 type StratovirtClient struct {
 	vmmType    int
 	socketPath string
+	vmmBinary  string
 }
 
-func NewStratovirtClient(vmmType int, socketPath string) *StratovirtClient {
+func NewStratovirtClient(vmmType int, socketPath, vmmBinary string) *StratovirtClient {
 	return &StratovirtClient{
 		vmmType:    vmmType,
 		socketPath: socketPath,
+		vmmBinary:  vmmBinary,
 	}
 }
 
@@ -172,11 +172,6 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 		return "", fmt.Errorf("resolve nsenter binary: %w", err)
 	}
 
-	vmmBinaryPath := defaultStratovirtBinary
-	if path, err := exec.LookPath("stratovirt"); err == nil {
-		vmmBinaryPath = path
-	}
-
 	machineType, err := stratovirtMachineType()
 	if err != nil {
 		logger.Error("Failed to resolve Stratovirt machine type", ulog.F("error", err))
@@ -190,7 +185,7 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, isResume boo
 
 	stArgs := StartScriptStratovirtArgs{
 		NSenterPath:     nsenterPath,
-		VmmBinaryPath:   vmmBinaryPath,
+		VmmBinaryPath:   s.vmmBinary,
 		CPUBoot:         args.CPUBoot,
 		CPUMax:          args.CPUMax,
 		MemorySize:      strconv.FormatInt(args.MemorySize, 10),

@@ -1,6 +1,6 @@
 # Template Module Interface
 
-Status: Draft
+Status: Implemented
 
 ## Purpose
 

@@ -39,6 +39,12 @@ containerd:
   root_dir: /var/lib/conch/containerd
   state_dir: /run/conch/containerd
 
+vmm:
+  cloud_hypervisor:
+    binary: /usr/local/bin/cloud-hypervisor
+  stratovirt:
+    binary: /usr/bin/stratovirt
+
 sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s

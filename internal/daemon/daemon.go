@@ -130,6 +130,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
 			CNI:                cfg.Network.CNI,
+			VMMBinaries:        cfg.VMM.BinaryPaths(),
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,

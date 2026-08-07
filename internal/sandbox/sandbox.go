@@ -71,7 +71,7 @@ type Sandbox struct {
 func ResumeSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -116,7 +116,7 @@ func ResumeSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, sandboxId, vmmResourceArgs, true,
+		vmmName, vmmBinary, sandboxId, vmmResourceArgs, true,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
@@ -155,7 +155,7 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string,
 ) (s *Sandbox, e error) {
 
@@ -201,7 +201,7 @@ func CreateSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, sandboxId, vmmResourceArgs, false,
+		vmmName, vmmBinary, sandboxId, vmmResourceArgs, false,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)

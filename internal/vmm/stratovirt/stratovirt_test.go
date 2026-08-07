@@ -13,14 +13,19 @@ import (
 )
 
 func TestStratovirtBuildStartCmd(t *testing.T) {
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "stratovirt")
+	configuredDir := t.TempDir()
+	binPath := filepath.Join(configuredDir, "stratovirt")
 	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pathDir := t.TempDir()
+	pathBinary := filepath.Join(pathDir, "stratovirt")
+	if err := os.WriteFile(pathBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() PATH binary error = %v", err)
+	}
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:    2,
 		CPUMax:     4,
@@ -49,6 +54,9 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
 	}
+	if strings.Contains(script, pathBinary) {
+		t.Fatalf("script used PATH binary %q instead of configured binary:\n%s", pathBinary, script)
+	}
 	for _, unwanted := range []string{"/must/not/be/used/mem.img", "-incoming", "memory-backend-file"} {
 		if strings.Contains(script, unwanted) {
 			t.Fatalf("cold script unexpectedly contains %q:\n%s", unwanted, script)
@@ -64,7 +72,7 @@ func TestStratovirtBuildResumeCmdUsesMappedCheckpoint(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:      1,
 		CPUMax:       1,
@@ -101,7 +109,7 @@ func TestStratovirtBuildStartCmdRequiresNSenter(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir)
 
-	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock")
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
 	_, err := client.BuildStartCmd(&driver.ResourceArgs{}, false)
 	if err == nil || !strings.Contains(err.Error(), "resolve nsenter binary") {
 		t.Fatalf("BuildStartCmd() error = %v, want missing nsenter error", err)
@@ -109,7 +117,7 @@ func TestStratovirtBuildStartCmdRequiresNSenter(t *testing.T) {
 }
 
 func TestStratovirtPrepareLaunchDoesNotConsumeCLHSnapshotConfig(t *testing.T) {
-	client := NewStratovirtClient(1, filepath.Join(t.TempDir(), "qmp.sock"))
+	client := NewStratovirtClient(1, filepath.Join(t.TempDir(), "qmp.sock"), "/opt/vmm/stratovirt")
 	if err := client.PrepareLaunch(&driver.ResourceArgs{
 		SnapfilePath: filepath.Join(t.TempDir(), "conch", "snapshot"),
 		MemoryPath:   filepath.Join(t.TempDir(), "mem.img"),

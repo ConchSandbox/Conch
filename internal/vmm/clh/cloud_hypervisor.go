@@ -25,7 +25,6 @@ import (
 )
 
 const (
-	defaultVmmBinary          = "/usr/local/bin/cloud-hypervisor"
 	pmemDevicesPerPciSegment  = 24
 	defaultCloudHypervisorPci = 1
 )
@@ -82,13 +81,15 @@ type StartScriptCLHArgs struct {
 type CLHClient struct {
 	vmmType    int
 	socketPath string
+	vmmBinary  string
 	fds        *VmmFds
 }
 
-func NewCLHClient(vmmType int, socketPath string) *CLHClient {
+func NewCLHClient(vmmType int, socketPath, vmmBinary string) *CLHClient {
 	return &CLHClient{
 		vmmType:    vmmType,
 		socketPath: socketPath,
+		vmmBinary:  vmmBinary,
 	}
 }
 
@@ -383,11 +384,6 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 		return "", fmt.Errorf("resolve nsenter binary: %w", err)
 	}
 
-	vmmBinaryPath := defaultVmmBinary
-	if path, err := exec.LookPath("cloud-hypervisor"); err == nil {
-		vmmBinaryPath = path
-	}
-
 	fsArgs := ""
 	sharefsCmdline := ""
 	if len(args.VirtioFS) > 0 {
@@ -398,7 +394,7 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, isResume bool) (s
 
 	clhArgs := StartScriptCLHArgs{
 		NSenterPath:     nsenterPath,
-		VmmBinaryPath:   vmmBinaryPath,
+		VmmBinaryPath:   clh.vmmBinary,
 		CPUBoot:         args.CPUBoot,
 		CPUMax:          args.CPUMax,
 		MemorySize:      strconv.FormatInt(args.MemorySize, 10) + "M",

@@ -31,18 +31,18 @@ curl --request GET \
 
 | 接口名称 | RPC 路径 | 说明 |
 | --- | --- | --- |
-| `runCommand` | `/pb.ProcessService/StartProcess` | 执行同步命令或启动后台进程 |
-| `connectBackgroundProcess` | `/pb.ProcessService/Connect` | 连接后台进程并读取输出事件 |
-| `listBackgroundProcesses` | `/pb.ProcessService/List` | 列出后台进程 |
-| `killBackgroundProcess` | `/pb.ProcessService/SendSignal` | 向后台进程发送信号 |
-| `uploadFile` | `/pb.FileService/PostFileStream` | 上传或写入文件 |
-| `downloadFile` | `/pb.FileService/GetFileStream` | 下载或读取文件 |
-| `listFiles` | `/pb.FileService/ListFiles` | 列出文件和目录 |
-| `searchFiles` | `/pb.FileService/SearchFiles` | 按 glob 搜索文件 |
+| `StartProcess` | `/pb.ProcessService/StartProcess` | 执行同步命令或启动后台进程 |
+| `Connect` | `/pb.ProcessService/Connect` | 连接后台进程并读取输出事件 |
+| `List` | `/pb.ProcessService/List` | 列出后台进程 |
+| `SendSignal` | `/pb.ProcessService/SendSignal` | 向后台进程发送信号 |
+| `PostFileStream` | `/pb.FileService/PostFileStream` | 上传或写入文件 |
+| `GetFileStream` | `/pb.FileService/GetFileStream` | 下载或读取文件 |
+| `ListFiles` | `/pb.FileService/ListFiles` | 列出文件和目录 |
+| `SearchFiles` | `/pb.FileService/SearchFiles` | 按 glob 搜索文件 |
 
 ## 执行命令
 
-接口名称：`runCommand`
+RPC 名称：`StartProcess`
 
 ```text
 pb.ProcessService/StartProcess
@@ -74,7 +74,7 @@ pb.ProcessService/StartProcess
 stream ProcessEvent
 ```
 
-```json
+```jsonl
 {"start": {"pid": 23456}}
 {"data": {"stdout": "aGVsbG8K"}}
 {"end": {"exitCode": 0, "exited": true, "status": "exited", "error": ""}}
@@ -234,7 +234,7 @@ process handle (pid=204, tag=http-srv)
 
 ## 连接后台进程
 
-接口名称：`connectBackgroundProcess`
+RPC 名称：`Connect`
 
 ```text
 pb.ProcessService/Connect
@@ -253,7 +253,7 @@ pb.ProcessService/Connect
 stream ProcessEvent
 ```
 
-```json
+```jsonl
 {"start":{"pid":23456}}
 {"data":{"stdout":"U2VydmluZyBIVFRQIG9uIDAuMC4wLjAgcG9ydCAxODA4MCAuLi4K"}}
 {"data":{"stderr":"d2Fybgo="}}
@@ -356,7 +356,7 @@ still_running: True
 
 ## 列出后台进程
 
-接口名称：`listBackgroundProcesses`
+RPC 名称：`List`
 
 ```text
 pb.ProcessService/List
@@ -415,7 +415,7 @@ curl --request POST \
 
 ## 发送进程信号
 
-接口名称：`killBackgroundProcess`
+RPC 名称：`SendSignal`
 
 ```text
 pb.ProcessService/SendSignal
@@ -482,7 +482,7 @@ curl --request POST \
 
 ## 上传文件
 
-接口名称：`uploadFile`
+RPC 名称：`PostFileStream`
 
 ```text
 pb.FileService/PostFileStream
@@ -546,7 +546,7 @@ WriteInfo(name='remote.txt', type=<FileType.FILE: 'file'>, path='/tmp/conch-doc-
 
 ## 下载文件
 
-接口名称：`downloadFile`
+RPC 名称：`GetFileStream`
 
 ```text
 pb.FileService/GetFileStream
@@ -606,7 +606,7 @@ b'hello\n'
 
 ## 列出文件
 
-接口名称：`listFiles`
+RPC 名称：`ListFiles`
 
 ```text
 pb.FileService/ListFiles
@@ -681,7 +681,7 @@ curl --request POST \
 
 ## 搜索文件
 
-接口名称：`searchFiles`
+RPC 名称：`SearchFiles`
 
 ```text
 pb.FileService/SearchFiles
