@@ -153,8 +153,9 @@ type ListImagesOptions struct {
 }
 
 type RemoveImageOptions struct {
-	ImageName   string
-	Synchronous bool
+	ImageName            string
+	ExpectedTargetDigest string
+	Synchronous          bool
 }
 
 type ImageRecord struct {

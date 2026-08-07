@@ -9,6 +9,8 @@ import (
 var (
 	ErrInvalidRequest      = errors.New("invalid image request")
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
+	ErrImageNotFound       = errors.New("image not found")
+	ErrTemplateManaged     = errors.New("image is managed by a template")
 )
 
 // RegistryPullOptions contains the registry inputs shared by OCI image and
@@ -19,6 +21,30 @@ type RegistryPullOptions struct {
 	PlainHTTP bool
 	Username  string
 	Password  string
+}
+
+// TemplateResourceReference identifies the immutable Boot Index and local
+// image record associated with a Template.
+type TemplateResourceReference struct {
+	TemplateID      string
+	BootIndexDigest string
+	BuildRef        string
+}
+
+// TemplateRemovalOptions describes one Template being removed and every
+// Template whose resources must remain reachable.
+type TemplateRemovalOptions struct {
+	Target   TemplateResourceReference
+	Retained []TemplateResourceReference
+}
+
+// TemplateRemovalPlan is prepared without mutating containerd. Applying it
+// removes only image records and snapshot lease references that are no longer
+// reachable from another Template.
+type TemplateRemovalPlan struct {
+	TemplateID   string
+	ImageNames   []string
+	SnapshotKeys []string
 }
 
 type PublishBootIndexOptions struct {

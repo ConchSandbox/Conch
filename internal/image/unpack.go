@@ -59,7 +59,7 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 
 	for _, manifestDesc := range components {
 		kind := getKind(manifestDesc)
-		subImageName := fmt.Sprintf("localhost/conch/%s-component:%s", kind, manifestDesc.Digest.Encoded())
+		subImageName := componentImageName(kind, manifestDesc)
 		if err := validateNativeComponentManifest(ctx, client, kind, manifestDesc); err != nil {
 			return nil, err
 		}
@@ -84,6 +84,10 @@ func getKind(manifestDesc ocispec.Descriptor) string {
 		return kind
 	}
 	return KindUnknown
+}
+
+func componentImageName(kind string, manifestDesc ocispec.Descriptor) string {
+	return fmt.Sprintf("localhost/conch/%s-component:%s", kind, manifestDesc.Digest.Encoded())
 }
 
 func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshotterName string, manifestDesc ocispec.Descriptor, kind string, imageName string) (string, error) {

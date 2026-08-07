@@ -9,6 +9,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
 	digestpkg "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -249,10 +250,20 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 	}
 	removeCtx := containerdclient.NewNamespaceContext(ctx)
 	opts := []images.DeleteOpt{}
+	if rawDigest := strings.TrimSpace(req.ExpectedTargetDigest); rawDigest != "" {
+		targetDigest, err := digestpkg.Parse(rawDigest)
+		if err != nil {
+			return fmt.Errorf("%w: invalid expected target digest %q: %v", ErrInvalidRequest, rawDigest, err)
+		}
+		opts = append(opts, images.DeleteTarget(&ocispec.Descriptor{Digest: targetDigest}))
+	}
 	if req.Synchronous {
 		opts = append(opts, images.SynchronousDelete())
 	}
 	if err := client.ImageService().Delete(removeCtx, req.ImageName, opts...); err != nil {
+		if errdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrImageNotFound, req.ImageName)
+		}
 		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
 	}
 	return nil
