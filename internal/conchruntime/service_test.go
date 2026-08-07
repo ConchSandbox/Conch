@@ -12,12 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -664,6 +667,81 @@ func TestUnpackTemplateResolvesBootIndexByDigest(t *testing.T) {
 
 	if err := svc.UnpackTemplate(ctx, TemplateUnpackOptions{TemplateID: "tmpl_unpack"}); err != nil {
 		t.Fatalf("UnpackTemplate() error = %v", err)
+	}
+}
+
+func TestRemoveTemplateRejectsSandboxReference(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+	digest := buildColdBootIndex(t, host, "in-use-template")
+	seedTemplate(t, ctx, svc.Templates, "tmpl-in-use", digest, conchtemplate.BootModeCold)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID:                     "sandbox-in-use",
+		SourceTemplateID:              "tmpl-in-use",
+		CheckpointHeadTemplateID:      "tmpl-in-use",
+		CheckpointHeadBootIndexDigest: digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.RemoveTemplate(ctx, "tmpl-in-use"); !errors.Is(err, conchtemplate.ErrInUse) {
+		t.Fatalf("RemoveTemplate() error = %v, want ErrInUse", err)
+	}
+	if _, err := svc.Templates.Get(ctx, "tmpl-in-use"); err != nil {
+		t.Fatalf("template was removed despite sandbox reference: %v", err)
+	}
+}
+
+func TestRemoveImageProtectsTemplateArtifactsAndDeletesOCIImage(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+
+	bootDigest := buildColdBootIndex(t, host, "owned-boot-index")
+	bootInfo, err := host.Client().ContentStore().Info(ctx, digest.Digest(bootDigest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootName := "localhost/conch/templates:owned"
+	if _, err := host.Client().ImageService().Create(ctx, images.Image{
+		Name: bootName,
+		Target: ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageIndex,
+			Digest:    digest.Digest(bootDigest),
+			Size:      bootInfo.Size,
+		},
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindBootIndexCold},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedTemplate(t, ctx, svc.Templates, "tmpl-owned", bootDigest, conchtemplate.BootModeCold)
+	if err := svc.RemoveImage(ctx, runtimeapi.RemoveImageOptions{ImageName: bootName}); !errors.Is(err, conchimage.ErrTemplateManaged) {
+		t.Fatalf("RemoveImage(owned boot index) error = %v, want ErrTemplateManaged", err)
+	}
+	if _, err := host.Client().ImageService().Get(ctx, bootName); err != nil {
+		t.Fatalf("owned boot index was removed: %v", err)
+	}
+
+	ociName := "localhost/conch/rootfs:ordinary"
+	ociTarget := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromString("ordinary-oci-image"),
+		Size:      1,
+	}
+	if _, err := host.Client().ImageService().Create(ctx, images.Image{
+		Name: ociName, Target: ociTarget,
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindOCIImage},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveImage(ctx, runtimeapi.RemoveImageOptions{ImageName: ociName}); err != nil {
+		t.Fatalf("RemoveImage(OCI) error = %v", err)
+	}
+	if _, err := host.Client().ImageService().Get(ctx, ociName); err == nil {
+		t.Fatal("ordinary OCI image still exists after removal")
 	}
 }
 

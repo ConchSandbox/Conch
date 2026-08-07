@@ -51,7 +51,10 @@ type Service struct {
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
 	lifecycleLocks  sandboxLifecycleLocks
+	templateLocks   sandboxLifecycleLocks
 }
+
+const templateResourceCleanupTimeout = 10 * time.Minute
 
 var ErrSandboxAlreadyExists = errors.New("sandbox already exists")
 
@@ -136,6 +139,20 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err
+	}
+	if s.Containerd != nil {
+		unlockTemplate := s.templateLocks.lock(templateIDLockKey(opts.TemplateID))
+		defer unlockTemplate()
+		if s.Templates == nil {
+			return SandboxCreateResult{}, fmt.Errorf("template store is not configured")
+		}
+		templateEntry, err := s.Templates.Get(ctx, opts.TemplateID)
+		if err != nil {
+			return SandboxCreateResult{}, err
+		}
+		if err := conchimage.RetainTemplateResources(ctx, s.Containerd, templateEntry.ID, templateEntry.BootIndexDigest); err != nil {
+			return SandboxCreateResult{}, fmt.Errorf("retain template %s resources: %w", templateEntry.ID, err)
+		}
 	}
 	agentToken, err := sandbox.GenerateAgentToken()
 	if err != nil {
@@ -394,7 +411,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	if err := s.Store.PublishCheckpoint(ctx, conchtemplate.Entry{
+	candidate := conchtemplate.Entry{
 		ID:               templateID,
 		Origin:           conchtemplate.OriginCheckpoint,
 		BootMode:         conchtemplate.BootModeResume,
@@ -404,9 +421,23 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		BuildRef:         published.ImageName,
 		Labels:           copyMap(opts.Labels),
 		CreatedAt:        time.Now().UnixNano(),
-	}); err != nil {
+	}
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	if err := conchimage.RetainTemplateResources(ctx, s.Containerd, templateID, info.BootIndexDigest); err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return SandboxCheckpointResult{}, fmt.Errorf("retain checkpoint template resources: %v; clean unpublished template: %w", err, cleanupErr)
+		}
+		return SandboxCheckpointResult{}, fmt.Errorf("retain checkpoint template resources: %w", err)
+	}
+	if err := s.Store.PublishCheckpoint(ctx, candidate); err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return SandboxCheckpointResult{}, fmt.Errorf("publish checkpoint metadata: %v; clean unpublished template: %w", err, cleanupErr)
+		}
 		return SandboxCheckpointResult{}, err
 	}
+	unlockResources()
 	return SandboxCheckpointResult{
 		TemplateID:      templateID,
 		BootIndexDigest: info.BootIndexDigest,
@@ -446,7 +477,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if err != nil {
 		return TemplatePullResult{}, err
 	}
-	entry, err := s.Templates.Create(ctx, conchtemplate.Entry{
+	candidate := conchtemplate.Entry{
 		ID:              templateID,
 		Origin:          origin,
 		BootMode:        bootMode,
@@ -454,10 +485,24 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		ImageName:       reference,
 		BuildRef:        reference,
 		Labels:          opts.Labels,
-	})
+	}
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	if err := conchimage.RetainTemplateResources(ctx, s.Containerd, templateID, info.BootIndexDigest); err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return TemplatePullResult{}, fmt.Errorf("retain pulled template resources: %v; clean unpublished template: %w", err, cleanupErr)
+		}
+		return TemplatePullResult{}, fmt.Errorf("retain pulled template resources: %w", err)
+	}
+	entry, err := s.Templates.Create(ctx, candidate)
 	if err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return TemplatePullResult{}, fmt.Errorf("create pulled template metadata: %v; clean unpublished template: %w", err, cleanupErr)
+		}
 		return TemplatePullResult{}, err
 	}
+	unlockResources()
 	return TemplatePullResult{
 		TemplateID:      entry.ID,
 		BootIndexDigest: info.BootIndexDigest,
@@ -558,7 +603,7 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	if info.Resume {
 		bootMode = conchtemplate.BootModeResume
 	}
-	entry, err := s.Templates.Create(ctx, conchtemplate.Entry{
+	candidate := conchtemplate.Entry{
 		ID:              templateID,
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        bootMode,
@@ -566,10 +611,24 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 		ImageName:       source,
 		BuildRef:        result.bootIndexTag,
 		Labels:          opts.Labels,
-	})
+	}
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	if err := conchimage.RetainTemplateResources(ctx, s.Containerd, templateID, info.BootIndexDigest); err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return TemplateCreateResult{}, fmt.Errorf("retain created template resources: %v; clean unpublished template: %w", err, cleanupErr)
+		}
+		return TemplateCreateResult{}, fmt.Errorf("retain created template resources: %w", err)
+	}
+	entry, err := s.Templates.Create(ctx, candidate)
 	if err != nil {
+		unlockResources()
+		if cleanupErr := s.cleanupUnpublishedTemplateResources(ctx, candidate); cleanupErr != nil {
+			return TemplateCreateResult{}, fmt.Errorf("create template metadata: %v; clean unpublished template: %w", err, cleanupErr)
+		}
 		return TemplateCreateResult{}, err
 	}
+	unlockResources()
 	return TemplateCreateResult{
 		TemplateID:      entry.ID,
 		BootIndexDigest: info.BootIndexDigest,
@@ -683,11 +742,174 @@ func (s *Service) GetTemplate(ctx context.Context, id string) (runtimeapi.Templa
 }
 
 func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
-	if s == nil || s.Templates == nil {
+	if s == nil || s.Templates == nil || s.Store == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	return s.Templates.Delete(ctx, id)
+	if s.Containerd == nil {
+		return fmt.Errorf("containerd client is not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("template id is required")
+	}
+	unlockTemplate := s.templateLocks.lock(templateIDLockKey(id))
+	defer unlockTemplate()
+
+	if _, err := s.Templates.Get(ctx, id); err != nil {
+		return err
+	}
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	defer unlockResources()
+	target, err := s.Templates.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	sandboxes, err := s.Store.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("list sandboxes before removing template: %w", err)
+	}
+	for _, rec := range sandboxes {
+		if rec.SourceTemplateID == id || rec.CheckpointHeadTemplateID == id {
+			return fmt.Errorf("%w: template %s is referenced by sandbox %s", conchtemplate.ErrInUse, id, rec.SandboxID)
+		}
+	}
+
+	plan, err := s.planTemplateRemoval(ctx, target)
+	if err != nil {
+		return fmt.Errorf("plan template %s resource cleanup: %w", id, err)
+	}
+	if err := s.Templates.Delete(ctx, id); err != nil {
+		return err
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
+	defer cancel()
+	if err := conchimage.ApplyTemplateRemoval(cleanupCtx, s.Containerd, plan); err != nil {
+		restoreCtx, restoreCancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
+		defer restoreCancel()
+		if _, restoreErr := s.Templates.Create(restoreCtx, target); restoreErr != nil {
+			return fmt.Errorf("template %s resource cleanup failed: %v; restore metadata: %w", id, err, restoreErr)
+		}
+		return fmt.Errorf("template %s resource cleanup failed; metadata restored: %w", id, err)
+	}
+	return nil
 }
+
+func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is not configured")
+	}
+	name := strings.TrimSpace(opts.ImageName)
+	if name == "" {
+		return fmt.Errorf("%w: image_name is required", conchimage.ErrInvalidRequest)
+	}
+	items, err := conchimage.List(ctx, s.Containerd, runtimeapi.ListImagesOptions{})
+	if err != nil {
+		return err
+	}
+	var target runtimeapi.ImageRecord
+	for _, item := range items {
+		if item.Name == name {
+			target = item
+			break
+		}
+	}
+	if target.Name == "" {
+		return fmt.Errorf("%w: %s", conchimage.ErrImageNotFound, name)
+	}
+
+	switch target.Kind {
+	case conchimage.ImageKindBootComponentRootfs,
+		conchimage.ImageKindBootComponentSandbox,
+		conchimage.ImageKindBootComponentMemory:
+		return fmt.Errorf("%w: component image %s must be removed through its template", conchimage.ErrTemplateManaged, name)
+	case conchimage.ImageKindBootIndexCold, conchimage.ImageKindBootIndexResume:
+		if s.Templates == nil {
+			return fmt.Errorf("template store is not configured")
+		}
+		unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+		defer unlockResources()
+		entries, err := s.Templates.List(ctx, conchtemplate.Filter{})
+		if err != nil {
+			return fmt.Errorf("list templates before removing image: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.BootIndexDigest == target.TargetDigest {
+				return fmt.Errorf("%w: image %s is owned by template %s", conchimage.ErrTemplateManaged, name, entry.ID)
+			}
+		}
+		plan, err := conchimage.PlanTemplateRemoval(ctx, s.Containerd, conchimage.TemplateRemovalOptions{
+			Target: conchimage.TemplateResourceReference{
+				BootIndexDigest: target.TargetDigest,
+				BuildRef:        name,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("plan boot index image cleanup: %w", err)
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
+		defer cancel()
+		return conchimage.ApplyTemplateRemoval(cleanupCtx, s.Containerd, plan)
+	default:
+		opts.ImageName = name
+		opts.ExpectedTargetDigest = target.TargetDigest
+		return conchimage.Remove(ctx, s.Containerd, opts)
+	}
+}
+
+func (s *Service) cleanupUnpublishedTemplateResources(ctx context.Context, target conchtemplate.Entry) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
+	defer cancel()
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	defer unlockResources()
+	if _, err := s.Templates.Get(cleanupCtx, target.ID); err == nil {
+		return fmt.Errorf("template %s metadata exists; resource cleanup skipped", target.ID)
+	} else if !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("confirm template %s metadata absence: %w", target.ID, err)
+	}
+	plan, err := s.planTemplateRemoval(cleanupCtx, target)
+	if err != nil {
+		return err
+	}
+	return conchimage.ApplyTemplateRemoval(cleanupCtx, s.Containerd, plan)
+}
+
+func (s *Service) planTemplateRemoval(ctx context.Context, target conchtemplate.Entry) (conchimage.TemplateRemovalPlan, error) {
+	entries, err := s.Templates.List(ctx, conchtemplate.Filter{})
+	if err != nil {
+		return conchimage.TemplateRemovalPlan{}, fmt.Errorf("list templates before resource removal: %w", err)
+	}
+	retained := make([]conchimage.TemplateResourceReference, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ID == target.ID {
+			continue
+		}
+		if err := conchimage.RetainTemplateResources(ctx, s.Containerd, entry.ID, entry.BootIndexDigest); err != nil {
+			return conchimage.TemplateRemovalPlan{}, fmt.Errorf("retain template %s resources before removing %s: %w", entry.ID, target.ID, err)
+		}
+		retained = append(retained, conchimage.TemplateResourceReference{
+			TemplateID:      entry.ID,
+			BootIndexDigest: entry.BootIndexDigest,
+			BuildRef:        entry.BuildRef,
+		})
+	}
+	if err := conchimage.RetainTemplateResources(ctx, s.Containerd, target.ID, target.BootIndexDigest); err != nil {
+		return conchimage.TemplateRemovalPlan{}, fmt.Errorf("retain target template %s resources before removal: %w", target.ID, err)
+	}
+	return conchimage.PlanTemplateRemoval(ctx, s.Containerd, conchimage.TemplateRemovalOptions{
+		Target: conchimage.TemplateResourceReference{
+			TemplateID:      target.ID,
+			BootIndexDigest: target.BootIndexDigest,
+			BuildRef:        target.BuildRef,
+		},
+		Retained: retained,
+	})
+}
+
+func templateIDLockKey(id string) string {
+	return "template-id:" + strings.TrimSpace(id)
+}
+
+const templateResourcesLockKey = "template-resources"
 
 func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
 	return runtimeapi.TemplateRecord{

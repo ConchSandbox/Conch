@@ -24,7 +24,10 @@ const (
 	BootModeResume BootMode = "resume"
 )
 
-var ErrAlreadyExists = errors.New("template already exists")
+var (
+	ErrAlreadyExists = errors.New("template already exists")
+	ErrInUse         = errors.New("template is in use")
+)
 
 // Entry is the non-persistent domain representation of a fully published and
 // validated Template. An Entry has no lifecycle state: if it exists, it is
