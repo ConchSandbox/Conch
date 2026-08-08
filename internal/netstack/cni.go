@@ -2,6 +2,7 @@ package netstack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -34,11 +35,13 @@ type CNIManagerConfig struct {
 type cniPlugin interface {
 	Setup(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
 	Remove(context.Context, string, string, ...cni.NamespaceOpts) error
+	GetConfig() *cni.ConfigResult
 }
 
 type CNIManager struct {
-	plugin cniPlugin
-	config CNIManagerConfig
+	plugin     cniPlugin
+	config     CNIManagerConfig
+	bridgeName string
 }
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
@@ -63,11 +66,45 @@ func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	if err := plugin.Load(cni.WithLoNetwork, cni.WithDefaultConf); err != nil {
 		return nil, fmt.Errorf("failed to load cni config: %w", err)
 	}
+	bridgeName, err := loadedBridgeName(plugin.GetConfig())
+	if err != nil {
+		return nil, fmt.Errorf("inspect loaded cni config: %w", err)
+	}
 
 	return &CNIManager{
-		plugin: plugin,
-		config: cfg,
+		plugin:     plugin,
+		config:     cfg,
+		bridgeName: bridgeName,
 	}, nil
+}
+
+type bridgePluginConfig struct {
+	Bridge string `json:"bridge"`
+}
+
+func loadedBridgeName(config *cni.ConfigResult) (string, error) {
+	if config == nil {
+		return "", fmt.Errorf("CNI returned no loaded configuration")
+	}
+	for _, network := range config.Networks {
+		if network == nil || network.Config == nil || network.Config.Name == "cni-loopback" {
+			continue
+		}
+		for _, plugin := range network.Config.Plugins {
+			if plugin == nil || plugin.Network == nil || plugin.Network.Type != "bridge" {
+				continue
+			}
+			var bridge bridgePluginConfig
+			if err := json.Unmarshal([]byte(plugin.Source), &bridge); err != nil {
+				return "", fmt.Errorf("parse bridge plugin config: %w", err)
+			}
+			if strings.TrimSpace(bridge.Bridge) == "" {
+				return "", fmt.Errorf("loaded bridge network %q has no bridge name", network.Config.Name)
+			}
+			return bridge.Bridge, nil
+		}
+	}
+	return "", fmt.Errorf("loaded CNI configuration has no bridge network")
 }
 
 func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {

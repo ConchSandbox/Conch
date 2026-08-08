@@ -112,11 +112,11 @@ ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- Expected result: a normal exit, including `SIGTERM` and `SIGINT`, closes the in-memory warm pool and makes a best-effort attempt to remove each queued idle slot's tap, CNI allocation, and network namespace. A cleanup failure is logged and does not prevent process exit. After restart, `conchd` prefills a fresh pool and does not adopt old slots. Resources left by an abnormal exit are not remediated, and old sandboxes are not restored; delete all active sandboxes before restarting the daemon.
+- Expected result: a normal exit, including `SIGTERM` and `SIGINT`, deletes all sandboxes before closing the containerd host; the containerd host closes the warm pool and makes a best-effort attempt to remove each queued idle slot's tap, CNI allocation, and network namespace. A cleanup failure is logged and does not prevent process exit. If `conchd` is force-killed with `SIGKILL`, the next startup scans and removes Conch-owned stale network resources before prefilling the warm pool, then deletes stale sandbox state records and releases their snapshot views. Old sandboxes are not restored.
 
 ## Manual Cleanup
 
-Normal `conchd` exit makes a best-effort attempt to clean the in-memory warm pool. If network resources remain after an abnormal exit or an individual cleanup failure, stop `conchd` and manually remove the namespaces, bridge, and IPAM directory with the commands below. Network slots are no longer stored in `/var/lib/conch/state.db`, so deleting that database is not a substitute for network cleanup:
+Normal `conchd` exit makes a best-effort attempt to clean the in-memory warm pool. Startup recovery handles network resources left by `SIGKILL`; if startup recovery reports a cleanup failure, stop `conchd` and manually remove the namespaces, bridge, and IPAM directory with the commands below. Network slots are not stored in `/var/lib/conch/state.db`, so deleting that database is not a substitute for network cleanup:
 
 ```bash
 sudo sh -c '

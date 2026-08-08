@@ -114,12 +114,12 @@ ip neigh show | grep 10.12
 ls /var/lib/cni/networks/conch-bridge
 ```
 
-- 预期结果：正常退出（包括 `SIGTERM`、`SIGINT`）会关闭内存 warm pool，并尽力清理队列中空闲 Slot 的 tap、CNI 分配和网络命名空间。单个 Slot 清理失败只记录日志，不阻止进程退出。重启 `conchd` 后会从空池重新预热，不会接管旧 Slot。当前不处理异常退出留下的资源，也不会恢复旧 sandbox；重启前应先删除所有活跃 sandbox。
+- 预期结果：正常退出（包括 `SIGTERM`、`SIGINT`）会先删除所有 Sandbox，再关闭 containerd host；containerd host 负责关闭 warm pool 和清理队列中空闲 Slot 的 tap、CNI 分配及网络命名空间。单个 Slot 清理失败只记录日志，不阻止进程退出。若 `conchd` 被 `SIGKILL` 强制终止，下次启动会在 warm pool 预热前扫描并清理 Conch 旧网络资源，然后删除旧 Sandbox 状态记录并释放对应 snapshot view；旧 Sandbox 不会被恢复。
 
 
 ## 手动清理流程
 
-正常退出 `conchd` 会尽力清理内存 warm pool。异常退出或单项清理失败后若仍有网络残留，可在退出 `conchd` 后使用如下指令手动删除命名空间、网桥以及 IPAM 目录。网络 Slot 不再写入 `/var/lib/conch/state.db`，删除该数据库不会代替网络清理：
+正常退出 `conchd` 会尽力清理内存 warm pool。启动恢复会自动处理 `SIGKILL` 后留下的 Conch 网络资源；如果启动恢复本身报告清理失败，仍可在停止 `conchd` 后使用如下指令手动删除命名空间、网桥以及 IPAM 目录。网络 Slot 不写入 `/var/lib/conch/state.db`，删除该数据库不会代替网络清理：
 
 ```bash
 sudo sh -c '

@@ -34,6 +34,41 @@ type fakeCNIPlugin struct {
 	remove func(context.Context, string, string, ...cni.NamespaceOpts) error
 }
 
+func TestCreateNetworkSlotWithRetrySucceedsOnSecondAttempt(t *testing.T) {
+	wantSlot := &Slot{id: firstSlotID}
+	attempts := 0
+	slot, err := createNetworkSlotWithRetry(context.Background(), func(context.Context) (*Slot, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("stale CNI allocation")
+		}
+		return wantSlot, nil
+	})
+	if err != nil {
+		t.Fatalf("createNetworkSlotWithRetry() error = %v", err)
+	}
+	if slot != wantSlot || attempts != 2 {
+		t.Fatalf("result = (%p, attempts=%d), want (%p, attempts=2)", slot, attempts, wantSlot)
+	}
+}
+
+func TestCreateNetworkSlotWithRetryReturnsSecondError(t *testing.T) {
+	wantErr := errors.New("CNI still unavailable")
+	attempts := 0
+	slot, err := createNetworkSlotWithRetry(context.Background(), func(context.Context) (*Slot, error) {
+		attempts++
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("createNetworkSlotWithRetry() error = %v, want %v", err, wantErr)
+	}
+	if slot != nil || attempts != 2 {
+		t.Fatalf("result = (%p, attempts=%d), want (nil, attempts=2)", slot, attempts)
+	}
+}
+
+func (f *fakeCNIPlugin) GetConfig() *cni.ConfigResult { return nil }
+
 func (f *fakeCNIPlugin) Setup(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) (*cni.Result, error) {
 	if f.setup == nil {
 		return nil, nil

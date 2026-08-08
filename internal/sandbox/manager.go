@@ -13,6 +13,7 @@ import (
 	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -89,8 +90,50 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	pool.Start(ctx)
 	return manager, nil
+}
+
+// Start launches background warm network pool population. Callers should
+// complete startup recovery first.
+func (m *Manager) Start(ctx context.Context) {
+	if m == nil || m.pool == nil {
+		return
+	}
+	m.pool.Start(ctx)
+}
+
+// RecoverStaleResources orchestrates cleanup of resources owned by a previous
+// conchd process. It must run before Start so the new warm pool starts clean.
+func (m *Manager) RecoverStaleResources(ctx context.Context, sandboxIDs []string) error {
+	if m == nil || m.pool == nil {
+		return fmt.Errorf("sandbox manager is not initialized")
+	}
+	if err := vmm.CleanupStaleResources(); err != nil {
+		return fmt.Errorf("clean stale VMM resources: %w", err)
+	}
+	if err := m.volumeManager.CleanupStaleResources(); err != nil {
+		return fmt.Errorf("clean stale volume resources: %w", err)
+	}
+	if err := m.pool.CleanupStaleResources(ctx); err != nil {
+		return fmt.Errorf("clean stale network resources: %w", err)
+	}
+	if err := m.cleanupStaleBootResources(ctx, sandboxIDs); err != nil {
+		return fmt.Errorf("clean stale boot resources: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) cleanupStaleBootResources(ctx context.Context, sandboxIDs []string) error {
+	if m == nil || m.boot == nil {
+		return fmt.Errorf("sandbox boot preparer is not configured")
+	}
+	var errs []error
+	for _, sandboxID := range sandboxIDs {
+		if err := m.boot.Release(ctx, ReleaseBootRequest{SandboxID: sandboxID}); err != nil {
+			errs = append(errs, fmt.Errorf("release sandbox %s boot layout: %w", sandboxID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func durationOrDefault(value, fallback time.Duration) time.Duration {

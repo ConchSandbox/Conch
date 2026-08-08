@@ -44,6 +44,7 @@ type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) ([]Device, error)
 	Cleanup(sandboxID string, devices []Device) error
+	CleanupStaleResources() error
 }
 
 var safeSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

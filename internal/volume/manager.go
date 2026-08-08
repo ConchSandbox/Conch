@@ -71,6 +71,15 @@ func (m *Manager) CleanupSandbox(sandboxID string, devices []Device) error {
 	return m.backend.Cleanup(sandboxID, devices)
 }
 
+// CleanupStaleResources removes per-sandbox volume backends left by a killed
+// daemon. The runtime directory is exclusively owned by Conch.
+func (m *Manager) CleanupStaleResources() error {
+	if m == nil || m.backend == nil {
+		return nil
+	}
+	return m.backend.CleanupStaleResources()
+}
+
 func isBlockedTarget(target string) bool {
 	switch target {
 	case "/", "/proc", "/sys", "/dev", "/run":

@@ -222,6 +222,45 @@ func (b *virtiofsBackend) Cleanup(sandboxID string, devices []Device) error {
 	return errors.Join(errs...)
 }
 
+func (b *virtiofsBackend) CleanupStaleResources() error {
+	var errs []error
+	procEntries, procErr := os.ReadDir("/proc")
+	if procErr != nil {
+		return fmt.Errorf("scan virtiofsd processes: %w", procErr)
+	}
+	for _, entry := range procEntries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || !strings.Contains(string(cmdline), "virtiofsd") || !strings.Contains(string(cmdline), b.runtimeDir) {
+			continue
+		}
+		pid, _ := strconv.Atoi(entry.Name())
+		if proc, err := os.FindProcess(pid); err == nil {
+			if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
+				errs = append(errs, fmt.Errorf("kill stale virtiofsd pid %d: %w", pid, killErr))
+			}
+		}
+	}
+	entries, err := os.ReadDir(b.runtimeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.Join(append(errs, err)...)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || ValidateSegment(entry.Name(), "sandbox_id") != nil {
+			continue
+		}
+		if cleanupErr := b.Cleanup(entry.Name(), nil); cleanupErr != nil {
+			errs = append(errs, fmt.Errorf("cleanup stale volume for sandbox %s: %w", entry.Name(), cleanupErr))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // processStartTicks reads /proc/<pid>/stat field 22 (starttime in clock ticks
 // since boot). Returns 0 if the process has exited or the file is unreadable.
 func processStartTicks(pid int) uint64 {

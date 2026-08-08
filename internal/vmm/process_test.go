@@ -49,6 +49,27 @@ func TestSandboxSocketPathRejectsTooLongWorkDir(t *testing.T) {
 	}
 }
 
+func TestIsSandboxSocketName(t *testing.T) {
+	for _, name := range []string{
+		"0123456789abcdef.sock",
+		"0123456789abcdef.sock.serial",
+	} {
+		if !isSandboxSocketName(name) {
+			t.Fatalf("isSandboxSocketName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{
+		"sandbox.sock",
+		"0123456789abcdef.serial",
+		"0123456789abcdef.sock.bak",
+		"0123456789ABCDEf.sock",
+	} {
+		if isSandboxSocketName(name) {
+			t.Fatalf("isSandboxSocketName(%q) = true, want false", name)
+		}
+	}
+}
+
 type blockingDaemonClient struct {
 	release chan struct{}
 }

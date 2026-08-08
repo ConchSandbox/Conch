@@ -23,9 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vishvananda/netlink"
 
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -34,6 +37,7 @@ import (
 const (
 	DefaultWarmPoolSize   = 250
 	prefillWorkers        = 16
+	prefillCreateAttempts = 2
 	populateRetryMinDelay = time.Second
 	populateRetryMaxDelay = 30 * time.Second
 )
@@ -188,6 +192,57 @@ func (p *Pool) Close() {
 	}
 }
 
+// CleanupStaleResources removes network slots left behind by a previous
+// conchd process. The allocator and warm queue are process-local, so an old
+// slot cannot be returned to the new pool and must be torn down first.
+func (p *Pool) CleanupStaleResources(ctx context.Context) error {
+	if p == nil || p.cniManager == nil {
+		return fmt.Errorf("network pool is not initialized")
+	}
+
+	entries, err := os.ReadDir(networkNamespaceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("list stale network namespaces: %w", err)
+	}
+
+	var errs []error
+	foundStaleSlot := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), networkNamespacePrefix) {
+			continue
+		}
+		foundStaleSlot = true
+		id, parseErr := strconv.Atoi(strings.TrimPrefix(entry.Name(), networkNamespacePrefix))
+		if parseErr != nil {
+			errs = append(errs, fmt.Errorf("invalid stale network namespace %s: %w", entry.Name(), parseErr))
+			continue
+		}
+		slot, slotErr := newSlot(id, p.slotConfig)
+		if slotErr != nil {
+			errs = append(errs, slotErr)
+			continue
+		}
+		if teardownErr := p.teardownSlotNetwork(ctx, slot); teardownErr != nil {
+			errs = append(errs, fmt.Errorf("clean stale network slot %d: %w", id, teardownErr))
+		}
+	}
+
+	// A bridge can be left after all stale slots are removed. Do not touch it
+	// when no stale slot was found, and do not delete it after a failed CNI DEL.
+	if foundStaleSlot && len(errs) == 0 {
+		if link, linkErr := netlink.LinkByName(p.cniManager.bridgeName); linkErr == nil {
+			if deleteErr := netlink.LinkDel(link); deleteErr != nil {
+				errs = append(errs, fmt.Errorf("delete stale Conch bridge: %w", deleteErr))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 func (p *Pool) populate(ctx context.Context) {
 	if err := p.prefill(ctx); err != nil &&
 		!errors.Is(err, errWarmPoolClosed) &&
@@ -262,6 +317,18 @@ func (p *Pool) waitForPopulateRetry(ctx context.Context, delay time.Duration) bo
 	}
 }
 
+func createNetworkSlotWithRetry(ctx context.Context, create func(context.Context) (*Slot, error)) (*Slot, error) {
+	var slot *Slot
+	var err error
+	for attempt := 0; attempt < prefillCreateAttempts; attempt++ {
+		slot, err = create(ctx)
+		if err == nil || ctx.Err() != nil {
+			return slot, err
+		}
+	}
+	return slot, err
+}
+
 func (p *Pool) prefill(ctx context.Context) error {
 	_, target := p.warmSlots.Usage()
 
@@ -290,7 +357,7 @@ func (p *Pool) prefill(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return
 				}
-				slot, err := p.createNetworkSlot(ctx)
+				slot, err := createNetworkSlotWithRetry(ctx, p.createNetworkSlot)
 				// The results buffer holds every submitted job, so ownership can
 				// always be transferred to the collector even after cancellation.
 				results <- result{slot: slot, err: err}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cni "github.com/containerd/go-cni"
+	"github.com/containernetworking/cni/pkg/types"
 )
 
 func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
@@ -47,6 +48,75 @@ func TestNewCNIManagerRejectsIncompatibleIfName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "incompatible") {
 		t.Fatalf("NewCNIManager() error = %v, want incompatible if_name error", err)
+	}
+}
+
+func TestLoadedBridgeNetwork(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *cni.ConfigResult
+		wantBridge string
+		wantErr    string
+	}{
+		{
+			name: "reads loaded bridge plugin",
+			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
+				Config: &cni.NetworkConfList{
+					Name: "custom-network",
+					Plugins: []*cni.NetworkConf{{
+						Network: &types.PluginConf{Type: "bridge"},
+						Source:  `{"bridge":"custom-bridge"}`,
+					}},
+				},
+			}}},
+			wantBridge: "custom-bridge",
+		},
+		{
+			name:    "rejects missing configuration",
+			config:  nil,
+			wantErr: "no loaded configuration",
+		},
+		{
+			name: "rejects missing bridge plugin",
+			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
+				Config: &cni.NetworkConfList{
+					Name:    "custom-network",
+					Plugins: []*cni.NetworkConf{{Network: &types.PluginConf{Type: "host-local"}}},
+				},
+			}}},
+			wantErr: "no bridge network",
+		},
+		{
+			name: "rejects missing bridge name",
+			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
+				Config: &cni.NetworkConfList{
+					Name: "custom-network",
+					Plugins: []*cni.NetworkConf{{
+						Network: &types.PluginConf{Type: "bridge"},
+						Source:  `{}`,
+					}},
+				},
+			}}},
+			wantErr: "has no bridge name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBridge, err := loadedBridgeName(tt.config)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("loadedBridgeName() error = %v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadedBridgeName() error = %v", err)
+			}
+			if gotBridge != tt.wantBridge {
+				t.Fatalf("loadedBridgeName() = %q, want %q", gotBridge, tt.wantBridge)
+			}
+		})
 	}
 }
 

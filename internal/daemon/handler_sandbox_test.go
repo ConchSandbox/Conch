@@ -39,6 +39,45 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 }
 
+func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ids := []string{"sandbox-a", "sandbox-b"}
+	for _, id := range ids {
+		if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+			SandboxID:                     id,
+			CheckpointHeadTemplateID:      "tmpl-1",
+			CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}); err != nil {
+			t.Fatalf("seed sandbox %s: %v", id, err)
+		}
+	}
+
+	sandboxOps := &fakeSandboxOps{}
+	server := &Daemon{
+		stateStore:     store,
+		runtimeService: conchruntime.New(sandboxOps, nil, store),
+	}
+
+	if err := server.removeAllSandboxes(); err != nil {
+		t.Fatalf("removeAllSandboxes() error = %v", err)
+	}
+	if len(sandboxOps.deleteReqs) != len(ids) {
+		t.Fatalf("delete requests = %d, want %d", len(sandboxOps.deleteReqs), len(ids))
+	}
+	remaining, err := store.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxes() error = %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining sandbox records = %#v, want empty", remaining)
+	}
+}
+
 func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 	tests := []struct {
 		name            string
