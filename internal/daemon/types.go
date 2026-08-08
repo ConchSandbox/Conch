@@ -6,11 +6,10 @@ import (
 )
 
 type pullImageRequest struct {
-	ImageName  string `json:"image_name"`
-	PlainHTTP  bool   `json:"plain_http,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Password   string `json:"password,omitempty"`
-	SkipUnpack bool   `json:"skip_unpack,omitempty"`
+	ImageName string `json:"image_name"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+	Username  string `json:"username,omitempty"`
+	Password  string `json:"password,omitempty"`
 }
 
 type pushImageRequest struct {
@@ -30,17 +29,8 @@ type removeImageRequest struct {
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
-type unpackImageRequest struct {
-	ImageName string `json:"image_name"`
-}
-
 type listImageResponse struct {
 	Images []runtimeapi.ImageRecord `json:"images"`
-}
-
-type importImageArchiveResponse struct {
-	SnapshotKey string `json:"snapshot_key"`
-	ImageName   string `json:"image_name"`
 }
 
 type listSnapshotRequest struct {
@@ -154,15 +144,12 @@ type templatePushRequest struct {
 	Password        string `json:"password,omitempty"`
 }
 
+type templateUnpackRequest struct {
+	TemplateID string `json:"template_id"`
+}
+
 type templateRecordResponse = runtimeapi.TemplateRecord
 
 type templateListResponse struct {
 	Items []templateRecordResponse `json:"items"`
-}
-
-func importImageArchiveHTTPResponse(result runtimeapi.ImportImageArchiveResult) importImageArchiveResponse {
-	return importImageArchiveResponse{
-		SnapshotKey: result.SnapshotKey,
-		ImageName:   result.ImageName,
-	}
 }

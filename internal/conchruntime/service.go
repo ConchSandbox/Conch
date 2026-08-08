@@ -452,6 +452,27 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	})
 }
 
+func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions) error {
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	if s.Templates == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	templateID := strings.TrimSpace(opts.TemplateID)
+	if templateID == "" {
+		return fmt.Errorf("%w: template_id is required", conchimage.ErrInvalidRequest)
+	}
+	rec, err := s.Templates.Get(ctx, templateID)
+	if err != nil {
+		return fmt.Errorf("get template %s: %w", templateID, err)
+	}
+	if err := conchimage.UnpackBootIndex(ctx, s.Containerd, rec.BootIndexDigest); err != nil {
+		return fmt.Errorf("unpack template %s: %w", templateID, err)
+	}
+	return nil
+}
+
 func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions) (TemplateCreateResult, error) {
 	if s == nil || s.Containerd == nil {
 		return TemplateCreateResult{}, fmt.Errorf("containerd client is required")
@@ -523,12 +544,11 @@ func (s *Service) createTemplateFromSource(ctx context.Context, templateID strin
 		if !errdefs.IsNotFound(err) {
 			return templateBuildResult{}, fmt.Errorf("lookup rootfs source image %s: %w", opts.Source, err)
 		}
-		if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
-			ImageName:  opts.Source,
-			PlainHTTP:  opts.PlainHTTP,
-			Username:   opts.Username,
-			Password:   opts.Password,
-			SkipUnpack: true,
+		if err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
+			ImageName: opts.Source,
+			PlainHTTP: opts.PlainHTTP,
+			Username:  opts.Username,
+			Password:  opts.Password,
 		}); err != nil {
 			return templateBuildResult{}, fmt.Errorf("pull rootfs source image %s: %w", opts.Source, err)
 		}

@@ -20,6 +20,7 @@ Commands:
   create   Build a template from an OCI image, kernel, and initrd.
   pull     Pull a registry Boot Index into a local Template.
   push     Push a Template Boot Index to a registry.
+  unpack   Unpack a Template's Boot Index into snapshots.
   ls       List templates.
   inspect  Inspect a template.
   rm       Remove a template.

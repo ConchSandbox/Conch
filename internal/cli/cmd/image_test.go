@@ -21,7 +21,6 @@ func TestPrintImageHelpListsImageCommands(t *testing.T) {
 		"conch image <command> [options]",
 		"  pull ",
 		"  push ",
-		"  unpack ",
 		"  ls ",
 		"  rm ",
 		"conch image <command> --help",
@@ -29,6 +28,9 @@ func TestPrintImageHelpListsImageCommands(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("image help output missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "  unpack ") {
+		t.Fatalf("image help output still lists unpack:\n%s", got)
 	}
 }
 

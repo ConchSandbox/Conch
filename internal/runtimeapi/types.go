@@ -97,6 +97,10 @@ type TemplatePushOptions struct {
 	Password        string
 }
 
+type TemplateUnpackOptions struct {
+	TemplateID string
+}
+
 type TemplateListOptions struct {
 	Origin   string
 	BootMode string
@@ -116,15 +120,10 @@ type TemplateRecord struct {
 }
 
 type PullImageOptions struct {
-	ImageName  string
-	PlainHTTP  bool
-	Username   string
-	Password   string
-	SkipUnpack bool
-}
-
-type PullImageResult struct {
-	Refs map[string]string
+	ImageName string
+	PlainHTTP bool
+	Username  string
+	Password  string
 }
 
 type PushImageOptions struct {
@@ -142,23 +141,6 @@ type ListImagesOptions struct {
 type RemoveImageOptions struct {
 	ImageName   string
 	Synchronous bool
-}
-
-type UnpackImageOptions struct {
-	ImageName string
-}
-
-type ImportImageArchiveOptions struct {
-	ImportedTag string
-}
-
-type ImportImageArchiveResult struct {
-	SnapshotKey string
-	ImageName   string
-}
-
-type ExportImageArchiveOptions struct {
-	ImageName string
 }
 
 type ImageRecord struct {

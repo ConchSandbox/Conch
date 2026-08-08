@@ -17,6 +17,7 @@ const (
 	createTemplate  = "/api/template/create"
 	pullTemplate    = "/api/template/pull"
 	pushTemplate    = "/api/template/push"
+	unpackTemplate  = "/api/template/unpack"
 	listTemplates   = "/api/template/list"
 	inspectTemplate = "/api/template/inspect"
 	removeTemplate  = "/api/template/remove"
@@ -58,6 +59,10 @@ type TemplatePushRequest struct {
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
+}
+
+type TemplateUnpackRequest struct {
+	TemplateID string `json:"template_id"`
 }
 
 type TemplateCreateRequest struct {
@@ -117,6 +122,10 @@ func (c *Client) PullTemplate(ctx context.Context, req TemplatePullRequest) (Tem
 
 func (c *Client) PushTemplate(ctx context.Context, req TemplatePushRequest) error {
 	return c.postJSON(ctx, pushTemplate, req, nil)
+}
+
+func (c *Client) UnpackTemplate(ctx context.Context, req TemplateUnpackRequest) error {
+	return c.postJSON(ctx, unpackTemplate, req, nil)
 }
 
 func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {
