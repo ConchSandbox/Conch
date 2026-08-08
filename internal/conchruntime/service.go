@@ -37,6 +37,10 @@ type SandboxOps interface {
 // a usable template ID for sandbox creation.
 var ErrTemplateIDRequired = errors.New("template_id is required and no default_template_id is configured")
 
+// ErrTemplateReconcileState reports that persisted Template state could not be
+// enumerated safely during startup reconciliation.
+var ErrTemplateReconcileState = errors.New("template reconciliation state is unavailable")
+
 type SnapshotOps interface {
 	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
 	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
@@ -44,14 +48,16 @@ type SnapshotOps interface {
 }
 
 type Service struct {
-	Sandbox         SandboxOps
-	Containerd      *containerdclient.Client
-	Snapshot        SnapshotOps
-	Store           state.Store
-	Templates       conchtemplate.Store
-	SandboxDefaults SandboxDefaults
-	lifecycleLocks  sandboxLifecycleLocks
-	templateLocks   sandboxLifecycleLocks
+	Sandbox                  SandboxOps
+	Containerd               *containerdclient.Client
+	Snapshot                 SnapshotOps
+	Store                    state.Store
+	Templates                conchtemplate.Store
+	SandboxDefaults          SandboxDefaults
+	lifecycleLocks           sandboxLifecycleLocks
+	templateLocks            sandboxLifecycleLocks
+	removeTemplateArtifacts  func(context.Context, *containerdclient.Client, conchimage.TemplateRemovalPlan) error
+	releaseTemplateResources func(context.Context, *containerdclient.Client, string) error
 }
 
 const templateResourceCleanupTimeout = 10 * time.Minute
@@ -95,10 +101,12 @@ func (l *sandboxLifecycleLocks) lock(id string) func() {
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client, store state.Store) *Service {
 	return &Service{
-		Sandbox:    sandboxOps,
-		Containerd: client,
-		Store:      store,
-		Templates:  conchtemplate.NewStore(store),
+		Sandbox:                  sandboxOps,
+		Containerd:               client,
+		Store:                    store,
+		Templates:                conchtemplate.NewStore(store),
+		removeTemplateArtifacts:  conchimage.RemoveTemplateArtifacts,
+		releaseTemplateResources: conchimage.ReleaseTemplateResources,
 	}
 }
 
@@ -528,6 +536,8 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if remoteReference == "" {
 		return fmt.Errorf("remote template reference is required")
 	}
+	unlockTemplate := s.templateLocks.lock(templateIDLockKey(templateID))
+	defer unlockTemplate()
 	rec, err := s.Templates.Get(ctx, templateID)
 	if err != nil {
 		return err
@@ -535,6 +545,9 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	bootIndexDigest := strings.TrimSpace(rec.BootIndexDigest)
 	if bootIndexDigest == "" {
 		return fmt.Errorf("template %s has no boot index digest", rec.ID)
+	}
+	if err := conchimage.RetainTemplateResources(ctx, s.Containerd, rec.ID, bootIndexDigest); err != nil {
+		return fmt.Errorf("retain template %s resources before push: %w", rec.ID, err)
 	}
 	return conchimage.PushBootIndex(ctx, s.Containerd, conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
@@ -754,44 +767,120 @@ func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
 	}
 	unlockTemplate := s.templateLocks.lock(templateIDLockKey(id))
 	defer unlockTemplate()
-
-	if _, err := s.Templates.Get(ctx, id); err != nil {
-		return err
-	}
 	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
 	defer unlockResources()
-	target, err := s.Templates.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	sandboxes, err := s.Store.ListSandboxes(ctx)
-	if err != nil {
-		return fmt.Errorf("list sandboxes before removing template: %w", err)
-	}
-	for _, rec := range sandboxes {
-		if rec.SourceTemplateID == id || rec.CheckpointHeadTemplateID == id {
-			return fmt.Errorf("%w: template %s is referenced by sandbox %s", conchtemplate.ErrInUse, id, rec.SandboxID)
-		}
-	}
 
-	plan, err := s.planTemplateRemoval(ctx, target)
-	if err != nil {
-		return fmt.Errorf("plan template %s resource cleanup: %w", id, err)
+	pending, err := s.Store.GetTemplateCleanup(ctx, id)
+	var plan conchimage.TemplateRemovalPlan
+	if errors.Is(err, state.ErrNotFound) {
+		target, getErr := s.Templates.Get(ctx, id)
+		if getErr != nil {
+			return getErr
+		}
+		sandboxes, listErr := s.Store.ListSandboxes(ctx)
+		if listErr != nil {
+			return fmt.Errorf("list sandboxes before removing template: %w", listErr)
+		}
+		for _, rec := range sandboxes {
+			if rec.SourceTemplateID == id || rec.CheckpointHeadTemplateID == id {
+				return fmt.Errorf("%w: template %s is referenced by sandbox %s", conchtemplate.ErrInUse, id, rec.SandboxID)
+			}
+		}
+		plan, err = s.planTemplateRemoval(ctx, target)
+		if err != nil {
+			return fmt.Errorf("plan template %s resource cleanup: %w", id, err)
+		}
+		pending, err = s.Store.BeginTemplateCleanup(ctx, id)
 	}
-	if err := s.Templates.Delete(ctx, id); err != nil {
+	if err != nil {
 		return err
 	}
+	return s.applyTemplateCleanup(ctx, pending, plan)
+}
+
+func (s *Service) applyTemplateCleanup(ctx context.Context, pending state.TemplateCleanupRecord, plan conchimage.TemplateRemovalPlan) error {
+	id := pending.Template.ID
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
 	defer cancel()
-	if err := conchimage.ApplyTemplateRemoval(cleanupCtx, s.Containerd, plan); err != nil {
-		restoreCtx, restoreCancel := context.WithTimeout(context.WithoutCancel(ctx), templateResourceCleanupTimeout)
-		defer restoreCancel()
-		if _, restoreErr := s.Templates.Create(restoreCtx, target); restoreErr != nil {
-			return fmt.Errorf("template %s resource cleanup failed: %v; restore metadata: %w", id, err, restoreErr)
+	if pending.Stage == state.TemplateCleanupArtifacts {
+		if plan.TemplateID == "" {
+			var err error
+			plan, err = s.planTemplateRemoval(cleanupCtx, pending.Template)
+			if err != nil {
+				return fmt.Errorf("replan template %s resource cleanup: %w", id, err)
+			}
 		}
-		return fmt.Errorf("template %s resource cleanup failed; metadata restored: %w", id, err)
+		removeArtifacts := s.removeTemplateArtifacts
+		if removeArtifacts == nil {
+			removeArtifacts = conchimage.RemoveTemplateArtifacts
+		}
+		if err := removeArtifacts(cleanupCtx, s.Containerd, plan); err != nil {
+			return fmt.Errorf("remove template %s artifacts: %w", id, err)
+		}
+		if err := s.Store.MarkTemplateCleanupArtifactsRemoved(cleanupCtx, id); err != nil {
+			return fmt.Errorf("record template %s artifact cleanup: %w", id, err)
+		}
+		pending.Stage = state.TemplateCleanupLease
+	}
+	if pending.Stage != state.TemplateCleanupLease {
+		return fmt.Errorf("template %s has unknown cleanup stage %q", id, pending.Stage)
+	}
+	releaseResources := s.releaseTemplateResources
+	if releaseResources == nil {
+		releaseResources = conchimage.ReleaseTemplateResources
+	}
+	if err := releaseResources(cleanupCtx, s.Containerd, id); err != nil {
+		return fmt.Errorf("release template %s resources: %w", id, err)
+	}
+	if err := s.Store.CompleteTemplateCleanup(cleanupCtx, id); err != nil {
+		return fmt.Errorf("complete template %s cleanup: %w", id, err)
 	}
 	return nil
+}
+
+// ReconcileTemplateResources upgrades legacy Templates to independent leases
+// and resumes every persisted cleanup. It processes all records before
+// returning so one broken Template cannot prevent other cleanup from making
+// progress.
+func (s *Service) ReconcileTemplateResources(ctx context.Context) error {
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is not configured")
+	}
+	if s.Templates == nil || s.Store == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+
+	var reconcileErrors []error
+	unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+	entries, err := s.Templates.List(ctx, conchtemplate.Filter{})
+	if err != nil {
+		reconcileErrors = append(reconcileErrors, fmt.Errorf("%w: list active templates: %w", ErrTemplateReconcileState, err))
+	} else {
+		for _, entry := range entries {
+			if retainErr := conchimage.RetainTemplateResources(ctx, s.Containerd, entry.ID, entry.BootIndexDigest); retainErr != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain legacy template %s: %w", entry.ID, retainErr))
+			}
+		}
+	}
+	unlockResources()
+
+	cleanups, err := s.Store.ListTemplateCleanups(ctx)
+	if err != nil {
+		reconcileErrors = append(reconcileErrors, fmt.Errorf("%w: list pending template cleanups: %w", ErrTemplateReconcileState, err))
+	} else {
+		for _, pending := range cleanups {
+			id := pending.Template.ID
+			unlockTemplate := s.templateLocks.lock(templateIDLockKey(id))
+			unlockResources := s.templateLocks.lock(templateResourcesLockKey)
+			cleanupErr := s.applyTemplateCleanup(ctx, pending, conchimage.TemplateRemovalPlan{})
+			unlockResources()
+			unlockTemplate()
+			if cleanupErr != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("resume template %s cleanup: %w", id, cleanupErr))
+			}
+		}
+	}
+	return errors.Join(reconcileErrors...)
 }
 
 func (s *Service) RemoveImage(ctx context.Context, opts runtimeapi.RemoveImageOptions) error {

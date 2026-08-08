@@ -159,6 +159,15 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
+	if err := s.runtimeService.ReconcileTemplateResources(ctx); err != nil {
+		if errors.Is(err, conchruntime.ErrTemplateReconcileState) {
+			cancel()
+			_ = host.Close()
+			_ = store.Close()
+			return nil, fmt.Errorf("reconcile template resources: %w", err)
+		}
+		logger.Warn("Template resource reconciliation incomplete; pending cleanup will remain retryable", ulog.F("error", err))
+	}
 
 	manager := host.SandboxManager()
 	if manager != nil {

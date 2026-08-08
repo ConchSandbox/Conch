@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -691,6 +693,185 @@ func TestRemoveTemplateRejectsSandboxReference(t *testing.T) {
 	}
 	if _, err := svc.Templates.Get(ctx, "tmpl-in-use"); err != nil {
 		t.Fatalf("template was removed despite sandbox reference: %v", err)
+	}
+}
+
+func TestReconcileTemplateResourcesBackfillsLegacyLease(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	bootDigest := buildColdBootIndex(t, host, "legacy-template")
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTemplate(t, ctx, conchtemplate.NewStore(store), "tmpl-legacy", bootDigest, conchtemplate.BootModeCold)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = state.OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := host.Client().LeasesService()
+	lease := leases.Lease{ID: "conch.template.tmpl-legacy"}
+	leaseCtx := containerdclient.NewNamespaceContext(ctx)
+	if _, err := manager.ListResources(leaseCtx, lease); !errdefs.IsNotFound(err) {
+		t.Fatalf("legacy Template unexpectedly has a lease: %v", err)
+	}
+
+	svc := New(nil, host.Client(), store)
+	if err := svc.ReconcileTemplateResources(ctx); err != nil {
+		t.Fatalf("ReconcileTemplateResources() error = %v", err)
+	}
+	resources, err := manager.ListResources(leaseCtx, lease)
+	if err != nil {
+		t.Fatalf("legacy Template lease was not created: %v", err)
+	}
+	if len(resources) == 0 {
+		t.Fatal("legacy Template lease has no retained content")
+	}
+}
+
+func TestPushTemplateRetainsLegacyResourcesBeforeRemoteAccess(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+	bootDigest := buildColdBootIndex(t, host, "legacy-push")
+	seedTemplate(t, ctx, svc.Templates, "tmpl-push", bootDigest, conchtemplate.BootModeCold)
+
+	if err := svc.PushTemplate(ctx, TemplatePushOptions{
+		TemplateID: "tmpl-push", RemoteReference: "invalid reference",
+	}); err == nil {
+		t.Fatal("PushTemplate() error = nil, want invalid reference error")
+	}
+	leaseCtx := containerdclient.NewNamespaceContext(ctx)
+	resources, err := host.Client().LeasesService().ListResources(leaseCtx, leases.Lease{ID: "conch.template.tmpl-push"})
+	if err != nil {
+		t.Fatalf("PushTemplate() did not backfill the Template lease: %v", err)
+	}
+	if len(resources) == 0 {
+		t.Fatal("PushTemplate() created an empty Template lease")
+	}
+}
+
+func TestTemplateCleanupRecoversAcrossArtifactAndLeaseFailures(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	bootDigest := buildColdBootIndex(t, host, "cleanup-recovery")
+	bootInfo, err := host.Client().ContentStore().Info(containerdclient.NewNamespaceContext(ctx), digest.Digest(bootDigest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateID := "tmpl-cleanup-recovery"
+	buildRef := "localhost/conch/templates:" + templateID
+	svc := New(nil, host.Client(), store)
+	seedTemplate(t, ctx, svc.Templates, templateID, bootDigest, conchtemplate.BootModeCold)
+	imageCtx := containerdclient.NewNamespaceContext(ctx)
+	if _, err := host.Client().ImageService().Create(imageCtx, images.Image{
+		Name: buildRef,
+		Target: ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageIndex, Digest: digest.Digest(bootDigest), Size: bootInfo.Size,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc.removeTemplateArtifacts = func(ctx context.Context, client *containerdclient.Client, _ conchimage.TemplateRemovalPlan) error {
+		if err := client.ImageService().Delete(containerdclient.NewNamespaceContext(ctx), buildRef); err != nil {
+			return err
+		}
+		return errors.New("injected failure after first artifact removal")
+	}
+	if err := svc.RemoveTemplate(ctx, templateID); err == nil {
+		t.Fatal("RemoveTemplate() error = nil, want artifact failure")
+	}
+	if _, err := host.Client().ImageService().Get(imageCtx, buildRef); !errdefs.IsNotFound(err) {
+		t.Fatalf("first artifact was not removed: %v", err)
+	}
+	pending, err := store.GetTemplateCleanup(ctx, templateID)
+	if err != nil || pending.Stage != state.TemplateCleanupArtifacts {
+		t.Fatalf("pending cleanup = %#v, %v", pending, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = state.OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(nil, host.Client(), store)
+	restarted.releaseTemplateResources = func(context.Context, *containerdclient.Client, string) error {
+		return errors.New("injected lease cleanup failure")
+	}
+	if err := restarted.ReconcileTemplateResources(ctx); err == nil {
+		t.Fatal("ReconcileTemplateResources() error = nil, want lease failure")
+	}
+	pending, err = store.GetTemplateCleanup(ctx, templateID)
+	if err != nil || pending.Stage != state.TemplateCleanupLease {
+		t.Fatalf("pending cleanup after artifact retry = %#v, %v", pending, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = state.OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restarted = New(nil, host.Client(), store)
+	if err := restarted.ReconcileTemplateResources(ctx); err != nil {
+		t.Fatalf("ReconcileTemplateResources() final retry error = %v", err)
+	}
+	if cleanups, err := store.ListTemplateCleanups(ctx); err != nil || len(cleanups) != 0 {
+		t.Fatalf("pending cleanups after final retry = %#v, %v", cleanups, err)
+	}
+	if _, err := restarted.Templates.Get(ctx, templateID); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("Template remains after recovery: %v", err)
+	}
+	if _, err := host.Client().LeasesService().ListResources(imageCtx, leases.Lease{ID: "conch.template." + templateID}); !errdefs.IsNotFound(err) {
+		t.Fatalf("Template lease remains after recovery: %v", err)
+	}
+}
+
+func TestReconcileTemplateResourcesContinuesAfterLegacyFailure(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+	seedTemplate(t, ctx, svc.Templates, "tmpl-broken", digest.FromString("missing legacy content").String(), conchtemplate.BootModeCold)
+
+	cleanupID := "tmpl-pending"
+	cleanupDigest := buildColdBootIndex(t, host, "pending-after-legacy-failure")
+	seedTemplate(t, ctx, svc.Templates, cleanupID, cleanupDigest, conchtemplate.BootModeCold)
+	if err := conchimage.RetainTemplateResources(ctx, host.Client(), cleanupID, cleanupDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginTemplateCleanup(ctx, cleanupID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTemplateCleanupArtifactsRemoved(ctx, cleanupID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ReconcileTemplateResources(ctx); err == nil {
+		t.Fatal("ReconcileTemplateResources() error = nil, want broken legacy Template error")
+	}
+	if _, err := store.GetTemplateCleanup(ctx, cleanupID); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("pending cleanup was skipped after legacy failure: %v", err)
+	}
+	leaseCtx := containerdclient.NewNamespaceContext(ctx)
+	if _, err := host.Client().LeasesService().ListResources(leaseCtx, leases.Lease{ID: "conch.template." + cleanupID}); !errdefs.IsNotFound(err) {
+		t.Fatalf("pending Template lease remains after reconciliation: %v", err)
 	}
 }
 
