@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/vmm"
@@ -65,7 +64,6 @@ type Sandbox struct {
 	sandboxID   string
 	leaseID     string
 	slot        *netstack.Slot
-	vsockConn   net.Conn
 }
 
 func ResumeSandbox(
@@ -252,10 +250,6 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 }
 
 func (s *Sandbox) Close(ctx context.Context) error {
-	if s.vsockConn != nil {
-		s.vsockConn.Close()
-		s.vsockConn = nil
-	}
 	err := s.cleanup.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup sandbox: %w", err)

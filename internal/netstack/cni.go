@@ -41,6 +41,11 @@ type CNIManager struct {
 	config CNIManagerConfig
 }
 
+type CNIResult struct {
+	IP  string
+	DNS DNSConfig
+}
+
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	cfg = normalizeCNIManagerConfig(cfg)
 	ifPrefix := strings.TrimRight(cfg.IfName, "0123456789")
@@ -120,21 +125,44 @@ func extractCNIIP(result *cni.Result, defaultIfName string) (string, error) {
 	return "", fmt.Errorf("failed to find IP for sandbox interface %q", defaultIfName)
 }
 
-// SetupSandboxNetwork performs CNI ADD and extracts the sandbox IP. The caller
+func extractCNIDNS(result *cni.Result) (DNSConfig, error) {
+	if result == nil {
+		return DNSConfig{}, fmt.Errorf("cni returned nil result")
+	}
+	var dns DNSConfig
+	for _, item := range result.DNS {
+		dns.Nameservers = append(dns.Nameservers, item.Nameservers...)
+		dns.Search = append(dns.Search, item.Search...)
+		dns.Options = append(dns.Options, item.Options...)
+		if dns.Domain == "" {
+			dns.Domain = item.Domain
+		}
+	}
+	return NormalizeDNS(dns)
+}
+
+// SetupSandboxNetwork performs CNI ADD and extracts the sandbox network result. The caller
 // owns rollback on every error because ADD may have taken effect before failing.
-func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string) (string, error) {
+func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string) (CNIResult, error) {
 	if m == nil || m.plugin == nil {
-		return "", fmt.Errorf("cni config not initialized")
+		return CNIResult{}, fmt.Errorf("cni config not initialized")
 	}
 	result, err := m.plugin.Setup(ctx, cniID, netnsPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to setup cni network: %w", err)
+		return CNIResult{}, fmt.Errorf("failed to setup cni network: %w", err)
 	}
 	cniIP, err := extractCNIIP(result, m.config.IfName)
 	if err != nil {
-		return "", fmt.Errorf("failed to extract cni IP: %w", err)
+		return CNIResult{}, fmt.Errorf("failed to extract cni IP: %w", err)
 	}
-	return cniIP, nil
+	if net.ParseIP(cniIP).To4() == nil {
+		return CNIResult{}, fmt.Errorf("cni IP %q must be IPv4", cniIP)
+	}
+	dns, err := extractCNIDNS(result)
+	if err != nil {
+		return CNIResult{}, fmt.Errorf("failed to extract cni DNS: %w", err)
+	}
+	return CNIResult{IP: cniIP, DNS: dns}, nil
 }
 
 func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, netnsPath string) error {

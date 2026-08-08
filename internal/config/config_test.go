@@ -130,7 +130,7 @@ func TestLoadConfig(t *testing.T) {
 			"vmm:\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: test-vmm\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
-			"network:\n  warm_pool_size: 123\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
+			"network:\n  warm_pool_size: 123\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    if_name: net1\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
@@ -168,12 +168,6 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Network.WarmPoolSize != 123 {
 		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want %d", cfg.Network.WarmPoolSize, 123)
-	}
-	if cfg.Network.TapIP != "192.168.100.10" {
-		t.Errorf("LoadConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.10")
-	}
-	if cfg.Network.TapMask != 25 {
-		t.Errorf("LoadConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 25)
 	}
 	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/custom/cni/bin" {
 		t.Errorf("LoadConfig().Network.CNI.PluginBinDirs = %v, want [/custom/cni/bin]", cfg.Network.CNI.PluginBinDirs)
@@ -232,6 +226,23 @@ func TestLoadConfigRejectsRemovedCRISection(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsRemovedTapSettings(t *testing.T) {
+	for _, field := range []string{"tap_ip", "tap_mask"} {
+		t.Run(field, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			data := []byte("network:\n  " + field + ": 1\n")
+			if err := os.WriteFile(cfgPath, data, 0o640); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			_, err := LoadConfig(cfgPath)
+			if err == nil || !strings.Contains(err.Error(), "field "+field+" not found") {
+				t.Fatalf("LoadConfig() error = %q, want removed %s field error", err, field)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -247,11 +258,6 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			name:    "negative volume max mounts",
 			data:    "volume:\n  max_mounts: -1\n",
 			wantErr: "volume.max_mounts",
-		},
-		{
-			name:    "invalid tap mask",
-			data:    "network:\n  tap_mask: 33\n",
-			wantErr: "network.tap_mask",
 		},
 		{
 			name:    "unsupported volume backend",
@@ -283,6 +289,11 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			data:    "network:\n  pool_szie: 12\n",
 			wantErr: "field pool_szie not found",
 		},
+		{
+			name:    "removed inherit host dns field",
+			data:    "network:\n  inherit_host_dns: true\n",
+			wantErr: "field inherit_host_dns not found",
+		},
 	}
 
 	for _, tt := range tests {
@@ -305,7 +316,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("network:\n  warm_pool_size: 0\n  tap_mask: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
+	data := []byte("network:\n  warm_pool_size: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -317,9 +328,6 @@ func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	want := DefaultConfig()
 	if cfg.Network.WarmPoolSize != want.Network.WarmPoolSize {
 		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want default %d", cfg.Network.WarmPoolSize, want.Network.WarmPoolSize)
-	}
-	if cfg.Network.TapMask != want.Network.TapMask {
-		t.Errorf("LoadConfig().Network.TapMask = %d, want default %d", cfg.Network.TapMask, want.Network.TapMask)
 	}
 	if cfg.Volume.MaxMounts != want.Volume.MaxMounts {
 		t.Errorf("LoadConfig().Volume.MaxMounts = %d, want default %d", cfg.Volume.MaxMounts, want.Volume.MaxMounts)
@@ -399,17 +407,11 @@ func TestResolveCNIPluginConfDirFallback(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigNetworkTapSettings(t *testing.T) {
+func TestDefaultConfigNetworkSettings(t *testing.T) {
 	cfg := DefaultConfig()
 
 	if cfg.Network.WarmPoolSize != netstack.DefaultWarmPoolSize {
 		t.Errorf("DefaultConfig().Network.WarmPoolSize = %d, want %d", cfg.Network.WarmPoolSize, netstack.DefaultWarmPoolSize)
-	}
-	if cfg.Network.TapIP != "192.168.100.2" {
-		t.Errorf("DefaultConfig().Network.TapIP = %q, want %q", cfg.Network.TapIP, "192.168.100.2")
-	}
-	if cfg.Network.TapMask != 24 {
-		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
 	}
 	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != netstack.DefaultCNIPluginBinDir {
 		t.Errorf("DefaultConfig().Network.CNI.PluginBinDirs = %v, want [%s]", cfg.Network.CNI.PluginBinDirs, netstack.DefaultCNIPluginBinDir)

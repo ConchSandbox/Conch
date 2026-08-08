@@ -1,7 +1,7 @@
 package guestd
 
 import (
-	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -17,8 +19,6 @@ const (
 	rootfsServicesReadyPath     = "/run/conch/services-ready"
 	sandboxReadyResponseTimeout = 1500 * time.Millisecond
 	agentAPIHealthTimeout       = 200 * time.Millisecond
-	vsockEnvLinePrefix          = "ENV:"
-	vsockEnvJSONLinePrefix      = "ENV_JSON:"
 )
 
 var (
@@ -34,120 +34,124 @@ var (
 )
 
 type VsockHandler interface {
-	HandleMessage(message string) string
+	HandleRequest(request agentprotocol.InitRequest) agentprotocol.InitResponse
+	NetworkReady() <-chan struct{}
 	GetSandboxID() string
 	SetSandboxID(id string)
 }
 
+type initState uint8
+
+const (
+	initAwaitingNetwork initState = iota // Waiting for the initial network configuration.
+	initNetworkApplied                   // Network is configured; guest services are starting.
+	initReady                            // Guest initialization completed; retries revalidate the network.
+)
+
 type VsockHandlerImpl struct {
-	mu         sync.Mutex
-	sandboxID  string
-	version    string
-	healthFunc func() bool
+	mu           sync.Mutex
+	sandboxID    string
+	healthFunc   func() bool
+	applyNetwork func(netstack.GuestNetworkConfig, bool) error
+	state        initState
+	networkReady chan struct{}
+	terminal     *agentprotocol.InitResponse
 }
 
-func NewVsockHandler(version string, healthFunc func() bool) *VsockHandlerImpl {
+func NewVsockHandler(healthFunc func() bool, applyNetwork func(netstack.GuestNetworkConfig, bool) error) *VsockHandlerImpl {
+	if applyNetwork == nil {
+		applyNetwork = applyGuestNetworkConfig
+	}
 	return &VsockHandlerImpl{
-		version:    version,
-		healthFunc: healthFunc,
+		healthFunc:   healthFunc,
+		applyNetwork: applyNetwork,
+		networkReady: make(chan struct{}),
 	}
 }
 
-func (h *VsockHandlerImpl) HandleMessage(message string) string {
-	logger := ulog.GetLogger()
+func (h *VsockHandlerImpl) NetworkReady() <-chan struct{} {
+	return h.networkReady
+}
 
-	if strings.Contains(message, "SANDBOX_ID:") {
-		newSandboxID := parseVsockField(message, "SANDBOX_ID:")
-		if newSandboxID != "" {
-			agentToken := parseVsockField(message, "AGENT_TOKEN:")
-			if agentToken == "" {
-				logger.Warn("agent token missing from vsock init message")
-				return "NOT_READY\n"
-			}
-			env, err := parseVsockEnv(message)
-			if err != nil {
-				logger.Warn("invalid environment in vsock init message", ulog.F("error", err))
-				return "NOT_READY\n"
-			}
-			agentAuth.SetToken(agentToken)
-			applyVsockEnv(env)
+func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) agentprotocol.InitResponse {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.terminal != nil {
+		return *h.terminal
+	}
+	if request.Version != agentprotocol.ProtocolVersion {
+		return h.failTerminal("UNSUPPORTED_VERSION", fmt.Errorf("unsupported protocol version %d", request.Version))
+	}
+	if err := validateInitRequest(request); err != nil {
+		return h.failTerminal("INVALID_REQUEST", err)
+	}
 
-			if newSandboxID != "" {
-				if h.GetSandboxID() != newSandboxID {
-					h.SetSandboxID(newSandboxID)
+	switch h.state {
+	case initAwaitingNetwork:
+		if err := h.applyNetwork(request.Network, false); err != nil {
+			return h.failTerminal("NETWORK_CONFIG_FAILED", err)
+		}
+		h.applyIdentity(request)
+		h.state = initNetworkApplied
+		close(h.networkReady)
+	case initReady:
+		if err := h.applyNetwork(request.Network, true); err != nil {
+			return h.failTerminal("NETWORK_MISMATCH", err)
+		}
+		h.applyIdentity(request)
+		return agentprotocol.ReadyResponse()
+	case initNetworkApplied:
+		// A retry waits for the already-started services; it never starts them again.
+	}
 
-					baseLogger := rootLogger
-					if baseLogger == nil {
-						baseLogger = logger
-					}
+	if h.waitForReady(sandboxReadyResponseTimeout) {
+		h.state = initReady
+		return agentprotocol.ReadyResponse()
+	}
+	return agentprotocol.NotReadyResponse("SERVICES_STARTING", "sandbox services are not ready", true)
+}
 
-					newCtxLogger := baseLogger.ReplaceField("sandboxId", newSandboxID)
-					rootLogger = newCtxLogger
-					ulog.SetLogger(newCtxLogger)
-
-					logger = ulog.GetLogger()
-					logger.Info("Updated sandbox_id from vsock",
-						ulog.F("new_sandbox_id", newSandboxID),
-					)
-				}
-
-				if h.waitForReady(sandboxReadyResponseTimeout) {
-					response := "OK\nREADY:" + h.version + "\n"
-					logger.Info("sandbox services healthy, sent READY back with version",
-						ulog.F("version", h.version))
-					return response
-				} else {
-					logger.Warn("sandbox services not ready before vsock response timeout",
-						ulog.F("timeout", sandboxReadyResponseTimeout.String()))
-					return "NOT_READY\n"
-				}
-			}
+func validateInitRequest(request agentprotocol.InitRequest) error {
+	if strings.TrimSpace(request.SandboxID) == "" {
+		return fmt.Errorf("sandboxID is required")
+	}
+	if strings.TrimSpace(request.AgentToken) == "" {
+		return fmt.Errorf("agentToken is required")
+	}
+	if len(request.AgentToken) > 4096 {
+		return fmt.Errorf("agentToken is too large")
+	}
+	for key := range request.Env {
+		if !validEnvKey(key) {
+			return fmt.Errorf("invalid environment key %q", key)
 		}
 	}
-	return ""
+	return request.Network.Validate()
 }
 
-func parseVsockEnv(message string) (map[string]string, error) {
-	env := make(map[string]string)
-	for _, line := range strings.Split(message, "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, vsockEnvLinePrefix):
-			key, value, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(line, vsockEnvLinePrefix)), "=")
-			if !ok {
-				return nil, invalidVsockEnvEntry(line)
-			}
-			key = strings.TrimSpace(key)
-			if !validEnvKey(key) {
-				return nil, invalidVsockEnvEntry(line)
-			}
-			env[key] = value
-		case strings.HasPrefix(line, vsockEnvJSONLinePrefix):
-			var parsed map[string]string
-			if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, vsockEnvJSONLinePrefix))), &parsed); err != nil {
-				return nil, err
-			}
-			for key, value := range parsed {
-				if !validEnvKey(key) {
-					return nil, invalidVsockEnvEntry(key)
-				}
-				env[key] = value
-			}
-		}
+func (h *VsockHandlerImpl) failTerminal(code string, err error) agentprotocol.InitResponse {
+	response := agentprotocol.NotReadyResponse(code, err.Error(), false)
+	h.terminal = &response
+	return response
+}
+
+func (h *VsockHandlerImpl) applyIdentity(request agentprotocol.InitRequest) {
+	agentAuth.SetToken(request.AgentToken)
+	applyVsockEnv(request.Env)
+	if h.sandboxID == request.SandboxID {
+		return
 	}
-	return env, nil
-}
-
-func invalidVsockEnvEntry(value string) error {
-	return &invalidVsockEnvError{value: value}
-}
-
-type invalidVsockEnvError struct {
-	value string
-}
-
-func (e *invalidVsockEnvError) Error() string {
-	return "invalid environment entry: " + e.value
+	h.sandboxID = request.SandboxID
+	mu.Lock()
+	currentSandboxID = request.SandboxID
+	mu.Unlock()
+	baseLogger := rootLogger
+	if baseLogger == nil {
+		baseLogger = ulog.GetLogger()
+	}
+	rootLogger = baseLogger.ReplaceField("sandboxId", request.SandboxID)
+	ulog.SetLogger(rootLogger)
+	ulog.GetLogger().Info("Updated sandbox_id from vsock", ulog.F("new_sandbox_id", request.SandboxID))
 }
 
 func validEnvKey(key string) bool {
@@ -171,19 +175,6 @@ func applyVsockEnv(env map[string]string) {
 			)
 		}
 	}
-}
-
-func parseVsockField(message, prefix string) string {
-	for _, line := range strings.Split(message, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, prefix) {
-			parts := strings.SplitN(line, prefix, 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
-		}
-	}
-	return ""
 }
 
 func (h *VsockHandlerImpl) waitForReady(timeout time.Duration) bool {

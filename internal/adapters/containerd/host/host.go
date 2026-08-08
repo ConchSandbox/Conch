@@ -22,11 +22,9 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/daemon/state"
-	"github.com/openeuler/Conch/internal/netstack"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
-	"github.com/openeuler/Conch/internal/volume"
 )
 
 const (
@@ -42,23 +40,11 @@ type Config struct {
 	StateDir      string
 	Snapshot      SnapshotConfig
 	TemplateStore state.Store
-	Sandbox       *SandboxConfig
+	Sandbox       *conchsandbox.Config
 }
 
 type SnapshotConfig struct {
 	WorkDir string
-}
-
-type SandboxConfig struct {
-	WarmPoolSize       int
-	TapIP              string
-	TapMask            int
-	CNI                netstack.CNIManagerConfig
-	VMMBinaries        map[string]string
-	VsockSignalRetry   time.Duration
-	VsockSignalTimeout time.Duration
-	RequestTimeout     time.Duration
-	VolumeManager      *volume.Manager
 }
 
 type Host struct {
@@ -209,7 +195,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 			inst.client,
 			host.templateStore,
 			host.snapshotServer,
-			sandboxManagerConfig(cfg.Sandbox),
+			*cfg.Sandbox,
 		)
 		if err != nil {
 			return fail("sandbox manager", err)
@@ -243,23 +229,6 @@ func startContainerdPluginGraph(ctx context.Context, cfg *serverconfig.Config) (
 	case <-timer.C:
 		srv.Stop()
 		return nil, nil, fmt.Errorf("containerd host bootstrap plugin did not initialize")
-	}
-}
-
-func sandboxManagerConfig(cfg *SandboxConfig) conchsandbox.Config {
-	if cfg == nil {
-		return conchsandbox.Config{}
-	}
-	return conchsandbox.Config{
-		WarmPoolSize:       cfg.WarmPoolSize,
-		TapIP:              cfg.TapIP,
-		TapMask:            cfg.TapMask,
-		CNI:                cfg.CNI,
-		VMMBinaries:        cfg.VMMBinaries,
-		VsockSignalRetry:   cfg.VsockSignalRetry,
-		VsockSignalTimeout: cfg.VsockSignalTimeout,
-		RequestTimeout:     cfg.RequestTimeout,
-		VolumeManager:      cfg.VolumeManager,
 	}
 }
 

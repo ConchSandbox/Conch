@@ -53,7 +53,13 @@ type Pool struct {
 	slotIDs        *slotstate.Allocator
 }
 
-func NewPool(warmPoolSize int, tapIP string, tapMask int, cniCfg CNIManagerConfig) (*Pool, error) {
+type PoolConfig struct {
+	WarmPoolSize int
+	CNI          CNIManagerConfig
+}
+
+func NewPool(cfg PoolConfig) (*Pool, error) {
+	warmPoolSize := cfg.WarmPoolSize
 	if warmPoolSize == 0 {
 		warmPoolSize = DefaultWarmPoolSize
 	}
@@ -61,17 +67,14 @@ func NewPool(warmPoolSize int, tapIP string, tapMask int, cniCfg CNIManagerConfi
 		return nil, fmt.Errorf("invalid network.warm_pool_size=%d, must be within [1, %d]", warmPoolSize, maxSlots)
 	}
 
-	slotConfig, err := newSlotConfig(tapIP, tapMask)
-	if err != nil {
-		return nil, fmt.Errorf("invalid tap network config: %w", err)
-	}
+	slotConfig := newSlotConfig()
 	if err := os.MkdirAll(networkNamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: create Conch network namespace directory: %w", err)
 	}
 	if err := os.Chmod(networkNamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: secure Conch network namespace directory: %w", err)
 	}
-	cniManager, err := NewCNIManager(cniCfg)
+	cniManager, err := NewCNIManager(cfg.CNI)
 	if err != nil {
 		return nil, err
 	}
@@ -407,14 +410,14 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 	netnsPath := slot.NetNSPath()
 	cniID := slot.cniContainerID()
 
-	cniIP, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath)
+	cniResult, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath)
 	if err != nil {
 		return fmt.Errorf("failed to setup cni network: %w", err)
 	}
-	slot.recordCNIIP(cniIP)
+	slot.recordCNIResult(cniResult)
 
 	if err := runInNetNSPath(ctx, netnsPath, func() error {
-		return configureGuestTapNetwork(slot, cniIP)
+		return configureGuestTapNetwork(slot, cniResult.IP)
 	}); err != nil {
 		return fmt.Errorf("failed to setup guest tap network: %w", err)
 	}
@@ -490,7 +493,7 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 		cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
 	}
 	if cniErr == nil {
-		slot.clearCNIIP()
+		slot.clearCNIResult()
 		cniTeardownComplete = true
 	} else {
 		errs = append(errs, cniErr)
