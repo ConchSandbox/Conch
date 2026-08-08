@@ -2,6 +2,7 @@ package image
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,7 +15,6 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
-	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 func RetainTemplateResources(ctx context.Context, client *containerdclient.Client, templateID, bootIndexDigest string) error {
@@ -186,22 +186,32 @@ func PlanTemplateRemoval(ctx context.Context, client *containerdclient.Client, o
 }
 
 func ApplyTemplateRemoval(ctx context.Context, client *containerdclient.Client, plan TemplateRemovalPlan) error {
+	if err := RemoveTemplateArtifacts(ctx, client, plan); err != nil {
+		return err
+	}
+	return ReleaseTemplateResources(ctx, client, plan.TemplateID)
+}
+
+// RemoveTemplateArtifacts removes unshared snapshot references and image
+// records while keeping the Template lease available for retries.
+func RemoveTemplateArtifacts(ctx context.Context, client *containerdclient.Client, plan TemplateRemovalPlan) error {
 	if client == nil || client.Client == nil {
 		return fmt.Errorf("containerd client is required")
 	}
 	cleanupCtx := containerdclient.NewNamespaceContext(ctx)
-	mutated := false
-
 	leaseManager := client.LeasesService()
 	runtimeLease := leases.Lease{ID: containerdclient.RuntimeLeaseID()}
 	resources, err := leaseManager.ListResources(cleanupCtx, runtimeLease)
+	var cleanupErrors []error
 	if err != nil && !errdefs.IsNotFound(err) {
-		return fmt.Errorf("list runtime lease resources: %w", err)
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("list runtime lease resources: %w", err))
 	}
 	leasedSnapshots := make(map[string]struct{})
-	for _, resource := range resources {
-		if resource.Type == "snapshots/erofs" {
-			leasedSnapshots[resource.ID] = struct{}{}
+	if err == nil {
+		for _, resource := range resources {
+			if resource.Type == "snapshots/erofs" {
+				leasedSnapshots[resource.ID] = struct{}{}
+			}
 		}
 	}
 	for _, key := range plan.SnapshotKeys {
@@ -212,14 +222,8 @@ func ApplyTemplateRemoval(ctx context.Context, client *containerdclient.Client, 
 			if errdefs.IsNotFound(err) {
 				continue
 			}
-			if mutated {
-				ulog.GetLogger().Warn("template cleanup could not release a snapshot after resource removal started",
-					ulog.F("snapshot", key), ulog.F("error", err))
-				continue
-			}
-			return fmt.Errorf("release snapshot %s from runtime lease: %w", key, err)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("release snapshot %s from runtime lease: %w", key, err))
 		}
-		mutated = true
 	}
 
 	for _, name := range plan.ImageNames {
@@ -227,39 +231,40 @@ func ApplyTemplateRemoval(ctx context.Context, client *containerdclient.Client, 
 			if errdefs.IsNotFound(err) {
 				continue
 			}
-			if mutated {
-				ulog.GetLogger().Warn("template cleanup could not remove an image after resource removal started",
-					ulog.F("image", name), ulog.F("error", err))
-				continue
-			}
-			return fmt.Errorf("remove template image %s: %w", name, err)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove template image %s: %w", name, err))
 		}
-		mutated = true
 	}
-	templateID := strings.TrimSpace(plan.TemplateID)
+	return errors.Join(cleanupErrors...)
+}
+
+// ReleaseTemplateResources drops the Template content lease and requests GC
+// after all mutable artifacts have been removed.
+func ReleaseTemplateResources(ctx context.Context, client *containerdclient.Client, templateID string) error {
+	if client == nil || client.Client == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	cleanupCtx := containerdclient.NewNamespaceContext(ctx)
+	leaseManager := client.LeasesService()
+	templateID = strings.TrimSpace(templateID)
 	if templateID != "" {
 		err := leaseManager.Delete(cleanupCtx, leases.Lease{ID: templateLeaseID(templateID)})
 		if err != nil && !errdefs.IsNotFound(err) {
-			if !mutated {
-				return fmt.Errorf("release template lease %s: %w", templateID, err)
-			}
-			ulog.GetLogger().Warn("template cleanup could not release its lease after resource removal started",
-				ulog.F("template_id", templateID), ulog.F("error", err))
-		}
-		if err == nil {
-			mutated = true
+			return fmt.Errorf("release template lease %s: %w", templateID, err)
 		}
 	}
-	if !mutated {
-		return nil
+	var gcLease leases.Lease
+	var err error
+	if templateID == "" {
+		gcLease, err = leaseManager.Create(cleanupCtx, leases.WithRandomID())
+	} else {
+		gcLease.ID = "conch.template.gc." + templateID
+		_, err = leaseManager.Create(cleanupCtx, leases.WithID(gcLease.ID))
 	}
-	gcLease, err := leaseManager.Create(cleanupCtx, leases.WithRandomID())
-	if err != nil {
-		ulog.GetLogger().Warn("template resources were released but synchronous garbage collection could not start", ulog.F("error", err))
-		return nil
+	if err != nil && !errdefs.IsAlreadyExists(err) {
+		return fmt.Errorf("start synchronous garbage collection: %w", err)
 	}
 	if err := leaseManager.Delete(cleanupCtx, gcLease, leases.SynchronousDelete); err != nil {
-		ulog.GetLogger().Warn("template resources were released but synchronous garbage collection did not finish", ulog.F("error", err))
+		return fmt.Errorf("finish synchronous garbage collection: %w", err)
 	}
 	return nil
 }
