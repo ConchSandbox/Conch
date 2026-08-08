@@ -9,14 +9,12 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	imageconverter "github.com/containerd/containerd/v2/core/images/converter"
-	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/platforms"
 	toolkit "github.com/erofs/erofs-container-toolkit/pkg/converter"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req ConvertRootfsRequest) (ConvertRootfsResult, error) {
@@ -66,15 +64,6 @@ func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req Con
 	snapshotKey := identity.ChainID(diffIDs).String()
 	if snapshotKey == "" {
 		return ConvertRootfsResult{}, fmt.Errorf("converted rootfs snapshot key is empty")
-	}
-	if _, err := client.SnapshotService("erofs").Update(convertCtx, snapshots.Info{
-		Name: snapshotKey,
-		Labels: map[string]string{
-			common.SnapshotLabelRootfsImage:    converted.Name,
-			common.SnapshotLabelRootfsManifest: converted.Target.Digest.String(),
-		},
-	}, "labels."+common.SnapshotLabelRootfsImage, "labels."+common.SnapshotLabelRootfsManifest); err != nil {
-		return ConvertRootfsResult{}, fmt.Errorf("label converted rootfs snapshot: %w", err)
 	}
 	return ConvertRootfsResult{
 		ImageName:      converted.Name,

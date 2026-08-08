@@ -16,33 +16,25 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
-func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
+func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) error {
 	if client == nil || client.Client == nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("containerd client is required")
+		return fmt.Errorf("containerd client is required")
 	}
 	if req.ImageName == "" {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
-	fetched, _, err := pullRegistryContent(pullCtx, client, RegistryPullOptions{
+	_, _, err := pullRegistryContent(pullCtx, client, RegistryPullOptions{
 		Reference: req.ImageName,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
 		Password:  req.Password,
 	}, false)
 	if err != nil {
-		return runtimeapi.PullImageResult{}, err
+		return err
 	}
-	if req.SkipUnpack {
-		return runtimeapi.PullImageResult{}, nil
-	}
-
-	results, err := unpackOCIImage(pullCtx, client.Client, fetched.Name)
-	if err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
-	}
-	return runtimeapi.PullImageResult{Refs: results}, nil
+	return nil
 }
 
 // PullBootIndex fetches a registry Boot Index and validates its complete

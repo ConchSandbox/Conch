@@ -551,6 +551,29 @@ func TestCreateTemplateRequiresContainerdClient(t *testing.T) {
 	}
 }
 
+func TestUnpackTemplateResolvesBootIndexByDigest(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	bootIndexDigest := buildColdBootIndex(t, host, "explicit-unpack")
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+
+	if _, err := svc.Templates.Create(ctx, conchtemplate.Entry{
+		ID:              "tmpl_unpack",
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: bootIndexDigest,
+		ImageName:       "not-the-boot-index:latest",
+		BuildRef:        "also-not-used:latest",
+	}); err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+
+	if err := svc.UnpackTemplate(ctx, TemplateUnpackOptions{TemplateID: "tmpl_unpack"}); err != nil {
+		t.Fatalf("UnpackTemplate() error = %v", err)
+	}
+}
+
 func newRuntimeImageHost(t *testing.T) *containerdhost.Host {
 	t.Helper()
 	if _, err := exec.LookPath("mkfs.erofs"); err != nil {

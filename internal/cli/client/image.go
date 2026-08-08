@@ -11,15 +11,13 @@ const (
 	pushImage   = "/api/image/push"
 	listImages  = "/api/image/list"
 	removeImage = "/api/image/remove"
-	unpackImage = "/api/image/unpack"
 )
 
 type PullImageRequest struct {
-	ImageName  string `json:"image_name"`
-	PlainHTTP  bool   `json:"plain_http,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Password   string `json:"password,omitempty"`
-	SkipUnpack bool   `json:"skip_unpack,omitempty"`
+	ImageName string `json:"image_name"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+	Username  string `json:"username,omitempty"`
+	Password  string `json:"password,omitempty"`
 }
 
 type PushImageRequest struct {
@@ -28,10 +26,6 @@ type PushImageRequest struct {
 	PlainHTTP   bool   `json:"plain_http,omitempty"`
 	Username    string `json:"username,omitempty"`
 	Password    string `json:"password,omitempty"`
-}
-
-type UnpackImageRequest struct {
-	ImageName string `json:"image_name"`
 }
 
 type ListImagesRequest struct {
@@ -43,22 +37,14 @@ type RemoveImageRequest struct {
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
-type imageResponse struct {
-	Results map[string]string `json:"results"`
-}
-
 type ImageRecord = runtimeapi.ImageRecord
 
 type listImagesResponse struct {
 	Images []ImageRecord `json:"images"`
 }
 
-func (c *Client) PullImage(ctx context.Context, req PullImageRequest) (map[string]string, error) {
-	var resp imageResponse
-	if err := c.postJSON(ctx, pullImage, req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
+func (c *Client) PullImage(ctx context.Context, req PullImageRequest) error {
+	return c.postJSON(ctx, pullImage, req, nil)
 }
 
 func (c *Client) PushImage(ctx context.Context, req PushImageRequest) error {
@@ -75,12 +61,4 @@ func (c *Client) ListImages(ctx context.Context, req ListImagesRequest) ([]Image
 
 func (c *Client) RemoveImage(ctx context.Context, req RemoveImageRequest) error {
 	return c.postJSON(ctx, removeImage, req, nil)
-}
-
-func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[string]string, error) {
-	var resp imageResponse
-	if err := c.postJSON(ctx, unpackImage, req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
 }

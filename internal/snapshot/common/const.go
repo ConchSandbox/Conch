@@ -26,12 +26,4 @@ const (
 	SnapshotLabelRootfs      = "conch/snapshotter/snapshot-rootfs"
 	SnapshotLabelSnapshotDir = "conch/snapshotter/snapshot-dir"
 	SnapshotLabelMemSize     = "conch/snapshotter/snapshot-memsize"
-
-	// SnapshotLabelRootfsImage records the source image name used to create the
-	// rootfs snapshot.
-	SnapshotLabelRootfsImage = "conch/snapshotter/rootfs-image"
-
-	// SnapshotLabelRootfsManifest records the source image manifest digest used
-	// to create the rootfs snapshot.
-	SnapshotLabelRootfsManifest = "conch/snapshotter/rootfs-manifest"
 )

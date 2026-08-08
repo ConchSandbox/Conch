@@ -251,22 +251,22 @@ func TestPrintImagePullHelpIncludesExample(t *testing.T) {
 		"config file path",
 		"--plain-http",
 		"--user string",
-		"--skip-unpack",
 		"docker.io/library/nginx:latest",
-		"Conch Boot Indexes must be pulled with `conch template pull`",
+		"Conch does not unpack OCI images",
+		"`conch template pull`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("pull help output missing %q:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"--kernel-plain-http", "--kernel-user"} {
+	for _, unwanted := range []string{"--kernel-plain-http", "--kernel-user", "--skip-unpack"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("pull help output should not expose %q:\n%s", unwanted, got)
 		}
 	}
 }
 
-func TestRunImagePullPassesSkipUnpack(t *testing.T) {
+func TestRunImagePullSendsContentOnlyRequest(t *testing.T) {
 	var got client.PullImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/image/pull" {
@@ -275,16 +275,16 @@ func TestRunImagePullPassesSkipUnpack(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode pull request: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": map[string]string{}})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 	t.Setenv("CONCH_API_URL", server.URL)
 
-	err := cmd.RunImagePull(context.Background(), []string{"--skip-unpack", "docker.io/library/nginx:latest"})
+	err := cmd.RunImagePull(context.Background(), []string{"docker.io/library/nginx:latest"})
 	if err != nil {
 		t.Fatalf("RunImagePull() error = %v", err)
 	}
-	if got.ImageName != "docker.io/library/nginx:latest" || !got.SkipUnpack {
+	if got.ImageName != "docker.io/library/nginx:latest" {
 		t.Fatalf("pull request = %#v", got)
 	}
 }
@@ -320,16 +320,17 @@ func TestParseRegistryUser(t *testing.T) {
 	}
 }
 
-func TestPrintImageUnpackHelpIncludesExample(t *testing.T) {
+func TestPrintTemplateUnpackHelpIncludesExample(t *testing.T) {
 	var buf bytes.Buffer
-	cmd.PrintImageUnpackHelp(&buf)
+	cmd.PrintTemplateUnpackHelp(&buf)
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch image unpack [options] <image-name>",
+		"conch template unpack [options] <template-id>",
 		"conchd API base URL",
 		"config file path",
-		"conch image unpack hub.oepkgs.net/conch/conch-index:v0.1",
+		"every component",
+		"conch template unpack tmpl_",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unpack help output missing %q:\n%s", want, got)

@@ -29,9 +29,8 @@ func printImageHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch image <command> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
-	fmt.Fprintln(out, "  pull    Pull an image and optionally unpack it.")
+	fmt.Fprintln(out, "  pull    Pull an image into the local content store.")
 	fmt.Fprintln(out, "  push    Push an image to a registry.")
-	fmt.Fprintln(out, "  unpack  Unpack a local image into snapshots.")
 	fmt.Fprintln(out, "  ls      List images from conchd/containerd.")
 	fmt.Fprintln(out, "  rm      Remove an image from conchd/containerd.")
 	fmt.Fprintln(out, "")
@@ -56,12 +55,6 @@ func RunImage(ctx context.Context, args []string) error {
 			return nil
 		}
 		return RunImagePush(ctx, args[1:])
-	case "unpack":
-		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
-			PrintImageUnpackHelp(os.Stdout)
-			return nil
-		}
-		return RunImageUnpack(ctx, args[1:])
 	case "ls":
 		return runImageList(ctx, args[1:])
 	case "rm":

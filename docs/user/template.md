@@ -62,6 +62,6 @@ Image digest: sha256:2222...
 
 ## 3. Image 管理
 
-`conch image pull / push / unpack / ls / rm` 用于管理 conchd 中的 OCI 镜像，其行为与 `ctr` 中对应的镜像操作一致。
+`conch image pull / push / ls / rm` 用于管理 conchd 中的 OCI 镜像内容，Conch 不会解包普通 OCI 镜像。需要手动解包 Template 的 Boot Index 时，使用 `conch template unpack <template-id>`。
 
 > **注意：** `conch image pull` 会拒绝 Boot Index；请使用 `conch template pull` 拉取并创建对应的 Template。
