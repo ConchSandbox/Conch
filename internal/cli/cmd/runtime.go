@@ -48,7 +48,7 @@ func InitUnpackLogger() error {
 
 func PrintUnpackSummary(results map[string]string) {
 	fmt.Println("------------------------------------------------------------")
-	fmt.Println("All sub-images processed successfully. Summary:")
+	fmt.Println("Image unpacked successfully. Summary:")
 	for kind, sid := range results {
 		fmt.Printf("Type: %-15s | SnapshotID: %s\n", kind, sid)
 	}

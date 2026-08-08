@@ -64,4 +64,4 @@ Image digest: sha256:2222...
 
 `conch image pull / push / unpack / ls / rm` 用于管理 conchd 中的 OCI 镜像，其行为与 `ctr` 中对应的镜像操作一致。
 
-> **注意：** 不要使用 `conch image pull` 拉取 Boot Index，请使用 `conch template pull`。
+> **注意：** `conch image pull` 会拒绝 Boot Index；请使用 `conch template pull` 拉取并创建对应的 Template。

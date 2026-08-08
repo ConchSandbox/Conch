@@ -2,6 +2,7 @@ package image
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -24,20 +25,58 @@ const (
 	ImageKindBootComponentMemory  = "boot-component-memory"
 )
 
-// DetectImageKind classifies newly ingested content before the result is
-// persisted as ImageKindLabel on its image record.
-func DetectImageKind(ctx context.Context, store content.Store, target ocispec.Descriptor) string {
+// DetectImageKind classifies an image using only its top-level
+// manifest or index. A Conch Boot Index is identified by its io.conch.* index
+// or component-descriptor annotations; referenced manifests, configs, and
+// layers do not need to be present in the content store.
+//
+// Once an index carries Conch metadata, malformed component topology is
+// reported as an error instead of being treated as an ordinary OCI index.
+func DetectImageKind(ctx context.Context, store content.Store, target ocispec.Descriptor) (string, error) {
 	if target.MediaType != ocispec.MediaTypeImageIndex {
-		return ImageKindOCIImage
+		return ImageKindOCIImage, nil
 	}
-	info, err := InspectBootIndexContent(ctx, store, target)
+	if store == nil {
+		return "", fmt.Errorf("content store is required")
+	}
+	raw, err := content.ReadBlob(ctx, store, target)
 	if err != nil {
-		return ImageKindOCIImage
+		return "", fmt.Errorf("read image index %s: %w", target.Digest, err)
+	}
+	var index ocispec.Index
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return "", fmt.Errorf("unmarshal image index %s: %w", target.Digest, err)
+	}
+	if index.MediaType != "" && index.MediaType != ocispec.MediaTypeImageIndex {
+		return "", fmt.Errorf("image index %s declares media type %q", target.Digest, index.MediaType)
+	}
+	if !hasConchIndexMetadata(index) {
+		return ImageKindOCIImage, nil
+	}
+	info, err := inspectBootIndexMetadata(target, index)
+	if err != nil {
+		return "", fmt.Errorf("invalid Conch Boot Index %s: %w", target.Digest, err)
 	}
 	if info.Resume {
-		return ImageKindBootIndexResume
+		return ImageKindBootIndexResume, nil
 	}
-	return ImageKindBootIndexCold
+	return ImageKindBootIndexCold, nil
+}
+
+func hasConchIndexMetadata(index ocispec.Index) bool {
+	for key := range index.Annotations {
+		if strings.HasPrefix(key, "io.conch.") {
+			return true
+		}
+	}
+	for _, manifest := range index.Manifests {
+		for key := range manifest.Annotations {
+			if strings.HasPrefix(key, "io.conch.") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SetImageKindLabel updates only the Conch classification label and preserves

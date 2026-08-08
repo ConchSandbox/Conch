@@ -252,7 +252,8 @@ func TestPrintImagePullHelpIncludesExample(t *testing.T) {
 		"--plain-http",
 		"--user string",
 		"--skip-unpack",
-		"hub.oepkgs.net/conch/sandbox-snapshot:latest",
+		"docker.io/library/nginx:latest",
+		"Conch Boot Indexes must be pulled with `conch template pull`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("pull help output missing %q:\n%s", want, got)
