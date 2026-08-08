@@ -379,18 +379,14 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, fmt.Errorf("template reference is required")
 	}
-	if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
-		ImageName:  reference,
-		PlainHTTP:  opts.PlainHTTP,
-		Username:   opts.Username,
-		Password:   opts.Password,
-		SkipUnpack: true,
-	}); err != nil {
-		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
-	}
-	info, err := conchimage.InspectBootIndexReference(ctx, s.Containerd, reference)
+	info, err := conchimage.PullBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
+		Reference: reference,
+		PlainHTTP: opts.PlainHTTP,
+		Username:  opts.Username,
+		Password:  opts.Password,
+	})
 	if err != nil {
-		return TemplatePullResult{}, fmt.Errorf("validate pulled template boot index %s: %w", reference, err)
+		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
 	}
 	origin := conchtemplate.OriginImage
 	bootMode := conchtemplate.BootModeCold

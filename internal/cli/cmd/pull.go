@@ -16,8 +16,8 @@ func PrintImagePullHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch image pull [options] <image-name>")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
-	fmt.Fprintln(out, "  Pull a Conch native image into containerd content store, then unpack")
-	fmt.Fprintln(out, "  all child images and link snapshot labels.")
+	fmt.Fprintln(out, "  Pull a standard OCI image into the containerd content store and unpack")
+	fmt.Fprintln(out, "  its rootfs. Conch Boot Indexes must be pulled with `conch template pull`.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -api-url string")
@@ -34,8 +34,8 @@ func PrintImagePullHelp(out io.Writer) {
 	fmt.Fprintln(out, "        pull image content without creating local snapshots")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch image pull hub.oepkgs.net/conch/sandbox-snapshot:latest")
-	fmt.Fprintln(out, "  conch image pull --skip-unpack docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  conch image pull docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  conch image pull --skip-unpack docker.io/library/alpine:latest")
 	fmt.Fprintln(out, "  conch image pull --plain-http --user example-user:example-password docker.io/library/nginx:latest")
 }
 

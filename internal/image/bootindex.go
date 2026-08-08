@@ -475,14 +475,23 @@ func InspectBootIndexContent(ctx context.Context, store content.Store, desc ocis
 		return BootIndexInfo{}, fmt.Errorf("boot index %s declares media type %q", desc.Digest, index.MediaType)
 	}
 
-	components, err := validateBootIndexManifestKinds(index.Manifests)
+	info, err := inspectBootIndexMetadata(desc, index)
 	if err != nil {
 		return BootIndexInfo{}, err
 	}
 	if err := validateContentClosure(ctx, store, desc); err != nil {
 		return BootIndexInfo{}, fmt.Errorf("validate boot index %s closure: %w", desc.Digest, err)
 	}
+	return info, nil
+}
 
+// inspectBootIndexMetadata validates the metadata carried by the top-level
+// index and its component descriptors without reading referenced content.
+func inspectBootIndexMetadata(desc ocispec.Descriptor, index ocispec.Index) (BootIndexInfo, error) {
+	components, err := validateBootIndexManifestKinds(index.Manifests)
+	if err != nil {
+		return BootIndexInfo{}, err
+	}
 	info := BootIndexInfo{
 		BootIndexDigest:   desc.Digest.String(),
 		RootfsDescriptor:  components[KindRootfs],

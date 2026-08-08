@@ -8,7 +8,6 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
-	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -35,19 +34,27 @@ func ImportArchive(ctx context.Context, client *containerdclient.Client, reader 
 	if len(importedImages) == 0 {
 		return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("no images were imported")
 	}
+	imageKinds := make(map[string]string, len(importedImages))
 	for _, imported := range importedImages {
-		kind := DetectImageKind(importCtx, client.ContentStore(), imported.Target)
+		kind, err := DetectImageKind(importCtx, client.ContentStore(), imported.Target)
+		if err != nil {
+			return runtimeapi.ImportImageArchiveResult{}, fmt.Errorf("detect imported image kind for %s: %w", imported.Name, err)
+		}
 		if err := SetImageKindLabel(importCtx, client.ImageService(), imported.Name, kind); err != nil {
 			return runtimeapi.ImportImageArchiveResult{}, err
 		}
+		imageKinds[imported.Name] = kind
 	}
 
-	snapshotter := client.SnapshotService("erofs")
 	finalSnapshotKey, finalImageName, err := selectImportedSnapshot(
 		reorderImportedImages(importedImages, req.ImportedTag),
 		func(imgInfo images.Image) (map[string]string, bool, error) {
-			if err := ValidateBootIndexContent(importCtx, client.Client, imgInfo.Name); err != nil {
+			kind := imageKinds[imgInfo.Name]
+			if kind != ImageKindBootIndexCold && kind != ImageKindBootIndexResume {
 				return nil, false, nil
+			}
+			if err := ValidateBootIndexContent(importCtx, client.Client, imgInfo.Name); err != nil {
+				return nil, true, fmt.Errorf("invalid Conch image index %s: %w", imgInfo.Name, err)
 			}
 			snapshotMap, err := UnpackAllSubImages(importCtx, client.Client, imgInfo.Name)
 			if err != nil {
@@ -57,19 +64,7 @@ func ImportArchive(ctx context.Context, client *containerdclient.Client, reader 
 		},
 		func(imgInfo images.Image) (string, error) {
 			img := containerd.NewImage(client.Client, imgInfo)
-			if err := img.Unpack(importCtx, "erofs"); err != nil {
-				return "", fmt.Errorf("failed to unpack image %s: %w", imgInfo.Name, err)
-			}
-
-			diffIDs, err := img.RootFS(importCtx)
-			if err != nil {
-				return "", fmt.Errorf("failed to get rootfs: %w", err)
-			}
-			snapshotKey := identity.ChainID(diffIDs).String()
-			if _, err := snapshotter.Stat(importCtx, snapshotKey); err != nil {
-				return "", nil
-			}
-			return snapshotKey, nil
+			return unpackOCIImageSnapshot(importCtx, client.Client, img)
 		},
 	)
 	if err != nil {

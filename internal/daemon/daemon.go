@@ -729,7 +729,7 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		Labels:    req.Labels,
 	})
 	if err != nil {
-		http.Error(w, "Failed to pull template: "+err.Error(), http.StatusInternalServerError)
+		writeImageError(w, "Failed to pull template", err)
 		return
 	}
 	writeJSON(w, map[string]string{

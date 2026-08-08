@@ -88,7 +88,71 @@ func Unpack(ctx context.Context, client *containerdclient.Client, req runtimeapi
 		return nil, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
 	}
 	unpackCtx := containerdclient.NewNamespaceContext(ctx)
-	return UnpackAllSubImages(unpackCtx, client.Client, req.ImageName)
+	img, err := client.GetImage(unpackCtx, req.ImageName)
+	if err != nil {
+		return nil, fmt.Errorf("get image %s: %w", req.ImageName, err)
+	}
+	kind := img.Labels()[ImageKindLabel]
+	if !validImageKind(kind) || kind == ImageKindBootComponentRootfs || kind == ImageKindBootComponentSandbox || kind == ImageKindBootComponentMemory {
+		kind, err = DetectImageKind(unpackCtx, client.ContentStore(), img.Target())
+		if err != nil {
+			return nil, fmt.Errorf("detect image kind for %s: %w", img.Name(), err)
+		}
+	}
+	return unpackImageByKind(unpackCtx, client.Client, img.Name(), kind)
+}
+
+func unpackImageByKind(ctx context.Context, client *containerd.Client, imageName, kind string) (map[string]string, error) {
+	switch kind {
+	case ImageKindBootIndexCold, ImageKindBootIndexResume:
+		return UnpackAllSubImages(ctx, client, imageName)
+	case ImageKindOCIImage:
+		return unpackOCIImage(ctx, client, imageName)
+	default:
+		return nil, fmt.Errorf("%w: cannot unpack image %s with kind %q", ErrInvalidRequest, imageName, kind)
+	}
+}
+
+func unpackOCIImage(ctx context.Context, client *containerd.Client, imageName string) (map[string]string, error) {
+	if client == nil {
+		return nil, fmt.Errorf("containerd client is required")
+	}
+	img, err := client.GetImage(ctx, imageName)
+	if err != nil {
+		return nil, fmt.Errorf("get OCI image %s: %w", imageName, err)
+	}
+	snapshotID, err := unpackOCIImageSnapshot(ctx, client, img)
+	if err != nil {
+		return nil, err
+	}
+	if snapshotID == "" {
+		return map[string]string{}, nil
+	}
+	return map[string]string{KindRootfs: snapshotID}, nil
+}
+
+func unpackOCIImageSnapshot(ctx context.Context, client *containerd.Client, img containerd.Image) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("containerd client is required")
+	}
+	if img == nil {
+		return "", fmt.Errorf("containerd image is required")
+	}
+	if err := img.Unpack(ctx, "erofs"); err != nil {
+		return "", fmt.Errorf("unpack OCI image %s: %w", img.Name(), err)
+	}
+	diffIDs, err := img.RootFS(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get OCI image rootfs: %w", err)
+	}
+	if len(diffIDs) == 0 {
+		return "", nil
+	}
+	snapshotID := identity.ChainID(diffIDs).String()
+	if _, err := client.SnapshotService("erofs").Stat(ctx, snapshotID); err != nil {
+		return "", fmt.Errorf("stat OCI rootfs snapshot %s: %w", snapshotID, err)
+	}
+	return snapshotID, nil
 }
 
 // UnpackAllSubImages validates an OCI Boot Index, unpacks all component
