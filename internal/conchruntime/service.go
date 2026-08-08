@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,10 +14,11 @@ import (
 
 	"github.com/containerd/errdefs"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -28,6 +30,7 @@ type SandboxOps interface {
 	Delete(sandbox.DeleteRequest) error
 	Suspend(sandbox.LifecycleRequest) error
 	Resume(sandbox.LifecycleRequest) error
+	UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
@@ -132,6 +135,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if opts.TemplateID == "" {
 		return SandboxCreateResult{}, ErrTemplateIDRequired
 	}
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+		return SandboxCreateResult{}, err
+	}
 	agentToken, err := sandbox.GenerateAgentToken()
 	if err != nil {
 		return SandboxCreateResult{}, err
@@ -148,6 +154,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		AgentToken:   agentToken,
 		Env:          copyMap(opts.Env),
 		VolumeMounts: opts.VolumeMounts,
+		Network:      opts.Network,
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -165,6 +172,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		IP:                            createResult.IP,
 		VCPUNum:                       opts.VCPUNum,
 		RamMB:                         opts.RamMB,
+		Network:                       marshalSandboxNetworkConfig(opts.Network),
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
@@ -182,6 +190,73 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:      opts.RamMB,
 		CreatedAt:  createdAt,
 	}, nil
+}
+
+func marshalSandboxNetworkConfig(cfg *runtimeapi.SandboxNetworkConfig) json.RawMessage {
+	if cfg == nil {
+		return nil
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func unmarshalSandboxNetworkConfig(raw json.RawMessage) (*runtimeapi.SandboxNetworkConfig, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var cfg runtimeapi.SandboxNetworkConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	if strings.TrimSpace(opts.SandboxID) == "" {
+		return fmt.Errorf("sandbox id is required")
+	}
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+		return err
+	}
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
+	defer unlock()
+	rec, err := s.getSandbox(ctx, opts.SandboxID)
+	if err != nil {
+		return err
+	}
+	if rec.State != state.SandboxReady && rec.State != state.SandboxSuspended {
+		return fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State)
+	}
+	oldNetwork, err := unmarshalSandboxNetworkConfig(rec.Network)
+	if err != nil {
+		return fmt.Errorf("decode existing sandbox network policy: %w", err)
+	}
+	oldRaw := append(json.RawMessage(nil), rec.Network...)
+	rec.Network = marshalSandboxNetworkConfig(opts.Network)
+	rec.LastError = ""
+	if err := s.upsertSandbox(ctx, rec); err != nil {
+		return err
+	}
+	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network}); err != nil {
+		rollbackCtx := context.WithoutCancel(ctx)
+		rollbackErr := s.Sandbox.UpdateNetwork(rollbackCtx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: oldNetwork})
+		rec.Network = oldRaw
+		applyErr := errors.Join(err, rollbackErr)
+		if rollbackErr != nil {
+			rec.State = state.SandboxUnknown
+			applyErr = errors.Join(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
+		}
+		rec.LastError = applyErr.Error()
+		rollbackStoreErr := s.upsertSandbox(rollbackCtx, rec)
+		return errors.Join(applyErr, rollbackStoreErr)
+	}
+	return nil
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {

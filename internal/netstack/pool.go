@@ -39,8 +39,11 @@ const (
 )
 
 var (
-	errWarmPoolClosed = slotstate.ErrClosed
-	errWarmPoolEmpty  = slotstate.ErrEmpty
+	errWarmPoolClosed    = slotstate.ErrClosed
+	errWarmPoolEmpty     = slotstate.ErrEmpty
+	applySandboxPolicy   = ApplySandboxNetworkPolicy
+	replaceSandboxPolicy = ReplaceSandboxNetworkPolicy
+	clearSandboxPolicy   = ClearSandboxNetworkPolicy
 )
 
 type Pool struct {
@@ -361,7 +364,25 @@ submitJobs:
 	return nil
 }
 
-func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
+// Get acquires a warm network slot for a sandbox and applies its initial
+// ingress and egress policy before returning the slot to the caller.
+func (p *Pool) Get(ctx context.Context, sandboxID string, policy *SandboxNetworkConfig) (*Slot, error) {
+	slot, err := p.get(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if slot == nil {
+		return nil, nil
+	}
+	if err := p.addInitPolicy(ctx, slot, policy); err != nil {
+		return nil, err
+	}
+	return slot, nil
+}
+
+// get only acquires and assigns a warm slot. Initial policy setup is kept in
+// Get so callers never receive a slot before its requested policy is applied.
+func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandboxID is required")
 	}
@@ -392,6 +413,44 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 	}
 	s.assignSandbox(sandboxID)
 	return s, nil
+}
+
+func (p *Pool) addInitPolicy(ctx context.Context, slot *Slot, policy *SandboxNetworkConfig) error {
+	if err := applySandboxPolicy(ctx, slot, policy); err != nil {
+		cleanupCtx := context.WithoutCancel(ctx)
+		clearErr := clearSandboxPolicy(cleanupCtx, slot)
+		slot.clearSandboxAssignment()
+		if clearErr != nil {
+			discardErr := p.Discard(cleanupCtx, slot)
+			return errors.Join(
+				fmt.Errorf("failed to apply sandbox network policy: %w", err),
+				fmt.Errorf("failed to clear partial sandbox network policy: %w", clearErr),
+				discardErr,
+			)
+		}
+		if pushErr := p.warmSlots.Push(slot); pushErr != nil {
+			discardErr := p.Discard(cleanupCtx, slot)
+			return errors.Join(fmt.Errorf("failed to apply sandbox network policy: %w", err), pushErr, discardErr)
+		}
+		return fmt.Errorf("failed to apply sandbox network policy: %w", err)
+	}
+	return nil
+}
+
+func (p *Pool) UpdateSandboxNetworkPolicy(ctx context.Context, slot *Slot, sandboxID string, policy *SandboxNetworkConfig) error {
+	if p == nil {
+		return fmt.Errorf("pool is nil")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if strings.TrimSpace(sandboxID) == "" || slot.sandboxID != sandboxID {
+		return fmt.Errorf("network slot is not assigned to sandbox %q", sandboxID)
+	}
+	if err := replaceSandboxPolicy(ctx, slot, policy); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
@@ -428,6 +487,11 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		return ctx.Err()
 	default:
 		if slot != nil {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := clearSandboxPolicy(cleanupCtx, slot); err != nil {
+				discardErr := p.Discard(cleanupCtx, slot)
+				return errors.Join(fmt.Errorf("failed to clear sandbox network policy: %w", err), discardErr)
+			}
 			slot.clearSandboxAssignment()
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {

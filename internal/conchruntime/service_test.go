@@ -17,6 +17,7 @@ import (
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -30,6 +31,8 @@ type fakeSandboxOps struct {
 	createErr          error
 	createCalls        int
 	deleteErr          error
+	updateReq          sandbox.NetworkUpdateRequest
+	updateErr          error
 }
 
 type serializedDeleteOps struct {
@@ -74,6 +77,11 @@ func (f *fakeSandboxOps) Suspend(sandbox.LifecycleRequest) error {
 
 func (f *fakeSandboxOps) Resume(sandbox.LifecycleRequest) error {
 	return nil
+}
+
+func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
+	f.updateReq = req
+	return f.updateErr
 }
 
 func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
@@ -539,6 +547,87 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	}
 	if sandboxOps.req.VCPUNum != 6 || sandboxOps.req.VCPUMax != 8 || sandboxOps.req.RAMMB != 8192 {
 		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
+	}
+}
+
+func TestCreateSandboxPersistsNetworkPolicy(t *testing.T) {
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, store)
+	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
+	policy := &netstack.SandboxNetworkConfig{DenyOut: []string{"192.0.2.10"}}
+
+	if _, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+		SandboxID: "sandbox-network",
+		Network:   policy,
+	}); err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if sandboxOps.req.Network != policy {
+		t.Fatalf("runtime network = %#v, want %#v", sandboxOps.req.Network, policy)
+	}
+	record, err := store.GetSandbox(context.Background(), "sandbox-network")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	stored, err := unmarshalSandboxNetworkConfig(record.Network)
+	if err != nil || !reflect.DeepEqual(stored, policy) {
+		t.Fatalf("stored network = %#v, %v; want %#v", stored, err, policy)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigReplacesPolicy(t *testing.T) {
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, store)
+	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+		SandboxID: "sandbox-network",
+		State:     state.SandboxReady,
+		Network:   marshalSandboxNetworkConfig(&netstack.SandboxNetworkConfig{AllowOut: []string{"192.0.2.10"}}),
+	}); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	replacement := &netstack.SandboxNetworkConfig{DenyOut: []string{"198.51.100.10"}}
+
+	if err := svc.UpdateSandboxNetworkConfig(context.Background(), SandboxNetworkUpdateOptions{
+		SandboxID: "sandbox-network",
+		Network:   replacement,
+	}); err != nil {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v", err)
+	}
+	if sandboxOps.updateReq.Network != replacement {
+		t.Fatalf("runtime network = %#v, want %#v", sandboxOps.updateReq.Network, replacement)
+	}
+	record, err := store.GetSandbox(context.Background(), "sandbox-network")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	stored, err := unmarshalSandboxNetworkConfig(record.Network)
+	if err != nil || !reflect.DeepEqual(stored, replacement) {
+		t.Fatalf("stored network = %#v, %v; want %#v", stored, err, replacement)
+	}
+}
+
+func TestUpdateSandboxNetworkConfigAllowsSuspendedSandbox(t *testing.T) {
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, store)
+	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+		SandboxID: "sandbox-suspended",
+		State:     state.SandboxSuspended,
+	}); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	policy := &netstack.SandboxNetworkConfig{DenyIn: []string{"192.0.2.10"}}
+
+	if err := svc.UpdateSandboxNetworkConfig(context.Background(), SandboxNetworkUpdateOptions{
+		SandboxID: "sandbox-suspended",
+		Network:   policy,
+	}); err != nil {
+		t.Fatalf("UpdateSandboxNetworkConfig() error = %v", err)
+	}
+	if sandboxOps.updateReq.Network != policy {
+		t.Fatalf("runtime network = %#v, want %#v", sandboxOps.updateReq.Network, policy)
 	}
 }
 

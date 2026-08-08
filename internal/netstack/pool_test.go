@@ -29,6 +29,33 @@ func TestNewPoolRejectsInvalidWarmPoolSize(t *testing.T) {
 	}
 }
 
+func TestUpdateSandboxNetworkPolicy(t *testing.T) {
+	_, slot := allocatedTestSlot(t)
+	slot.assignSandbox("sandbox-1")
+	original := replaceSandboxPolicy
+	t.Cleanup(func() { replaceSandboxPolicy = original })
+
+	want := &SandboxNetworkConfig{DenyOut: []string{"192.0.2.10"}}
+	var got *SandboxNetworkConfig
+	replaceSandboxPolicy = func(_ context.Context, gotSlot *Slot, policy *SandboxNetworkConfig) error {
+		if gotSlot != slot {
+			t.Fatalf("slot = %p, want %p", gotSlot, slot)
+		}
+		got = policy
+		return nil
+	}
+
+	if err := (&Pool{}).UpdateSandboxNetworkPolicy(context.Background(), slot, "sandbox-1", want); err != nil {
+		t.Fatalf("UpdateSandboxNetworkPolicy() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("policy = %#v, want %#v", got, want)
+	}
+	if err := (&Pool{}).UpdateSandboxNetworkPolicy(context.Background(), slot, "sandbox-2", want); err == nil {
+		t.Fatal("UpdateSandboxNetworkPolicy() accepted the wrong sandbox owner")
+	}
+}
+
 type fakeCNIPlugin struct {
 	setup  func(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
 	remove func(context.Context, string, string, ...cni.NamespaceOpts) error
@@ -200,7 +227,7 @@ func TestPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
 	p.Close()
 	p.Close()
 
-	if _, err := p.Get(context.Background(), "sandbox-a"); !errors.Is(err, errWarmPoolClosed) {
+	if _, err := p.Get(context.Background(), "sandbox-a", nil); !errors.Is(err, errWarmPoolClosed) {
 		t.Fatalf("Get() after Close() error = %v, want errWarmPoolClosed", err)
 	}
 	size, _ := p.warmSlots.Usage()
@@ -295,7 +322,7 @@ func TestGetAssignsWarmSlot(t *testing.T) {
 		t.Fatalf("Push(): %v", err)
 	}
 
-	got, err := p.Get(context.Background(), "sandbox-a")
+	got, err := p.Get(context.Background(), "sandbox-a", nil)
 	if err != nil {
 		t.Fatalf("Get(): %v", err)
 	}

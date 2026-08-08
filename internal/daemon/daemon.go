@@ -27,6 +27,7 @@ import (
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
@@ -168,6 +169,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("POST /api/v1/sandboxes", s.handleCreateSandbox)
 	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}", s.handleGetSandbox)
 	s.router.HandleFunc("DELETE /api/v1/sandboxes/{sandboxID}", s.handleDeleteSandbox)
+	s.router.HandleFunc("PUT /api/v1/sandboxes/{sandboxID}/network", s.handleUpdateSandboxNetwork)
 	s.router.HandleFunc("/health", s.handleHealth)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
@@ -357,9 +359,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		RamMB:        req.RAMMB,
 		VolumeMounts: req.VolumeMounts,
 		Env:          req.Env,
+		Network:      req.Network,
 	})
 	if err != nil {
-		if errors.Is(err, conchruntime.ErrTemplateIDRequired) {
+		if errors.Is(err, conchruntime.ErrTemplateIDRequired) || errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -387,6 +390,43 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sandboxResponseFromCreate(result))
+}
+
+func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("sandboxID")
+	if sandboxID == "" {
+		http.Error(w, "Missing sandbox id", http.StatusBadRequest)
+		return
+	}
+	var req runtimeapi.SandboxNetworkConfig
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if s.stateStore == nil || s.runtimeService == nil {
+		http.Error(w, "Sandbox service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	record, err := s.findSandboxRecord(r.Context(), sandboxID)
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	if err := s.runtimeService.UpdateSandboxNetworkConfig(r.Context(), runtimeapi.SandboxNetworkUpdateOptions{
+		SandboxID: record.SandboxID,
+		Network:   &req,
+	}); err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "Failed to update sandbox network: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
@@ -548,6 +588,12 @@ func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandbo
 		domain := record.IP
 		response.Domain = &domain
 		response.Lifecycle = &sandboxLifecycleResponse{}
+		if len(record.Network) != 0 {
+			var network runtimeapi.SandboxNetworkConfig
+			if json.Unmarshal(record.Network, &network) == nil {
+				response.Network = &network
+			}
+		}
 	}
 	return response
 }
