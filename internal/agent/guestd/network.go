@@ -4,59 +4,109 @@
 package guestd
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"net"
+	"os"
+	"strings"
 	"syscall"
 
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"github.com/vishvananda/netlink"
 )
 
-const (
-	guestAddressCIDR = "192.168.100.21/24"
-	defaultGateway   = "192.168.100.2"
-	mmdsRouteCIDR    = "169.254.169.254/32"
-)
+var resolverTargetPath = "/etc/resolv.conf"
 
-// setupNetwork brings up the loopback and first non-lo interface with a static IP.
-func setupNetwork() {
-	logger := ulog.GetLogger()
-
-	if err := setLinkUpByName("lo"); err != nil {
-		logger.Warn("Failed to bring loopback up", ulog.F("error", err))
+// applyGuestNetworkConfig configures a cold guest or validates restored state.
+// Once the sandbox is ready, address and route identity are never changed.
+func applyGuestNetworkConfig(cfg netstack.GuestNetworkConfig, revalidate bool) error {
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
+	link, err := firstGuestLink()
+	if err != nil {
+		return err
+	}
+	if revalidate {
+		if err := validateGuestLinkConfig(link, cfg); err != nil {
+			return err
+		}
+	} else {
+		if err := configureGuestLink(link, cfg); err != nil {
+			return err
+		}
+	}
+	if err := installResolverConfig(cfg.DNS); err != nil {
+		return fmt.Errorf("install resolver config: %w", err)
+	}
+	return nil
+}
 
+func firstGuestLink() (netlink.Link, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
-		logger.Error("Failed to get network interfaces", ulog.F("error", err))
-		return
+		return nil, fmt.Errorf("list network interfaces: %w", err)
 	}
-
 	for _, link := range links {
 		attrs := link.Attrs()
 		if attrs == nil || attrs.Name == "" || attrs.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		nicName := attrs.Name
-		logger.Info("Configuring interface", ulog.F("name", nicName))
-
-		if err := ensureAddress(link, guestAddressCIDR); err != nil {
-			logger.Warn("Failed to assign address", ulog.F("name", nicName), ulog.F("error", err))
-		}
-		if err := netlink.LinkSetUp(link); err != nil {
-			logger.Warn("Failed to bring interface up", ulog.F("name", nicName), ulog.F("error", err))
-		}
-		if err := ensureDefaultRoute(link, defaultGateway); err != nil {
-			logger.Warn("Failed to add default route", ulog.F("name", nicName), ulog.F("error", err))
-		}
-		if err := ensureLinkRoute(link, mmdsRouteCIDR); err != nil {
-			logger.Warn("Failed to add MMDS route", ulog.F("name", nicName), ulog.F("error", err))
-		}
-
-		logger.Info("Network configured", ulog.F("name", nicName))
-		return
+		return link, nil
 	}
-	logger.Warn("No non-loopback network interface found")
+	return nil, fmt.Errorf("no non-loopback network interface found")
+}
+
+func configureGuestLink(link netlink.Link, cfg netstack.GuestNetworkConfig) error {
+	if err := setLinkUpByName("lo"); err != nil {
+		return fmt.Errorf("bring loopback up: %w", err)
+	}
+	cidr := fmt.Sprintf("%s/%d", cfg.GuestIP, cfg.PrefixLength)
+	if err := ensureAddress(link, cidr); err != nil {
+		return fmt.Errorf("assign guest address: %w", err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("bring guest interface up: %w", err)
+	}
+	if err := ensureDefaultRoute(link, cfg.Gateway); err != nil {
+		return fmt.Errorf("set default route: %w", err)
+	}
+	ulog.GetLogger().Info("Guest network configured", ulog.F("name", link.Attrs().Name), ulog.F("address", cidr), ulog.F("gateway", cfg.Gateway))
+	return nil
+}
+
+func validateGuestLinkConfig(link netlink.Link, cfg netstack.GuestNetworkConfig) error {
+	attrs := link.Attrs()
+	if attrs == nil || attrs.Flags&net.FlagUp == 0 {
+		return fmt.Errorf("guest interface is not up")
+	}
+	cidr := fmt.Sprintf("%s/%d", cfg.GuestIP, cfg.PrefixLength)
+	_, expected, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	expected.IP = net.ParseIP(cfg.GuestIP)
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("list guest addresses: %w", err)
+	}
+	found := false
+	for _, addr := range addrs {
+		if addr.IPNet != nil && addr.IPNet.IP.Equal(expected.IP) && maskEqual(addr.IPNet.Mask, expected.Mask) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("guest interface does not have required address %s", cidr)
+	}
+	gw := net.ParseIP(cfg.Gateway)
+	if !routeExists(link, nil, gw) {
+		return fmt.Errorf("guest interface does not have required default gateway %s", cfg.Gateway)
+	}
+	return nil
 }
 
 func setLinkUpByName(name string) error {
@@ -110,26 +160,6 @@ func ensureDefaultRoute(link netlink.Link, gateway string) error {
 	return err
 }
 
-func ensureLinkRoute(link netlink.Link, cidr string) error {
-	_, dst, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return err
-	}
-	if routeExists(link, dst, nil) {
-		return nil
-	}
-
-	err = netlink.RouteAdd(&netlink.Route{
-		LinkIndex: link.Attrs().Index,
-		Dst:       dst,
-		Scope:     netlink.SCOPE_LINK,
-	})
-	if err == nil || errors.Is(err, syscall.EEXIST) && routeExists(link, dst, nil) {
-		return nil
-	}
-	return err
-}
-
 func maskEqual(a, b net.IPMask) bool {
 	if len(a) != len(b) {
 		return false
@@ -171,4 +201,29 @@ func routeDstEqual(a, b *net.IPNet) bool {
 		return a == nil && b == nil
 	}
 	return a.IP.Equal(b.IP) && maskEqual(a.Mask, b.Mask)
+}
+
+func installResolverConfig(cfg netstack.DNSConfig) error {
+	normalized, err := netstack.NormalizeDNS(cfg)
+	if err != nil {
+		return err
+	}
+	cfg = normalized
+	var out bytes.Buffer
+	out.WriteString("# Generated by Conch\n")
+	for _, server := range cfg.Nameservers {
+		fmt.Fprintf(&out, "nameserver %s\n", server)
+	}
+	if len(cfg.Search) != 0 {
+		fmt.Fprintf(&out, "search %s\n", strings.Join(cfg.Search, " "))
+	} else if cfg.Domain != "" {
+		fmt.Fprintf(&out, "domain %s\n", cfg.Domain)
+	}
+	if len(cfg.Options) != 0 {
+		fmt.Fprintf(&out, "options %s\n", strings.Join(cfg.Options, " "))
+	}
+	if err := os.Remove(resolverTargetPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove existing resolver config: %w", err)
+	}
+	return os.WriteFile(resolverTargetPath, out.Bytes(), 0o644)
 }

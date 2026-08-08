@@ -23,20 +23,18 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-
-	netutils "k8s.io/utils/net"
 )
 
 const (
 	firstSlotID = 2
 	maxSlots    = 4000
 
-	defaultTapIP           = "192.168.100.2"
-	defaultTapMask         = 24
+	guestGatewayIP         = "192.168.100.2"
+	guestIP                = "192.168.100.21"
+	guestPrefixLength      = 24
 	networkNamespaceDir    = "/run/conch/netns"
 	networkNamespacePrefix = "slot-"
 	tapInterfaceName       = "tap0"
-	namespaceIPIndex       = 21
 )
 
 // slotConfig contains the immutable network addressing shared by Slots in a Pool.
@@ -46,29 +44,12 @@ type slotConfig struct {
 	namespaceIP net.IP
 }
 
-func newSlotConfig(tapIP string, tapMask int) (slotConfig, error) {
-	if tapIP == "" {
-		tapIP = defaultTapIP
-	}
-	if tapMask == 0 {
-		tapMask = defaultTapMask
-	}
-
-	tapCIDR := fmt.Sprintf("%s/%d", tapIP, tapMask)
-	parsedTapIP, tapNet, err := net.ParseCIDR(tapCIDR)
-	if err != nil {
-		return slotConfig{}, fmt.Errorf("failed to parse tap CIDR %q: %w", tapCIDR, err)
-	}
-	namespaceIP, err := netutils.GetIndexedIP(tapNet, namespaceIPIndex)
-	if err != nil {
-		return slotConfig{}, fmt.Errorf("failed to derive namespace IP from tap CIDR %q: %w", tapCIDR, err)
-	}
-
+func newSlotConfig() slotConfig {
 	return slotConfig{
-		tapIP:       parsedTapIP,
-		tapMask:     tapNet.Mask,
-		namespaceIP: namespaceIP,
-	}, nil
+		tapIP:       net.ParseIP(guestGatewayIP).To4(),
+		tapMask:     net.CIDRMask(guestPrefixLength, 32),
+		namespaceIP: net.ParseIP(guestIP).To4(),
+	}
 }
 
 // Slot describes one reusable network slot. Callers outside netstack receive
@@ -78,6 +59,7 @@ type Slot struct {
 
 	sandboxID string
 	cniIP     string
+	cniDNS    DNSConfig
 
 	tapIP       net.IP
 	tapMask     net.IPMask
@@ -123,12 +105,14 @@ func (s *Slot) cniContainerID() string {
 	return fmt.Sprintf("conch-slot-%d", s.id)
 }
 
-func (s *Slot) recordCNIIP(cniIP string) {
-	s.cniIP = cniIP
+func (s *Slot) recordCNIResult(result CNIResult) {
+	s.cniIP = result.IP
+	s.cniDNS = result.DNS.Clone()
 }
 
-func (s *Slot) clearCNIIP() {
+func (s *Slot) clearCNIResult() {
 	s.cniIP = ""
+	s.cniDNS = DNSConfig{}
 }
 
 func (s *Slot) assignSandbox(sandboxID string) {
@@ -141,6 +125,16 @@ func (s *Slot) clearSandboxAssignment() {
 
 func (s *Slot) CNIIP() string {
 	return s.cniIP
+}
+
+func (s *Slot) GuestNetworkConfig() GuestNetworkConfig {
+	prefixLength, _ := s.tapMask.Size()
+	return GuestNetworkConfig{
+		GuestIP:      s.namespaceIP.String(),
+		PrefixLength: prefixLength,
+		Gateway:      s.tapIP.String(),
+		DNS:          s.cniDNS.Clone(),
+	}
 }
 
 func (s *Slot) TapName() string {

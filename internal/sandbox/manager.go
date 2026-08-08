@@ -20,10 +20,7 @@ import (
 )
 
 type Config struct {
-	WarmPoolSize       int
-	TapIP              string
-	TapMask            int
-	CNI                netstack.CNIManagerConfig
+	Network            netstack.PoolConfig
 	VMMBinaries        map[string]string
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
@@ -84,7 +81,7 @@ func New(
 	vsockSignalTimeout := durationOrDefault(cfg.VsockSignalTimeout, 60*time.Second)
 	requestTimeout := durationOrDefault(cfg.RequestTimeout, 60*time.Second)
 
-	pool, err := netstack.NewPool(cfg.WarmPoolSize, cfg.TapIP, cfg.TapMask, cfg.CNI)
+	pool, err := netstack.NewPool(cfg.Network)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +294,7 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 		Retry:           vsockSignalRetry,
 		Timeout:         vsockSignalTimeout,
 	}
-	if err := hostconn.ValidateReadyOptions(readyOpts); err != nil {
+	if err := hostconn.ValidateReadyPreflight(readyOpts); err != nil {
 		return nil, err
 	}
 
@@ -311,13 +308,15 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
+	readyOpts.Network = sbx.slot.GuestNetworkConfig()
+	if err := readyOpts.Network.Validate(); err != nil {
+		return sbx, fmt.Errorf("invalid guest network config: %w", err)
+	}
 
 	// WaitReady returns timeout and context cancellation errors directly.
-	conn, err := hostconn.WaitReady(ctx, readyOpts)
-	if err != nil {
+	if err := hostconn.WaitReady(ctx, readyOpts); err != nil {
 		return sbx, err
 	}
-	sbx.vsockConn = conn
 	logger.Info("Vsock signal sent successfully", ulog.F("sandboxId", sandboxId))
 	return sbx, nil
 }

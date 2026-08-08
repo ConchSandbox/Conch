@@ -5,14 +5,16 @@ package guestd
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -136,7 +138,6 @@ func runAsInit() {
 	mountEssentialFilesystems()
 	setupInitFileLogging()
 	mountStorageDevices()
-	setupNetwork()
 
 	mergeReady := false
 	if _, err := os.Stat(MergeTarget + "/usr"); err == nil {
@@ -152,13 +153,6 @@ func runAsInit() {
 		setupMergeFileLogging()
 
 		rootfsEntrypointExpected.Store(hasRootfsEntrypoint())
-		if rootfsEntrypointExpected.Load() {
-			ulog.GetLogger().Info("Rootfs conch entrypoint found; using rootfs service startup")
-			startRootfsEntrypoint()
-		} else {
-			ulog.GetLogger().Info("Rootfs conch entrypoint not found; skipping rootfs service startup")
-		}
-
 		if err := chrootToMerge(); err != nil {
 			ulog.GetLogger().Error("Failed to chroot into merge layer, aborting init")
 			return
@@ -167,18 +161,38 @@ func runAsInit() {
 		ulog.GetLogger().Warn("Overlay rootfs not found", ulog.F("target", MergeTarget))
 	}
 
+	handler := NewVsockHandler(checkSandboxReady, nil)
+	vsockServerErr, err := startVsockServer(handler)
+	if err != nil {
+		ulog.GetLogger().Error("Failed to start vsock initialization server", ulog.F("error", err))
+		return
+	}
+
+	select {
+	case <-handler.NetworkReady():
+	case err := <-vsockServerErr:
+		ulog.GetLogger().Error("vsock server stopped before network initialization", ulog.F("error", err))
+		return
+	}
+
+	go waitForRootfsServiceReadySignal()
+	if rootfsEntrypointExpected.Load() {
+		ulog.GetLogger().Info("Rootfs conch entrypoint found; using rootfs service startup")
+		startRootfsEntrypoint()
+	} else {
+		ulog.GetLogger().Info("Rootfs conch entrypoint not found; skipping rootfs service startup")
+	}
+
 	if err := startAgentAPIServerAsync(); err != nil {
 		ulog.GetLogger().Error("agent API server failed to start, vsock will report NOT_READY",
 			ulog.F("error", err),
 		)
 	}
 
-	go startVsockServer()
 	go reapChildren()
-	go waitForRootfsServiceReadySignal()
 
 	ulog.GetLogger().Info("Initialization complete")
-	waitForSignal()
+	waitForSignal(vsockServerErr)
 }
 
 // chrootToMerge chroot to the OverlayFS merge layer.
@@ -204,12 +218,16 @@ func waitForRootfsServiceReadySignal() {
 	}
 }
 
-// waitForSignal waits for SIGTERM/SIGINT
-func waitForSignal() {
+// waitForSignal waits for SIGTERM/SIGINT or a fatal vsock server error.
+func waitForSignal(vsockServerErr <-chan error) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	<-sigCh
-	ulog.GetLogger().Info("Received shutdown signal")
+	select {
+	case <-sigCh:
+		ulog.GetLogger().Info("Received shutdown signal")
+	case err := <-vsockServerErr:
+		ulog.GetLogger().Error("vsock server stopped", ulog.F("error", err))
+	}
 }
 
 // startAgentAPIServerAsync binds the agent API listener synchronously, then serves in
@@ -237,14 +255,13 @@ func startAgentAPIServerAsync() error {
 	return nil
 }
 
-// startVsockServer starts the vsock server for host communication.
-func startVsockServer() {
+// startVsockServer creates the listener synchronously, then serves connections
+// in the background. The returned channel reports fatal listener errors.
+func startVsockServer(handler VsockHandler) (<-chan error, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
-		ulog.GetLogger().Error("Failed to create vsock socket", ulog.F("error", err))
-		return
+		return nil, fmt.Errorf("create vsock socket: %w", err)
 	}
-	defer unix.Close(fd)
 
 	sa := &unix.SockaddrVM{
 		CID:  unix.VMADDR_CID_ANY,
@@ -252,50 +269,69 @@ func startVsockServer() {
 	}
 
 	if err := unix.Bind(fd, sa); err != nil {
-		ulog.GetLogger().Error("Failed to bind vsock", ulog.F("error", err))
-		return
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("bind vsock socket: %w", err)
 	}
 
 	if err := unix.Listen(fd, 5); err != nil {
-		ulog.GetLogger().Error("Failed to listen on vsock", ulog.F("error", err))
-		return
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("listen on vsock socket: %w", err)
 	}
 
 	ulog.GetLogger().Info("vsock server listening", ulog.F("port", vsockReadyPort))
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveVsock(fd, handler)
+	}()
+	return serverErr, nil
+}
 
-	handler := NewVsockHandler(ServerVersion, checkSandboxReady)
+func serveVsock(fd int, handler VsockHandler) error {
+	defer unix.Close(fd)
+	logger := ulog.GetLogger()
 	for {
 		connFd, _, err := unix.Accept(fd)
-		logger := ulog.GetLogger()
 		if err != nil {
-			logger.Error("vsock accept error", ulog.F("error", err))
-			continue
+			if errors.Is(err, unix.EINTR) ||
+				errors.Is(err, unix.EAGAIN) ||
+				errors.Is(err, unix.ECONNABORTED) {
+				continue
+			}
+			return fmt.Errorf("accept vsock connection: %w", err)
 		}
 
-		buf := make([]byte, 1024)
-		n, err := unix.Read(connFd, buf)
-		if err != nil {
-			logger.Error("vsock read error",
-				ulog.F("fd", connFd),
-				ulog.F("error", err),
-			)
-			_ = unix.Close(connFd)
-			continue
+		if err := handleVsockConnection(connFd, handler); err != nil {
+			logger.Warn("failed to handle vsock connection", ulog.F("error", err))
 		}
-		if n > 0 {
-			message := string(buf[:n])
-			response := handler.HandleMessage(message)
-			if response != "" {
-				if _, err := unix.Write(connFd, []byte(response)); err != nil {
-					ulog.GetLogger().Error("vsock write response error",
-						ulog.F("fd", connFd),
-						ulog.F("error", err),
-					)
-				} else if strings.Contains(response, "READY:") {
-					ulog.GetLogger().Info("vsock sent READY response", ulog.F("fd", connFd))
-				}
-			}
-		}
-		_ = unix.Close(connFd)
 	}
+}
+
+func handleVsockConnection(connFd int, handler VsockHandler) error {
+	file := os.NewFile(uintptr(connFd), "guest-vsock")
+	if file == nil {
+		_ = unix.Close(connFd)
+		return fmt.Errorf("wrap vsock fd %d", connFd)
+	}
+	defer file.Close()
+
+	tv := unix.NsecToTimeval(int64(2 * time.Second))
+	_ = unix.SetsockoptTimeval(connFd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+
+	var request agentprotocol.InitRequest
+	if err := agentprotocol.ReadFrame(file, &request); err != nil {
+		return fmt.Errorf("read initialization frame: %w", err)
+	}
+
+	_ = unix.SetsockoptTimeval(connFd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{})
+	response := handler.HandleRequest(request)
+
+	_ = unix.SetsockoptTimeval(connFd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
+	if err := agentprotocol.WriteFrame(file, response); err != nil {
+		return fmt.Errorf("write initialization response: %w", err)
+	}
+
+	if response.Status == "ready" {
+		ulog.GetLogger().Info("vsock sent READY response", ulog.F("fd", connFd))
+	}
+	return nil
 }

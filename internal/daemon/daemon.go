@@ -27,7 +27,9 @@ import (
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -125,11 +127,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
 		},
-		Sandbox: &containerdhost.SandboxConfig{
-			WarmPoolSize:       cfg.Network.WarmPoolSize,
-			TapIP:              cfg.Network.TapIP,
-			TapMask:            cfg.Network.TapMask,
-			CNI:                cfg.Network.CNI,
+		Sandbox: &conchsandbox.Config{
+			Network: netstack.PoolConfig{
+				WarmPoolSize: cfg.Network.WarmPoolSize,
+				CNI:          cfg.Network.CNI,
+			},
 			VMMBinaries:        cfg.VMM.BinaryPaths(),
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,

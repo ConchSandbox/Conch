@@ -26,7 +26,7 @@ func TestNewPoolRejectsInvalidWarmPoolSize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewPool(tt.warm, "", 0, CNIManagerConfig{}); err == nil || !strings.Contains(err.Error(), "network.warm_pool_size") {
+			if _, err := NewPool(PoolConfig{WarmPoolSize: tt.warm}); err == nil || !strings.Contains(err.Error(), "network.warm_pool_size") {
 				t.Fatalf("NewPool() error = %v, want invalid warm pool size error", err)
 			}
 		})
@@ -94,10 +94,7 @@ func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	if err != nil {
 		t.Fatalf("Acquire(): %v", err)
 	}
-	cfg, err := newSlotConfig("", 0)
-	if err != nil {
-		t.Fatalf("newSlotConfig(): %v", err)
-	}
+	cfg := newSlotConfig()
 	slot, err := newSlot(id, cfg)
 	if err != nil {
 		t.Fatalf("newSlot(): %v", err)
@@ -144,10 +141,13 @@ func integrationTestPool(t *testing.T) *Pool {
 		t.Fatalf("write integration CNI config: %v", err)
 	}
 
-	p, err := NewPool(1, "", 0, CNIManagerConfig{
-		PluginBinDirs: []string{pluginDir},
-		PluginConfDir: confDir,
-		IfName:        defaultCNIIfName,
+	p, err := NewPool(PoolConfig{
+		WarmPoolSize: 1,
+		CNI: CNIManagerConfig{
+			PluginBinDirs: []string{pluginDir},
+			PluginConfDir: confDir,
+			IfName:        defaultCNIIfName,
+		},
 	})
 	if err != nil {
 		t.Fatalf("initialize integration network pool: %v", err)

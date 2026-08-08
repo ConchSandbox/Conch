@@ -16,7 +16,6 @@ const HealthMsgOK = "OK"
 const agentFileChunkBytes = 1024 * 1024
 
 type AgentServer struct {
-	Version      string
 	processMu    sync.Mutex
 	processes    map[int32]*managedProcess
 	processByTag map[string]int32

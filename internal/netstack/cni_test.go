@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	cni "github.com/containerd/go-cni"
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
 
 func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
@@ -25,6 +25,29 @@ func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
 	}
 	if defaultCNIMinNetworkCount != defaultCNIPluginMaxConfNum+1 {
 		t.Fatalf("defaultCNIMinNetworkCount = %d, want defaultCNIPluginMaxConfNum + 1", defaultCNIMinNetworkCount)
+	}
+}
+
+func TestExtractCNIDNS(t *testing.T) {
+	result := &cni.Result{DNS: []cnitypes.DNS{
+		{Nameservers: []string{"10.0.0.53"}, Search: []string{"one.example"}, Options: []string{"timeout:2"}},
+		{Nameservers: []string{"10.0.0.54"}, Search: []string{"two.example"}, Domain: "ignored.example"},
+	}}
+	got, err := extractCNIDNS(result)
+	if err != nil {
+		t.Fatalf("extractCNIDNS() error = %v", err)
+	}
+	if !reflect.DeepEqual(got.Nameservers, []string{"10.0.0.53", "10.0.0.54"}) ||
+		!reflect.DeepEqual(got.Search, []string{"one.example", "two.example"}) ||
+		got.Domain != "" {
+		t.Fatalf("extractCNIDNS() = %#v", got)
+	}
+}
+
+func TestExtractCNIDNSRejectsInvalidExplicitServer(t *testing.T) {
+	result := &cni.Result{DNS: []cnitypes.DNS{{Nameservers: []string{"127.0.0.53"}}}}
+	if _, err := extractCNIDNS(result); err == nil {
+		t.Fatal("extractCNIDNS() error = nil, want invalid CNI DNS error")
 	}
 }
 
@@ -64,7 +87,7 @@ func TestLoadedBridgeNetwork(t *testing.T) {
 				Config: &cni.NetworkConfList{
 					Name: "custom-network",
 					Plugins: []*cni.NetworkConf{{
-						Network: &types.PluginConf{Type: "bridge"},
+						Network: &cnitypes.PluginConf{Type: "bridge"},
 						Source:  `{"bridge":"custom-bridge"}`,
 					}},
 				},
@@ -81,7 +104,7 @@ func TestLoadedBridgeNetwork(t *testing.T) {
 			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
 				Config: &cni.NetworkConfList{
 					Name:    "custom-network",
-					Plugins: []*cni.NetworkConf{{Network: &types.PluginConf{Type: "host-local"}}},
+					Plugins: []*cni.NetworkConf{{Network: &cnitypes.PluginConf{Type: "host-local"}}},
 				},
 			}}},
 			wantErr: "no bridge network",
@@ -92,7 +115,7 @@ func TestLoadedBridgeNetwork(t *testing.T) {
 				Config: &cni.NetworkConfList{
 					Name: "custom-network",
 					Plugins: []*cni.NetworkConf{{
-						Network: &types.PluginConf{Type: "bridge"},
+						Network: &cnitypes.PluginConf{Type: "bridge"},
 						Source:  `{}`,
 					}},
 				},

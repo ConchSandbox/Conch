@@ -34,7 +34,7 @@ func serveAgentAPI(listener net.Listener) error {
 }
 
 func newAgentHTTPHandler() http.Handler {
-	server := &AgentServer{Version: ServerVersion}
+	server := &AgentServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleAgentHealth)
 

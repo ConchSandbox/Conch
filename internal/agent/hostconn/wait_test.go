@@ -1,13 +1,18 @@
 package hostconn
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"golang.org/x/sys/unix"
 )
@@ -15,19 +20,17 @@ import (
 func TestWaitForVsockAgentReadyReportsTimeout(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
-		conn, err := WaitReady(
+		err := WaitReady(
 			context.Background(),
 			ReadyOptions{
 				SandboxID:       "sandbox-timeout",
 				AgentToken:      "token",
+				Network:         testGuestNetwork(),
 				VsockSocketPath: t.TempDir() + "/missing.vsock",
 				Retry:           time.Millisecond,
 				Timeout:         10 * time.Millisecond,
 			},
 		)
-		if conn != nil {
-			_ = conn.Close()
-		}
 		errCh <- err
 	}()
 
@@ -48,64 +51,175 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	conn, err := WaitReady(
+	err := WaitReady(
 		ctx,
 		ReadyOptions{
 			SandboxID:       "sandbox-canceled",
 			AgentToken:      "token",
+			Network:         testGuestNetwork(),
 			VsockSocketPath: t.TempDir() + "/missing.vsock",
 			Retry:           time.Millisecond,
 			Timeout:         time.Second,
 		},
 	)
-	if conn != nil {
-		_ = conn.Close()
-	}
 	if err == nil || err != context.Canceled {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
 
-func TestReadyPayloadIncludesEnvironment(t *testing.T) {
-	payload, err := readyPayload(ReadyOptions{
-		SandboxID:  "sandbox-1",
-		AgentToken: "token",
-		Env: map[string]string{
-			"SOME_RANDOM_KEY": "key123",
-		},
+func TestWaitReadySendsEnvironmentAndNetwork(t *testing.T) {
+	socketPath := t.TempDir() + "/vsock.sock"
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	requestCh := make(chan agentprotocol.InitRequest, 1)
+	serverErrCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		command, err := reader.ReadString('\n')
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if command != fmt.Sprintf("CONNECT %d\n", vsockReadyPort) {
+			serverErrCh <- fmt.Errorf("unexpected proxy command %q", command)
+			return
+		}
+		if _, err := conn.Write([]byte("OK\n")); err != nil {
+			serverErrCh <- err
+			return
+		}
+
+		var request agentprotocol.InitRequest
+		if err := agentprotocol.ReadFrame(reader, &request); err != nil {
+			serverErrCh <- err
+			return
+		}
+		requestCh <- request
+		if err := agentprotocol.WriteFrame(conn, agentprotocol.ReadyResponse()); err != nil {
+			serverErrCh <- err
+			return
+		}
+		buf := make([]byte, 1)
+		if _, err := conn.Read(buf); !errors.Is(err, io.EOF) {
+			serverErrCh <- fmt.Errorf("wait for client close: %w", err)
+			return
+		}
+		serverErrCh <- nil
+	}()
+
+	err = WaitReady(context.Background(), ReadyOptions{
+		SandboxID:       "sandbox-1",
+		AgentToken:      "token",
+		Env:             map[string]string{"SOME_RANDOM_KEY": "key123"},
+		Network:         testGuestNetwork(),
+		VsockSocketPath: socketPath,
+		Retry:           time.Millisecond,
+		Timeout:         time.Second,
 	})
 	if err != nil {
-		t.Fatalf("readyPayload() error = %v", err)
+		t.Fatalf("WaitReady() error = %v", err)
 	}
-	want := "I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:token\nENV_JSON:{\"SOME_RANDOM_KEY\":\"key123\"}\n"
-	if payload != want {
-		t.Fatalf("readyPayload() = %q, want %q", payload, want)
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("serve initialization request: %v", err)
+	}
+
+	request := <-requestCh
+	if request.Version != agentprotocol.ProtocolVersion || request.Env["SOME_RANDOM_KEY"] != "key123" {
+		t.Fatalf("initialization request = %#v", request)
+	}
+	if request.Network.GuestIP != "192.168.100.21" || request.Network.PrefixLength != 24 {
+		t.Fatalf("network = %#v", request.Network)
 	}
 }
 
-func TestReadyPayloadRejectsPayloadLargerThanGuestReadLimit(t *testing.T) {
-	_, err := readyPayload(ReadyOptions{
+func TestValidateReadyPreflightDoesNotRequireNetwork(t *testing.T) {
+	err := ValidateReadyPreflight(ReadyOptions{
 		SandboxID:  "sandbox-1",
 		AgentToken: "token",
-		Env:        map[string]string{"TOO_LARGE": strings.Repeat("x", maxVsockInitPayload)},
+		Env:        map[string]string{"KEY": "value"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "maximum is 1024") {
-		t.Fatalf("readyPayload() error = %v, want 1024-byte limit error", err)
+	if err != nil {
+		t.Fatalf("ValidateReadyPreflight() error = %v", err)
 	}
 }
 
-func TestValidateAgentReadyAcceptsVersionMismatch(t *testing.T) {
-	if err := validateAgentReady("READY:0.0.0", "sandbox-version", ulog.GetLogger(), ""); err != nil {
-		t.Fatalf("validateAgentReady() error = %v, want nil for version mismatch", err)
+func TestWaitReadyRejectsInvalidNetwork(t *testing.T) {
+	invalid := testGuestNetwork()
+	invalid.Gateway = ""
+	err := WaitReady(context.Background(), ReadyOptions{
+		SandboxID:       "sandbox-1",
+		AgentToken:      "token",
+		Network:         invalid,
+		VsockSocketPath: t.TempDir() + "/missing.vsock",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid guest network config") {
+		t.Fatalf("WaitReady() error = %v, want invalid network error", err)
 	}
 }
 
-func TestValidateAgentReadyRejectsNotReadyAndUnknown(t *testing.T) {
-	if err := validateAgentReady("NOT_READY", "sandbox-not-ready", ulog.GetLogger(), ""); err == nil {
-		t.Fatal("validateAgentReady(NOT_READY) error = nil, want error")
+func TestWaitReadyRejectsPayloadLargerThanLimit(t *testing.T) {
+	err := WaitReady(context.Background(), ReadyOptions{
+		SandboxID:       "sandbox-1",
+		AgentToken:      "token",
+		Env:             map[string]string{"TOO_LARGE": strings.Repeat("x", agentprotocol.MaxPayloadSize)},
+		Network:         testGuestNetwork(),
+		VsockSocketPath: t.TempDir() + "/missing.vsock",
+	})
+	if err == nil || !strings.Contains(err.Error(), "payload") {
+		t.Fatalf("WaitReady() error = %v, want payload limit error", err)
 	}
-	if err := validateAgentReady("hello", "sandbox-unknown", ulog.GetLogger(), ""); err == nil {
-		t.Fatal("validateAgentReady(unknown) error = nil, want error")
+}
+
+func TestExchangeInitHandlesReadyAndTerminalResponses(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response agentprotocol.InitResponse
+		wantErr  bool
+		terminal bool
+	}{
+		{name: "ready", response: agentprotocol.ReadyResponse()},
+		{name: "retryable", response: agentprotocol.NotReadyResponse("SERVICES_STARTING", "wait", true), wantErr: true},
+		{name: "terminal", response: agentprotocol.NotReadyResponse("NETWORK_MISMATCH", "bad", false), wantErr: true, terminal: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			go func() {
+				defer server.Close()
+				var request agentprotocol.InitRequest
+				if err := agentprotocol.ReadFrame(server, &request); err != nil {
+					return
+				}
+				_ = agentprotocol.WriteFrame(server, tt.response)
+			}()
+			err := exchangeInit(client, agentprotocol.InitRequest{Version: agentprotocol.ProtocolVersion}, "sandbox-1", ulog.GetLogger())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("exchangeInit() error = %v, wantErr=%v", err, tt.wantErr)
+			}
+			if errors.Is(err, errInitRejected) != tt.terminal {
+				t.Fatalf("terminal error = %v, want %v", errors.Is(err, errInitRejected), tt.terminal)
+			}
+		})
+	}
+}
+
+func testGuestNetwork() netstack.GuestNetworkConfig {
+	return netstack.GuestNetworkConfig{
+		GuestIP:      "192.168.100.21",
+		PrefixLength: 24,
+		Gateway:      "192.168.100.2",
+		DNS:          netstack.DNSConfig{Nameservers: []string{"10.0.0.53"}},
 	}
 }
 
