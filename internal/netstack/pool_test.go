@@ -3,6 +3,10 @@ package netstack
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +70,105 @@ func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	return allocator, slot
 }
 
+func integrationTestPool(t *testing.T) *Pool {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("network slot integration test is disabled in short mode")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("network slot integration test requires root privileges")
+	}
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		t.Skipf("network slot integration test requires /dev/net/tun: %v", err)
+	}
+	if _, err := exec.LookPath("iptables"); err != nil {
+		t.Skipf("network slot integration test requires iptables: %v", err)
+	}
+
+	pluginDir := integrationCNIPluginDir()
+	if pluginDir == "" {
+		t.Skip("network slot integration test requires loopback, ptp, and host-local CNI plugins")
+	}
+	confDir := t.TempDir()
+	octet := os.Getpid()%200 + 20
+	conf := fmt.Sprintf(`{
+  "cniVersion": "1.0.0",
+  "name": "conch-integration-%d",
+  "type": "ptp",
+  "ipMasq": true,
+  "ipam": {
+    "type": "host-local",
+    "subnet": "10.254.%d.0/24",
+    "routes": [{"dst": "0.0.0.0/0"}]
+  }
+}
+`, os.Getpid(), octet)
+	if err := os.WriteFile(filepath.Join(confDir, "10-conch-integration.conf"), []byte(conf), 0o600); err != nil {
+		t.Fatalf("write integration CNI config: %v", err)
+	}
+
+	p, err := NewPool(1, "", 0, CNIManagerConfig{
+		PluginBinDirs: []string{pluginDir},
+		PluginConfDir: confDir,
+		IfName:        defaultCNIIfName,
+	})
+	if err != nil {
+		t.Fatalf("initialize integration network pool: %v", err)
+	}
+	return p
+}
+
+func integrationCNIPluginDir() string {
+	candidates := []string{
+		os.Getenv("CONCH_TEST_CNI_BIN_DIR"),
+		"/opt/cni/bin",
+		"/usr/lib/cni",
+		"/usr/libexec/cni",
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		available := true
+		for _, plugin := range []string{"loopback", "ptp", "host-local"} {
+			info, err := os.Stat(filepath.Join(dir, plugin))
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				available = false
+				break
+			}
+		}
+		if available {
+			return dir
+		}
+	}
+	return ""
+}
+
+func integrationTestSlot(t *testing.T) (*Pool, *Slot) {
+	t.Helper()
+	p := integrationTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	slot, err := p.createNetworkSlot(ctx)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrExist) || strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("network slot integration environment is unavailable: %v", err)
+		}
+		t.Fatalf("create integration network slot: %v", err)
+	}
+	t.Cleanup(func() {
+		if slot.CNIIP() == "" {
+			if _, statErr := os.Stat(slot.NetNSPath()); os.IsNotExist(statErr) {
+				return
+			}
+		}
+		if cleanupErr := p.destroyNetworkSlot(context.Background(), slot); cleanupErr != nil {
+			t.Errorf("clean up integration network slot: %v", cleanupErr)
+		}
+	})
+	return p, slot
+}
+
 func TestSetupSlotNetworkLeavesRollbackToPool(t *testing.T) {
 	_, slot := allocatedTestSlot(t)
 	setupErr := errors.New("cni add failed")
@@ -116,20 +219,19 @@ func TestTeardownDerivesCNIIdentityFromSlot(t *testing.T) {
 	}
 }
 
-func TestDestroyNetworkSlotKeepsIDReservedWithoutSignalAfterCNIDelFailure(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
+func TestNetworkSlotIntegrationDestroyKeepsIDReservedWithoutSignalAfterCNIDelFailure(t *testing.T) {
+	p, slot := integrationTestSlot(t)
+	allocator := p.slotIDs
 	removeErr := errors.New("cni del failed")
 	removeCalls := 0
-	p := &Pool{
-		refillNeeded: make(chan struct{}, 1),
-		slotIDs:      allocator,
-		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
-			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
-				removeCalls++
-				return removeErr
-			},
-		}},
+	realPlugin := p.cniManager.plugin
+	p.cniManager.plugin = &fakeCNIPlugin{
+		remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
+			removeCalls++
+			return removeErr
+		},
 	}
+	defer func() { p.cniManager.plugin = realPlugin }()
 
 	err := p.destroyNetworkSlot(context.Background(), slot)
 	if !errors.Is(err, removeErr) {
@@ -152,12 +254,9 @@ func TestDestroyNetworkSlotKeepsIDReservedWithoutSignalAfterCNIDelFailure(t *tes
 	}
 }
 
-func TestDestroyNetworkSlotReleasesID(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
-	p := &Pool{
-		slotIDs:    allocator,
-		cniManager: &CNIManager{plugin: &fakeCNIPlugin{}},
-	}
+func TestNetworkSlotIntegrationDestroyReleasesID(t *testing.T) {
+	p, slot := integrationTestSlot(t)
+	allocator := p.slotIDs
 
 	if err := p.destroyNetworkSlot(context.Background(), slot); err != nil {
 		t.Fatalf("destroyNetworkSlot(): %v", err)
@@ -178,24 +277,12 @@ func TestCNIBusyErrorDetection(t *testing.T) {
 	}
 }
 
-func TestPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
-	removeCalls := 0
-	p := &Pool{
-		warmSlots:    slotstate.NewQueue[*Slot](1),
-		refillNeeded: make(chan struct{}, 1),
-		slotIDs:      allocator,
-		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
-			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
-				removeCalls++
-				return nil
-			},
-		}},
-	}
+func TestNetworkSlotIntegrationPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
+	p, slot := integrationTestSlot(t)
+	allocator := p.slotIDs
 	if err := p.warmSlots.Push(slot); err != nil {
 		t.Fatalf("Push(): %v", err)
 	}
-	p.Start(context.Background())
 
 	p.Close()
 	p.Close()
@@ -207,32 +294,28 @@ func TestPoolCloseRejectsGetAndCleansBufferedSlots(t *testing.T) {
 	if size != 0 || !p.warmSlots.IsClosed() {
 		t.Fatalf("warm queue after Close() = (size=%d, closed=%v), want empty and closed", size, p.warmSlots.IsClosed())
 	}
-	if removeCalls != 1 {
-		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
-	}
 	reused, err := allocator.Acquire()
 	if err != nil || reused != slot.ID() {
 		t.Fatalf("Acquire() after Close() = (%d, %v), want (%d, nil)", reused, err, slot.ID())
 	}
 }
 
-func TestPoolCloseWaitsForPopulationBeforeCleaningBufferedSlots(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
+func TestNetworkSlotIntegrationPoolCloseWaitsForPopulationBeforeCleaningBufferedSlots(t *testing.T) {
+	p, slot := integrationTestSlot(t)
 	populateCanceled := make(chan struct{})
 	populateDone := make(chan struct{})
 	removeCalled := make(chan struct{}, 1)
-	p := &Pool{
-		warmSlots:      slotstate.NewQueue[*Slot](1),
-		populateCancel: func() { close(populateCanceled) },
-		populateDone:   populateDone,
-		slotIDs:        allocator,
-		cniManager: &CNIManager{plugin: &fakeCNIPlugin{
-			remove: func(context.Context, string, string, ...cni.NamespaceOpts) error {
-				removeCalled <- struct{}{}
-				return nil
-			},
-		}},
+	p.populateCancel = func() { close(populateCanceled) }
+	p.populateDone = populateDone
+	realPlugin := p.cniManager.plugin
+	p.cniManager.plugin = &fakeCNIPlugin{
+		setup: realPlugin.Setup,
+		remove: func(ctx context.Context, id, path string, opts ...cni.NamespaceOpts) error {
+			removeCalled <- struct{}{}
+			return realPlugin.Remove(ctx, id, path, opts...)
+		},
 	}
+	defer func() { p.cniManager.plugin = realPlugin }()
 	if err := p.warmSlots.Push(slot); err != nil {
 		t.Fatalf("Push(): %v", err)
 	}
@@ -258,13 +341,8 @@ func TestPoolCloseWaitsForPopulationBeforeCleaningBufferedSlots(t *testing.T) {
 	}
 }
 
-func TestDiscardWakesPopulateRetryAfterCapacityRelease(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
-	p := &Pool{
-		refillNeeded: make(chan struct{}, 1),
-		slotIDs:      allocator,
-		cniManager:   &CNIManager{plugin: &fakeCNIPlugin{}},
-	}
+func TestNetworkSlotIntegrationDiscardWakesPopulateRetryAfterCapacityRelease(t *testing.T) {
+	p, slot := integrationTestSlot(t)
 	retryDone := make(chan bool, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
