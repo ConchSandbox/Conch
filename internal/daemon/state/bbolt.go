@@ -37,6 +37,7 @@ type templateRecord struct {
 	BuildRef         string            `json:"build_ref,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
 	CreatedAt        int64             `json:"created_at"`
+	CleanupStage     string            `json:"cleanup_stage,omitempty"`
 }
 
 func OpenBolt(path string) (*BoltStore, error) {
@@ -182,6 +183,9 @@ func (s *BoltStore) GetTemplate(ctx context.Context, id string) (conchtemplate.E
 	if err := s.get(ctx, []byte("templates"), id, &rec); err != nil {
 		return conchtemplate.Entry{}, err
 	}
+	if rec.CleanupStage != "" {
+		return conchtemplate.Entry{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
 	return templateEntryFromRecord(rec)
 }
 
@@ -191,6 +195,9 @@ func (s *BoltStore) ListTemplates(ctx context.Context) ([]conchtemplate.Entry, e
 		var rec templateRecord
 		if err := json.Unmarshal(data, &rec); err != nil {
 			return err
+		}
+		if rec.CleanupStage != "" {
+			return nil
 		}
 		entry, err := templateEntryFromRecord(rec)
 		if err != nil {
@@ -202,8 +209,128 @@ func (s *BoltStore) ListTemplates(ctx context.Context) ([]conchtemplate.Entry, e
 	return out, err
 }
 
-func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
-	return s.delete(ctx, []byte("templates"), id)
+func (s *BoltStore) BeginTemplateCleanup(_ context.Context, id string) (TemplateCleanupRecord, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return TemplateCleanupRecord{}, fmt.Errorf("template id is required")
+	}
+	var out TemplateCleanupRecord
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		templates := tx.Bucket([]byte("templates"))
+		data := templates.Get([]byte(id))
+		if data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		var rec templateRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("unmarshal template record %s: %w", id, err)
+		}
+		entry, err := templateEntryFromRecord(rec)
+		if err != nil {
+			return err
+		}
+		if rec.CleanupStage == "" {
+			rec.CleanupStage = TemplateCleanupArtifacts
+		}
+		updated, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("marshal template cleanup %s: %w", id, err)
+		}
+		if err := templates.Put([]byte(id), updated); err != nil {
+			return err
+		}
+		out = TemplateCleanupRecord{Template: entry, Stage: rec.CleanupStage}
+		return nil
+	})
+	return out, err
+}
+
+func (s *BoltStore) GetTemplateCleanup(ctx context.Context, id string) (TemplateCleanupRecord, error) {
+	var rec templateRecord
+	if err := s.get(ctx, []byte("templates"), id, &rec); err != nil {
+		return TemplateCleanupRecord{}, err
+	}
+	if rec.CleanupStage == "" {
+		return TemplateCleanupRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	entry, err := templateEntryFromRecord(rec)
+	if err != nil {
+		return TemplateCleanupRecord{}, err
+	}
+	return TemplateCleanupRecord{Template: entry, Stage: rec.CleanupStage}, nil
+}
+
+func (s *BoltStore) ListTemplateCleanups(ctx context.Context) ([]TemplateCleanupRecord, error) {
+	var out []TemplateCleanupRecord
+	err := s.list(ctx, []byte("templates"), func(data []byte) error {
+		var rec templateRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		if rec.CleanupStage == "" {
+			return nil
+		}
+		entry, err := templateEntryFromRecord(rec)
+		if err != nil {
+			return err
+		}
+		out = append(out, TemplateCleanupRecord{Template: entry, Stage: rec.CleanupStage})
+		return nil
+	})
+	return out, err
+}
+
+func (s *BoltStore) MarkTemplateCleanupArtifactsRemoved(_ context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("template id is required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		templates := tx.Bucket([]byte("templates"))
+		data := templates.Get([]byte(id))
+		if data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		var rec templateRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("unmarshal template cleanup %s: %w", id, err)
+		}
+		switch rec.CleanupStage {
+		case TemplateCleanupLease:
+			return nil
+		case TemplateCleanupArtifacts:
+			rec.CleanupStage = TemplateCleanupLease
+		default:
+			return fmt.Errorf("template %s is not pending artifact cleanup", id)
+		}
+		updated, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("marshal template cleanup %s: %w", id, err)
+		}
+		return templates.Put([]byte(id), updated)
+	})
+}
+
+func (s *BoltStore) CompleteTemplateCleanup(_ context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("template id is required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		templates := tx.Bucket([]byte("templates"))
+		data := templates.Get([]byte(id))
+		if data == nil {
+			return nil
+		}
+		var rec templateRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("unmarshal template cleanup %s: %w", id, err)
+		}
+		if rec.CleanupStage != TemplateCleanupLease {
+			return fmt.Errorf("template %s cleanup stage is %q, want %q", id, rec.CleanupStage, TemplateCleanupLease)
+		}
+		return templates.Delete([]byte(id))
+	})
 }
 
 // PublishCheckpoint atomically creates a complete checkpoint Template Entry

@@ -50,13 +50,6 @@ func TestStoreCRUDAndList(t *testing.T) {
 	if len(items) != 1 || items[0].ID != entry.ID {
 		t.Fatalf("List() = %#v", items)
 	}
-
-	if err := store.Delete(ctx, entry.ID); err != nil {
-		t.Fatalf("Delete() error = %v", err)
-	}
-	if _, err := store.Get(ctx, entry.ID); err == nil {
-		t.Fatal("Get() after Delete() error = nil")
-	}
 }
 
 func TestStoreCreateValidatesCompleteEntry(t *testing.T) {
@@ -185,9 +178,4 @@ func (s *memoryStateStore) ListTemplates(context.Context) ([]Entry, error) {
 		out = append(out, entry)
 	}
 	return out, nil
-}
-
-func (s *memoryStateStore) DeleteTemplate(_ context.Context, id string) error {
-	delete(s.entries, id)
-	return nil
 }

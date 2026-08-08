@@ -17,6 +17,10 @@ type Store interface {
 	CreateTemplate(context.Context, template.Entry) error
 	GetTemplate(context.Context, string) (template.Entry, error)
 	ListTemplates(context.Context) ([]template.Entry, error)
-	DeleteTemplate(context.Context, string) error
 	PublishCheckpoint(context.Context, template.Entry) error
+	BeginTemplateCleanup(context.Context, string) (TemplateCleanupRecord, error)
+	GetTemplateCleanup(context.Context, string) (TemplateCleanupRecord, error)
+	ListTemplateCleanups(context.Context) ([]TemplateCleanupRecord, error)
+	MarkTemplateCleanupArtifactsRemoved(context.Context, string) error
+	CompleteTemplateCleanup(context.Context, string) error
 }

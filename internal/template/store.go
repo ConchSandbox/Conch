@@ -16,7 +16,6 @@ type Store interface {
 	Create(context.Context, Entry) (Entry, error)
 	Get(context.Context, string) (Entry, error)
 	List(context.Context, Filter) ([]Entry, error)
-	Delete(context.Context, string) error
 }
 
 // StateStore is the persistence capability required by the Template domain.
@@ -25,7 +24,6 @@ type StateStore interface {
 	CreateTemplate(context.Context, Entry) error
 	GetTemplate(context.Context, string) (Entry, error)
 	ListTemplates(context.Context) ([]Entry, error)
-	DeleteTemplate(context.Context, string) error
 }
 
 type PersistentStore struct {
@@ -105,13 +103,6 @@ func (s *PersistentStore) List(ctx context.Context, filter Filter) ([]Entry, err
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-func (s *PersistentStore) Delete(ctx context.Context, id string) error {
-	if s == nil || s.store == nil {
-		return fmt.Errorf("template store is not configured")
-	}
-	return s.store.DeleteTemplate(ctx, strings.TrimSpace(id))
 }
 
 func copyMap(in map[string]string) map[string]string {

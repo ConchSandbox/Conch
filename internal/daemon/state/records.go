@@ -1,12 +1,23 @@
 package state
 
-import "github.com/openeuler/Conch/internal/runtimeapi"
+import (
+	"github.com/openeuler/Conch/internal/runtimeapi"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
+)
 
 const (
 	SandboxReady     = "READY"
 	SandboxSuspended = "SUSPENDED"
 	SandboxUnknown   = "UNKNOWN"
+
+	TemplateCleanupArtifacts = "artifacts"
+	TemplateCleanupLease     = "lease"
 )
+
+type TemplateCleanupRecord struct {
+	Template conchtemplate.Entry
+	Stage    string
+}
 
 type SandboxRecord struct {
 	SandboxID                     string                           `json:"sandbox_id"`

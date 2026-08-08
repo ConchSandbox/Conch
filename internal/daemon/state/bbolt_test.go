@@ -144,11 +144,56 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	if len(items) != 1 || items[0].ID != rec.ID {
 		t.Fatalf("ListTemplates() = %#v", items)
 	}
-	if err := store.DeleteTemplate(ctx, rec.ID); err != nil {
-		t.Fatalf("DeleteTemplate() error = %v", err)
+}
+
+func TestBoltStoreTemplateCleanupSurvivesReopenAndEnumerates(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/state.db"
+	store, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := store.GetTemplate(ctx, rec.ID); err == nil {
-		t.Fatalf("GetTemplate() after delete got nil error")
+	entry := conchtemplate.Entry{
+		ID: "tmpl-cleanup", Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold,
+		BootIndexDigest: digest.FromString("cleanup").String(),
+	}
+	if err := store.CreateTemplate(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.BeginTemplateCleanup(ctx, entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Template.ID != entry.ID || pending.Stage != TemplateCleanupArtifacts {
+		t.Fatalf("BeginTemplateCleanup() = %#v", pending)
+	}
+	if _, err := store.GetTemplate(ctx, entry.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("pending template remains visible: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cleanups, err := store.ListTemplateCleanups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleanups) != 1 || cleanups[0].Template.ID != entry.ID || cleanups[0].Stage != TemplateCleanupArtifacts {
+		t.Fatalf("ListTemplateCleanups() = %#v", cleanups)
+	}
+	if err := store.MarkTemplateCleanupArtifactsRemoved(ctx, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteTemplateCleanup(ctx, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if cleanups, err := store.ListTemplateCleanups(ctx); err != nil || len(cleanups) != 0 {
+		t.Fatalf("cleanups after completion = %#v, %v", cleanups, err)
 	}
 }
 
