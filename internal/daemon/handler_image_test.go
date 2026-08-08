@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -73,6 +75,53 @@ func TestWriteImageErrorPreservesRegistryAuthStatusWithoutLeakingCredentials(t *
 				t.Fatalf("response body leaked registry credentials: %q", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestWriteImageErrorMapsInvalidAuthorizationToUnauthorized(t *testing.T) {
+	err := fmt.Errorf("pull access denied: %w", fmt.Errorf("%w: no basic auth credentials", docker.ErrInvalidAuthorization))
+	rec := httptest.NewRecorder()
+	writeImageError(rec, "Failed to pull image", err)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+	const wantBody = "Failed to pull image: registry request failed: Unauthorized\n"
+	if rec.Body.String() != wantBody {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), wantBody)
+	}
+	if strings.Contains(rec.Body.String(), "no basic auth credentials") || strings.Contains(rec.Body.String(), "pull access denied") {
+		t.Fatalf("response body leaked registry authorization details: %q", rec.Body.String())
+	}
+}
+
+func TestWriteImageErrorMapsResolverBasicAuthChallengeToUnauthorized(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	}))
+	defer registry.Close()
+
+	registryHost := strings.TrimPrefix(registry.URL, "http://")
+	resolver := docker.NewResolver(docker.ResolverOptions{
+		PlainHTTP: true,
+		Credentials: func(string) (string, string, error) {
+			return "", "", nil
+		},
+	})
+	_, _, err := resolver.Resolve(context.Background(), registryHost+"/conch/test:latest")
+	if !errors.Is(err, docker.ErrInvalidAuthorization) {
+		t.Fatalf("resolver error = %v, want ErrInvalidAuthorization", err)
+	}
+
+	rec := httptest.NewRecorder()
+	writeImageError(rec, "Failed to pull image", fmt.Errorf("pull image: %w", err))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+	const wantBody = "Failed to pull image: registry request failed: Unauthorized\n"
+	if rec.Body.String() != wantBody {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), wantBody)
 	}
 }
 

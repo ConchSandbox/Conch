@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"golang.org/x/sys/unix"
 
@@ -1098,6 +1099,9 @@ func writeImageError(w http.ResponseWriter, prefix string, err error) {
 			} else {
 				detail = "registry request failed"
 			}
+		} else if errors.Is(err, docker.ErrInvalidAuthorization) {
+			status = http.StatusUnauthorized
+			detail = "registry request failed: " + http.StatusText(status)
 		}
 	}
 	http.Error(w, prefix+": "+detail, status)
