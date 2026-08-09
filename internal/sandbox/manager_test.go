@@ -178,7 +178,8 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 }
 
 type recordingBootPreparer struct {
-	released []ReleaseBootRequest
+	released   []ReleaseBootRequest
+	releaseErr error
 }
 
 func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
@@ -187,7 +188,41 @@ func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (Pr
 
 func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {
 	r.released = append(r.released, req)
-	return nil
+	return r.releaseErr
+}
+
+func TestDeleteMissingSandboxReturnsNotFoundWithoutReleasingBootLayout(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot}
+
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); err == nil || err.Error() != "sandbox sandbox-a not found" {
+		t.Fatalf("Delete() error = %v, want sandbox not found", err)
+	}
+	if len(boot.released) != 0 {
+		t.Fatalf("released boot layouts = %#v, want none", boot.released)
+	}
+}
+
+func TestCleanupStaleBootResourcesReleasesBootLayout(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot}
+
+	if err := m.cleanupStaleBootResources(context.Background(), []string{"sandbox-a"}); err != nil {
+		t.Fatalf("cleanupStaleBootResources() error = %v", err)
+	}
+	if len(boot.released) != 1 || boot.released[0].SandboxID != "sandbox-a" {
+		t.Fatalf("released boot layouts = %#v", boot.released)
+	}
+}
+
+func TestCleanupStaleBootResourcesReturnsBootReleaseError(t *testing.T) {
+	wantErr := errors.New("release failed")
+	boot := &recordingBootPreparer{releaseErr: wantErr}
+	m := &Manager{boot: boot}
+
+	if err := m.cleanupStaleBootResources(context.Background(), []string{"sandbox-a"}); !errors.Is(err, wantErr) {
+		t.Fatalf("cleanupStaleBootResources() error = %v, want %v", err, wantErr)
+	}
 }
 
 func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {

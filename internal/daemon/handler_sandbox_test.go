@@ -39,6 +39,45 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 }
 
+func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ids := []string{"sandbox-a", "sandbox-b"}
+	for _, id := range ids {
+		if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+			SandboxID:                     id,
+			CheckpointHeadTemplateID:      "tmpl-1",
+			CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}); err != nil {
+			t.Fatalf("seed sandbox %s: %v", id, err)
+		}
+	}
+
+	sandboxOps := &fakeSandboxOps{}
+	server := &Daemon{
+		stateStore:     store,
+		runtimeService: conchruntime.New(sandboxOps, nil, store),
+	}
+
+	if err := server.removeAllSandboxes(); err != nil {
+		t.Fatalf("removeAllSandboxes() error = %v", err)
+	}
+	if len(sandboxOps.deleteReqs) != len(ids) {
+		t.Fatalf("delete requests = %d, want %d", len(sandboxOps.deleteReqs), len(ids))
+	}
+	remaining, err := store.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxes() error = %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining sandbox records = %#v, want empty", remaining)
+	}
+}
+
 func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -110,6 +149,25 @@ func TestHandleCreateSandboxUsesConfiguredDefaultsForOmittedResources(t *testing
 		t.Fatalf("resources = vmm:%q vcpu:%d/%d ram:%d; want vmm:%q vcpu:%d/%d ram:%d",
 			got.VMMName, got.VCPUNum, got.VCPUMax, got.RAMMB,
 			defaults.DefaultVMMName, defaults.DefaultVCPUNum, defaults.DefaultVCPUMax, defaults.DefaultRAMMB)
+	}
+}
+
+func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: "tmpl-default"})
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"ram_mb":64}`))
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if sandboxOps.createReq.SandboxID != "" {
+		t.Fatalf("runtime Create() was called: %#v", sandboxOps.createReq)
 	}
 }
 

@@ -34,7 +34,8 @@ import (
 )
 
 const (
-	shutdownTimeout = 30 * time.Second
+	shutdownTimeout     = 30 * time.Second
+	minimumSandboxRAMMB = 128
 )
 
 type Daemon struct {
@@ -155,6 +156,34 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
+
+	manager := host.SandboxManager()
+	if manager != nil {
+		records, err := store.ListSandboxes(ctx)
+		if err != nil {
+			cleanupErr := host.Close()
+			_ = store.Close()
+			cancel()
+			return nil, errors.Join(fmt.Errorf("list stale sandboxes during startup: %w", err), cleanupErr)
+		}
+		sandboxIDs := make([]string, 0, len(records))
+		for _, record := range records {
+			sandboxIDs = append(sandboxIDs, record.SandboxID)
+		}
+		if err := manager.RecoverStaleResources(ctx, sandboxIDs); err != nil {
+			cleanupErr := host.Close()
+			_ = store.Close()
+			cancel()
+			return nil, errors.Join(fmt.Errorf("recover stale sandbox resources during startup: %w", err), cleanupErr)
+		}
+		if err := s.removeAllSandboxes(); err != nil {
+			cleanupErr := host.Close()
+			_ = store.Close()
+			cancel()
+			return nil, errors.Join(fmt.Errorf("clean up stale sandboxes during startup: %w", err), cleanupErr)
+		}
+		manager.Start(ctx)
+	}
 
 	handleSignals(ctx, cancel, s)
 
@@ -284,6 +313,15 @@ func (s *Daemon) Shutdown() {
 			}
 		}
 
+		if s.runtimeService != nil && s.stateStore != nil {
+			finish := cleanupdiag.Start("daemon.sandboxes.remove_all")
+			err := s.removeAllSandboxes()
+			finish(err)
+			if err != nil {
+				logger.Error("Sandbox cleanup error", ulog.F("error", err))
+			}
+		}
+
 		if s.containerdHost != nil {
 			finish := cleanupdiag.Start("daemon.containerd_host.close")
 			err := s.containerdHost.Close()
@@ -310,6 +348,22 @@ func (s *Daemon) Shutdown() {
 		}
 		logger.Info("Cleanup completed")
 	})
+}
+
+// removeAllSandboxes removes runtime resources and persistent records.
+func (s *Daemon) removeAllSandboxes() error {
+	records, err := s.stateStore.ListSandboxes(context.Background())
+	if err != nil {
+		return fmt.Errorf("list sandboxes for shutdown: %w", err)
+	}
+
+	var errs []error
+	for _, record := range records {
+		if err := s.runtimeService.RemoveSandbox(context.Background(), record.SandboxID); err != nil {
+			errs = append(errs, fmt.Errorf("remove sandbox %s: %w", record.SandboxID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -345,6 +399,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req sandboxCreateRequest
 	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.RAMMB != 0 && req.RAMMB < minimumSandboxRAMMB {
+		http.Error(w, fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB), http.StatusBadRequest)
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
