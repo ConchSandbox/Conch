@@ -113,6 +113,25 @@ func TestHandleCreateSandboxUsesConfiguredDefaultsForOmittedResources(t *testing
 	}
 }
 
+func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: "tmpl-default"})
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"ram_mb":64}`))
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if sandboxOps.createReq.SandboxID != "" {
+		t.Fatalf("runtime Create() was called: %#v", sandboxOps.createReq)
+	}
+}
+
 func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 	store, err := state.OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {

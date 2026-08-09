@@ -34,7 +34,8 @@ import (
 )
 
 const (
-	shutdownTimeout = 30 * time.Second
+	shutdownTimeout     = 30 * time.Second
+	minimumSandboxRAMMB = 128
 )
 
 type Daemon struct {
@@ -345,6 +346,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req sandboxCreateRequest
 	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.RAMMB != 0 && req.RAMMB < minimumSandboxRAMMB {
+		http.Error(w, fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB), http.StatusBadRequest)
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
