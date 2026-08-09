@@ -198,40 +198,40 @@ func (s *Daemon) Start(addr string, unixSocket string) error {
 		ln  net.Listener
 	)
 
+	handler := http.Handler(s.router)
+	var connContext func(context.Context, net.Conn) context.Context
+
 	if unixSocket != "" {
 		// If the Unix socket is not empty, then we should use it for server listen port
-		// First create the parent directory if needed; this requires permission for the socket path.
-		// Then for any existing stale socket it should be removed before start to listen
-		if err := os.MkdirAll(filepath.Dir(unixSocket), 0o755); err != nil {
-			return fmt.Errorf("failed to create unix socket directory: %w", err)
-		}
-		if err := os.Remove(unixSocket); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove stale unix socket: %w", err)
+		ln, err = listenUnixSocket(unixSocket)
+		if err != nil {
+			return err
 		}
 
-		ln, err = net.Listen("unix", unixSocket)
-		if err != nil {
-			return fmt.Errorf("failed to listen on unix socket %s: %w", unixSocket, err)
-		}
-		if err := os.Chmod(unixSocket, 0o660); err != nil {
-			_ = ln.Close()
-			_ = os.Remove(unixSocket)
-			return fmt.Errorf("failed to set unix socket permissions: %w", err)
-		}
+		handler = peerAuthMiddleware(handler)
+		connContext = peerIdentityConnContext
 
 		s.unixSocketPath = unixSocket
-		logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
+		logger.Info("Starting HTTP server",
+			ulog.F("network", "unix"),
+			ulog.F("socket", unixSocket),
+			ulog.F("auth", "SO_PEERCRED root-only"),
+		)
 	} else {
 		// If the Unix socket is empty, then we should use tcp IP for server listen port
 		ln, err = net.Listen("tcp", addr)
 		if err != nil {
 			return fmt.Errorf("failed to listen on address %s: %w", addr, err)
 		}
+		// TCP carries no peer credentials, so nothing identifies the caller here.
+		logger.Warn("Control plane is served over TCP without caller authentication",
+			ulog.F("address", addr),
+		)
 		logger.Info("Starting HTTP server", ulog.F("network", "tcp"), ulog.F("address", addr))
 	}
 
 	s.listener = ln
-	s.httpServer = &http.Server{Handler: s.router}
+	s.httpServer = &http.Server{Handler: handler, ConnContext: connContext}
 	// Listener is bound, so clients can connect before Serve accepts.
 	util.NotifyReady()
 	err = s.httpServer.Serve(ln)
