@@ -43,6 +43,7 @@ SANDBOX_CREATE_PATH = SANDBOX_COLLECTION_PATH
 SANDBOX_LIST_PATH = SANDBOX_COLLECTION_PATH
 SANDBOX_GET_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
 SANDBOX_DELETE_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
+SANDBOX_NETWORK_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}/network"
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
@@ -637,6 +638,7 @@ class Sandbox:
             ram_mb: Optional[int] = None,
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
             env: Optional[Dict[str, str]] = None,
+            network: Optional[Dict[str, Any]] = None,
     ):
         self._config: Dict[str, Any] = load_config()
         sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
@@ -671,6 +673,7 @@ class Sandbox:
         self.files = FilesManager(self)
         self.volume_mounts = volume_mounts or []
         self.env = env
+        self.network = dict(network) if network is not None else None
         self.metadata: Dict[str, str] = {}
         self.lifecycle: Dict[str, Any] = {}
 
@@ -728,6 +731,11 @@ class Sandbox:
         response.raise_for_status()
         return {} if response.status_code == HTTP_NO_CONTENT else response.json()
 
+    def _put_control_plane_requests(self, path: str, payload: Dict[str, Any]) -> Any:
+        response = self._session.put(self._build_control_plane_url(path), json=payload)
+        response.raise_for_status()
+        return {} if response.status_code == HTTP_NO_CONTENT else response.json()
+
     def _build_create_payload(self) -> Dict[str, Any]:
         config = self._config[CFG_IMAGE_SECTION]
         payload = {
@@ -743,6 +751,8 @@ class Sandbox:
             payload[VOLUME_MOUNTS_KEY] = self.volume_mounts
         if self.env is not None:
             payload["env"] = self.env
+        if self.network is not None:
+            payload["network"] = self.network
         return payload
 
     def _apply_sandbox_record(self, record: Dict[str, Any]) -> None:
@@ -772,6 +782,8 @@ class Sandbox:
             self.lifecycle = dict(record["lifecycle"] or {})
         if "volumeMounts" in record:
             self.volume_mounts = list(record["volumeMounts"] or [])
+        if "network" in record:
+            self.network = dict(record["network"] or {})
         if self.ip and self.agent_token:
             if self._client:
                 try:
@@ -882,6 +894,36 @@ class Sandbox:
     def resume(self) -> bool:
         return self._lifecycle(SANDBOX_RESUME_PATH)
 
+    def update_network(
+            self,
+            allow_out: Optional[List[str]] = None,
+            deny_out: Optional[List[str]] = None,
+            allow_in: Optional[List[str]] = None,
+            deny_in: Optional[List[str]] = None,
+            allow_internet_access: Optional[bool] = None,
+    ) -> bool:
+        payload: Dict[str, Any] = {}
+        for value, key in (
+                (allow_out, "allowOut"),
+                (deny_out, "denyOut"),
+                (allow_in, "allowIn"),
+                (deny_in, "denyIn"),
+        ):
+            if value is not None:
+                payload[key] = list(value)
+        if allow_internet_access is not None:
+            payload["allow_internet_access"] = allow_internet_access
+
+        path = SANDBOX_NETWORK_PATH_TEMPLATE.format(
+            sandbox_id=quote(str(self.sandbox_id), safe="")
+        )
+        try:
+            self._put_control_plane_requests(path, payload)
+            self.network = payload
+            return True
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+
     def _lifecycle(self, path: str) -> bool:
         payload = {
             SANDBOX_ID_KEY: self.sandbox_id,
@@ -902,6 +944,7 @@ class Sandbox:
             ram_mb: Optional[int] = None,
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
             env: Optional[Dict[str, str]] = None,
+            network: Optional[Dict[str, Any]] = None,
     ) -> "Sandbox":
         sbx = cls(
             sandbox_id=sandbox_id,
@@ -911,6 +954,7 @@ class Sandbox:
             ram_mb=ram_mb,
             volume_mounts=volume_mounts,
             env=env,
+            network=network,
         )
         return sbx._do_create()
 

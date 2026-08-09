@@ -49,7 +49,7 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ```text
 Sandbox.create(template_id=None, sandbox_id=None,
                vcpu_num=None, vcpu_max=None, ram_mb=None,
-               volume_mounts=None, env=None) -> Sandbox
+               volume_mounts=None, env=None, network=None) -> Sandbox
 ```
 
 基于 Template 创建沙箱。省略 `template_id` 时，由 conchd 使用
@@ -62,6 +62,7 @@ Sandbox.create(template_id=None, sandbox_id=None,
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
 - `volume_mounts` (list, 可选): 卷挂载配置
 - `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。沙箱 ID、访问令牌、协议字段和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 1024 字节；超过限制时会在虚拟机启动前拒绝创建请求。
+- `network` (dict, 可选): 创建时应用的 IP 级网络策略。支持 `allowOut`、`denyOut`、`allowIn`、`denyIn` 和 `allow_internet_access`。
 
 **返回：** 成功返回 `Sandbox` 对象。
 
@@ -230,7 +231,43 @@ Sandbox.get(sandbox_id) -> Sandbox
 | `domain` | str | 沙箱当前可用的网络地址；详细 GET 响应提供 |
 | `metadata` | dict | 沙箱元数据键值映射 |
 | `lifecycle` | dict | 生命周期配置；当前包含 `autoResume` 占位字段 |
+| `network` | dict | 当前持久化的 IP 级网络策略；详细 GET 响应提供 |
 | `volumeMounts` | list[dict] | 预留的卷挂载列表；当前固定返回空列表 |
+---
+
+### 更新沙箱网络策略
+
+```python
+sandbox.update_network(
+    allow_out=None,
+    deny_out=None,
+    allow_in=None,
+    deny_in=None,
+    allow_internet_access=None,
+) -> bool
+```
+
+该方法通过 `PUT /api/v1/sandboxes/{sandboxID}/network` 完整替换沙箱的网络策略。省略的列表按空列表处理，省略 `allow_internet_access` 表示不额外禁止未匹配的出站流量。`READY` 和 `SUSPENDED` 状态的沙箱均可更新。
+
+| 参数 | JSON 字段 | 说明 |
+|------|-----------|------|
+| `allow_out` | `allowOut` | 允许访问的出站 IPv4 地址或 CIDR |
+| `deny_out` | `denyOut` | 拒绝访问的出站 IPv4 地址或 CIDR |
+| `allow_in` | `allowIn` | 允许进入 guest 的来源 IPv4 地址或 CIDR |
+| `deny_in` | `denyIn` | 拒绝进入 guest 的来源 IPv4 地址或 CIDR |
+| `allow_internet_access` | `allow_internet_access` | 为 `False` 时拒绝未被其他规则接受的出站流量；为 `True` 或省略时不增加该默认拒绝 |
+
+规则语义如下：
+
+- 对新连接，显式拒绝规则优先于显式允许规则。更新策略前已经建立且仍由 conntrack 跟踪的连接不会被立即终止，可以继续到连接关闭或跟踪记录过期。
+- 非空允许列表启用白名单模式，拒绝该方向上未匹配的流量。
+- 只有拒绝列表时，拒绝匹配地址并允许未匹配流量。
+- 允许和拒绝列表都为空时，该方向不受列表限制。
+- `allow_internet_access: false` 会额外拒绝未匹配的出站流量，不影响入站规则。
+- 当前仅接受 IPv4 地址和 IPv4 CIDR；四个列表合计最多 1024 项。
+
+出站规则挂载在 Linux network namespace 内从 guest tap 发出的转发路径，入站规则挂载在转发到 guest tap 的路径。入站规则只过滤平台已经路由到该沙箱的 IP 流量；它不会创建主机监听端口、公开服务、执行 hostname 路由或修改 HTTP 请求。
+
 ---
 
 ### 获取沙箱信息
@@ -524,7 +561,7 @@ print(result)
 ```python
 Sandbox(sandbox_id=None, template_id=None,
         vcpu_num=None, vcpu_max=None, ram_mb=None,
-        volume_mounts=None, env=None)
+        volume_mounts=None, env=None, network=None)
 ```
 
 **主要参数：**
@@ -538,6 +575,7 @@ Sandbox(sandbox_id=None, template_id=None,
 | `ram_mb` | int | 内存大小（MB） |
 | `volume_mounts` | list | 创建沙箱时使用的卷挂载配置 |
 | `env` | dict | 创建沙箱时传入的环境变量 |
+| `network` | dict | 创建时应用的 IP 级网络策略 |
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。SDK 首次使用时读取配置并在进程内缓存；可通过 `CONCH_SDK_CONFIG` 指定配置文件。控制面地址不属于沙箱操作参数。请使用 `Sandbox.create()` 类方法创建沙箱。
 

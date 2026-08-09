@@ -54,15 +54,16 @@ type removeSnapshotResponse struct {
 }
 
 type sandboxCreateRequest struct {
-	TemplateID   string            `json:"template_id"`
-	VMMName      string            `json:"vmm_name"`
-	SandboxID    string            `json:"sandbox_id"`
-	LeaseID      string            `json:"lease_id,omitempty"`
-	VCPUNum      int64             `json:"vcpu_num"`
-	VCPUMax      int64             `json:"vcpu_max"`
-	RAMMB        int64             `json:"ram_mb"`
-	VolumeMounts []volume.Mount    `json:"volumeMounts,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
+	TemplateID   string                           `json:"template_id"`
+	VMMName      string                           `json:"vmm_name"`
+	SandboxID    string                           `json:"sandbox_id"`
+	LeaseID      string                           `json:"lease_id,omitempty"`
+	VCPUNum      int64                            `json:"vcpu_num"`
+	VCPUMax      int64                            `json:"vcpu_max"`
+	RAMMB        int64                            `json:"ram_mb"`
+	VolumeMounts []volume.Mount                   `json:"volumeMounts,omitempty"`
+	Env          map[string]string                `json:"env,omitempty"`
+	Network      *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 }
 
 type sandboxVolumeMountResponse struct {
@@ -84,21 +85,22 @@ type createSandboxResponse struct {
 }
 
 type sandboxInspectResponse struct {
-	TemplateID       string                       `json:"templateID"`
-	ImageName        string                       `json:"imageName"`
-	SnapshotID       string                       `json:"snapshotID"`
-	SandboxID        string                       `json:"sandboxID"`
-	StartedAt        string                       `json:"startedAt"`
-	EndAt            string                       `json:"endAt"`
-	CPUCount         int64                        `json:"cpuCount"`
-	MemoryMB         int64                        `json:"memoryMB"`
-	DiskSizeMB       int64                        `json:"diskSizeMB"`
-	ConchInitVersion string                       `json:"conchInitVersion"`
-	Alias            string                       `json:"alias"`
-	Domain           *string                      `json:"domain,omitempty"`
-	Metadata         map[string]string            `json:"metadata"`
-	Lifecycle        *sandboxLifecycleResponse    `json:"lifecycle,omitempty"`
-	VolumeMounts     []sandboxVolumeMountResponse `json:"volumeMounts"`
+	TemplateID       string                           `json:"templateID"`
+	ImageName        string                           `json:"imageName"`
+	SnapshotID       string                           `json:"snapshotID"`
+	SandboxID        string                           `json:"sandboxID"`
+	StartedAt        string                           `json:"startedAt"`
+	EndAt            string                           `json:"endAt"`
+	CPUCount         int64                            `json:"cpuCount"`
+	MemoryMB         int64                            `json:"memoryMB"`
+	DiskSizeMB       int64                            `json:"diskSizeMB"`
+	ConchInitVersion string                           `json:"conchInitVersion"`
+	Alias            string                           `json:"alias"`
+	Domain           *string                          `json:"domain,omitempty"`
+	Metadata         map[string]string                `json:"metadata"`
+	Lifecycle        *sandboxLifecycleResponse        `json:"lifecycle,omitempty"`
+	VolumeMounts     []sandboxVolumeMountResponse     `json:"volumeMounts"`
+	Network          *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 }
 
 type sandboxLifecycleRequest struct {

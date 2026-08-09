@@ -287,7 +287,7 @@ func TestNetworkSlotIntegrationPoolCloseRejectsGetAndCleansBufferedSlots(t *test
 	p.Close()
 	p.Close()
 
-	if _, err := p.Get(context.Background(), "sandbox-a"); !errors.Is(err, errWarmPoolClosed) {
+	if _, err := p.Get(context.Background(), "sandbox-a", nil); !errors.Is(err, errWarmPoolClosed) {
 		t.Fatalf("Get() after Close() error = %v, want errWarmPoolClosed", err)
 	}
 	size, _ := p.warmSlots.Usage()
@@ -373,7 +373,7 @@ func TestGetAssignsWarmSlot(t *testing.T) {
 		t.Fatalf("Push(): %v", err)
 	}
 
-	got, err := p.Get(context.Background(), "sandbox-a")
+	got, err := p.Get(context.Background(), "sandbox-a", nil)
 	if err != nil {
 		t.Fatalf("Get(): %v", err)
 	}
