@@ -41,6 +41,7 @@ type fakeSandboxOps struct {
 	createErr      error
 	checkpointErr  error
 	checkpointResp sandbox.CheckpointResult
+	updateReq      sandbox.NetworkUpdateRequest
 }
 
 func newSnapshotHandlerServer(svc conchruntime.SnapshotOps) *Daemon {
@@ -108,6 +109,11 @@ func (f *fakeSandboxOps) Suspend(req sandbox.LifecycleRequest) error {
 
 func (f *fakeSandboxOps) Resume(req sandbox.LifecycleRequest) error {
 	f.resumeReq = req
+	return nil
+}
+
+func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
+	f.updateReq = req
 	return nil
 }
 
@@ -292,7 +298,8 @@ func TestSandboxV1Handlers(t *testing.T) {
 
 	t.Run("create", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
-			"sandbox_id":"sandbox-2","template_id":"tmpl-2","env":{"SOME_RANDOM_KEY":"key123"}
+			"sandbox_id":"sandbox-2","template_id":"tmpl-2","env":{"SOME_RANDOM_KEY":"key123"},
+			"network":{"denyOut":["192.0.2.10"],"allowIn":["198.51.100.0/24"]}
 		}`))
 		if response.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -307,6 +314,42 @@ func TestSandboxV1Handlers(t *testing.T) {
 		}
 		if got := sandboxOps.createReq.Env["SOME_RANDOM_KEY"]; got != "key123" {
 			t.Fatalf("Env[SOME_RANDOM_KEY] = %q, want key123", got)
+		}
+		if sandboxOps.createReq.Network == nil || len(sandboxOps.createReq.Network.DenyOut) != 1 || len(sandboxOps.createReq.Network.AllowIn) != 1 {
+			t.Fatalf("create network = %#v", sandboxOps.createReq.Network)
+		}
+	})
+
+	t.Run("update network", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", strings.NewReader(`{
+			"allowOut":["192.0.2.20"],"denyIn":["198.51.100.20"]
+		}`))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		if sandboxOps.updateReq.Network == nil || len(sandboxOps.updateReq.Network.AllowOut) != 1 || len(sandboxOps.updateReq.Network.DenyIn) != 1 {
+			t.Fatalf("update network = %#v", sandboxOps.updateReq.Network)
+		}
+		getResponse := serveSandboxRequest(server, http.MethodGet, "/api/v1/sandboxes/sandbox-1", nil)
+		var record sandboxInspectResponse
+		if getResponse.Code != http.StatusOK || json.NewDecoder(getResponse.Body).Decode(&record) != nil {
+			t.Fatalf("get after update status = %d, body = %s", getResponse.Code, getResponse.Body.String())
+		}
+		if record.Network == nil || len(record.Network.AllowOut) != 1 || len(record.Network.DenyIn) != 1 {
+			t.Fatalf("get network = %#v", record.Network)
+		}
+	})
+
+	t.Run("rejects invalid network", func(t *testing.T) {
+		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", strings.NewReader(`{"allowOut":["example.com"]}`))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		response = serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+			"sandbox_id":"invalid-network","template_id":"tmpl-2","network":{"denyIn":["example.com"]}
+		}`))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
 		}
 	})
 

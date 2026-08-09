@@ -5,6 +5,7 @@ import "github.com/openeuler/Conch/internal/runtimeapi"
 type SandboxCreateOptions = runtimeapi.SandboxCreateOptions
 type SandboxCreateResult = runtimeapi.SandboxCreateResult
 type SandboxDefaults = runtimeapi.SandboxDefaults
+type SandboxNetworkUpdateOptions = runtimeapi.SandboxNetworkUpdateOptions
 type SandboxCheckpointOptions = runtimeapi.SandboxCheckpointOptions
 type SandboxCheckpointResult = runtimeapi.SandboxCheckpointResult
 type TemplateCreateOptions = runtimeapi.TemplateCreateOptions

@@ -198,6 +198,7 @@ type CreateRequest struct {
 	AgentToken   string
 	Env          map[string]string
 	VolumeMounts []volume.Mount
+	Network      *netstack.SandboxNetworkConfig
 }
 
 type DeleteRequest struct {
@@ -206,6 +207,11 @@ type DeleteRequest struct {
 
 type LifecycleRequest struct {
 	SandboxID string
+}
+
+type NetworkUpdateRequest struct {
+	SandboxID string
+	Network   *netstack.SandboxNetworkConfig
 }
 
 type CheckpointRequest struct {
@@ -282,7 +288,20 @@ func (m *Manager) isCurrentSandboxEntry(mapKey string, entry *sandboxEntry) bool
 	return ok && actual == entry
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string) (*Sandbox, error) {
+func (m *Manager) lockCurrentSandboxEntry(mapKey, sandboxID string) (*sandboxEntry, func(), error) {
+	entry, err := m.loadSandboxEntry(mapKey, sandboxID)
+	if err != nil {
+		return nil, nil, err
+	}
+	entry.mu.Lock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		entry.mu.Unlock()
+		return nil, nil, fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	return entry, entry.mu.Unlock, nil
+}
+
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 	readyOpts := hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
@@ -301,9 +320,9 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	var sbx *Sandbox
 	var createErr error
 	if resume {
-		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -521,6 +540,7 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 		resume,
 		runtimeIDs.vsockCID,
 		runtimeIDs.vsockSocketPath,
+		req.Network,
 	)
 }
 
@@ -686,16 +706,11 @@ func (m *Manager) Suspend(req LifecycleRequest) error {
 	defer cancel()
 
 	mapKey := req.SandboxID
-	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
+	entry, unlock, err := m.lockCurrentSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
 	}
-
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !m.isCurrentSandboxEntry(mapKey, entry) {
-		return fmt.Errorf("sandbox %s not found", req.SandboxID)
-	}
+	defer unlock()
 	if entry.state != sandboxReady {
 		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
 	}
@@ -716,16 +731,11 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	defer cancel()
 
 	mapKey := req.SandboxID
-	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
+	entry, unlock, err := m.lockCurrentSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return err
 	}
-
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !m.isCurrentSandboxEntry(mapKey, entry) {
-		return fmt.Errorf("sandbox %s not found", req.SandboxID)
-	}
+	defer unlock()
 	if entry.state != sandboxSuspended {
 		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
 	}
@@ -740,21 +750,34 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	return nil
 }
 
+func (m *Manager) UpdateNetwork(parent context.Context, req NetworkUpdateRequest) error {
+	ctx, cancel := context.WithTimeoutCause(parent, m.requestTimeout, fmt.Errorf("request timed out"))
+	defer cancel()
+
+	entry, unlock, err := m.lockCurrentSandboxEntry(req.SandboxID, req.SandboxID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if entry.state != sandboxReady && entry.state != sandboxSuspended {
+		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+	}
+	if entry.sbx == nil || entry.sbx.slot == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: network slot is nil", req.SandboxID)
+	}
+	return m.pool.SetSandboxNetworkPolicy(ctx, entry.sbx.slot, req.SandboxID, req.Network)
+}
+
 func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	mapKey := req.SandboxID
-	entry, err := m.loadSandboxEntry(mapKey, req.SandboxID)
+	entry, unlock, err := m.lockCurrentSandboxEntry(mapKey, req.SandboxID)
 	if err != nil {
 		return CheckpointResult{}, err
 	}
-
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !m.isCurrentSandboxEntry(mapKey, entry) {
-		return CheckpointResult{}, fmt.Errorf("sandbox %s not found", req.SandboxID)
-	}
+	defer unlock()
 	wasSuspended := entry.state == sandboxSuspended
 	if entry.state != sandboxReady && !wasSuspended {
 		return CheckpointResult{}, fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
