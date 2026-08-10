@@ -17,6 +17,7 @@ const (
 const (
 	CapabilitySupported   = "supported"
 	CapabilityUnsupported = "unsupported"
+	CapabilityUnknown     = "unknown"
 )
 
 type Request struct {
