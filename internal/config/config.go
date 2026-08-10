@@ -85,6 +85,8 @@ const (
 )
 
 type SandboxConfig struct {
+	MemoryMode         string           `yaml:"memory_mode"`
+	CowBinary          string           `yaml:"cow_binary"`
 	VsockSignalRetry   time.Duration    `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration    `yaml:"vsock_signal_timeout"`
 	RequestTimeout     time.Duration    `yaml:"request_timeout"`
@@ -145,6 +147,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Sandbox: SandboxConfig{
+			MemoryMode:         "full",
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
@@ -238,6 +241,9 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
 	}
 	cfg.Network.CNI.CacheDir = cfg.RuntimePaths().CNICacheDir
+	if strings.TrimSpace(cfg.Sandbox.MemoryMode) == "" {
+		cfg.Sandbox.MemoryMode = defaultCfg.Sandbox.MemoryMode
+	}
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
 	}
@@ -283,6 +289,22 @@ func validateConfig(cfg *Config) error {
 	}
 	cfg.Server.WorkDir = filepath.Clean(cfg.Server.WorkDir)
 	cfg.Server.StateDir = filepath.Clean(cfg.Server.StateDir)
+	switch cfg.Sandbox.MemoryMode {
+	case "full", "incremental":
+	default:
+		return fmt.Errorf("invalid sandbox.memory_mode=%q: must be full or incremental", cfg.Sandbox.MemoryMode)
+	}
+	cowBinary := strings.TrimSpace(cfg.Sandbox.CowBinary)
+	if cfg.Sandbox.MemoryMode == "incremental" && cowBinary == "" {
+		return fmt.Errorf("sandbox.cow_binary is required when sandbox.memory_mode is incremental")
+	}
+	if cowBinary != "" && !filepath.IsAbs(cowBinary) {
+		return fmt.Errorf("invalid sandbox.cow_binary=%q: must be an absolute path", cfg.Sandbox.CowBinary)
+	}
+	if cowBinary != "" {
+		cowBinary = filepath.Clean(cowBinary)
+	}
+	cfg.Sandbox.CowBinary = cowBinary
 	if cfg.Network.WarmPoolSize < 0 {
 		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}

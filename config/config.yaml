@@ -14,6 +14,10 @@ server:
 
 sandbox:
   backend: stratovirt
+  # Global StratoVirt memory policy: full or incremental. Defaults to full.
+  memory_mode: full
+  # Required when memory_mode is incremental.
+  # cow_binary: /usr/bin/conch-cow
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
   request_timeout: 60s

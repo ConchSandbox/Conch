@@ -487,3 +487,61 @@ func TestDefaultSandboxBackendStaysStratovirt(t *testing.T) {
 		t.Fatalf("DefaultConfig().Sandbox.Backend = %q, want stratovirt", got)
 	}
 }
+
+func TestSandboxMemoryConfigDefaultsAndValidation(t *testing.T) {
+	defaults := DefaultConfig()
+	if defaults.Sandbox.MemoryMode != "full" {
+		t.Fatalf("default memory mode = %q, want full", defaults.Sandbox.MemoryMode)
+	}
+	if defaults.Sandbox.CowBinary != "" {
+		t.Fatalf("default cow binary = %q, want empty", defaults.Sandbox.CowBinary)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("sandbox:\n  memory_mode: incremental\n  cow_binary: /opt/conch/conch-cow\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Sandbox.MemoryMode != "incremental" || loaded.Sandbox.CowBinary != "/opt/conch/conch-cow" {
+		t.Fatalf("loaded sandbox memory config = %#v", loaded.Sandbox)
+	}
+
+	missingBinaryPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(missingBinaryPath, []byte("sandbox:\n  memory_mode: incremental\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(missingBinaryPath); err == nil || !strings.Contains(err.Error(), "sandbox.cow_binary is required") {
+		t.Fatalf("LoadConfig(missing cow binary) error = %v, want sandbox.cow_binary is required", err)
+	}
+
+	relativeBinaryPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(relativeBinaryPath, []byte("sandbox:\n  cow_binary: bin/conch-cow\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(relativeBinaryPath); err == nil || !strings.Contains(err.Error(), "sandbox.cow_binary") {
+		t.Fatalf("LoadConfig(relative cow_binary) error = %v, want sandbox.cow_binary", err)
+	}
+
+	for _, value := range []string{"auto", "unknown", "FULL"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("sandbox:\n  memory_mode: "+value+"\n"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "sandbox.memory_mode") {
+				t.Fatalf("LoadConfig() error = %v, want sandbox.memory_mode", err)
+			}
+		})
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(legacyPath, []byte("sandbox:\n  memd_socket: /run/conch/memd.sock\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(legacyPath); err == nil || !strings.Contains(err.Error(), "field memd_socket not found") {
+		t.Fatalf("LoadConfig(legacy memd_socket) error = %v", err)
+	}
+}
