@@ -363,7 +363,11 @@ func TestInspectBootIndexMemorySizeCompatibilityIsVMMSpecific(t *testing.T) {
 	} {
 		t.Run(tt.vmm, func(t *testing.T) {
 			candidateMem := memDesc
-			candidateMem.Annotations = mergeAnnotations(memDesc.Annotations, map[string]string{AnnotationVMM: tt.vmm})
+			annotations := map[string]string{AnnotationVMM: tt.vmm}
+			if tt.vmm == "stratovirt" {
+				annotations[AnnotationMemoryFormat] = MemoryFormatFullV1
+			}
+			candidateMem.Annotations = mergeAnnotations(memDesc.Annotations, annotations)
 			indexDesc, err := writeIndexToContent(ctx, store, []ocispec.Descriptor{rootfsDesc, candidateMem, sandboxDesc}, map[string]string{
 				AnnotationVMM: tt.vmm,
 			})
@@ -384,6 +388,112 @@ func TestInspectBootIndexMemorySizeCompatibilityIsVMMSpecific(t *testing.T) {
 				t.Fatalf("legacy CLH memory size = %d", info.MemorySizeMB)
 			}
 		})
+	}
+}
+
+func TestInspectBootIndexStratoVirtMemoryFormat(t *testing.T) {
+	requireMkfsErofs(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := localcontent.NewStore(filepath.Join(dir, "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(kind, name string) ocispec.Descriptor {
+		t.Helper()
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, "example:"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return desc
+	}
+	rootfsDesc := build(KindRootfs, "rootfs-memory-format")
+	memDesc := build(KindMemSnapshot, "mem-memory-format")
+	sandboxDesc := build(KindSandbox, "sandbox-memory-format")
+	tests := []struct {
+		name       string
+		vmm        string
+		format     string
+		wantFormat string
+		wantError  bool
+	}{
+		{name: "full", vmm: "stratovirt", format: MemoryFormatFullV1, wantFormat: MemoryFormatFullV1},
+		{name: "incremental", vmm: "stratovirt", format: MemoryFormatIncrementalV1, wantFormat: MemoryFormatIncrementalV1},
+		{name: "missing", vmm: "stratovirt", wantError: true},
+		{name: "unknown", vmm: "stratovirt", format: "layered-v1", wantError: true},
+		{name: "cloud hypervisor", vmm: "cloud-hypervisor"},
+		{name: "cloud hypervisor annotated", vmm: "cloud-hypervisor", format: MemoryFormatFullV1, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidateMem := memDesc
+			candidateMem.Annotations = mergeAnnotations(memDesc.Annotations, map[string]string{
+				AnnotationVMM:          test.vmm,
+				AnnotationMemorySizeMB: "512",
+			})
+			if test.format != "" {
+				candidateMem.Annotations[AnnotationMemoryFormat] = test.format
+			}
+			indexDesc, err := writeIndexToContent(ctx, store, []ocispec.Descriptor{rootfsDesc, candidateMem, sandboxDesc}, map[string]string{
+				AnnotationVMM:          test.vmm,
+				AnnotationMemorySizeMB: "512",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := InspectBootIndexContent(ctx, store, indexDesc)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), AnnotationMemoryFormat) {
+					t.Fatalf("InspectBootIndexContent() error = %v, want %s", err, AnnotationMemoryFormat)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.MemoryFormat != test.wantFormat {
+				t.Fatalf("MemoryFormat = %q, want %q", info.MemoryFormat, test.wantFormat)
+			}
+		})
+	}
+}
+
+func TestBuildIncrementalMemoryComponentAppendsOneLayer(t *testing.T) {
+	requireMkfsErofs(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := localcontent.NewStore(filepath.Join(dir, "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := BuildIncrementalMemoryComponentInContent(ctx, store, ocispec.Descriptor{}, writeComponentRoot(t, dir, "epoch-a"), "example:a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Annotations = mergeAnnotations(first.Annotations, map[string]string{AnnotationMemoryFormat: MemoryFormatIncrementalV1})
+	second, err := BuildIncrementalMemoryComponentInContent(ctx, store, first, writeComponentRoot(t, dir, "epoch-b"), "example:b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readManifest := func(desc ocispec.Descriptor) ocispec.Manifest {
+		t.Helper()
+		raw, err := content.ReadBlob(ctx, store, desc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest ocispec.Manifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		return manifest
+	}
+	firstManifest := readManifest(first)
+	secondManifest := readManifest(second)
+	if len(firstManifest.Layers) != 1 || len(secondManifest.Layers) != 2 {
+		t.Fatalf("layer counts = %d, %d", len(firstManifest.Layers), len(secondManifest.Layers))
+	}
+	if secondManifest.Layers[0].Digest != firstManifest.Layers[0].Digest {
+		t.Fatalf("parent layer changed: first=%s second=%s", firstManifest.Layers[0].Digest, secondManifest.Layers[0].Digest)
 	}
 }
 
