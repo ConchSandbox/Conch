@@ -15,8 +15,10 @@ import (
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
+	"github.com/openeuler/Conch/internal/cow"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -33,6 +35,8 @@ type fakeSandboxOps struct {
 	deleteErr          error
 	updateReq          sandbox.NetworkUpdateRequest
 	updateErr          error
+	completeRequests   []sandbox.LifecycleRequest
+	completeErr        error
 }
 
 type serializedDeleteOps struct {
@@ -94,6 +98,11 @@ func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.Chec
 		return f.checkpointResults[call], nil
 	}
 	return sandbox.CheckpointResult{}, nil
+}
+
+func (f *fakeSandboxOps) CompleteCheckpoint(req sandbox.LifecycleRequest) error {
+	f.completeRequests = append(f.completeRequests, req)
+	return f.completeErr
 }
 
 func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
@@ -168,6 +177,50 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 }
 
+func TestCheckpointSandboxClearsIncrementalPoisonOnlyAfterHeadAdvances(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	t0Digest := buildColdBootIndex(t, host, "incremental-checkpoint-t0")
+	memRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(memRoot, "state"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memRoot, "memory"), []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completeErr := errors.New("completion failed")
+	ops := &fakeSandboxOps{
+		checkpointResults: []sandbox.CheckpointResult{{
+			MemRootPath: memRoot, CleanupPath: memRoot, VMMName: "stratovirt", MemorySizeMB: 256,
+			MemoryFormat: conchimage.MemoryFormatIncrementalV1,
+		}},
+		completeErr: completeErr,
+	}
+	store := newTestStore(t)
+	svc := New(ops, host.Client(), store)
+	seedTemplate(t, ctx, svc.Templates, "t0", t0Digest, conchtemplate.BootModeCold)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID: "sandbox-incremental", CheckpointHeadTemplateID: "t0", CheckpointHeadBootIndexDigest: t0Digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{SandboxID: "sandbox-incremental"})
+	if !errors.Is(err, completeErr) {
+		t.Fatalf("CheckpointSandbox() error = %v", err)
+	}
+	if len(ops.completeRequests) != 1 || ops.completeRequests[0].SandboxID != "sandbox-incremental" {
+		t.Fatalf("completion requests = %#v", ops.completeRequests)
+	}
+	record, err := store.GetSandbox(ctx, "sandbox-incremental")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.CheckpointHeadTemplateID == "t0" || record.CheckpointHeadBootIndexDigest == t0Digest {
+		t.Fatalf("checkpoint head was not advanced before completion: %#v", record)
+	}
+}
+
 func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	ctx := context.Background()
 	host := newRuntimeImageHost(t)
@@ -218,8 +271,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	memRoot1 := t.TempDir()
 	memRoot2 := t.TempDir()
 	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{
-		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256},
-		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256},
+		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256, MemoryFormat: conchimage.MemoryFormatFullV1},
+		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256, MemoryFormat: conchimage.MemoryFormatFullV1},
 	}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
@@ -392,6 +445,79 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	if rec != want {
 		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
 	}
+}
+
+func TestCreateSandboxResolvesGlobalMemoryModeBeforeRuntimeAllocation(t *testing.T) {
+	tests := []struct {
+		name          string
+		requested     memorymode.RequestedMode
+		info          conchimage.BootIndexInfo
+		capability    cow.Capabilities
+		capabilityErr error
+		wantMode      string
+		precondition  bool
+		wantError     bool
+	}{
+		{
+			name: "auto falls back only for explicit unsupported capability", requested: memorymode.RequestedAuto,
+			info:       conchimage.BootIndexInfo{VMMName: "", Resume: false},
+			capability: cow.Capabilities{IncrementalMemory: cow.CapabilityUnsupported}, wantMode: "full",
+		},
+		{
+			name: "auto operational error fails before create", requested: memorymode.RequestedAuto,
+			info: conchimage.BootIndexInfo{Resume: false}, capabilityErr: errors.New("cow unavailable"), wantError: true,
+		},
+		{
+			name: "incremental cannot restore full artifact", requested: memorymode.RequestedIncremental,
+			info:         conchimage.BootIndexInfo{Resume: true, VMMName: "stratovirt", MemoryFormat: conchimage.MemoryFormatFullV1},
+			precondition: true, wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			ops := &fakeSandboxOps{createResult: sandbox.CreateResult{BootIndexDigest: digest.FromString(t.Name()).String()}}
+			svc := New(ops, nil, store)
+			entry, err := svc.Templates.Create(context.Background(), conchtemplate.Entry{
+				ID: "tmpl-memory", Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold,
+				BootIndexDigest: digest.FromString("memory-policy").String(), ImageName: "local/memory-policy",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider := &runtimeMemoryCapabilities{capabilities: test.capability, err: test.capabilityErr}
+			svc.SetMemoryPolicy(test.requested, provider)
+			svc.memoryBootInspector = func(context.Context, string) (conchimage.BootIndexInfo, error) { return test.info, nil }
+
+			_, err = svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+				SandboxID: "sandbox-memory", TemplateID: entry.ID, VMMName: "stratovirt", RamMB: 256,
+			})
+			if test.wantError {
+				if err == nil || errors.Is(err, memorymode.ErrPrecondition) != test.precondition {
+					t.Fatalf("CreateSandbox() error = %v, precondition=%v", err, errors.Is(err, memorymode.ErrPrecondition))
+				}
+				if ops.createCalls != 0 {
+					t.Fatalf("runtime Create() calls = %d, want 0", ops.createCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateSandbox() error = %v", err)
+			}
+			if ops.req.MemoryMode != test.wantMode {
+				t.Fatalf("runtime memory mode = %q, want %q", ops.req.MemoryMode, test.wantMode)
+			}
+		})
+	}
+}
+
+type runtimeMemoryCapabilities struct {
+	capabilities cow.Capabilities
+	err          error
+}
+
+func (provider *runtimeMemoryCapabilities) Capabilities(context.Context) (cow.Capabilities, error) {
+	return provider.capabilities, provider.err
 }
 
 func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {

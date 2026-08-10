@@ -25,8 +25,10 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/cow"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
@@ -137,6 +139,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
 			VolumeManager:      s.volumeManager,
+			CowSocket:          cfg.Sandbox.CowSocket,
 		},
 	})
 	if err != nil {
@@ -159,6 +162,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
+	s.runtimeService.SetMemoryPolicy(memorymode.RequestedMode(cfg.Sandbox.MemoryMode), cow.NewClient(cfg.Sandbox.CowSocket))
 
 	manager := host.SandboxManager()
 	if manager != nil {
@@ -443,6 +447,8 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, conchruntime.ErrSandboxAlreadyExists) {
 			status = http.StatusConflict
+		} else if errors.Is(err, memorymode.ErrPrecondition) {
+			status = http.StatusPreconditionFailed
 		}
 		http.Error(w, "Failed to create sandbox: "+err.Error(), status)
 		return

@@ -3,10 +3,14 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/cow"
+	"github.com/openeuler/Conch/internal/memsnap"
 )
 
 func TestDurationOrDefault(t *testing.T) {
@@ -156,14 +160,154 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	}
 }
 
+func TestCheckpointUsesIncrementalCaptureAndRequiresCompletionToClearPoison(t *testing.T) {
+	fullCapture := &recordingCheckpointCapture{}
+	incrementalCapture := &recordingCheckpointCapture{poisonSource: true, result: CapturedBootComponents{
+		MemoryFormat: incrementalMemoryFormat,
+		Manifest: &memsnap.Manifest{
+			SchemaVersion: memsnap.SchemaVersion,
+			MemorySize:    memsnap.DefaultBlockSize,
+			BlockSize:     memsnap.DefaultBlockSize,
+			Layers:        []string{"layers/0.mem"},
+			BuildMap:      []memsnap.BuildRange{{Offset: 0, Length: memsnap.DefaultBlockSize, LayerIndex: 0}},
+		},
+	}}
+	m, entry, sbx := checkpointTestManager(sandboxReady, fullCapture)
+	m.incrementalCapture = incrementalCapture
+	sbx.memoryMode = "incremental"
+	sbx.memoryOrigin = "restored"
+
+	if _, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("Checkpoint() error = %v", err)
+	}
+	if len(fullCapture.requests) != 0 || len(incrementalCapture.requests) != 1 {
+		t.Fatalf("capture calls: full=%d incremental=%d", len(fullCapture.requests), len(incrementalCapture.requests))
+	}
+	if sbx.memoryManifest == nil || !sbx.CheckpointPoisoned() {
+		t.Fatalf("sandbox memory transaction = manifest %#v poisoned %v", sbx.memoryManifest, sbx.CheckpointPoisoned())
+	}
+	if _, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"}); err == nil || !strings.Contains(err.Error(), "previous incremental") {
+		t.Fatalf("second Checkpoint() error = %v", err)
+	}
+	if err := m.CompleteCheckpoint(LifecycleRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("CompleteCheckpoint() error = %v", err)
+	}
+	if sbx.CheckpointPoisoned() || entry.state != sandboxReady {
+		t.Fatalf("completed sandbox state = poisoned %v lifecycle %s", sbx.CheckpointPoisoned(), entry.state)
+	}
+}
+
+func TestPrepareIncrementalMemoryAttachesAndWaitsWithoutProcessDescriptor(t *testing.T) {
+	root := t.TempDir()
+	memoryFile, err := os.CreateTemp(t.TempDir(), "memory-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingMemoryAttacher{file: memoryFile, response: cow.Response{
+		OK: true, Token: "token-1", UFFDSocketPath: "/run/conch/uffd/token-1.sock",
+		MemorySize: 1024 * 1024, BlockSize: memsnap.DefaultBlockSize,
+	}}
+	m := &Manager{memory: client}
+	attachment, err := m.prepareIncrementalMemory(context.Background(), "sandbox-a", PreparedBoot{
+		Spec: BootSpec{MemorySizeMB: 1},
+		Runtime: BootRuntime{
+			Resume: true, MemoryFormat: incrementalMemoryFormat, MemorySnapshotRoot: root,
+		},
+	})
+	if err != nil {
+		t.Fatalf("prepareIncrementalMemory() error = %v", err)
+	}
+	if err := attachment.waitReady(context.Background()); err != nil {
+		t.Fatalf("waitReady() error = %v", err)
+	}
+	if client.attachRequest.SandboxID != "sandbox-a" || client.attachRequest.MemorySnapshotRoot != root ||
+		client.waitToken != "token-1" || client.waitSandboxID != "sandbox-a" {
+		t.Fatalf("cow calls = attach %#v wait token %q sandbox %q", client.attachRequest, client.waitToken, client.waitSandboxID)
+	}
+	if err := attachment.detach(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.detachToken != "token-1" {
+		t.Fatalf("detach token = %q", client.detachToken)
+	}
+}
+
+func TestCreateClosesIncrementalMemoryFileWhenVMMDoesNotTakeOwnership(t *testing.T) {
+	memoryFile, err := os.CreateTemp(t.TempDir(), "memory-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = memoryFile.Close() })
+	client := &recordingMemoryAttacher{file: memoryFile, response: cow.Response{
+		OK: true, Token: "token-1", UFFDSocketPath: "/run/conch/uffd/token-1.sock",
+		MemorySize: 1024 * 1024, BlockSize: memsnap.DefaultBlockSize,
+	}}
+	m := &Manager{
+		boot: &recordingBootPreparer{prepared: PreparedBoot{
+			Spec: BootSpec{MemorySizeMB: 1},
+			Runtime: BootRuntime{
+				Resume: true, MemoryFormat: incrementalMemoryFormat, MemorySnapshotRoot: t.TempDir(),
+			},
+		}},
+		memory:         client,
+		cidAllocator:   NewCIDAllocator(),
+		requestTimeout: time.Second,
+	}
+
+	_, err = m.Create(CreateRequest{
+		SandboxID:  "sandbox-a",
+		AgentToken: "token",
+		VMMName:    "stratovirt",
+		VCPUNum:    1,
+	})
+	if err == nil || !strings.Contains(err.Error(), `vmm "stratovirt" is not configured`) {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := memoryFile.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("incremental memory file remains open: %v", err)
+	}
+	if client.detachToken != "token-1" {
+		t.Fatalf("Detach() token = %q", client.detachToken)
+	}
+}
+
+type recordingMemoryAttacher struct {
+	file          *os.File
+	response      cow.Response
+	attachRequest cow.Request
+	waitToken     string
+	waitSandboxID string
+	detachToken   string
+}
+
+func (client *recordingMemoryAttacher) Attach(_ context.Context, request cow.Request) (*os.File, cow.Response, error) {
+	client.attachRequest = request
+	return client.file, client.response, nil
+}
+func (client *recordingMemoryAttacher) WaitAttachmentReady(_ context.Context, token, sandboxID string) (cow.Response, error) {
+	client.waitToken = token
+	client.waitSandboxID = sandboxID
+	return cow.Response{OK: true}, nil
+}
+func (client *recordingMemoryAttacher) Detach(_ context.Context, token string) (cow.Response, error) {
+	client.detachToken = token
+	return cow.Response{OK: true}, nil
+}
+
 type recordingCheckpointCapture struct {
-	requests []RuntimeCaptureRequest
-	result   CapturedBootComponents
-	err      error
+	requests     []RuntimeCaptureRequest
+	result       CapturedBootComponents
+	err          error
+	poisonSource bool
 }
 
 func (r *recordingCheckpointCapture) Capture(_ context.Context, req RuntimeCaptureRequest) (CapturedBootComponents, error) {
 	r.requests = append(r.requests, req)
+	if r.poisonSource {
+		if source, ok := req.Source.(interface{ SetCheckpointPoisoned(bool) }); ok {
+			source.SetCheckpointPoisoned(true)
+		}
+	}
 	return r.result, r.err
 }
 
@@ -180,10 +324,11 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 type recordingBootPreparer struct {
 	released   []ReleaseBootRequest
 	releaseErr error
+	prepared   PreparedBoot
 }
 
 func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
-	return PreparedBoot{}, nil
+	return r.prepared, nil
 }
 
 func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {

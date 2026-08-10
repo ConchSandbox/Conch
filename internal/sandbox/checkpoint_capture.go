@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/openeuler/Conch/internal/memsnap"
 	"github.com/openeuler/Conch/internal/vmm"
 	"golang.org/x/sys/unix"
 )
@@ -61,8 +62,11 @@ type RuntimeCaptureRequest struct {
 // source Boot Index by the publisher.
 type CapturedBootComponents struct {
 	MemRootPath  string
+	CleanupPath  string
 	VMMName      string
 	MemorySizeMB int64
+	MemoryFormat string
+	Manifest     *memsnap.Manifest
 }
 
 // FullCheckpointCapture is the default full-checkpoint implementation used
@@ -146,8 +150,15 @@ func (c *FullCheckpointCapture) Capture(ctx context.Context, req RuntimeCaptureR
 
 	return CapturedBootComponents{
 		MemRootPath:  memRoot,
+		CleanupPath:  memRoot,
 		VMMName:      vmmName,
 		MemorySizeMB: memorySizeMB,
+		MemoryFormat: func() string {
+			if vmmName == vmm.StratovirtName {
+				return "full-v1"
+			}
+			return ""
+		}(),
 	}, nil
 }
 
@@ -190,14 +201,10 @@ func (cloudHypervisorCheckpointCapturer) CaptureCheckpointArtifacts(ctx context.
 type stratovirtCheckpointCapturer struct{}
 
 func (stratovirtCheckpointCapturer) CaptureCheckpointArtifacts(ctx context.Context, source RuntimeCaptureSource, stagingRoot string) error {
-	snapshotDir := filepath.Join(stagingRoot, capturedSnapshotDir)
-	if err := os.MkdirAll(snapshotDir, 0o750); err != nil {
-		return fmt.Errorf("create VMM state directory: %w", err)
-	}
-	if err := source.CreateVMMState(ctx, snapshotDir); err != nil {
+	if err := source.CreateVMMState(ctx, stagingRoot); err != nil {
 		return fmt.Errorf("capture VMM state: %w", err)
 	}
-	if err := validateStratovirtSnapshot(snapshotDir); err != nil {
+	if err := validateStratovirtSnapshot(stagingRoot); err != nil {
 		return fmt.Errorf("validate StratoVirt snapshot: %w", err)
 	}
 	return nil

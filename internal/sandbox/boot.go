@@ -26,6 +26,7 @@ type SnapshotBackend interface {
 
 type BootSpec struct {
 	MemorySizeMB int64
+	MemoryFormat string
 
 	MemoryPath   string
 	KernelPath   string
@@ -35,16 +36,17 @@ type BootSpec struct {
 }
 
 type BootRuntime struct {
-	BootIndexDigest string
-	CapturedVMMName string
-	RootfsKey       string
-	MemKey          string
-	RootfsMount     string
-	MemMount        string
-	VMMount         string
-	RootDir         string
-	MemSize         int64
-	Resume          bool
+	BootIndexDigest    string
+	CapturedVMMName    string
+	RootfsKey          string
+	MemKey             string
+	RootfsMount        string
+	MemorySnapshotRoot string
+	VMMount            string
+	RootDir            string
+	MemSize            int64
+	MemoryFormat       string
+	Resume             bool
 }
 
 type PrepareBootRequest struct {
@@ -186,6 +188,7 @@ func (p *bootPreparer) prepareResolvedBoot(
 		Parents:      parents,
 		MemoryLayout: memoryLayout,
 		MemorySizeMB: memorySizeMB,
+		MemoryFormat: resolved.MemoryFormat,
 	}
 	var layout *snapshot.BootLayout
 	if resume {
@@ -197,22 +200,23 @@ func (p *bootPreparer) prepareResolvedBoot(
 		return PreparedBoot{}, fmt.Errorf("failed to prepare boot layout: %w", err)
 	}
 	runtimeMemKey := ""
-	if strings.TrimSpace(layout.MemMount) != "" {
+	if strings.TrimSpace(layout.MemorySnapshotRoot) != "" {
 		runtimeMemKey = snapshot.MemKeyFromRootfs(key)
 	}
 	return PreparedBoot{
 		Spec: bootSpecFromLayout(layout),
 		Runtime: BootRuntime{
-			BootIndexDigest: resolved.BootIndexDigest,
-			CapturedVMMName: resolved.VMMName,
-			RootfsKey:       key,
-			MemKey:          runtimeMemKey,
-			RootfsMount:     layout.RootfsMount,
-			MemMount:        layout.MemMount,
-			VMMount:         layout.VMMount,
-			RootDir:         layout.SnapshotDir,
-			MemSize:         layout.MemorySizeMB,
-			Resume:          resume,
+			BootIndexDigest:    resolved.BootIndexDigest,
+			CapturedVMMName:    resolved.VMMName,
+			RootfsKey:          key,
+			MemKey:             runtimeMemKey,
+			RootfsMount:        layout.RootfsMount,
+			MemorySnapshotRoot: layout.MemorySnapshotRoot,
+			VMMount:            layout.VMMount,
+			RootDir:            layout.SnapshotDir,
+			MemSize:            layout.MemorySizeMB,
+			MemoryFormat:       resolved.MemoryFormat,
+			Resume:             resume,
 		},
 	}, nil
 }
@@ -279,6 +283,7 @@ func bootSpecFromLayout(layout *snapshot.BootLayout) BootSpec {
 	}
 	return BootSpec{
 		MemorySizeMB: layout.MemorySizeMB,
+		MemoryFormat: layout.MemoryFormat,
 		MemoryPath:   layout.SnapshotMemFile(),
 		KernelPath:   layout.KernelFile(),
 		InitrdPath:   layout.InitrdFile(),
@@ -298,12 +303,13 @@ func BootSpecFromRuntime(runtime BootRuntime) BootSpec {
 	}
 	memoryPath := ""
 	snapfilePath := ""
-	if strings.TrimSpace(runtime.MemMount) != "" {
-		memoryPath = filepath.Join(runtime.MemMount, common.MemFileName)
-		snapfilePath = filepath.Join(runtime.MemMount, strings.TrimLeft(rootDir, string(filepath.Separator)))
+	if strings.TrimSpace(runtime.MemorySnapshotRoot) != "" {
+		memoryPath = filepath.Join(runtime.MemorySnapshotRoot, common.MemFileName)
+		snapfilePath = filepath.Join(runtime.MemorySnapshotRoot, strings.TrimLeft(rootDir, string(filepath.Separator)))
 	}
 	return BootSpec{
 		MemorySizeMB: memSize,
+		MemoryFormat: runtime.MemoryFormat,
 		MemoryPath:   memoryPath,
 		KernelPath:   filepath.Join(runtime.VMMount, common.VmKernelRelativePath),
 		InitrdPath:   filepath.Join(runtime.VMMount, common.VmInitrdRelativePath),

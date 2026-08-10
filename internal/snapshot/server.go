@@ -36,13 +36,14 @@ type runtimeSnapshotKey struct {
 }
 
 type BootLayout struct {
-	RootfsMount string // dir which mounts rootfs snapshot view
-	MemMount    string // dir which mounts mem snapshot view or active layer
-	VMMount     string // dir which mounts sandbox snapshot view
+	RootfsMount        string // dir which mounts rootfs snapshot view
+	MemorySnapshotRoot string // dir which mounts mem snapshot view or active layer
+	VMMount            string // dir which mounts sandbox snapshot view
 
-	SnapshotDir  string           // dir which stores vm snapshot, relative to MemMount
+	SnapshotDir  string           // dir which stores vm snapshot, relative to MemorySnapshotRoot
 	MemorySizeMB int64            // memory size of vm, unit is mb
 	MemoryLayout MemoryLayoutMode // storage semantics for Guest RAM artifacts
+	MemoryFormat string           // immutable Boot Index memory format annotation
 
 	pmemFiles []string // pmem array (e.g. layer1.erofs, layer2.erofs, layer3.erofs)
 }
@@ -63,6 +64,7 @@ type BootLayoutRequest struct {
 	Parents      ParentSnapshotIDs
 	MemoryLayout MemoryLayoutMode
 	MemorySizeMB int64
+	MemoryFormat string
 }
 
 func normalizeMemoryLayout(mode MemoryLayoutMode) (MemoryLayoutMode, error) {
@@ -90,10 +92,10 @@ func (w *BootLayout) PmemFiles() []string {
 }
 
 func (w *BootLayout) SnapshotMemFile() string {
-	if w == nil || w.MemoryLayout != MemoryLayoutWritableFile || strings.TrimSpace(w.MemMount) == "" {
+	if w == nil || w.MemoryLayout != MemoryLayoutWritableFile || strings.TrimSpace(w.MemorySnapshotRoot) == "" {
 		return ""
 	}
-	return filepath.Join(w.MemMount, common.MemFileName)
+	return filepath.Join(w.MemorySnapshotRoot, common.MemFileName)
 }
 
 func (w *BootLayout) InitrdFile() string {
@@ -105,10 +107,10 @@ func (w *BootLayout) KernelFile() string {
 }
 
 func (w *BootLayout) SnapDir() string {
-	if w == nil || w.MemoryLayout == MemoryLayoutNone || strings.TrimSpace(w.MemMount) == "" {
+	if w == nil || w.MemoryLayout == MemoryLayoutNone || strings.TrimSpace(w.MemorySnapshotRoot) == "" {
 		return ""
 	}
-	return filepath.Join(w.MemMount, strings.TrimLeft(w.SnapshotDir, string(filepath.Separator)))
+	return filepath.Join(w.MemorySnapshotRoot, strings.TrimLeft(w.SnapshotDir, string(filepath.Separator)))
 }
 
 // initDefaults sets default values for BootLayout fields.
@@ -288,17 +290,18 @@ func (s *Server) CreateBootLayout(
 	vmViewSnapshotKey := getVMViewSnapshotKey(key)
 
 	layout := &BootLayout{
-		RootfsMount:  getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
-		MemMount:     getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
-		VMMount:      getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM),
-		MemoryLayout: memoryLayout,
+		RootfsMount:        getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
+		MemorySnapshotRoot: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
+		VMMount:            getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM),
+		MemoryLayout:       memoryLayout,
+		MemoryFormat:       strings.TrimSpace(req.MemoryFormat),
 	}
 	layout.initDefaults()
 	if req.MemorySizeMB > 0 {
 		layout.MemorySizeMB = req.MemorySizeMB
 	}
 	if memoryLayout == MemoryLayoutNone {
-		layout.MemMount = ""
+		layout.MemorySnapshotRoot = ""
 		layout.SnapshotDir = ""
 	}
 	labels := bootLayoutLabels(layout, nil)
@@ -315,6 +318,7 @@ func (s *Server) CreateBootLayout(
 	if err != nil {
 		return nil, err
 	}
+	applyDirectCheckpointPath(layout)
 	if parents.Rootfs != "" {
 		defer func() {
 			if err != nil {
@@ -341,8 +345,8 @@ func (s *Server) CreateBootLayout(
 	}
 
 	// Step 3: prepare writable mem + create sparse memfile
-	memMountPoint := layout.MemMount
-	memAccessPath, err := s.prepareAndMountActiveSnapshot(ctx, namespace, memKey, parents.Mem, memMountPoint)
+	memorySnapshotMountPoint := layout.MemorySnapshotRoot
+	memAccessPath, err := s.prepareAndMountActiveSnapshot(ctx, namespace, memKey, parents.Mem, memorySnapshotMountPoint)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +355,7 @@ func (s *Server) CreateBootLayout(
 			return
 		}
 		s.removeActiveSnapshot(namespace, memKey)
-		if unmountErr := s.unmountPath(memMountPoint); unmountErr != nil {
+		if unmountErr := s.unmountPath(memorySnapshotMountPoint); unmountErr != nil {
 			err = errors.Join(err, unmountErr)
 		}
 		if s.mountMgr != nil {
@@ -364,9 +368,9 @@ func (s *Server) CreateBootLayout(
 			err = errors.Join(err, removeErr)
 		}
 	}()
-	layout.MemMount = memAccessPath
+	layout.MemorySnapshotRoot = memAccessPath
 
-	if err = ensureMemFile(layout, layout.MemMount, true); err != nil {
+	if err = ensureMemFile(layout, layout.MemorySnapshotRoot, true); err != nil {
 		return nil, fmt.Errorf("prepare mem.img failed: %v", err)
 	}
 
@@ -376,6 +380,16 @@ func (s *Server) CreateBootLayout(
 	}
 
 	return layout, nil
+}
+
+func applyDirectCheckpointPath(layout *BootLayout) {
+	if layout == nil || layout.MemoryLayout != MemoryLayoutCheckpointView {
+		return
+	}
+	switch strings.TrimSpace(layout.MemoryFormat) {
+	case "full-v1", "incremental-v1":
+		layout.SnapshotDir = "."
+	}
 }
 
 // RestoreBootLayout creates per-sandbox rootfs/VM views and either a writable
@@ -402,10 +416,10 @@ func (s *Server) RestoreBootLayout(
 	vmViewSnapshotKey := getVMViewSnapshotKey(key)
 
 	layout := &BootLayout{
-		RootfsMount:  getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
-		MemMount:     getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
-		VMMount:      getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM),
-		MemoryLayout: memoryLayout,
+		RootfsMount:        getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs),
+		MemorySnapshotRoot: getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem),
+		VMMount:            getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM),
+		MemoryLayout:       memoryLayout,
 	}
 	layout.initDefaults()
 	memorySizeFromSnapshot, err := s.loadCommittedBootLayoutMetadata(ctx, namespace, parents, layout)
@@ -443,24 +457,24 @@ func (s *Server) RestoreBootLayout(
 		}
 	}()
 
-	memMountPoint := layout.MemMount
+	memorySnapshotMountPoint := layout.MemorySnapshotRoot
 	if memoryLayout == MemoryLayoutCheckpointView {
 		memViewSnapshotKey := getMemViewSnapshotKey(key)
-		if _, err := s.viewSnapshotMount(ctx, namespace, parents.Mem, memViewSnapshotKey, memMountPoint); err != nil {
+		if _, err := s.viewSnapshotMount(ctx, namespace, parents.Mem, memViewSnapshotKey, memorySnapshotMountPoint); err != nil {
 			return nil, fmt.Errorf("view checkpoint memory failed: %w", err)
 		}
 		defer func() {
 			if err == nil {
 				return
 			}
-			if releaseErr := s.releaseViewSnapshot(ctx, namespace, memViewSnapshotKey, memMountPoint); releaseErr != nil {
+			if releaseErr := s.releaseViewSnapshot(ctx, namespace, memViewSnapshotKey, memorySnapshotMountPoint); releaseErr != nil {
 				err = errors.Join(err, releaseErr)
 			}
 		}()
 		return layout, nil
 	}
 
-	memAccessPath, err := s.prepareAndMountActiveSnapshot(ctx, namespace, memKey, parents.Mem, memMountPoint)
+	memAccessPath, err := s.prepareAndMountActiveSnapshot(ctx, namespace, memKey, parents.Mem, memorySnapshotMountPoint)
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +483,7 @@ func (s *Server) RestoreBootLayout(
 			return
 		}
 		s.removeActiveSnapshot(namespace, memKey)
-		if unmountErr := s.unmountPath(memMountPoint); unmountErr != nil {
+		if unmountErr := s.unmountPath(memorySnapshotMountPoint); unmountErr != nil {
 			err = errors.Join(err, unmountErr)
 		}
 		if s.mountMgr != nil {
@@ -482,9 +496,9 @@ func (s *Server) RestoreBootLayout(
 			err = errors.Join(err, removeErr)
 		}
 	}()
-	layout.MemMount = memAccessPath
+	layout.MemorySnapshotRoot = memAccessPath
 
-	if err = ensureMemFile(layout, layout.MemMount, false); err != nil {
+	if err = ensureMemFile(layout, layout.MemorySnapshotRoot, false); err != nil {
 		return nil, fmt.Errorf("mem.img verification failed: %v", err)
 	}
 	if !memorySizeFromSnapshot {
@@ -522,15 +536,15 @@ func (s *Server) ReleaseBootLayout(ctx context.Context, key string) error {
 		errs = append(errs, err)
 	}
 
-	memMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem)
+	memorySnapshotMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem)
 	if s.activeSnapshotExists(ctx, namespace, memKey) {
-		if err := s.releaseActiveSnapshot(ctx, namespace, memKey, memMount); err != nil {
+		if err := s.releaseActiveSnapshot(ctx, namespace, memKey, memorySnapshotMount); err != nil {
 			errs = append(errs, err)
 		}
 	} else {
 		memViewSnapshotKey := getMemViewSnapshotKey(key)
 		if s.snapshotKindExists(ctx, namespace, memViewSnapshotKey, snapshots.KindView) {
-			if err := s.releaseViewSnapshot(ctx, namespace, memViewSnapshotKey, memMount); err != nil {
+			if err := s.releaseViewSnapshot(ctx, namespace, memViewSnapshotKey, memorySnapshotMount); err != nil {
 				errs = append(errs, err)
 			}
 		}

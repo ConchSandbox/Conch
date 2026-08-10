@@ -6,12 +6,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
+	"github.com/openeuler/Conch/internal/cow"
+	"github.com/openeuler/Conch/internal/memsnap"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
@@ -26,6 +29,7 @@ type Config struct {
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
 	VolumeManager      *volume.Manager
+	CowSocket          string
 }
 
 type Manager struct {
@@ -34,12 +38,66 @@ type Manager struct {
 	daemonClient       *containerdclient.Client
 	boot               BootPreparer
 	checkpointCapture  CheckpointCapture
+	incrementalCapture CheckpointCapture
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
 	cidAllocator       *CIDAllocator
 	volumeManager      *volume.Manager
 	vmmBinaries        map[string]string
+	memory             MemoryAttacher
+}
+
+type MemoryAttacher interface {
+	Attach(context.Context, cow.Request) (*os.File, cow.Response, error)
+	WaitAttachmentReady(context.Context, string, string) (cow.Response, error)
+	Detach(context.Context, string) (cow.Response, error)
+}
+
+type incrementalMemoryAttachment struct {
+	client         MemoryAttacher
+	file           *os.File
+	token          string
+	sandboxID      string
+	uffdSocketPath string
+	detached       bool
+	mu             sync.Mutex
+}
+
+func (attachment *incrementalMemoryAttachment) waitReady(ctx context.Context) error {
+	if attachment == nil || attachment.client == nil {
+		return fmt.Errorf("incremental memory attachment is not configured")
+	}
+	_, err := attachment.client.WaitAttachmentReady(ctx, attachment.token, attachment.sandboxID)
+	return err
+}
+
+func (attachment *incrementalMemoryAttachment) detach(ctx context.Context) error {
+	if attachment == nil || attachment.client == nil {
+		return nil
+	}
+	attachment.mu.Lock()
+	defer attachment.mu.Unlock()
+	if attachment.detached {
+		return nil
+	}
+	_, err := attachment.client.Detach(ctx, attachment.token)
+	if err == nil {
+		attachment.detached = true
+	}
+	return err
+}
+
+func (attachment *incrementalMemoryAttachment) abort(ctx context.Context) error {
+	if attachment == nil {
+		return nil
+	}
+	var closeErr error
+	if attachment.file != nil {
+		closeErr = attachment.file.Close()
+		attachment.file = nil
+	}
+	return errors.Join(closeErr, attachment.detach(ctx))
 }
 
 type sandboxLifecycleState uint8
@@ -89,6 +147,12 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	manager.memory = cow.NewClient(cfg.CowSocket)
+	incrementalCapture, err := NewIncrementalCheckpointCapture("")
+	if err != nil {
+		return nil, err
+	}
+	manager.incrementalCapture = incrementalCapture
 	return manager, nil
 }
 
@@ -199,6 +263,7 @@ type CreateRequest struct {
 	Env          map[string]string
 	VolumeMounts []volume.Mount
 	Network      *netstack.SandboxNetworkConfig
+	MemoryMode   string
 }
 
 type DeleteRequest struct {
@@ -221,26 +286,26 @@ type CheckpointRequest struct {
 type CheckpointResult = CapturedBootComponents
 
 type CreateResult struct {
-	IP              string
-	AgentToken      string
-	SandboxID       string
-	LeaseID         string
-	VMMPID          int
-	VMMSocketPath   string
-	VsockCID        uint32
-	VsockSocketPath string
-	NetworkSlotID   int
-	RootfsKey       string
-	MemKey          string
-	RootfsMount     string
-	MemMount        string
-	VMMount         string
-	RootDir         string
-	MemSize         int64
-	Resume          bool
-	BootIndexDigest string
-	RootfsPmemPaths []string
-	VolumeDevices   []volume.Device
+	IP                 string
+	AgentToken         string
+	SandboxID          string
+	LeaseID            string
+	VMMPID             int
+	VMMSocketPath      string
+	VsockCID           uint32
+	VsockSocketPath    string
+	NetworkSlotID      int
+	RootfsKey          string
+	MemKey             string
+	RootfsMount        string
+	MemorySnapshotRoot string
+	VMMount            string
+	RootDir            string
+	MemSize            int64
+	Resume             bool
+	BootIndexDigest    string
+	RootfsPmemPaths    []string
+	VolumeDevices      []volume.Device
 }
 
 func GenerateAgentToken() (string, error) {
@@ -404,8 +469,23 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		}
 		logger.Info("released sandbox boot layout due to error", ulog.F("key", runtimeIDs.key))
 	}()
+	memoryAttachment, err := m.prepareIncrementalMemory(leaseCtx, req.SandboxID, boot)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("prepare incremental memory: %w", err)
+	}
+	defer func() {
+		if err == nil || memoryAttachment == nil {
+			return
+		}
+		_ = memoryAttachment.abort(context.WithoutCancel(leaseCtx))
+	}()
 
 	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
+	if memoryAttachment != nil {
+		vmStartSpec.MemoryFile = memoryAttachment.file
+		vmStartSpec.UFFDSocketPath = memoryAttachment.uffdSocketPath
+		vmStartSpec.ResumeStartedHook = memoryAttachment.waitReady
+	}
 	volumeDevices, err := m.prepareVolumes(req, boot.Runtime.Resume)
 	if err != nil {
 		return CreateResult{}, err
@@ -430,7 +510,12 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
+	if err := configureSandboxMemoryCapture(sbx, req, boot); err != nil {
+		m.cleanupCreateFailure(sbx, req.SandboxID)
+		return CreateResult{}, err
+	}
 	registerSandboxVolumeCleanup(sbx, m.volumeManager, req.SandboxID, volumeDevices)
+	registerSandboxMemoryDetach(sbx, memoryAttachment)
 
 	entry.sbx = sbx
 	entry.state = sandboxReady
@@ -439,6 +524,79 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 
 	logger.Debug("created sandbox in manager")
 	return buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
+}
+
+func (m *Manager) prepareIncrementalMemory(ctx context.Context, sandboxID string, boot PreparedBoot) (*incrementalMemoryAttachment, error) {
+	if !boot.Runtime.Resume || boot.Runtime.MemoryFormat != incrementalMemoryFormat {
+		return nil, nil
+	}
+	if m.memory == nil {
+		return nil, fmt.Errorf("cow client is required for incremental restore")
+	}
+	file, response, err := m.memory.Attach(ctx, cow.Request{MemorySnapshotRoot: boot.Runtime.MemorySnapshotRoot, SandboxID: sandboxID})
+	attachment := &incrementalMemoryAttachment{
+		client: m.memory, file: file, token: response.Token, sandboxID: sandboxID, uffdSocketPath: response.UFFDSocketPath,
+	}
+	if err != nil {
+		return nil, errors.Join(err, attachment.abort(context.WithoutCancel(ctx)))
+	}
+	if file == nil || response.Token == "" || response.UFFDSocketPath == "" {
+		return nil, errors.Join(fmt.Errorf("cow Attach returned incomplete attachment"), attachment.abort(context.WithoutCancel(ctx)))
+	}
+	const bytesPerMiB = uint64(1024 * 1024)
+	if boot.Spec.MemorySizeMB <= 0 || response.MemorySize%bytesPerMiB != 0 || response.MemorySize/bytesPerMiB != uint64(boot.Spec.MemorySizeMB) {
+		return nil, errors.Join(fmt.Errorf(
+			"cow Attach memory size %d bytes does not match Boot Index memory size %d MiB",
+			response.MemorySize,
+			boot.Spec.MemorySizeMB,
+		), attachment.abort(context.WithoutCancel(ctx)))
+	}
+	return attachment, nil
+}
+
+func registerSandboxMemoryDetach(sbx *Sandbox, attachment *incrementalMemoryAttachment) {
+	if sbx == nil || sbx.cleanup == nil || attachment == nil {
+		return
+	}
+	sbx.cleanup.Add(func(ctx context.Context) error { return attachment.detach(ctx) })
+}
+
+func configureSandboxMemoryCapture(sbx *Sandbox, req CreateRequest, boot PreparedBoot) error {
+	if sbx == nil {
+		return fmt.Errorf("sandbox is nil")
+	}
+	sbx.memoryMode = req.MemoryMode
+	if req.MemoryMode != "incremental" {
+		return nil
+	}
+	if req.VMMName != vmm.StratovirtName {
+		return fmt.Errorf("incremental checkpoint requires StratoVirt")
+	}
+	sbx.memoryOrigin = "cold"
+	if boot.Runtime.Resume {
+		sbx.memoryOrigin = "restored"
+		pinned, err := memsnap.LoadAndPin(boot.Runtime.MemorySnapshotRoot)
+		if err != nil {
+			return fmt.Errorf("load restored incremental manifest: %w", err)
+		}
+		sbx.memoryManifest = &pinned.Manifest
+		sbx.memorySizeBytes = pinned.Manifest.MemorySize
+		sbx.memoryBlockSize = pinned.Manifest.BlockSize
+		if err := pinned.Close(); err != nil {
+			return fmt.Errorf("close restored incremental manifest: %w", err)
+		}
+		return nil
+	}
+	if req.RAMMB <= 0 {
+		return fmt.Errorf("incremental checkpoint requires positive guest RAM")
+	}
+	const bytesPerMiB = uint64(1024 * 1024)
+	if uint64(req.RAMMB) > ^uint64(0)/bytesPerMiB {
+		return fmt.Errorf("guest RAM size overflows bytes")
+	}
+	sbx.memorySizeBytes = uint64(req.RAMMB) * bytesPerMiB
+	sbx.memoryBlockSize = memsnap.DefaultBlockSize
+	return nil
 }
 
 func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Device, error) {
@@ -585,26 +743,26 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
-		IP:              sbx.slot.CNIIP(),
-		AgentToken:      req.AgentToken,
-		SandboxID:       req.SandboxID,
-		LeaseID:         leaseID,
-		VMMPID:          sbx.process.Pid(),
-		VMMSocketPath:   sbx.process.VmmSocketPath,
-		VsockCID:        runtimeIDs.vsockCID,
-		VsockSocketPath: runtimeIDs.vsockSocketPath,
-		NetworkSlotID:   sbx.slot.ID(),
-		RootfsKey:       runtime.RootfsKey,
-		MemKey:          runtime.MemKey,
-		RootfsMount:     runtime.RootfsMount,
-		MemMount:        runtime.MemMount,
-		VMMount:         runtime.VMMount,
-		RootDir:         runtime.RootDir,
-		MemSize:         runtime.MemSize,
-		Resume:          runtime.Resume,
-		BootIndexDigest: runtime.BootIndexDigest,
-		RootfsPmemPaths: append([]string(nil), boot.Spec.PmemPaths...),
-		VolumeDevices:   append([]volume.Device(nil), volumeDevices...),
+		IP:                 sbx.slot.CNIIP(),
+		AgentToken:         req.AgentToken,
+		SandboxID:          req.SandboxID,
+		LeaseID:            leaseID,
+		VMMPID:             sbx.process.Pid(),
+		VMMSocketPath:      sbx.process.VmmSocketPath,
+		VsockCID:           runtimeIDs.vsockCID,
+		VsockSocketPath:    runtimeIDs.vsockSocketPath,
+		NetworkSlotID:      sbx.slot.ID(),
+		RootfsKey:          runtime.RootfsKey,
+		MemKey:             runtime.MemKey,
+		RootfsMount:        runtime.RootfsMount,
+		MemorySnapshotRoot: runtime.MemorySnapshotRoot,
+		VMMount:            runtime.VMMount,
+		RootDir:            runtime.RootDir,
+		MemSize:            runtime.MemSize,
+		Resume:             runtime.Resume,
+		BootIndexDigest:    runtime.BootIndexDigest,
+		RootfsPmemPaths:    append([]string(nil), boot.Spec.PmemPaths...),
+		VolumeDevices:      append([]volume.Device(nil), volumeDevices...),
 	}
 }
 
@@ -789,8 +947,16 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	if len(sbx.vmStartSpec.VirtioFS) > 0 {
 		return CheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", req.SandboxID)
 	}
+	if sbx.CheckpointPoisoned() {
+		return CheckpointResult{}, fmt.Errorf("sandbox %s cannot checkpoint after a previous incremental checkpoint failure", req.SandboxID)
+	}
 	capture := m.checkpointCapture
-	if capture == nil {
+	if sbx.memoryMode == "incremental" {
+		capture = m.incrementalCapture
+		if capture == nil {
+			return CheckpointResult{}, fmt.Errorf("incremental checkpoint capture is not configured")
+		}
+	} else if capture == nil {
 		capture = NewFullCheckpointCapture()
 	}
 	captured, err := capture.Capture(ctx, RuntimeCaptureRequest{
@@ -803,8 +969,29 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 		}
 		return CheckpointResult{}, fmt.Errorf("sandbox %s checkpoint failed: %w", req.SandboxID, err)
 	}
+	recordIncrementalManifest(sbx, captured)
 
 	return captured, nil
+}
+
+func recordIncrementalManifest(sbx *Sandbox, captured CapturedBootComponents) {
+	if sbx == nil || sbx.memoryOrigin != "restored" || captured.Manifest == nil {
+		return
+	}
+	sbx.SetIncrementalManifest(*captured.Manifest)
+}
+
+func (m *Manager) CompleteCheckpoint(req LifecycleRequest) error {
+	entry, unlock, err := m.lockCurrentSandboxEntry(req.SandboxID, req.SandboxID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if entry.sbx == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
+	}
+	entry.sbx.SetCheckpointPoisoned(false)
+	return nil
 }
 
 func (m *Manager) AllocateUniqueCID(sandboxId string) (uint32, error) {
