@@ -127,3 +127,19 @@ func TestWaitForAgentAliveReturnsProcessExitError(t *testing.T) {
 		t.Fatalf("waitForAgentAlive() error = %q, want early exit context", err.Error())
 	}
 }
+
+func TestRunResumeStartedHookCallsConfiguredHook(t *testing.T) {
+	called := false
+	process := &Process{
+		resumeStartedHook: func(context.Context) error {
+			called = true
+			return nil
+		},
+	}
+	if err := process.runResumeStartedHook(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("resume-started hook was not called")
+	}
+}
