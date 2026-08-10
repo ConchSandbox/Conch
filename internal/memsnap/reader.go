@@ -14,11 +14,13 @@ import (
 
 var openatForPin = unix.Openat
 
-// PinnedManifest keeps validated layer descriptors open. Replacing a path
-// after validation therefore cannot change the bytes returned to the guest.
+// PinnedManifest keeps the validated manifest and layer descriptors open.
+// Replacing a path after validation therefore cannot change the bytes returned
+// to the guest.
 type PinnedManifest struct {
-	Manifest Manifest
-	layers   map[int]*os.File
+	Manifest     Manifest
+	manifestFile *os.File
+	layers       map[int]*os.File
 }
 
 func LoadAndPin(root string) (*PinnedManifest, error) {
@@ -45,18 +47,20 @@ func loadAndPin(root string, selectLayers func(Manifest) []int) (*PinnedManifest
 		return nil, fmt.Errorf("open manifest: %w", err)
 	}
 	data, readErr := io.ReadAll(manifestFile)
-	closeErr := manifestFile.Close()
 	if readErr != nil {
+		closeErr := manifestFile.Close()
+		if closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("read manifest: %w", readErr), fmt.Errorf("close manifest: %w", closeErr))
+		}
 		return nil, fmt.Errorf("read manifest: %w", readErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close manifest: %w", closeErr)
 	}
 	var manifest Manifest
 	if err := decodeStrictJSON(data, &manifest); err != nil {
+		_ = manifestFile.Close()
 		return nil, fmt.Errorf("decode manifest: %w", err)
 	}
 	if err := validateManifest(manifest); err != nil {
+		_ = manifestFile.Close()
 		return nil, err
 	}
 
@@ -67,7 +71,7 @@ func loadAndPin(root string, selectLayers func(Manifest) []int) (*PinnedManifest
 	if selectLayers != nil {
 		indexes = selectLayers(manifest)
 	}
-	pinned := &PinnedManifest{Manifest: manifest, layers: make(map[int]*os.File, len(indexes))}
+	pinned := &PinnedManifest{Manifest: manifest, manifestFile: manifestFile, layers: make(map[int]*os.File, len(indexes))}
 	for _, index := range indexes {
 		if index < 0 || index >= len(manifest.Layers) {
 			_ = pinned.Close()
@@ -234,6 +238,12 @@ func (p *PinnedManifest) Close() error {
 		return nil
 	}
 	var result error
+	if p.manifestFile != nil {
+		if err := p.manifestFile.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("close manifest: %w", err))
+		}
+		p.manifestFile = nil
+	}
 	for index, file := range p.layers {
 		if err := file.Close(); err != nil {
 			result = errors.Join(result, fmt.Errorf("close layer %d: %w", index, err))

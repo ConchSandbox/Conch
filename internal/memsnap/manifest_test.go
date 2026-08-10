@@ -169,6 +169,9 @@ func TestLoadAndPinKeepsValidatedLayerOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pinned.Close() })
+	if pinned.manifestFile == nil {
+		t.Fatal("LoadAndPin() did not keep the validated manifest open")
+	}
 	path := filepath.Join(root, "layers/0.mem")
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)

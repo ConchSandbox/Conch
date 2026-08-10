@@ -139,9 +139,11 @@ func TestDirectCheckpointMemoryFormatUsesComponentRoot(t *testing.T) {
 			MemorySnapshotRoot: "/runtime/mem",
 			SnapshotDir:        "conch/snapshot",
 			MemoryLayout:       MemoryLayoutCheckpointView,
-			MemoryFormat:       format,
 		}
-		applyDirectCheckpointPath(layout)
+		applyRequestedMemoryFormat(layout, format)
+		if layout.MemoryFormat != format {
+			t.Fatalf("MemoryFormat = %q, want %q", layout.MemoryFormat, format)
+		}
 		if got := layout.SnapDir(); got != "/runtime/mem" {
 			t.Fatalf("format %s SnapDir() = %q", format, got)
 		}
