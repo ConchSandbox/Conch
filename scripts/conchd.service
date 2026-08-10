@@ -19,8 +19,8 @@ ExecStart=/usr/bin/conchd --config ${CONCHD_CONFIG} $CONCHD_OPTS
 
 Type=notify
 Delegate=yes
-# VMM processes are not killed with conchd and are not re-adopted on restart.
-# Delete active sandboxes before stopping or restarting this service.
+# systemd signals only conchd; its normal shutdown stops Sandbox VMMs and conch-cow.
+# Abnormal conchd termination and child re-adoption are not handled.
 KillMode=process
 Restart=on-failure
 RestartSec=2
