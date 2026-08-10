@@ -56,8 +56,8 @@ func TestIsSandboxSocketName(t *testing.T) {
 		"0123456789abcdef.sock",
 		"0123456789abcdef.sock.serial",
 	} {
-		if !isSandboxSocketName(name) {
-			t.Fatalf("isSandboxSocketName(%q) = false, want true", name)
+		if !sandboxSocketNameRE.MatchString(name) {
+			t.Fatalf("sandboxSocketNameRE.MatchString(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{
@@ -66,9 +66,41 @@ func TestIsSandboxSocketName(t *testing.T) {
 		"0123456789abcdef.sock.bak",
 		"0123456789ABCDEf.sock",
 	} {
-		if isSandboxSocketName(name) {
-			t.Fatalf("isSandboxSocketName(%q) = true, want false", name)
+		if sandboxSocketNameRE.MatchString(name) {
+			t.Fatalf("sandboxSocketNameRE.MatchString(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestKillStaleVMMProcessIgnoresReusedPID(t *testing.T) {
+	binaries := map[string]string{"test-vmm": "/opt/test/vmm"}
+	if err := killStaleVMMProcess(os.Getpid(), binaries); err != nil {
+		t.Fatalf("killStaleVMMProcess() error = %v, want nil for non-VMM process", err)
+	}
+}
+
+func TestMatchesConfiguredVMMCommand(t *testing.T) {
+	binaries := map[string]string{
+		"vmm-a": "/opt/test/vmm-a",
+		"vmm-b": "/opt/test/vmm-b",
+	}
+	tests := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{name: "configured binary", cmdline: "/opt/test/vmm-a\x00--api-socket\x00socket", want: true},
+		{name: "second configured binary", cmdline: "/opt/test/vmm-b\x00--restore", want: true},
+		{name: "binary only in argument", cmdline: "/usr/bin/wrapper\x00/opt/test/vmm-a", want: false},
+		{name: "path prefix", cmdline: "/opt/test/vmm-a.backup\x00--run", want: false},
+		{name: "empty command line", cmdline: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesConfiguredVMMCommand([]byte(tt.cmdline), binaries); got != tt.want {
+				t.Fatalf("matchesConfiguredVMMCommand(%q) = %t, want %t", tt.cmdline, got, tt.want)
+			}
+		})
 	}
 }
 

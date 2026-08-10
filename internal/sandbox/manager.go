@@ -103,11 +103,11 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // RecoverStaleResources orchestrates cleanup of resources owned by a previous
 // conchd process. It must run before Start so the new warm pool starts clean.
-func (m *Manager) RecoverStaleResources(ctx context.Context, sandboxIDs []string) error {
+func (m *Manager) RecoverStaleResources(ctx context.Context, sandboxIDs []string, vmmPIDs []int, hasCreatingSandbox bool) error {
 	if m == nil || m.pool == nil {
 		return fmt.Errorf("sandbox manager is not initialized")
 	}
-	if err := vmm.CleanupStaleResources(); err != nil {
+	if err := vmm.CleanupStaleResources(vmmPIDs, m.vmmBinaries, hasCreatingSandbox); err != nil {
 		return fmt.Errorf("clean stale VMM resources: %w", err)
 	}
 	if err := m.volumeManager.CleanupStaleResources(); err != nil {

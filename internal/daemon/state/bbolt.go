@@ -126,6 +126,12 @@ func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error 
 	if strings.TrimSpace(rec.SandboxID) == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
+	if rec.State == SandboxCreating {
+		if strings.TrimSpace(rec.SourceTemplateID) == "" {
+			return fmt.Errorf("creating sandbox source template id is required")
+		}
+		return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
+	}
 	if strings.TrimSpace(rec.CheckpointHeadTemplateID) == "" {
 		return fmt.Errorf("sandbox checkpoint head template id is required")
 	}
