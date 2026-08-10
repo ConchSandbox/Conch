@@ -50,8 +50,8 @@ type BootIndexInfo struct {
 
 // PublishCheckpointBootIndexOptions publishes captured memory and VMM state as
 // a new Boot Index while reusing the source Boot Index's immutable rootfs and
-// sandbox components. MemRoot is a self-contained directory whose artifact
-// layout is defined by VMMName.
+// sandbox components. MemRoot stores VMM state under vmm-state and
+// format-specific memory artifacts at its root.
 type PublishCheckpointBootIndexOptions struct {
 	SourceBootIndexDigest string `json:"source_boot_index_digest"`
 	MemRoot               string `json:"mem_root"`

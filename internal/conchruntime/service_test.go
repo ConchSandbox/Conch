@@ -40,6 +40,8 @@ type fakeSandboxOps struct {
 	updateReq          sandbox.NetworkUpdateRequest
 	updateErr          error
 	createHook         func()
+	completeRequests   []sandbox.LifecycleRequest
+	completeErr        error
 }
 
 type serializedDeleteOps struct {
@@ -143,6 +145,11 @@ func TestTemplateRecordUsesBootIndexDigestsAsTemplateIDs(t *testing.T) {
 	}
 }
 
+func (f *fakeSandboxOps) CompleteCheckpoint(req sandbox.LifecycleRequest) error {
+	f.completeRequests = append(f.completeRequests, req)
+	return f.completeErr
+}
+
 func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
 	ctx := context.Background()
 	host := newRuntimeImageHost(t)
@@ -212,6 +219,50 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	}
 }
 
+func TestCheckpointSandboxClearsIncrementalPoisonOnlyAfterHeadAdvances(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	t0Digest := buildColdBootIndex(t, host, "incremental-checkpoint-t0")
+	memRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(memRoot, "state"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memRoot, "memory"), []byte("metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completeErr := errors.New("completion failed")
+	ops := &fakeSandboxOps{
+		checkpointResults: []sandbox.CheckpointResult{{
+			MemRootPath: memRoot, CleanupPath: memRoot, VMMName: "stratovirt", MemorySizeMB: 256,
+			MemoryFormat: conchimage.MemoryFormatIncrementalV1,
+		}},
+		completeErr: completeErr,
+	}
+	store := newTestStore(t)
+	svc := New(ops, host.Client(), store)
+	seedTemplate(t, ctx, svc.Templates, t0Digest, conchtemplate.BootModeCold)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID: "sandbox-incremental", CheckpointHeadTemplateID: t0Digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{SandboxID: "sandbox-incremental"})
+	if !errors.Is(err, completeErr) {
+		t.Fatalf("CheckpointSandbox() error = %v", err)
+	}
+	if len(ops.completeRequests) != 1 || ops.completeRequests[0].SandboxID != "sandbox-incremental" {
+		t.Fatalf("completion requests = %#v", ops.completeRequests)
+	}
+	record, err := store.GetSandbox(ctx, "sandbox-incremental")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.CheckpointHeadTemplateID == t0Digest {
+		t.Fatalf("checkpoint head was not advanced before completion: %#v", record)
+	}
+}
+
 func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	ctx := context.Background()
 	host := newRuntimeImageHost(t)
@@ -261,8 +312,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	memRoot1 := t.TempDir()
 	memRoot2 := t.TempDir()
 	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{
-		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256},
-		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256},
+		{MemRootPath: memRoot1, VMMName: "stratovirt", MemorySizeMB: 256, MemoryFormat: conchimage.MemoryFormatFull},
+		{MemRootPath: memRoot2, VMMName: "stratovirt", MemorySizeMB: 256, MemoryFormat: conchimage.MemoryFormatFull},
 	}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)

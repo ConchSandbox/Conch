@@ -47,6 +47,7 @@ const (
 )
 
 type Daemon struct {
+	config         *config.Config
 	router         *http.ServeMux
 	containerdHost *containerdhost.Host
 	stateStore     state.Store
@@ -100,6 +101,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Daemon{
+		config: cfg,
 		router: http.NewServeMux(),
 	}
 	s.routes()
@@ -146,6 +148,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
 			VolumeManager:      s.volumeManager,
 			WorkDir:            paths.WorkDir,
+			CowSocket:          paths.CowSocket,
+			IncrementalRoot:    paths.IncrementalDir,
 		},
 	})
 	if err != nil {
@@ -168,7 +172,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultSpec.VCPUMax,
 		RamMB:      cfg.Sandbox.DefaultSpec.RamMB,
 	})
-
 	manager := host.SandboxManager()
 	if manager != nil {
 		records, err := store.ListSandboxes(ctx)
@@ -432,17 +435,22 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
+	requestedMemoryMode := ""
+	if s.config != nil {
+		requestedMemoryMode = s.config.Sandbox.MemoryMode
+	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
-		SandboxID:    req.SandboxID,
-		LeaseID:      req.LeaseID,
-		TemplateID:   req.TemplateID,
-		VMMName:      req.VMMName,
-		VCPUNum:      req.VCPUNum,
-		VCPUMax:      req.VCPUMax,
-		RamMB:        req.RAMMB,
-		VolumeMounts: req.VolumeMounts,
-		Env:          req.Env,
-		Network:      req.Network,
+		SandboxID:           req.SandboxID,
+		LeaseID:             req.LeaseID,
+		TemplateID:          req.TemplateID,
+		VMMName:             req.VMMName,
+		VCPUNum:             req.VCPUNum,
+		VCPUMax:             req.VCPUMax,
+		RamMB:               req.RAMMB,
+		VolumeMounts:        req.VolumeMounts,
+		Env:                 req.Env,
+		Network:             req.Network,
+		RequestedMemoryMode: requestedMemoryMode,
 	})
 	if err != nil {
 		writeAPIError(w, err, ulog.F("operation", "sandbox.create"), ulog.F("sandbox_id", req.SandboxID))

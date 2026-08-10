@@ -331,9 +331,6 @@ func (s *Server) loadCommittedBootLayoutMetadata(ctx context.Context, namespace 
 			memorySizeFromSnapshot = true
 		}
 	}
-	if v := rootfsInfo.Labels[common.SnapshotLabelSnapshotDir]; v != "" {
-		layout.SnapshotDir = v
-	}
 	return memorySizeFromSnapshot, nil
 }
 

@@ -12,15 +12,15 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-func TestBootLayoutSnapDirTreatsSnapshotDirAsMemRelative(t *testing.T) {
+func TestBootLayoutVMMStatePathUsesFixedMemoryRelativeDirectory(t *testing.T) {
 	layout := &BootLayout{
-		MemMount:    "/var/lib/conch/mem",
-		SnapshotDir: "/conch/snapshot",
+		MemorySnapshotRoot: "/var/lib/conch/mem",
 	}
-	if got, want := layout.SnapDir(), "/var/lib/conch/mem/conch/snapshot"; got != want {
-		t.Fatalf("SnapDir() = %q, want %q", got, want)
+	if got, want := layout.VMMStatePath(), filepath.Join("/var/lib/conch/mem", common.VMMStateDir); got != want {
+		t.Fatalf("VMMStatePath() = %q, want %q", got, want)
 	}
 }
 

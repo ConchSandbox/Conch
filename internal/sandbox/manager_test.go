@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/memsnap"
 )
 
 func TestDurationOrDefault(t *testing.T) {
@@ -244,14 +246,57 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	}
 }
 
+func TestCheckpointUsesIncrementalCaptureAndRequiresCompletionToClearPoison(t *testing.T) {
+	fullCapture := &recordingCheckpointCapture{}
+	incrementalCapture := &recordingCheckpointCapture{poisonSource: true, result: CapturedBootComponents{
+		MemoryFormat: incrementalMemoryFormat,
+		Manifest: &memsnap.Manifest{
+			SchemaVersion: memsnap.SchemaVersion,
+			MemorySize:    memsnap.DefaultBlockSize,
+			BlockSize:     memsnap.DefaultBlockSize,
+			Layers:        []string{"layers/0.mem"},
+			BuildMap:      []memsnap.BuildRange{{Offset: 0, Length: memsnap.DefaultBlockSize, LayerIndex: 0}},
+		},
+	}}
+	m, entry, sbx := checkpointTestManager(sandboxReady, fullCapture)
+	m.incrementalCapture = incrementalCapture
+	sbx.memoryMode = "incremental"
+	sbx.memoryOrigin = "restored"
+
+	if _, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("Checkpoint() error = %v", err)
+	}
+	if len(fullCapture.requests) != 0 || len(incrementalCapture.requests) != 1 {
+		t.Fatalf("capture calls: full=%d incremental=%d", len(fullCapture.requests), len(incrementalCapture.requests))
+	}
+	if sbx.memoryManifest == nil || !sbx.CheckpointPoisoned() {
+		t.Fatalf("sandbox memory transaction = manifest %#v poisoned %v", sbx.memoryManifest, sbx.CheckpointPoisoned())
+	}
+	if _, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"}); err == nil || !strings.Contains(err.Error(), "previous incremental") {
+		t.Fatalf("second Checkpoint() error = %v", err)
+	}
+	if err := m.CompleteCheckpoint(LifecycleRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("CompleteCheckpoint() error = %v", err)
+	}
+	if sbx.CheckpointPoisoned() || entry.state != sandboxReady {
+		t.Fatalf("completed sandbox state = poisoned %v lifecycle %s", sbx.CheckpointPoisoned(), entry.state)
+	}
+}
+
 type recordingCheckpointCapture struct {
-	requests []RuntimeCaptureRequest
-	result   CapturedBootComponents
-	err      error
+	requests     []RuntimeCaptureRequest
+	result       CapturedBootComponents
+	err          error
+	poisonSource bool
 }
 
 func (r *recordingCheckpointCapture) Capture(_ context.Context, req RuntimeCaptureRequest) (CapturedBootComponents, error) {
 	r.requests = append(r.requests, req)
+	if r.poisonSource {
+		if source, ok := req.Source.(interface{ SetCheckpointPoisoned(bool) }); ok {
+			source.SetCheckpointPoisoned(true)
+		}
+	}
 	return r.result, r.err
 }
 
@@ -268,10 +313,11 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 type recordingBootPreparer struct {
 	released   []ReleaseBootRequest
 	releaseErr error
+	prepared   PreparedBoot
 }
 
 func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
-	return PreparedBoot{}, nil
+	return r.prepared, nil
 }
 
 func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {

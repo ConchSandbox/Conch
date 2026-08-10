@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
 func TestFullCheckpointCaptureRunningCopiesCompleteMemoryComponent(t *testing.T) {
@@ -61,7 +63,7 @@ func TestFullCheckpointCaptureRunningCopiesCompleteMemoryComponent(t *testing.T)
 		t.Fatalf("captured memory mode = %o, want %o", got, want)
 	}
 
-	statePath := filepath.Join(captured.MemRootPath, "conch", "snapshot", "state.bin")
+	statePath := filepath.Join(captured.MemRootPath, common.VMMStateDir, "state.bin")
 	state, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatalf("read captured VMM state: %v", err)
@@ -92,17 +94,20 @@ func TestFullCheckpointCaptureStratovirtDoesNotRequireMemoryBacking(t *testing.T
 	if _, err := os.Stat(filepath.Join(captured.MemRootPath, capturedMemoryFileName)); !os.IsNotExist(err) {
 		t.Fatalf("StratoVirt capture unexpectedly contains mem.img: %v", err)
 	}
+	if captured.MemoryFormat != "full" || captured.CleanupPath != captured.MemRootPath {
+		t.Fatalf("StratoVirt capture metadata = %#v", captured)
+	}
 	for _, name := range []string{"state", "memory"} {
-		if _, err := os.Stat(filepath.Join(captured.MemRootPath, capturedSnapshotDir, name)); err != nil {
+		if _, err := os.Stat(filepath.Join(captured.MemRootPath, common.VMMStateDir, name)); err != nil {
 			t.Fatalf("StratoVirt artifact %s is unavailable: %v", name, err)
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(captured.MemRootPath, capturedSnapshotDir))
+	entries, err := os.ReadDir(captured.MemRootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("StratoVirt snapshot entries = %#v, want only state and memory", entries)
+	if len(entries) != 1 || entries[0].Name() != common.VMMStateDir || !entries[0].IsDir() {
+		t.Fatalf("StratoVirt snapshot entries = %#v, want only %s/", entries, common.VMMStateDir)
 	}
 }
 
@@ -133,7 +138,7 @@ func TestFullCheckpointCaptureRejectsIncompleteStratovirtArtifacts(t *testing.T)
 			if got := strings.Join(source.events, ","); got != "pause,capture,resume" {
 				t.Fatalf("events = %q", got)
 			}
-			stagingRoot := filepath.Dir(filepath.Dir(source.snapshotDir))
+			stagingRoot := source.snapshotDir
 			if _, statErr := os.Stat(stagingRoot); !os.IsNotExist(statErr) {
 				t.Fatalf("failed staging root still exists: %v", statErr)
 			}
@@ -258,7 +263,7 @@ func TestFullCheckpointCaptureErrorsRollbackLifecycleAndStaging(t *testing.T) {
 				t.Fatalf("capture events = %q, want %q", got, tt.wantEvents)
 			}
 			if tt.wantStatePath {
-				memRoot := filepath.Dir(filepath.Dir(source.snapshotDir))
+				memRoot := filepath.Dir(source.snapshotDir)
 				if _, statErr := os.Stat(memRoot); !os.IsNotExist(statErr) {
 					t.Fatalf("failed capture staging still exists at %s: %v", memRoot, statErr)
 				}
@@ -319,7 +324,7 @@ func (f *fakeRuntimeCaptureSource) Pause(context.Context) error {
 func (f *fakeRuntimeCaptureSource) Resume(context.Context) error {
 	f.events = append(f.events, "resume")
 	if f.checkCopyOnResume {
-		memRoot := filepath.Dir(filepath.Dir(f.snapshotDir))
+		memRoot := filepath.Dir(f.snapshotDir)
 		got, err := os.ReadFile(filepath.Join(memRoot, capturedMemoryFileName))
 		if err != nil {
 			f.resumeCheckErr = err

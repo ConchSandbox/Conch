@@ -133,7 +133,7 @@ func populateRootfsParent(mountPoint string) error {
 }
 
 func populateMemParent(mountPoint string) error {
-	snapshotDir := mountPoint + "/conch/snapshot"
+	snapshotDir := mountPoint + "/" + common.VMMStateDir
 	if err := os.MkdirAll(snapshotDir, 0o750); err != nil {
 		return err
 	}

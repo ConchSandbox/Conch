@@ -11,6 +11,7 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/sandbox"
 )
 
@@ -49,6 +50,26 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 	if sandboxOps.createReq.TemplateID != testTemplateIDDefault {
 		t.Fatalf("Boot Index digest = %q, want daemon default", sandboxOps.createReq.TemplateID)
+	}
+}
+
+func TestHandleCreateSandboxMapsMemoryPreconditionToConflict(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{createErr: sandbox.ErrFailedPrecondition.Wrap(memorymode.ErrPrecondition)}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
+		TemplateID: testTemplateIDDefault,
+		VCPUNum:    1,
+		VCPUMax:    1,
+		RamMB:      256,
+	})
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

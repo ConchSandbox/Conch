@@ -5,6 +5,7 @@ const (
 	FileMode = 0640
 
 	MemFileName          = "mem.img"
+	VMMStateDir          = "vmm-state"
 	MemKeySuffix         = "-mem"
 	VmKeySuffix          = "-vm"
 	MemMB                = (1024 * 1024)
@@ -22,8 +23,7 @@ const (
 	ImageKindMemSnapshot    = "snapshot"
 	ImageKindRootfs         = "rootfs"
 
-	SnapshotLabel            = "conch/snapshotter/snapshot"
-	SnapshotLabelRootfs      = "conch/snapshotter/snapshot-rootfs"
-	SnapshotLabelSnapshotDir = "conch/snapshotter/snapshot-dir"
-	SnapshotLabelMemSize     = "conch/snapshotter/snapshot-memsize"
+	SnapshotLabel        = "conch/snapshotter/snapshot"
+	SnapshotLabelRootfs  = "conch/snapshotter/snapshot-rootfs"
+	SnapshotLabelMemSize = "conch/snapshotter/snapshot-memsize"
 )

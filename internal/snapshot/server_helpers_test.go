@@ -14,11 +14,10 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-func TestLoadCommittedBootLayoutMetadataUsesRootfsLabels(t *testing.T) {
+func TestLoadCommittedBootLayoutMetadataUsesMemorySizeLabel(t *testing.T) {
 	snapshotter := &recordingServerSnapshotter{
 		statInfo: snapshots.Info{Labels: map[string]string{
-			common.SnapshotLabelMemSize:     "1024",
-			common.SnapshotLabelSnapshotDir: "custom/snapshot",
+			common.SnapshotLabelMemSize: "1024",
 		}},
 	}
 	srv := &Server{snt: snapshotter}
@@ -34,9 +33,6 @@ func TestLoadCommittedBootLayoutMetadataUsesRootfsLabels(t *testing.T) {
 	}
 	if layout.MemorySizeMB != 1024 {
 		t.Fatalf("MemorySizeMB = %d, want 1024", layout.MemorySizeMB)
-	}
-	if layout.SnapshotDir != "custom/snapshot" {
-		t.Fatalf("SnapshotDir = %q, want custom/snapshot", layout.SnapshotDir)
 	}
 }
 
@@ -119,17 +115,29 @@ func TestBootLayoutMemoryPathsRespectStorageMode(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			layout := &BootLayout{
-				MemMount:     "/runtime/mem",
-				SnapshotDir:  "conch/snapshot",
-				MemoryLayout: tt.mode,
+				MemorySnapshotRoot: "/runtime/mem",
+				MemoryLayout:       tt.mode,
 			}
 			if got := layout.SnapshotMemFile() != ""; got != tt.wantMemoryPath {
 				t.Fatalf("SnapshotMemFile() = %q", layout.SnapshotMemFile())
 			}
-			if got := layout.SnapDir() != ""; got != tt.wantSnapPath {
-				t.Fatalf("SnapDir() = %q", layout.SnapDir())
+			if got := layout.VMMStatePath() != ""; got != tt.wantSnapPath {
+				t.Fatalf("VMMStatePath() = %q", layout.VMMStatePath())
 			}
 		})
+	}
+}
+
+func TestVMMStatePathIsIndependentOfMemoryFormat(t *testing.T) {
+	for _, format := range []string{"full", "incremental-v1"} {
+		layout := &BootLayout{
+			MemorySnapshotRoot: "/runtime/mem",
+			MemoryLayout:       MemoryLayoutCheckpointView,
+			MemoryFormat:       format,
+		}
+		if got := layout.VMMStatePath(); got != "/runtime/mem/vmm-state" {
+			t.Fatalf("format %s VMMStatePath() = %q", format, got)
+		}
 	}
 }
 

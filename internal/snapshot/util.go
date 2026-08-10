@@ -13,9 +13,8 @@ import (
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
 
-// prepareSnapshotFiles creates the snapshot directory structure.
-func prepareSnapshotFiles(layout *BootLayout) error {
-	return os.MkdirAll(layout.SnapDir(), common.DirMode)
+func prepareVMMStateDirectory(layout *BootLayout) error {
+	return os.MkdirAll(layout.VMMStatePath(), common.DirMode)
 }
 
 // listRootfsLayerErofs scans rootfs mount point for layer files in pattern "layer<N>.erofs".
@@ -155,6 +154,5 @@ func bootLayoutLabels(layout *BootLayout, labels map[string]string) map[string]s
 	labels[common.SnapshotLabel] = "true"
 	labels[common.SnapshotLabelMemSize] = fmt.Sprintf("%d", layout.MemorySizeMB)
 	labels[common.SnapshotLabelRootfs] = layout.RootfsMount
-	labels[common.SnapshotLabelSnapshotDir] = layout.SnapshotDir
 	return labels
 }

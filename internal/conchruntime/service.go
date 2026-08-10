@@ -20,6 +20,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
@@ -37,6 +38,9 @@ type SandboxOps interface {
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
+type checkpointCompleter interface {
+	CompleteCheckpoint(sandbox.LifecycleRequest) error
+}
 type SnapshotOps interface {
 	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
 	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
@@ -155,6 +159,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err := s.validateSandboxLimits(opts); err != nil {
 		return SandboxCreateResult{}, err
 	}
+	memoryMode, err := s.resolveCreateMemoryMode(ctx, opts)
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err
 	}
@@ -175,6 +183,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		Env:          copyMap(opts.Env),
 		VolumeMounts: opts.VolumeMounts,
 		Network:      opts.Network,
+		MemoryMode:   string(memoryMode),
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -247,6 +256,44 @@ func (s *Service) validateSandboxLimits(opts SandboxCreateOptions) error {
 		))
 	}
 	return nil
+}
+
+func (s *Service) resolveCreateMemoryMode(ctx context.Context, opts SandboxCreateOptions) (memorymode.EffectiveMode, error) {
+	requested := memorymode.RequestedMode(strings.TrimSpace(opts.RequestedMemoryMode))
+	if requested == "" {
+		return memorymode.EffectiveFull, nil
+	}
+	if s.Templates == nil {
+		return "", fmt.Errorf("template store is not configured")
+	}
+	entry, err := s.Templates.Get(ctx, opts.TemplateID)
+	if err != nil {
+		return "", fmt.Errorf("get template for memory mode: %w", err)
+	}
+	if s.Containerd == nil {
+		return "", fmt.Errorf("containerd client is not configured for memory mode preflight")
+	}
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, entry.BootIndexDigest)
+	if err != nil {
+		return "", fmt.Errorf("inspect template boot index for memory mode: %w", err)
+	}
+	vmmName := opts.VMMName
+	if info.Resume {
+		vmmName = info.VMMName
+	}
+	mode, err := memorymode.Resolve(memorymode.Input{
+		Requested:      requested,
+		VMMName:        vmmName,
+		Resume:         info.Resume,
+		ArtifactFormat: info.MemoryFormat,
+	})
+	if err != nil {
+		if errors.Is(err, memorymode.ErrPrecondition) {
+			return "", sandbox.ErrFailedPrecondition.Wrap(err)
+		}
+		return "", err
+	}
+	return mode, nil
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
@@ -418,13 +465,18 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	defer os.RemoveAll(captured.MemRootPath)
+	cleanupPath := captured.CleanupPath
+	if strings.TrimSpace(cleanupPath) == "" {
+		cleanupPath = captured.MemRootPath
+	}
+	defer os.RemoveAll(cleanupPath)
 
 	published, err := conchimage.PublishCheckpointBootIndex(ctx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
 		SourceBootIndexDigest: parentID,
 		MemRoot:               captured.MemRootPath,
 		VMMName:               captured.VMMName,
 		MemorySizeMB:          captured.MemorySizeMB,
+		MemoryFormat:          captured.MemoryFormat,
 	})
 	if err != nil {
 		return SandboxCheckpointResult{}, err
@@ -463,6 +515,13 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
+	if info.MemoryFormat != captured.MemoryFormat {
+		return SandboxCheckpointResult{}, fmt.Errorf(
+			"validated checkpoint memory format %s does not match captured format %s",
+			info.MemoryFormat,
+			captured.MemoryFormat,
+		)
+	}
 	if err := s.Store.PublishCheckpoint(ctx, conchtemplate.Entry{
 		Origin:                conchtemplate.OriginCheckpoint,
 		BootMode:              conchtemplate.BootModeResume,
@@ -475,6 +534,15 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		return SandboxCheckpointResult{}, err
 	}
 	keepCanonicalRecord = true
+	if captured.MemoryFormat == conchimage.MemoryFormatIncrementalV1 {
+		completer, ok := s.Sandbox.(checkpointCompleter)
+		if !ok {
+			return SandboxCheckpointResult{}, fmt.Errorf("sandbox manager cannot complete incremental checkpoint")
+		}
+		if err := completer.CompleteCheckpoint(sandbox.LifecycleRequest{SandboxID: sandboxID}); err != nil {
+			return SandboxCheckpointResult{}, fmt.Errorf("complete incremental checkpoint: %w", err)
+		}
+	}
 	return SandboxCheckpointResult{
 		TemplateID: info.BootIndexDigest,
 	}, nil

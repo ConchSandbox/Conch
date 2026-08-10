@@ -193,8 +193,8 @@ func PushBootIndex(ctx context.Context, client *containerdclient.Client, req Pus
 // the index: checkpoint publication may add content and metadata, but it must
 // not create checkpoint snapshots.
 //
-// The current implementation takes a VMM-specific MemRoot staging directory as
-// its mutable checkpoint input. A future, more containerd-native implementation
+// The current implementation takes a self-contained MemRoot staging directory
+// as its mutable checkpoint input. A future, more containerd-native implementation
 // should integrate checkpoint publication with containerd's snapshot commit
 // mechanism and publish the committed snapshot as the memory component.
 func PublishCheckpointBootIndex(

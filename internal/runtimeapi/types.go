@@ -42,6 +42,8 @@ type SandboxCreateOptions struct {
 	VolumeMounts []volume.Mount
 	Env          map[string]string
 	Network      *SandboxNetworkConfig
+	// RequestedMemoryMode is injected by conchd and is not part of the HTTP API.
+	RequestedMemoryMode string
 }
 
 type SandboxDefaults struct {

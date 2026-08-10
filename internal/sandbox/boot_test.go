@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/template"
 )
 
@@ -78,7 +80,7 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	if got.Spec.MemoryPath != "" || got.Spec.SnapfilePath != "" {
 		t.Fatalf("StratoVirt cold spec = %#v", got.Spec)
 	}
-	if got.Runtime.MemKey != "" || got.Runtime.MemMount != "" {
+	if got.Runtime.MemKey != "" || got.Runtime.MemorySnapshotRoot != "" {
 		t.Fatalf("StratoVirt cold runtime = %#v", got.Runtime)
 	}
 }
@@ -115,8 +117,33 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	if !got.Runtime.Resume || got.Runtime.BootIndexDigest != bootDigest || got.Runtime.CapturedVMMName != "cloud-hypervisor" {
 		t.Fatalf("resume runtime = %#v", got.Runtime)
 	}
-	if got.Spec.SnapfilePath == "" {
-		t.Fatalf("resume boot = %#v", got)
+	if want := filepath.Join(got.Runtime.MemorySnapshotRoot, common.VMMStateDir); got.Spec.SnapfilePath != want {
+		t.Fatalf("resume state path = %q, want %q", got.Spec.SnapfilePath, want)
+	}
+}
+
+func TestBootPreparerStratovirtResumePropagatesIncrementalMemoryFormat(t *testing.T) {
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
+	resolved := resolvedBoot(bootDigest, true, "stratovirt")
+	resolved.MemoryFormat = conchimage.MemoryFormatIncrementalV1
+	snapshots := &fakeSnapshotBackend{}
+
+	got, err := mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}).Prepare(context.Background(), PrepareBootRequest{
+		TemplateID: entry.BootIndexDigest,
+		SandboxID:  "sandbox-incremental",
+		VMMName:    "stratovirt",
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if len(snapshots.restores) != 1 || snapshots.restores[0].memoryFormat != conchimage.MemoryFormatIncrementalV1 {
+		t.Fatalf("restore calls = %#v", snapshots.restores)
+	}
+	if got.Spec.MemoryFormat != conchimage.MemoryFormatIncrementalV1 || got.Runtime.MemoryFormat != conchimage.MemoryFormatIncrementalV1 {
+		t.Fatalf("prepared boot = %#v", got)
+	}
+	if want := filepath.Join(got.Runtime.MemorySnapshotRoot, common.VMMStateDir); got.Spec.SnapfilePath != want {
+		t.Fatalf("incremental state path = %q, want %q", got.Spec.SnapfilePath, want)
 	}
 }
 
@@ -234,7 +261,7 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 		t.Fatalf("runtime handles are shared: first=%#v second=%#v", first.Runtime, second.Runtime)
 	}
 	if first.Runtime.RootfsMount == second.Runtime.RootfsMount ||
-		first.Runtime.MemMount == second.Runtime.MemMount ||
+		first.Runtime.MemorySnapshotRoot == second.Runtime.MemorySnapshotRoot ||
 		first.Runtime.VMMount == second.Runtime.VMMount {
 		t.Fatalf("runtime mounts are shared: first=%#v second=%#v", first.Runtime, second.Runtime)
 	}
@@ -293,6 +320,7 @@ type bootLayoutCall struct {
 	parents      snapshot.ParentSnapshotIDs
 	memoryLayout snapshot.MemoryLayoutMode
 	memorySizeMB int64
+	memoryFormat string
 }
 
 // fakeSnapshotBackend intentionally has no snapshot metadata query method:
@@ -310,8 +338,9 @@ func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, key string, re
 		parents:      req.Parents,
 		memoryLayout: req.MemoryLayout,
 		memorySizeMB: req.MemorySizeMB,
+		memoryFormat: req.MemoryFormat,
 	})
-	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
+	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout, req.MemoryFormat), nil
 }
 
 func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
@@ -320,8 +349,9 @@ func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, key string, r
 		parents:      req.Parents,
 		memoryLayout: req.MemoryLayout,
 		memorySizeMB: req.MemorySizeMB,
+		memoryFormat: req.MemoryFormat,
 	})
-	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
+	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout, req.MemoryFormat), nil
 }
 
 func (f *fakeSnapshotBackend) ReleaseBootLayout(_ context.Context, key string) error {
@@ -378,22 +408,20 @@ func assertBootResolverRequest(t *testing.T, requests []bootResolverCall, bootDi
 	}
 }
 
-func fakeBootLayout(key string, memorySizeMB int64, memoryLayout snapshot.MemoryLayoutMode) *snapshot.BootLayout {
+func fakeBootLayout(key string, memorySizeMB int64, memoryLayout snapshot.MemoryLayoutMode, memoryFormat string) *snapshot.BootLayout {
 	if memorySizeMB <= 0 {
 		memorySizeMB = 256
 	}
-	memMount := "/mnt/" + key + "/mem"
-	snapshotDir := "conch/snapshot"
+	memorySnapshotRoot := "/mnt/" + key + "/mem"
 	if memoryLayout == snapshot.MemoryLayoutNone {
-		memMount = ""
-		snapshotDir = ""
+		memorySnapshotRoot = ""
 	}
 	return &snapshot.BootLayout{
-		RootfsMount:  "/mnt/" + key + "/rootfs",
-		MemMount:     memMount,
-		VMMount:      "/mnt/" + key + "/vm",
-		SnapshotDir:  snapshotDir,
-		MemorySizeMB: memorySizeMB,
-		MemoryLayout: memoryLayout,
+		RootfsMount:        "/mnt/" + key + "/rootfs",
+		MemorySnapshotRoot: memorySnapshotRoot,
+		VMMount:            "/mnt/" + key + "/vm",
+		MemorySizeMB:       memorySizeMB,
+		MemoryLayout:       memoryLayout,
+		MemoryFormat:       memoryFormat,
 	}
 }

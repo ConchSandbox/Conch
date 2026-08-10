@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
 
 	"github.com/openeuler/Conch/internal/agent/hostconn"
+	"github.com/openeuler/Conch/internal/memsnap"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
@@ -36,7 +40,11 @@ type Execution struct {
 }
 
 type VMStartSpec struct {
-	MemorySizeMB int64
+	MemorySizeMB      int64
+	MemoryFormat      string
+	MemoryFile        *os.File
+	UFFDSocketPath    string
+	ResumeStartedHook func(context.Context) error
 
 	MemoryPath   string
 	KernelPath   string
@@ -49,6 +57,7 @@ type VMStartSpec struct {
 func vmStartSpecFromBootSpec(spec BootSpec) VMStartSpec {
 	return VMStartSpec{
 		MemorySizeMB: spec.MemorySizeMB,
+		MemoryFormat: spec.MemoryFormat,
 		MemoryPath:   spec.MemoryPath,
 		KernelPath:   spec.KernelPath,
 		InitrdPath:   spec.InitrdPath,
@@ -65,6 +74,14 @@ type Sandbox struct {
 	sandboxID   string
 	leaseID     string
 	slot        *netstack.Slot
+
+	memoryMu           sync.RWMutex
+	memoryMode         string
+	memoryOrigin       string
+	memoryManifest     *memsnap.Manifest
+	memorySizeBytes    uint64
+	memoryBlockSize    uint64
+	checkpointPoisoned atomic.Bool
 }
 
 func RestoreSandbox(
@@ -104,20 +121,30 @@ func RestoreSandbox(
 		return nil, fmt.Errorf("validate initialization before VMM start: %w", err)
 	}
 
+	var incrementalRestore *vmm.IncrementalRestoreArgs
+	if vmStartSpec.MemoryFile != nil || vmStartSpec.UFFDSocketPath != "" || vmStartSpec.ResumeStartedHook != nil {
+		incrementalRestore = &vmm.IncrementalRestoreArgs{
+			MemoryFile:        vmStartSpec.MemoryFile,
+			UFFDSocketPath:    vmStartSpec.UFFDSocketPath,
+			ResumeStartedHook: vmStartSpec.ResumeStartedHook,
+		}
+	}
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         vcpuNum,
-		CPUMax:          vcpuMax,
-		MemorySize:      vmStartSpec.MemorySizeMB,
-		MemoryPath:      vmStartSpec.MemoryPath,
-		NetNSPath:       slot.NetNSPath(),
-		TapName:         slot.TapName(),
-		KernelPath:      vmStartSpec.KernelPath,
-		SnapfilePath:    vmStartSpec.SnapfilePath,
-		InitrdPath:      vmStartSpec.InitrdPath,
-		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
-		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
-		VsockCID:        vsockCID,
-		VsockSocketPath: vsockSocketPath,
+		CPUBoot:            vcpuNum,
+		CPUMax:             vcpuMax,
+		MemorySize:         vmStartSpec.MemorySizeMB,
+		MemoryPath:         vmStartSpec.MemoryPath,
+		MemoryFormat:       vmStartSpec.MemoryFormat,
+		IncrementalRestore: incrementalRestore,
+		NetNSPath:          slot.NetNSPath(),
+		TapName:            slot.TapName(),
+		KernelPath:         vmStartSpec.KernelPath,
+		SnapfilePath:       vmStartSpec.SnapfilePath,
+		InitrdPath:         vmStartSpec.InitrdPath,
+		PmemPaths:          append([]string(nil), vmStartSpec.PmemPaths...),
+		VirtioFS:           append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
+		VsockCID:           vsockCID,
+		VsockSocketPath:    vsockSocketPath,
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
@@ -200,6 +227,7 @@ func CreateSandbox(
 		CPUMax:          vcpuMax,
 		MemorySize:      vmStartSpec.MemorySizeMB,
 		MemoryPath:      vmStartSpec.MemoryPath,
+		MemoryFormat:    vmStartSpec.MemoryFormat,
 		NetNSPath:       slot.NetNSPath(),
 		TapName:         slot.TapName(),
 		KernelPath:      vmStartSpec.KernelPath,
@@ -286,6 +314,49 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return fmt.Errorf("failed to resume VM: %w", err)
 	}
 	return nil
+}
+
+func (s *Sandbox) SetCheckpointPoisoned(poisoned bool) {
+	if s != nil {
+		s.checkpointPoisoned.Store(poisoned)
+	}
+}
+
+func (s *Sandbox) CheckpointPoisoned() bool {
+	return s != nil && s.checkpointPoisoned.Load()
+}
+
+func (s *Sandbox) SetIncrementalManifest(manifest memsnap.Manifest) {
+	if s == nil {
+		return
+	}
+	s.memoryMu.Lock()
+	s.memoryManifest = &manifest
+	s.memoryMu.Unlock()
+}
+
+func (s *Sandbox) IncrementalMemoryRuntime() (IncrementalMemoryRuntime, error) {
+	if s == nil || s.process == nil {
+		return IncrementalMemoryRuntime{}, fmt.Errorf("sandbox VMM process is not configured")
+	}
+	adapter, ok := s.process.IncrementalMemoryAdapter()
+	if !ok {
+		return IncrementalMemoryRuntime{}, fmt.Errorf("VMM does not support incremental memory capture")
+	}
+	s.memoryMu.RLock()
+	defer s.memoryMu.RUnlock()
+	var parent *memsnap.Manifest
+	if s.memoryManifest != nil {
+		copy := *s.memoryManifest
+		copy.Layers = append([]string(nil), copy.Layers...)
+		copy.BuildMap = append([]memsnap.BuildRange(nil), copy.BuildMap...)
+		parent = &copy
+	}
+	return IncrementalMemoryRuntime{
+		Origin: s.memoryOrigin, ParentManifest: parent,
+		MemorySize: s.memorySizeBytes, BlockSize: s.memoryBlockSize,
+		PID: s.process.Pid(), Adapter: adapter,
+	}, nil
 }
 
 // CreateVMMState writes the VMM-specific capture into snapshotDir. The caller
