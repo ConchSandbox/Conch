@@ -40,6 +40,7 @@ type BootIndexContentOptions struct {
 	Tag               string
 	VMMName           string
 	MemorySizeMB      int64
+	MemoryFormat      string
 }
 
 func BuildBootIndexInContent(ctx context.Context, store content.Store, opts BootIndexContentOptions) (ocispec.Descriptor, error) {
@@ -77,6 +78,21 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 	if !hasMem && opts.MemorySizeMB != 0 {
 		return ocispec.Descriptor{}, fmt.Errorf("memory size requires a mem-snapshot component")
 	}
+	if !hasMem && opts.MemoryFormat != "" {
+		return ocispec.Descriptor{}, fmt.Errorf("memory format requires a mem-snapshot component")
+	}
+	if hasMem {
+		switch vmmName {
+		case "stratovirt":
+			if opts.MemoryFormat != MemoryFormatFullV1 && opts.MemoryFormat != MemoryFormatIncrementalV1 {
+				return ocispec.Descriptor{}, fmt.Errorf("invalid %s value %q", AnnotationMemoryFormat, opts.MemoryFormat)
+			}
+		default:
+			if opts.MemoryFormat != "" {
+				return ocispec.Descriptor{}, fmt.Errorf("non-stratovirt mem component has unexpected %s", AnnotationMemoryFormat)
+			}
+		}
+	}
 
 	rootfsDesc, err := normalizeComponentDescriptor(ctx, store, opts.RootfsDescriptor, KindRootfs, opts.Tag+"-rootfs", "")
 	if err != nil {
@@ -92,6 +108,9 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 		memDesc.Annotations = mergeAnnotations(memDesc.Annotations, map[string]string{
 			AnnotationMemorySizeMB: strconv.FormatInt(opts.MemorySizeMB, 10),
 		})
+		if opts.MemoryFormat != "" {
+			memDesc.Annotations[AnnotationMemoryFormat] = opts.MemoryFormat
+		}
 		manifests = append(manifests, memDesc)
 	}
 
@@ -246,6 +265,132 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 		"org.opencontainers.image.ref.name": tag,
 	}
 	return manifestDesc, nil
+}
+
+// BuildIncrementalMemoryComponentInContent appends one immutable native EROFS
+// layer to an incremental memory component. An empty source starts a new chain.
+func BuildIncrementalMemoryComponentInContent(
+	ctx context.Context,
+	store content.Store,
+	source ocispec.Descriptor,
+	newRoot string,
+	tag string,
+) (ocispec.Descriptor, error) {
+	if store == nil {
+		return ocispec.Descriptor{}, fmt.Errorf("content store is required")
+	}
+	newRoot = strings.TrimSpace(newRoot)
+	if newRoot == "" {
+		return ocispec.Descriptor{}, fmt.Errorf("%s component has no new root", KindMemSnapshot)
+	}
+	var sourceManifest ocispec.Manifest
+	var sourceConfig ocispec.Image
+	if descriptorProvided(source) {
+		memoryFormat, err := inspectMemoryDescriptorAnnotations("stratovirt", source)
+		if err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("validate source memory annotations: %w", err)
+		}
+		if memoryFormat != MemoryFormatIncrementalV1 {
+			return ocispec.Descriptor{}, fmt.Errorf("source memory format %q cannot be appended as %s", memoryFormat, MemoryFormatIncrementalV1)
+		}
+		sourceManifest, sourceConfig, err = readNativeComponentForAppend(ctx, store, source, KindMemSnapshot)
+		if err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("validate source memory component: %w", err)
+		}
+	}
+
+	newComponent, err := BuildNativeComponentInContent(ctx, store, []string{newRoot}, KindMemSnapshot, tag)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if !descriptorProvided(source) {
+		return newComponent, nil
+	}
+	newManifest, newConfig, err := readNativeComponentForAppend(ctx, store, newComponent, KindMemSnapshot)
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("validate new memory component: %w", err)
+	}
+	if len(newManifest.Layers) != 1 || len(newConfig.RootFS.DiffIDs) != 1 {
+		return ocispec.Descriptor{}, fmt.Errorf("new incremental epoch must contain exactly one OCI layer")
+	}
+
+	combinedConfig := sourceConfig
+	combinedConfig.Created = newConfig.Created
+	combinedConfig.RootFS.DiffIDs = append(append([]digest.Digest(nil), sourceConfig.RootFS.DiffIDs...), newConfig.RootFS.DiffIDs...)
+	combinedConfig.History = append(append([]ocispec.History(nil), sourceConfig.History...), newConfig.History...)
+	configDesc, err := writeBlobJSONToContent(ctx, store, combinedConfig, ocispec.MediaTypeImageConfig)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	combinedManifest := ocispec.Manifest{
+		Versioned: ispec.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    configDesc,
+		Layers:    append(append([]ocispec.Descriptor(nil), sourceManifest.Layers...), newManifest.Layers...),
+	}
+	manifestDesc, err := writeBlobJSONToContent(ctx, store, combinedManifest, ocispec.MediaTypeImageManifest)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	manifestDesc.Annotations = mergeAnnotations(newComponent.Annotations, nil)
+	return manifestDesc, nil
+}
+
+func readNativeComponentForAppend(
+	ctx context.Context,
+	store content.Store,
+	source ocispec.Descriptor,
+	kind string,
+) (ocispec.Manifest, ocispec.Image, error) {
+	if err := validateDescriptor(source, "source "+kind); err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, err
+	}
+	if source.MediaType != ocispec.MediaTypeImageManifest {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source media type is %q", source.MediaType)
+	}
+	if getKind(source) != kind {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source kind is %q, want %q", getKind(source), kind)
+	}
+	if err := validateContentClosure(ctx, store, source); err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source closure: %w", err)
+	}
+	rawManifest, err := content.ReadBlob(ctx, store, source)
+	if err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("read source manifest: %w", err)
+	}
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("unmarshal source manifest: %w", err)
+	}
+	if manifest.MediaType != ocispec.MediaTypeImageManifest || len(manifest.Layers) == 0 {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source manifest is not a non-empty image manifest")
+	}
+	if manifest.Config.MediaType != ocispec.MediaTypeImageConfig {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source config media type is %q", manifest.Config.MediaType)
+	}
+	rawConfig, err := content.ReadBlob(ctx, store, manifest.Config)
+	if err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("read source config: %w", err)
+	}
+	var config ocispec.Image
+	if err := json.Unmarshal(rawConfig, &config); err != nil {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("unmarshal source config: %w", err)
+	}
+	if config.OS != runtime.GOOS || config.Architecture != runtime.GOARCH {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source platform %s/%s does not match %s/%s", config.OS, config.Architecture, runtime.GOOS, runtime.GOARCH)
+	}
+	if config.RootFS.Type != "layers" || len(config.RootFS.DiffIDs) != len(manifest.Layers) {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source rootfs does not match manifest layers")
+	}
+	if config.Config.Labels["io.conch.component.type"] != kind {
+		return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source config component type is %q", config.Config.Labels["io.conch.component.type"])
+	}
+	for index, layer := range manifest.Layers {
+		if layer.MediaType != erofsconvert.NativeLayerMediaType || config.RootFS.DiffIDs[index] != layer.Digest {
+			return ocispec.Manifest{}, ocispec.Image{}, fmt.Errorf("source layer %d is not native EROFS content", index)
+		}
+	}
+	return manifest, config, nil
 }
 
 func descriptorProvided(desc ocispec.Descriptor) bool {
@@ -511,6 +656,11 @@ func inspectBootIndexMetadata(desc ocispec.Descriptor, index ocispec.Index) (Boo
 			return BootIndexInfo{}, fmt.Errorf("boot index VMM %q does not match mem component VMM %q", indexVMM, memVMM)
 		}
 		info.VMMName = indexVMM
+		memoryFormat, err := inspectMemoryDescriptorAnnotations(indexVMM, info.MemDescriptor)
+		if err != nil {
+			return BootIndexInfo{}, err
+		}
+		info.MemoryFormat = memoryFormat
 		switch {
 		case indexMemorySize == "" && memMemorySize == "":
 			// Legacy Cloud Hypervisor indexes can still derive the size from
@@ -536,6 +686,28 @@ func inspectBootIndexMetadata(desc ocispec.Descriptor, index ocispec.Index) (Boo
 		return BootIndexInfo{}, fmt.Errorf("cold boot index %s has unexpected %s capability", desc.Digest, AnnotationMemorySizeMB)
 	}
 	return info, nil
+}
+
+func inspectMemoryDescriptorAnnotations(vmmName string, memDescriptor ocispec.Descriptor) (string, error) {
+	if !descriptorProvided(memDescriptor) {
+		return "", nil
+	}
+	memoryFormat, hasMemoryFormat := memDescriptor.Annotations[AnnotationMemoryFormat]
+	if vmmName != "stratovirt" {
+		if hasMemoryFormat {
+			return "", fmt.Errorf("non-stratovirt mem component has unexpected %s", AnnotationMemoryFormat)
+		}
+		return "", nil
+	}
+	if !hasMemoryFormat {
+		return "", fmt.Errorf("stratovirt mem component is missing %s", AnnotationMemoryFormat)
+	}
+	switch memoryFormat {
+	case MemoryFormatFullV1, MemoryFormatIncrementalV1:
+		return memoryFormat, nil
+	default:
+		return "", fmt.Errorf("mem component has invalid %s value %q", AnnotationMemoryFormat, memoryFormat)
+	}
 }
 
 func validateDescriptor(desc ocispec.Descriptor, name string) error {
