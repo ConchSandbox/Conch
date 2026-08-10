@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -55,8 +56,27 @@ type Process struct {
 	apiReadyMu      sync.Mutex
 	apiReady        bool
 	// Exit *utils.SetOnce[struct{}]
-	adapter    vmmAdapter
-	exitSignal chan error
+	adapter           vmmAdapter
+	exitSignal        chan error
+	inheritedFiles    []*os.File
+	resumeStartedHook func(context.Context) error
+}
+
+func appendInheritedFile(cmd *exec.Cmd, file *os.File) int {
+	childFD := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	return childFD
+}
+
+func (p *Process) closeInheritedFiles() error {
+	var result error
+	for _, file := range p.inheritedFiles {
+		if file != nil {
+			result = errors.Join(result, file.Close())
+		}
+	}
+	p.inheritedFiles = nil
+	return result
 }
 
 func SandboxVmmSocketPath(sandboxId string) (string, error) {
@@ -80,6 +100,21 @@ func NewProcess(
 	vmmResourceArgs *ResourceArgs, restore bool,
 ) (*Process, error) {
 	logger := ulog.GetLogger()
+	if vmmResourceArgs == nil {
+		return nil, fmt.Errorf("VMM resource arguments are required")
+	}
+	var inheritedFiles []*os.File
+	if vmmResourceArgs.MemoryFile != nil {
+		inheritedFiles = append(inheritedFiles, vmmResourceArgs.MemoryFile)
+	}
+	constructionComplete := false
+	defer func() {
+		if !constructionComplete {
+			for _, file := range inheritedFiles {
+				_ = file.Close()
+			}
+		}
+	}()
 
 	vmmSocketPath, err := SandboxVmmSocketPath(sandboxId)
 	if err != nil {
@@ -99,11 +134,17 @@ func NewProcess(
 		return nil, err
 	}
 
+	cmd := exec.Command("bash", "-c", "")
+	for _, file := range inheritedFiles {
+		vmmResourceArgs.MemoryFD = appendInheritedFile(cmd, file)
+	}
 	p := Process{
-		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
-		VmmSocketPath:   vmmSocketPath,
-		adapter:         adapter,
-		exitSignal:      make(chan error, 1),
+		VsockSocketPath:   vmmResourceArgs.VsockSocketPath,
+		VmmSocketPath:     vmmSocketPath,
+		adapter:           adapter,
+		exitSignal:        make(chan error, 1),
+		inheritedFiles:    inheritedFiles,
+		resumeStartedHook: vmmResourceArgs.ResumeStartedHook,
 	}
 
 	startScript, err := adapter.BuildStartCmd(vmmResourceArgs, restore)
@@ -127,12 +168,9 @@ func NewProcess(
 		return nil, fmt.Errorf("error stating disk file: %w", err)
 	}
 
-	cmd := exec.Command(
-		"bash",
-		"-c",
-		startScript,
-	)
+	cmd.Args[2] = startScript
 	p.cmd = cmd
+	constructionComplete = true
 
 	return &p, nil
 }
@@ -149,11 +187,16 @@ func (p *Process) startCmd(
 	logger.Debug("Starting VMM process")
 	err := p.cmd.Start()
 	if err != nil {
+		closeErr := p.closeInheritedFiles()
 		logger.Error("Error starting VMM process",
 			ulog.F("error", err),
 		)
 		p.adapter.Cleanup()
-		return fmt.Errorf("error starting vmm process: %w", err)
+		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), closeErr)
+	}
+	if err := p.closeInheritedFiles(); err != nil {
+		_ = p.cmd.Process.Kill()
+		return fmt.Errorf("close inherited VMM descriptors: %w", err)
 	}
 
 	p.adapter.AfterProcessStart()
@@ -230,6 +273,10 @@ func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
+	if err := p.runResumeStartedHook(ctx); err != nil {
+		vmmStopErr := p.Stop()
+		return errors.Join(fmt.Errorf("wait for external memory readiness: %w", err), vmmStopErr)
+	}
 
 	if err := p.adapter.WaitForRestoreReady(ctx, p.exitSignal); err != nil {
 		vmmStopErr := p.Stop()
@@ -260,6 +307,13 @@ func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 	return nil
 }
 
+func (p *Process) runResumeStartedHook(ctx context.Context) error {
+	if p.resumeStartedHook == nil {
+		return nil
+	}
+	return p.resumeStartedHook(ctx)
+}
+
 func getProcessState(pid int) (string, error) {
 	cmd, err := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(pid)).Output()
 	if err != nil {
@@ -275,9 +329,10 @@ func (p *Process) Stop() error {
 	var errs []error
 
 	if p.cmd == nil || p.cmd.Process == nil {
+		closeErr := p.closeInheritedFiles()
 		p.adapter.Cleanup()
 		logger.Warn("VMM process not started")
-		return fmt.Errorf("vmm process not started")
+		return errors.Join(fmt.Errorf("vmm process not started"), closeErr)
 	}
 
 	select {
@@ -351,6 +406,11 @@ func (p *Process) CreateSnapshot(ctx context.Context, snapfilePath string) error
 		ulog.F("path", snapfilePath),
 	)
 	return p.adapter.CreateSnapshot(snapfilePath)
+}
+
+func (p *Process) IncrementalMemoryAdapter() (driver.IncrementalMemoryAdapter, bool) {
+	adapter, ok := p.adapter.(driver.IncrementalMemoryAdapter)
+	return adapter, ok
 }
 
 func (p *Process) Wait() error {

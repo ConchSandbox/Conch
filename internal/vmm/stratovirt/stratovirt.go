@@ -75,12 +75,35 @@ const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 -disable-seccomp \
 -incoming file:{{ .SnapfilePath }},mapped=true`
 
+const incrementalRestoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
+{{ .VmmBinaryPath }} \
+-machine {{ .MachineType }}{{ .MachineOpts }} \
+-kernel {{ .KernelPath }} \
+-initrd {{ .RootfsPath }} \
+-append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw" \
+-m {{ .MemorySize }}M \
+-smp {{ .CPUBoot }} \
+-qmp unix:{{ .VmmSocket }},server,nowait \
+-serial socket,path={{ .SerialSocket }},server,nowait \
+-netdev tap,id=net0,ifname={{ .TapName }} \
+-device virtio-net-pci,netdev=net0,id=net0,bus=pcie.0,addr=0x10 \
+{{ .PmemDevices }} \
+-device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
+-disable-seccomp \
+-S \
+-object memory-backend-memfd,size={{ .MemorySize }}M,id=mem0,fd={{ .MemoryFD }},share=off,mem-prealloc=false \
+-numa node,nodeid=0,cpus=0-{{ .CPUEnd }},memdev=mem0 \
+-incoming file:{{ .SnapfilePath }},memory=external,mapped=false,uffd_sock={{ .UFFDSocketPath }}`
+
 type StartScriptStratovirtArgs struct {
 	NSenterPath     string
 	VmmBinaryPath   string
 	CPUBoot         int64
 	CPUMax          int64
 	MemorySize      string
+	MemoryFD        int
+	CPUEnd          int64
+	UFFDSocketPath  string
 	MachineType     string
 	ConsoleDevice   string
 	KernelPath      string
@@ -189,6 +212,9 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 		CPUBoot:         args.CPUBoot,
 		CPUMax:          args.CPUMax,
 		MemorySize:      strconv.FormatInt(args.MemorySize, 10),
+		MemoryFD:        args.MemoryFD,
+		CPUEnd:          args.CPUBoot - 1,
+		UFFDSocketPath:  args.UFFDSocketPath,
 		MachineType:     machineType,
 		ConsoleDevice:   consoleDevice,
 		KernelPath:      args.KernelPath,
@@ -217,6 +243,18 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 	scriptContent := startScriptStratovirt
 	if restore {
 		scriptContent = restoreScriptStratovirt
+		if args.MemoryFormat == "incremental-v1" {
+			if args.MemoryFD < 3 {
+				return "", fmt.Errorf("incremental restore requires an inherited memory fd")
+			}
+			if strings.TrimSpace(args.UFFDSocketPath) == "" {
+				return "", fmt.Errorf("incremental restore requires a UFFD socket path")
+			}
+			if args.CPUBoot <= 0 {
+				return "", fmt.Errorf("incremental restore requires a positive boot CPU count")
+			}
+			scriptContent = incrementalRestoreScriptStratovirt
+		}
 	}
 	templateSt := template.Must(template.New("stratovirt-start").Parse(scriptContent))
 
@@ -348,14 +386,34 @@ func (s *StratovirtClient) connectQMP() (net.Conn, *bufio.Reader, error) {
 		return nil, nil, fmt.Errorf("failed to send qmp_capabilities: %w", err)
 	}
 
-	resp, err := reader.ReadString('\n')
+	response, err := readQMPResponse(reader)
 	if err != nil {
 		conn.Close()
 		return nil, nil, fmt.Errorf("failed to read qmp_capabilities response: %w", err)
 	}
-	logger.Debug("QMP capabilities response", ulog.F("response", strings.TrimSpace(resp)))
+	logger.Debug("QMP capabilities response", ulog.F("response", response))
 
 	return conn, reader, nil
+}
+
+func readQMPResponse(reader *bufio.Reader) (map[string]any, error) {
+	for {
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		var response map[string]any
+		decoder := json.NewDecoder(strings.NewReader(message))
+		decoder.UseNumber()
+		if err := decoder.Decode(&response); err != nil {
+			return nil, fmt.Errorf("failed to parse qmp response: %w", err)
+		}
+		if _, isEvent := response["event"]; isEvent {
+			ulog.GetLogger().Debug("Ignoring asynchronous QMP event", ulog.F("event", strings.TrimSpace(message)))
+			continue
+		}
+		return response, nil
+	}
 }
 
 func (s *StratovirtClient) executeQMPCommand(command string, arguments map[string]any) error {
@@ -390,16 +448,11 @@ func (s *StratovirtClient) executeQMPCommandWithResponse(command string, argumen
 		return nil, fmt.Errorf("failed to send qmp command: %w", err)
 	}
 
-	resp, err := reader.ReadString('\n')
+	response, err := readQMPResponse(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read qmp response: %w", err)
 	}
-	logger.Debug("QMP response", ulog.F("response", strings.TrimSpace(resp)))
-
-	var response map[string]any
-	if err := json.Unmarshal([]byte(resp), &response); err != nil {
-		return nil, fmt.Errorf("failed to parse qmp response: %w", err)
-	}
+	logger.Debug("QMP response", ulog.F("response", response))
 	if errObj, ok := response["error"]; ok {
 		return nil, fmt.Errorf("qmp command failed: %v", errObj)
 	}
@@ -475,15 +528,7 @@ func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited <-
 			ulog.F("running", running))
 
 		if status == "paused" {
-			logger.Info("VM is paused, sending cont command")
-			if err := s.executeQMPCommand("cont", nil); err != nil {
-				logger.Warn("Failed to send cont command", ulog.F("error", err))
-				if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := waitForAgentRetry(ctx, processExited, 200*time.Millisecond); err != nil {
+			if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 				return err
 			}
 			continue
@@ -558,6 +603,60 @@ func (s *StratovirtClient) queryStatus() (string, error) {
 	return status, nil
 }
 
+func (s *StratovirtClient) QueryVMStatus() (string, error) {
+	return s.queryStatus()
+}
+
+func decodeQMPReturn(response map[string]any, target any) error {
+	returnValue, ok := response["return"]
+	if !ok {
+		return fmt.Errorf("missing return field")
+	}
+	encoded, err := json.Marshal(returnValue)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, target)
+}
+
+func (s *StratovirtClient) QueryMemoryMappings() ([]driver.MemoryMapping, error) {
+	response, err := s.executeQMPCommandWithResponse("query-mem-mappings", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Mappings []driver.MemoryMapping `json:"mappings"`
+	}
+	if err := decodeQMPReturn(response, &result); err != nil {
+		return nil, fmt.Errorf("decode query-mem-mappings response: %w", err)
+	}
+	return result.Mappings, nil
+}
+
+func (s *StratovirtClient) QueryMemoryPageState() (driver.MemoryPageState, error) {
+	response, err := s.executeQMPCommandWithResponse("query-mem-page-state", nil)
+	if err != nil {
+		return driver.MemoryPageState{}, err
+	}
+	var result driver.MemoryPageState
+	if err := decodeQMPReturn(response, &result); err != nil {
+		return driver.MemoryPageState{}, fmt.Errorf("decode query-mem-page-state response: %w", err)
+	}
+	return result, nil
+}
+
+func (s *StratovirtClient) QueryMemoryDirtyBitmap() (driver.MemoryDirtyBitmap, error) {
+	response, err := s.executeQMPCommandWithResponse("query-mem-dirty-bitmap", nil)
+	if err != nil {
+		return driver.MemoryDirtyBitmap{}, err
+	}
+	var result driver.MemoryDirtyBitmap
+	if err := decodeQMPReturn(response, &result); err != nil {
+		return driver.MemoryDirtyBitmap{}, fmt.Errorf("decode query-mem-dirty-bitmap response: %w", err)
+	}
+	return result, nil
+}
+
 const (
 	stratovirtSnapshotPollInterval = 500 * time.Millisecond
 	stratovirtSnapshotPollTimeout  = 5 * time.Minute
@@ -583,9 +682,20 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 		}
 	}
 
-	args := map[string]any{
-		"uri": "file:" + snapfilePath,
+	return s.createSnapshot(snapfilePath, false)
+}
+
+func (s *StratovirtClient) CreateExternalMemorySnapshot(snapfilePath string) error {
+	return s.createSnapshot(snapfilePath, true)
+}
+
+func (s *StratovirtClient) createSnapshot(snapfilePath string, externalMemory bool) error {
+	logger := ulog.GetLogger()
+	uri := "file:" + snapfilePath
+	if externalMemory {
+		uri += ",memory=external"
 	}
+	args := map[string]any{"uri": uri}
 	if err := s.executeQMPCommand("migrate", args); err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
