@@ -196,18 +196,26 @@ func clearSandboxNetworkPolicyRules(ctx context.Context, slot *Slot) error {
 		if err != nil {
 			return fmt.Errorf("initialize iptables: %w", err)
 		}
+		chains := []struct {
+			name string
+			hook []string
+		}{
+			{name: egressPolicyChain, hook: []string{"-i", slot.TapName(), "-j", egressPolicyChain}},
+			{name: ingressPolicyChain, hook: []string{"-o", slot.TapName(), "-j", ingressPolicyChain}},
+		}
+
 		var errs []error
-		errs = append(errs, tables.DeleteIfExists(sandboxPolicyTable, "FORWARD", "-i", slot.TapName(), "-j", egressPolicyChain))
-		errs = append(errs, tables.DeleteIfExists(sandboxPolicyTable, "FORWARD", "-o", slot.TapName(), "-j", ingressPolicyChain))
-		for _, chain := range []string{egressPolicyChain, ingressPolicyChain} {
-			exists, existsErr := tables.ChainExists(sandboxPolicyTable, chain)
+		for _, chain := range chains {
+			exists, existsErr := tables.ChainExists(sandboxPolicyTable, chain.name)
 			if existsErr != nil {
 				errs = append(errs, existsErr)
 				continue
 			}
-			if exists {
-				errs = append(errs, tables.ClearChain(sandboxPolicyTable, chain))
+			if !exists {
+				continue
 			}
+			errs = append(errs, tables.DeleteIfExists(sandboxPolicyTable, "FORWARD", chain.hook...))
+			errs = append(errs, tables.ClearChain(sandboxPolicyTable, chain.name))
 		}
 		return errors.Join(errs...)
 	})

@@ -66,7 +66,7 @@ type Sandbox struct {
 	slot        *netstack.Slot
 }
 
-func ResumeSandbox(
+func RestoreSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
 	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
@@ -120,9 +120,9 @@ func ResumeSandbox(
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
-	err = vmmHandle.Resume(ctx, vmStartSpec.SnapfilePath)
+	err = vmmHandle.Restore(ctx, vmStartSpec.SnapfilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create VMM: %w", err)
+		return nil, fmt.Errorf("failed to restore VMM: %w", err)
 	}
 
 	sbx := &Sandbox{

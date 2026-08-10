@@ -301,7 +301,7 @@ func (m *Manager) lockCurrentSandboxEntry(mapKey, sandboxID string) (*sandboxEnt
 	return entry, entry.mu.Unlock, nil
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, resume bool, vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, restore bool, vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 	readyOpts := hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
@@ -319,8 +319,8 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 
 	var sbx *Sandbox
 	var createErr error
-	if resume {
-		sbx, createErr = ResumeSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
+	if restore {
+		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
 	} else {
 		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
 	}
@@ -519,7 +519,7 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, run
 	})
 }
 
-func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, resume bool) (*Sandbox, error) {
+func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, restore bool) (*Sandbox, error) {
 	vmmBinary, ok := m.vmmBinaries[req.VMMName]
 	if !ok {
 		return nil, fmt.Errorf("vmm %q is not configured", req.VMMName)
@@ -537,7 +537,7 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 		m.pool,
 		m.vsockSignalRetry,
 		m.vsockSignalTimeout,
-		resume,
+		restore,
 		runtimeIDs.vsockCID,
 		runtimeIDs.vsockSocketPath,
 		req.Network,
