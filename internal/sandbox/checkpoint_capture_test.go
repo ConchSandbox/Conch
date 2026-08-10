@@ -92,12 +92,15 @@ func TestFullCheckpointCaptureStratovirtDoesNotRequireMemoryBacking(t *testing.T
 	if _, err := os.Stat(filepath.Join(captured.MemRootPath, capturedMemoryFileName)); !os.IsNotExist(err) {
 		t.Fatalf("StratoVirt capture unexpectedly contains mem.img: %v", err)
 	}
+	if captured.MemoryFormat != "full-v1" || captured.CleanupPath != captured.MemRootPath {
+		t.Fatalf("StratoVirt capture metadata = %#v", captured)
+	}
 	for _, name := range []string{"state", "memory"} {
-		if _, err := os.Stat(filepath.Join(captured.MemRootPath, capturedSnapshotDir, name)); err != nil {
+		if _, err := os.Stat(filepath.Join(captured.MemRootPath, name)); err != nil {
 			t.Fatalf("StratoVirt artifact %s is unavailable: %v", name, err)
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(captured.MemRootPath, capturedSnapshotDir))
+	entries, err := os.ReadDir(captured.MemRootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +136,7 @@ func TestFullCheckpointCaptureRejectsIncompleteStratovirtArtifacts(t *testing.T)
 			if got := strings.Join(source.events, ","); got != "pause,capture,resume" {
 				t.Fatalf("events = %q", got)
 			}
-			stagingRoot := filepath.Dir(filepath.Dir(source.snapshotDir))
+			stagingRoot := source.snapshotDir
 			if _, statErr := os.Stat(stagingRoot); !os.IsNotExist(statErr) {
 				t.Fatalf("failed staging root still exists: %v", statErr)
 			}

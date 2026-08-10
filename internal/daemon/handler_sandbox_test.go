@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/memorymode"
 )
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
@@ -36,6 +38,21 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 	if sandboxOps.createReq.TemplateID != "tmpl-default" {
 		t.Fatalf("template ID = %q, want daemon default", sandboxOps.createReq.TemplateID)
+	}
+}
+
+func TestHandleCreateSandboxMapsMemoryPreconditionToHTTP412(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{createErr: fmt.Errorf("resolve memory mode: %w", memorymode.ErrPrecondition)}
+	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: "tmpl-default"})
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

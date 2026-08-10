@@ -16,8 +16,8 @@ import (
 
 func TestBootLayoutSnapDirTreatsSnapshotDirAsMemRelative(t *testing.T) {
 	layout := &BootLayout{
-		MemMount:    "/var/lib/conch/mem",
-		SnapshotDir: "/conch/snapshot",
+		MemorySnapshotRoot: "/var/lib/conch/mem",
+		SnapshotDir:        "/conch/snapshot",
 	}
 	if got, want := layout.SnapDir(), "/var/lib/conch/mem/conch/snapshot"; got != want {
 		t.Fatalf("SnapDir() = %q, want %q", got, want)
