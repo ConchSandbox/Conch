@@ -24,8 +24,10 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/cow"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
@@ -58,6 +60,7 @@ type Daemon struct {
 	listener       net.Listener
 	unixSocketPath string
 	cleanupOnce    sync.Once
+	cowProcess     *cow.Process
 
 	// TODO: need ListCachedBuilds()
 }
@@ -108,6 +111,26 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := ulog.GetLogger()
 	paths := cfg.RuntimePaths()
+	requestedMemoryMode := memorymode.RequestedMode(cfg.Sandbox.MemoryMode)
+	startupComplete := false
+	defer func() {
+		if !startupComplete && s.cowProcess != nil {
+			_ = s.cowProcess.Close()
+		}
+	}()
+	if requestedMemoryMode == memorymode.RequestedIncremental {
+		if err := cow.ProbeIncrementalMemory(); err != nil {
+			cancel()
+			return nil, fmt.Errorf("incremental memory preflight: %w", err)
+		}
+		cowProcess, err := cow.StartProcess(ctx, cfg.Sandbox.CowBinary, paths.CowSocket)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("start conch-cow: %w", err)
+		}
+		s.cowProcess = cowProcess
+		logger.Info("conch-cow initialized", ulog.F("binary", cfg.Sandbox.CowBinary), ulog.F("socket", paths.CowSocket))
+	}
 
 	store, err := state.OpenBolt(paths.StateDB)
 	if err != nil {
@@ -216,6 +239,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	handleSignals(ctx, cancel, s)
 
+	startupComplete = true
 	logger.Info("Server initialized successfully")
 	return s, nil
 }
@@ -343,6 +367,15 @@ func (s *Daemon) Shutdown() {
 			finish(err)
 			if err != nil {
 				logger.Error("Sandbox cleanup error", ulog.F("error", err))
+			}
+		}
+
+		if s.cowProcess != nil {
+			finish := cleanupdiag.Start("daemon.cow.close")
+			err := s.cowProcess.Close()
+			finish(err)
+			if err != nil {
+				logger.Error("conch-cow cleanup error", ulog.F("error", err))
 			}
 		}
 
