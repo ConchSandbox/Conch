@@ -53,6 +53,7 @@ type Pool struct {
 	populateCancel context.CancelFunc
 	populateDone   <-chan struct{}
 	cniManager     *CNIManager
+	hostInterface  string
 	slotConfig     slotConfig
 	slotIDs        *slotstate.Allocator
 }
@@ -82,13 +83,21 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
+	gateway, err := defaultGatewayInterface()
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureHostForwardingRules(cniManager.bridgeName, gateway); err != nil {
+		return nil, fmt.Errorf("configure host forwarding for CNI bridge %s: %w", cniManager.bridgeName, err)
+	}
 
 	p := &Pool{
-		warmSlots:    slotstate.NewQueue[*Slot](warmPoolSize),
-		refillNeeded: make(chan struct{}, 1),
-		cniManager:   cniManager,
-		slotConfig:   slotConfig,
-		slotIDs:      slotstate.NewAllocator(firstSlotID, maxSlots),
+		warmSlots:     slotstate.NewQueue[*Slot](warmPoolSize),
+		refillNeeded:  make(chan struct{}, 1),
+		cniManager:    cniManager,
+		hostInterface: gateway,
+		slotConfig:    slotConfig,
+		slotIDs:       slotstate.NewAllocator(firstSlotID, maxSlots),
 	}
 
 	return p, nil
@@ -160,6 +169,7 @@ func (p *Pool) signalRefillNeeded() {
 }
 
 // Start launches the pool's population loop. It must be called exactly once.
+
 func (p *Pool) Start(ctx context.Context) {
 	populateCtx, populateCancel := context.WithCancel(ctx)
 	populateDone := make(chan struct{})
@@ -192,6 +202,11 @@ func (p *Pool) Close() {
 			}
 		}
 		p.warmSlots.Close()
+	}
+	if p.cniManager != nil {
+		if err := removeHostForwardingRules(p.cniManager.bridgeName, p.hostInterface); err != nil {
+			ulog.GetLogger().Warn("failed to remove host forwarding rules during shutdown", ulog.F("bridge", p.cniManager.bridgeName), ulog.F("error", err))
+		}
 	}
 }
 
