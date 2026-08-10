@@ -219,6 +219,13 @@ func PublishCheckpointBootIndex(
 	if req.MemorySizeMB <= 0 {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: memory_size_mb must be positive", ErrInvalidArgument)
 	}
+	if req.VMMName == "stratovirt" {
+		if req.MemoryFormat != MemoryFormatFull && req.MemoryFormat != MemoryFormatIncrementalV1 {
+			return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: invalid %s value %q", ErrInvalidArgument, AnnotationMemoryFormat, req.MemoryFormat)
+		}
+	} else if req.MemoryFormat != "" {
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: non-stratovirt checkpoint cannot set %s", ErrInvalidArgument, AnnotationMemoryFormat)
+	}
 
 	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
 	publishCtx, done, err := client.WithLease(namespaceCtx)
@@ -235,7 +242,24 @@ func PublishCheckpointBootIndex(
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("source boot index VMM %q does not match capture VMM %q", sourceInfo.VMMName, req.VMMName)
 	}
 
-	memDesc, err := BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot)
+	var memDesc ocispec.Descriptor
+	if req.MemoryFormat == MemoryFormatIncrementalV1 {
+		if sourceInfo.Resume && sourceInfo.MemoryFormat != MemoryFormatIncrementalV1 {
+			return PublishCheckpointBootIndexResult{}, fmt.Errorf(
+				"source memory format %q cannot be appended as %s",
+				sourceInfo.MemoryFormat,
+				MemoryFormatIncrementalV1,
+			)
+		}
+		memDesc, err = BuildIncrementalMemoryComponentInContent(
+			publishCtx,
+			client.ContentStore(),
+			sourceInfo.MemDescriptor,
+			req.MemRoot,
+		)
+	} else {
+		memDesc, err = BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot)
+	}
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("publish captured mem component: %w", err)
 	}
@@ -245,6 +269,7 @@ func PublishCheckpointBootIndex(
 		SandboxDescriptor: sourceInfo.SandboxDescriptor,
 		VMMName:           req.VMMName,
 		MemorySizeMB:      req.MemorySizeMB,
+		MemoryFormat:      req.MemoryFormat,
 	})
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)
