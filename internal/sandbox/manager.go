@@ -94,11 +94,11 @@ func New(
 
 // Start launches background warm network pool population. Callers should
 // complete startup recovery first.
-func (m *Manager) Start(ctx context.Context) {
+func (m *Manager) Start(ctx context.Context) error {
 	if m == nil || m.pool == nil {
-		return
+		return fmt.Errorf("sandbox manager is not initialized")
 	}
-	m.pool.Start(ctx)
+	return m.pool.Start(ctx)
 }
 
 // RecoverStaleResources orchestrates cleanup of resources owned by a previous

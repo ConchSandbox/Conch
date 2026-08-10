@@ -152,6 +152,11 @@ func integrationTestPool(t *testing.T) *Pool {
 	if err != nil {
 		t.Fatalf("initialize integration network pool: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := removeHostForwardingRules(p.cniManager.bridgeName, p.hostInterface); err != nil {
+			t.Errorf("remove integration host forwarding rules: %v", err)
+		}
+	})
 	return p
 }
 
