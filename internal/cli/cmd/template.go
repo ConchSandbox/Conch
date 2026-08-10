@@ -46,6 +46,7 @@ func printTemplateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  create   Build a template from an OCI image, kernel, and initrd.")
 	fmt.Fprintln(out, "  pull     Pull a registry Boot Index into a local Template.")
 	fmt.Fprintln(out, "  push     Push a Template Boot Index to a registry.")
+	fmt.Fprintln(out, "  unpack   Unpack a Template's Boot Index into snapshots.")
 	fmt.Fprintln(out, "  ls       List templates.")
 	fmt.Fprintln(out, "  inspect  Inspect a template.")
 	fmt.Fprintln(out, "  rm       Remove a template.")
@@ -105,6 +106,12 @@ func RunTemplate(ctx context.Context, args []string) error {
 		return runTemplatePull(ctx, args[1:])
 	case "push":
 		return runTemplatePush(ctx, args[1:])
+	case "unpack":
+		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
+			PrintTemplateUnpackHelp(os.Stdout)
+			return nil
+		}
+		return runTemplateUnpack(ctx, args[1:])
 	case "ls":
 		return runTemplateList(ctx, args[1:])
 	case "inspect":

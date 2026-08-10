@@ -10,47 +10,134 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	digestpkg "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
-func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) (runtimeapi.PullImageResult, error) {
+func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) error {
 	if client == nil || client.Client == nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("containerd client is required")
+		return fmt.Errorf("containerd client is required")
 	}
 	if req.ImageName == "" {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
+	_, _, err := pullRegistryContent(pullCtx, client, RegistryPullOptions{
+		Reference: req.ImageName,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
+	}, false)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// PullBootIndex fetches a registry Boot Index and validates its complete
+// descriptor closure without unpacking component snapshots. The top-level
+// index is classified before child descriptors are fetched, so ordinary OCI
+// images are rejected without downloading their configs or layers.
+func PullBootIndex(ctx context.Context, client *containerdclient.Client, req RegistryPullOptions) (BootIndexInfo, error) {
+	if client == nil || client.Client == nil {
+		return BootIndexInfo{}, fmt.Errorf("containerd client is required")
+	}
+	if strings.TrimSpace(req.Reference) == "" {
+		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidRequest)
+	}
+
+	pullCtx := containerdclient.NewNamespaceContext(ctx)
+	fetched, _, err := pullRegistryContent(pullCtx, client, req, true)
+	if err != nil {
+		return BootIndexInfo{}, err
+	}
+	info, err := InspectBootIndexContent(pullCtx, client.ContentStore(), fetched.Target)
+	if err != nil {
+		return BootIndexInfo{}, fmt.Errorf("validate pulled Boot Index %s: %w", fetched.Name, err)
+	}
+	return info, nil
+}
+
+func pullRegistryContent(
+	ctx context.Context,
+	client *containerdclient.Client,
+	req RegistryPullOptions,
+	bootIndexOnly bool,
+) (images.Image, string, error) {
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		PlainHTTP: req.PlainHTTP,
 		Credentials: func(string) (string, string, error) {
 			return req.Username, req.Password, nil
 		},
 	})
-	if _, err := client.Pull(pullCtx, req.ImageName, containerd.WithResolver(resolver)); err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("pull image %s: %w", req.ImageName, err)
-	}
+	var (
+		probed bool
+		kind   string
+	)
+	gateRoot := func(next images.Handler) images.Handler {
+		return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+			children, err := next.Handle(ctx, desc)
+			if err != nil {
+				return nil, err
+			}
+			if probed {
+				return children, nil
+			}
 
-	fetched, err := client.Fetch(pullCtx, req.ImageName, containerd.WithResolver(resolver))
+			// Dispatch visits the root before starting concurrent traversal of
+			// its children, so the first descriptor handled here is the target.
+			probed = true
+			kind, err = DetectImageKind(ctx, client.ContentStore(), desc)
+			if err != nil {
+				return nil, err
+			}
+			if err := validatePullKind(req.Reference, kind, bootIndexOnly); err != nil {
+				return nil, err
+			}
+			return children, nil
+		})
+	}
+	fetched, err := client.Fetch(
+		ctx,
+		req.Reference,
+		containerd.WithResolver(resolver),
+		containerd.WithImageHandlerWrapper(gateRoot),
+	)
 	if err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("fetch all Conch image content: %w", err)
+		return images.Image{}, "", fmt.Errorf("fetch image %s: %w", req.Reference, err)
 	}
-	kind := DetectImageKind(pullCtx, client.ContentStore(), fetched.Target)
-	if err := SetImageKindLabel(pullCtx, client.ImageService(), fetched.Name, kind); err != nil {
-		return runtimeapi.PullImageResult{}, err
+	if !probed || kind == "" {
+		return images.Image{}, "", fmt.Errorf("classify fetched image %s: root descriptor was not inspected", req.Reference)
 	}
-	if req.SkipUnpack {
-		return runtimeapi.PullImageResult{}, nil
+	if err := SetImageKindLabel(ctx, client.ImageService(), fetched.Name, kind); err != nil {
+		return images.Image{}, "", err
 	}
+	return fetched, kind, nil
+}
 
-	results, err := UnpackAllSubImages(pullCtx, client.Client, req.ImageName)
-	if err != nil {
-		return runtimeapi.PullImageResult{}, fmt.Errorf("unpack pulled image: %w", err)
+func validatePullKind(reference, kind string, bootIndexOnly bool) error {
+	isBootIndex := kind == ImageKindBootIndexCold || kind == ImageKindBootIndexResume
+	if (!bootIndexOnly && kind == ImageKindOCIImage) || (bootIndexOnly && isBootIndex) {
+		return nil
 	}
-	return runtimeapi.PullImageResult{Refs: results}, nil
+	if bootIndexOnly {
+		return fmt.Errorf(
+			"%w: %s is not a Conch Boot Index; use `conch image pull %s`",
+			ErrInvalidRequest,
+			reference,
+			reference,
+		)
+	}
+	return fmt.Errorf(
+		"%w: %s is a Conch Boot Index (%s); use `conch template pull %s`",
+		ErrInvalidRequest,
+		reference,
+		kind,
+		reference,
+	)
 }
 
 func Push(ctx context.Context, client *containerdclient.Client, req runtimeapi.PushImageOptions) error {

@@ -30,7 +30,6 @@ func newTestClient(t *testing.T, opts Options) *Client {
 
 func TestImageAPIMethods(t *testing.T) {
 	var pullReq PullImageRequest
-	var unpackReq UnpackImageRequest
 	var listReq ListImagesRequest
 	var removeReq RemoveImageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,12 +38,7 @@ func TestImageAPIMethods(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&pullReq); err != nil {
 				t.Fatalf("decode pull request: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(imageResponse{Results: map[string]string{"rootfs": "rootfs-id"}})
-		case unpackImage:
-			if err := json.NewDecoder(r.Body).Decode(&unpackReq); err != nil {
-				t.Fatalf("decode unpack request: %v", err)
-			}
-			_ = json.NewEncoder(w).Encode(imageResponse{Results: map[string]string{"sandbox": "sandbox-id"}})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case listImages:
 			if err := json.NewDecoder(r.Body).Decode(&listReq); err != nil {
 				t.Fatalf("decode list request: %v", err)
@@ -68,31 +62,13 @@ func TestImageAPIMethods(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, Options{BaseURL: server.URL})
-	pullResults, err := c.PullImage(context.Background(), PullImageRequest{
-		ImageName:  "docker.io/library/nginx:latest",
-		SkipUnpack: true,
-	})
-	if err != nil {
+	if err := c.PullImage(context.Background(), PullImageRequest{
+		ImageName: "docker.io/library/nginx:latest",
+	}); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
-	if pullReq.ImageName != "docker.io/library/nginx:latest" || !pullReq.SkipUnpack {
+	if pullReq.ImageName != "docker.io/library/nginx:latest" {
 		t.Fatalf("pull request = %#v", pullReq)
-	}
-	if pullResults["rootfs"] != "rootfs-id" {
-		t.Fatalf("pull results = %#v", pullResults)
-	}
-
-	unpackResults, err := c.UnpackImage(context.Background(), UnpackImageRequest{
-		ImageName: "hub.oepkgs.net/conch/conch-index:v0.1",
-	})
-	if err != nil {
-		t.Fatalf("UnpackImage: %v", err)
-	}
-	if unpackReq.ImageName != "hub.oepkgs.net/conch/conch-index:v0.1" {
-		t.Fatalf("unpack request = %#v", unpackReq)
-	}
-	if unpackResults["sandbox"] != "sandbox-id" {
-		t.Fatalf("unpack results = %#v", unpackResults)
 	}
 
 	images, err := c.ListImages(context.Background(), ListImagesRequest{
@@ -132,7 +108,7 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, Options{BaseURL: server.URL})
-	_, err := c.PullImage(context.Background(), PullImageRequest{ImageName: "bad"})
+	err := c.PullImage(context.Background(), PullImageRequest{ImageName: "bad"})
 	if err == nil {
 		t.Fatal("PullImage() error = nil")
 	}
@@ -380,6 +356,7 @@ func TestTemplateRecordIncludesBootIndexDigestInJSON(t *testing.T) {
 func TestTemplateDistributionAPIMethods(t *testing.T) {
 	var pullReq TemplatePullRequest
 	var pushReq TemplatePushRequest
+	var unpackReq TemplateUnpackRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case pullTemplate:
@@ -395,6 +372,11 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 		case pushTemplate:
 			if err := json.NewDecoder(r.Body).Decode(&pushReq); err != nil {
 				t.Fatalf("decode push request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case unpackTemplate:
+			if err := json.NewDecoder(r.Body).Decode(&unpackReq); err != nil {
+				t.Fatalf("decode unpack request: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
@@ -429,6 +411,13 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	}
 	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
+	}
+
+	if err := c.UnpackTemplate(context.Background(), TemplateUnpackRequest{TemplateID: pulled.TemplateID}); err != nil {
+		t.Fatalf("UnpackTemplate() error = %v", err)
+	}
+	if unpackReq.TemplateID != "tmpl_pulled" {
+		t.Fatalf("UnpackTemplate() request = %#v", unpackReq)
 	}
 }
 
@@ -489,5 +478,34 @@ func TestCreateSandboxOmitsEmptyTemplateID(t *testing.T) {
 	}
 	if _, ok := body["template_id"]; ok {
 		t.Fatalf("create request unexpectedly includes template_id: %#v", body)
+	}
+}
+
+func TestSandboxListAndDeleteUseV1API(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.RequestURI() != listSandbox {
+				t.Fatalf("list request = %s %s", r.Method, r.URL.String())
+			}
+			_ = json.NewEncoder(w).Encode([]SandboxRecord{{SandboxID: "sandbox-1"}})
+		case http.MethodDelete:
+			if r.URL.Path != deleteSandbox+"sandbox-1" {
+				t.Fatalf("delete request = %s %s", r.Method, r.URL.String())
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	c := newTestClient(t, Options{BaseURL: server.URL})
+	records, err := c.ListSandboxes(context.Background())
+	if err != nil || len(records) != 1 || records[0].SandboxID != "sandbox-1" {
+		t.Fatalf("ListSandboxes() = %#v, %v", records, err)
+	}
+	if err := c.DeleteSandbox(context.Background(), "sandbox-1"); err != nil {
+		t.Fatalf("DeleteSandbox() error = %v", err)
 	}
 }

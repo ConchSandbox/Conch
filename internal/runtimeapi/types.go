@@ -6,6 +6,19 @@ import (
 	"github.com/openeuler/Conch/internal/volume"
 )
 
+type SandboxNetworkConfig struct {
+	AllowOut            []string `json:"allowOut,omitempty"`
+	DenyOut             []string `json:"denyOut,omitempty"`
+	AllowIn             []string `json:"allowIn,omitempty"`
+	DenyIn              []string `json:"denyIn,omitempty"`
+	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
+}
+
+type SandboxNetworkUpdateOptions struct {
+	SandboxID string
+	Network   *SandboxNetworkConfig
+}
+
 // ImageRecord.Kind values exposed by the image API. These classify the
 // user-visible image record, not the io.conch.kind annotation stored on Boot
 // Index component descriptors.
@@ -28,6 +41,7 @@ type SandboxCreateOptions struct {
 	RamMB        int64
 	VolumeMounts []volume.Mount
 	Env          map[string]string
+	Network      *SandboxNetworkConfig
 }
 
 type SandboxDefaults struct {
@@ -97,6 +111,10 @@ type TemplatePushOptions struct {
 	Password        string
 }
 
+type TemplateUnpackOptions struct {
+	TemplateID string
+}
+
 type TemplateListOptions struct {
 	Origin   string
 	BootMode string
@@ -116,15 +134,10 @@ type TemplateRecord struct {
 }
 
 type PullImageOptions struct {
-	ImageName  string
-	PlainHTTP  bool
-	Username   string
-	Password   string
-	SkipUnpack bool
-}
-
-type PullImageResult struct {
-	Refs map[string]string
+	ImageName string
+	PlainHTTP bool
+	Username  string
+	Password  string
 }
 
 type PushImageOptions struct {
@@ -142,23 +155,6 @@ type ListImagesOptions struct {
 type RemoveImageOptions struct {
 	ImageName   string
 	Synchronous bool
-}
-
-type UnpackImageOptions struct {
-	ImageName string
-}
-
-type ImportImageArchiveOptions struct {
-	ImportedTag string
-}
-
-type ImportImageArchiveResult struct {
-	SnapshotKey string
-	ImageName   string
-}
-
-type ExportImageArchiveOptions struct {
-	ImageName string
 }
 
 type ImageRecord struct {

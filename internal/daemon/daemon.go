@@ -27,7 +27,9 @@ import (
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -125,11 +127,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
 		},
-		Sandbox: &containerdhost.SandboxConfig{
-			WarmPoolSize:       cfg.Network.WarmPoolSize,
-			TapIP:              cfg.Network.TapIP,
-			TapMask:            cfg.Network.TapMask,
-			CNI:                cfg.Network.CNI,
+		Sandbox: &conchsandbox.Config{
+			Network: netstack.PoolConfig{
+				WarmPoolSize: cfg.Network.WarmPoolSize,
+				CNI:          cfg.Network.CNI,
+			},
+			VMMBinaries:        cfg.VMM.BinaryPaths(),
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
@@ -197,6 +200,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("POST /api/v1/sandboxes", s.handleCreateSandbox)
 	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}", s.handleGetSandbox)
 	s.router.HandleFunc("DELETE /api/v1/sandboxes/{sandboxID}", s.handleDeleteSandbox)
+	s.router.HandleFunc("PUT /api/v1/sandboxes/{sandboxID}/network", s.handleUpdateSandboxNetwork)
 	s.router.HandleFunc("/health", s.handleHealth)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
@@ -205,6 +209,7 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
 	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
+	s.router.HandleFunc("/api/template/unpack", s.handleUnpackTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
 	s.router.HandleFunc("/api/template/remove", s.handleRemoveTemplate)
@@ -217,8 +222,6 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/push", s.handlePushImage)
 	s.router.HandleFunc("/api/image/list", s.handleListImage)
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
-	s.router.HandleFunc("/api/image/unpack", s.handleUnpackImage)
-	s.router.HandleFunc("/api/image/import", s.handleImportImage)
 }
 func (s *Daemon) Start(addr string, unixSocket string) error {
 	logger := ulog.GetLogger()
@@ -415,9 +418,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		RamMB:        req.RAMMB,
 		VolumeMounts: req.VolumeMounts,
 		Env:          req.Env,
+		Network:      req.Network,
 	})
 	if err != nil {
-		if errors.Is(err, conchruntime.ErrTemplateIDRequired) {
+		if errors.Is(err, conchruntime.ErrTemplateIDRequired) || errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -445,6 +449,43 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sandboxResponseFromCreate(result))
+}
+
+func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("sandboxID")
+	if sandboxID == "" {
+		http.Error(w, "Missing sandbox id", http.StatusBadRequest)
+		return
+	}
+	var req runtimeapi.SandboxNetworkConfig
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if s.stateStore == nil || s.runtimeService == nil {
+		http.Error(w, "Sandbox service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	record, err := s.findSandboxRecord(r.Context(), sandboxID)
+	if err != nil {
+		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if record == nil {
+		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		return
+	}
+	if err := s.runtimeService.UpdateSandboxNetworkConfig(r.Context(), runtimeapi.SandboxNetworkUpdateOptions{
+		SandboxID: record.SandboxID,
+		Network:   &req,
+	}); err != nil {
+		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
+			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "Failed to update sandbox network: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
@@ -606,6 +647,7 @@ func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandbo
 		domain := record.IP
 		response.Domain = &domain
 		response.Lifecycle = &sandboxLifecycleResponse{}
+		response.Network = record.Network
 	}
 	return response
 }
@@ -786,7 +828,7 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		Labels:    req.Labels,
 	})
 	if err != nil {
-		http.Error(w, "Failed to pull template: "+err.Error(), http.StatusInternalServerError)
+		writeImageError(w, "Failed to pull template", err)
 		return
 	}
 	writeJSON(w, map[string]string{
@@ -810,6 +852,20 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 		Password:        req.Password,
 	}); err != nil {
 		http.Error(w, "Failed to push template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Daemon) handleUnpackTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templateUnpackRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	if err := s.runtimeService.UnpackTemplate(r.Context(), runtimeapi.TemplateUnpackOptions{
+		TemplateID: req.TemplateID,
+	}); err != nil {
+		writeImageError(w, "Failed to unpack template", err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -874,15 +930,13 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := runtimeapi.PullImageOptions{
-		ImageName:  req.ImageName,
-		PlainHTTP:  req.PlainHTTP,
-		Username:   req.Username,
-		Password:   req.Password,
-		SkipUnpack: req.SkipUnpack,
+		ImageName: req.ImageName,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
 	}
 
-	result, err := conchimage.Pull(r.Context(), s.daemonClient, opts)
-	if err != nil {
+	if err := conchimage.Pull(r.Context(), s.daemonClient, opts); err != nil {
 		logger.Error("Failed to pull image",
 			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
@@ -892,7 +946,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info("Image pulled successfully", ulog.F("image_name", opts.ImageName))
-	writeImageResults(w, result.Refs)
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
@@ -998,78 +1052,6 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (s *Daemon) handleUnpackImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
-	logger.Debug("Handling unpack image request")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	var req unpackImageRequest
-	if !decodeJSONBody(w, r, &req) {
-		return
-	}
-
-	opts := runtimeapi.UnpackImageOptions{
-		ImageName: req.ImageName,
-	}
-	results, err := conchimage.Unpack(r.Context(), s.daemonClient, opts)
-	if err != nil {
-		logger.Error("Failed to unpack image",
-			ulog.F("image_name", opts.ImageName),
-			ulog.F("error", err),
-		)
-		writeImageError(w, "Failed to unpack image", err)
-		return
-	}
-
-	logger.Info("Image unpacked successfully", ulog.F("image_name", opts.ImageName))
-	writeImageResults(w, results)
-}
-
-func (s *Daemon) handleImportImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
-	logger.Debug("Handling import image request")
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, "Invalid multipart body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	file, _, err := r.FormFile("archive")
-	if err != nil {
-		http.Error(w, "Missing archive file: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	resp, err := conchimage.ImportArchive(r.Context(), s.daemonClient, file, runtimeapi.ImportImageArchiveOptions{
-		ImportedTag: r.FormValue("imported_tag"),
-	})
-	if err != nil {
-		logger.Error("Failed to import image archive", ulog.F("error", err))
-		writeImageError(w, "Failed to import image archive", err)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(importImageArchiveHTTPResponse(resp))
-}
-
 func saveMultipartFile(r *http.Request, field, dir, name string) (string, error) {
 	file, _, err := r.FormFile(field)
 	if err != nil {
@@ -1131,13 +1113,6 @@ func decodeStrictJSON(reader io.Reader, out any) error {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeImageResults(w http.ResponseWriter, results map[string]string) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]map[string]string{
-		"results": results,
-	})
 }
 
 func writeImageError(w http.ResponseWriter, prefix string, err error) {

@@ -108,15 +108,19 @@ func TestWriteImageErrorOnlyTrustsTypedRegistryStatus(t *testing.T) {
 	}
 }
 
-func TestConvertImageRouteRemoved(t *testing.T) {
+func TestRemovedImageRoutesReturnNotFound(t *testing.T) {
 	server := &Daemon{router: http.NewServeMux()}
 	server.routes()
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/image/convert", bytes.NewBufferString("{}"))
-	server.router.ServeHTTP(rec, req)
+	for _, path := range []string{"/api/image/convert", "/api/image/import", "/api/image/unpack"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString("{}"))
+			server.router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

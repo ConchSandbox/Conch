@@ -8,12 +8,14 @@ import (
 	"os"
 
 	"github.com/openeuler/Conch/internal/cli/client"
-	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-func PrintImageUnpackHelp(out io.Writer) {
+func PrintTemplateUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch image unpack [options] <image-name>")
+	fmt.Fprintln(out, "  conch template unpack [options] <template-id>")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Description:")
+	fmt.Fprintln(out, "  Unpack every component in a local Template's Boot Index.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -api-url string")
@@ -24,49 +26,37 @@ func PrintImageUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch image unpack hub.oepkgs.net/conch/conch-index:v0.1")
+	fmt.Fprintln(out, "  conch template unpack tmpl_ab2345da0a69b4e18aa24ad6")
 }
 
-func RunImageUnpack(ctx context.Context, args []string) error {
-	if err := InitUnpackLogger(); err != nil {
-		return err
-	}
-	defer func() {
-		logger := ulog.GetLogger()
-		if closer, ok := logger.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}()
-
-	fs := flag.NewFlagSet("image unpack", flag.ContinueOnError)
+func runTemplateUnpack(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("template unpack", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	apiURL := fs.String("api-url", "", "conchd API base URL")
 	addr := fs.String("address", "", "deprecated alias for -api-url")
 	configPath := fs.String("config", "", "config file path")
-	fs.Usage = func() { PrintImageUnpackHelp(os.Stderr) }
+	fs.Usage = func() { PrintTemplateUnpackHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("conch image unpack: exactly one image name is required")
+		return fmt.Errorf("conch template unpack: exactly one template ID is required")
 	}
-	imageName := fs.Arg(0)
+	templateID := fs.Arg(0)
 
 	conchClient, err := client.New(client.Options{
 		BaseURL:    ResolveConchAPIURL(*apiURL, *addr),
 		ConfigPath: *configPath,
 	})
 	if err != nil {
-		return fmt.Errorf("conch image unpack: create API client: %w", err)
+		return fmt.Errorf("conch template unpack: create API client: %w", err)
 	}
-	fmt.Println("------------------------------------------------------------")
-	results, err := conchClient.UnpackImage(ctx, client.UnpackImageRequest{
-		ImageName: imageName,
-	})
-	if err != nil {
-		return fmt.Errorf("conch image unpack: %w", err)
+	if err := conchClient.UnpackTemplate(ctx, client.TemplateUnpackRequest{
+		TemplateID: templateID,
+	}); err != nil {
+		return fmt.Errorf("conch template unpack: %w", err)
 	}
-	PrintUnpackSummary(results)
+	fmt.Fprintf(os.Stdout, "Unpacked template: %s\n", templateID)
 	return nil
 }

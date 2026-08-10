@@ -38,9 +38,10 @@ build/
 *.log
 
 # python
+.venv/
 __pycache__
 *.pyc
 *.egg-info/
 
-# Coding Agents
-.codex
+# Local configuration
+config/config.local.yaml

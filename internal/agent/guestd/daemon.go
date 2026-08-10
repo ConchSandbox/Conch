@@ -11,7 +11,6 @@ import (
 
 const (
 	ServerPort     = ":4064"
-	ServerVersion  = "0.0.4"
 	vsockReadyPort = 4065
 )
 

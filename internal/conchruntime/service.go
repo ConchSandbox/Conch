@@ -13,10 +13,11 @@ import (
 
 	"github.com/containerd/errdefs"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -28,6 +29,7 @@ type SandboxOps interface {
 	Delete(sandbox.DeleteRequest) error
 	Suspend(sandbox.LifecycleRequest) error
 	Resume(sandbox.LifecycleRequest) error
+	UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
@@ -132,6 +134,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if opts.TemplateID == "" {
 		return SandboxCreateResult{}, ErrTemplateIDRequired
 	}
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+		return SandboxCreateResult{}, err
+	}
 	agentToken, err := sandbox.GenerateAgentToken()
 	if err != nil {
 		return SandboxCreateResult{}, err
@@ -148,6 +153,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		AgentToken:   agentToken,
 		Env:          copyMap(opts.Env),
 		VolumeMounts: opts.VolumeMounts,
+		Network:      opts.Network,
 	}
 
 	createdAt := time.Now().UnixNano()
@@ -165,6 +171,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		IP:                            createResult.IP,
 		VCPUNum:                       opts.VCPUNum,
 		RamMB:                         opts.RamMB,
+		Network:                       opts.Network,
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
@@ -182,6 +189,47 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:      opts.RamMB,
 		CreatedAt:  createdAt,
 	}, nil
+}
+
+func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	if strings.TrimSpace(opts.SandboxID) == "" {
+		return fmt.Errorf("sandbox id is required")
+	}
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+		return err
+	}
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
+	defer unlock()
+	rec, err := s.getSandbox(ctx, opts.SandboxID)
+	if err != nil {
+		return err
+	}
+	if rec.State != state.SandboxReady && rec.State != state.SandboxSuspended {
+		return fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State)
+	}
+	oldNetwork := rec.Network
+	rec.Network = opts.Network
+	rec.LastError = ""
+	if err := s.upsertSandbox(ctx, rec); err != nil {
+		return err
+	}
+	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network}); err != nil {
+		rollbackCtx := context.WithoutCancel(ctx)
+		rollbackErr := s.Sandbox.UpdateNetwork(rollbackCtx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: oldNetwork})
+		rec.Network = oldNetwork
+		applyErr := errors.Join(err, rollbackErr)
+		if rollbackErr != nil {
+			rec.State = state.SandboxUnknown
+			applyErr = errors.Join(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
+		}
+		rec.LastError = applyErr.Error()
+		rollbackStoreErr := s.upsertSandbox(rollbackCtx, rec)
+		return errors.Join(applyErr, rollbackStoreErr)
+	}
+	return nil
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -379,18 +427,14 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, fmt.Errorf("template reference is required")
 	}
-	if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
-		ImageName:  reference,
-		PlainHTTP:  opts.PlainHTTP,
-		Username:   opts.Username,
-		Password:   opts.Password,
-		SkipUnpack: true,
-	}); err != nil {
-		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
-	}
-	info, err := conchimage.InspectBootIndexReference(ctx, s.Containerd, reference)
+	info, err := conchimage.PullBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
+		Reference: reference,
+		PlainHTTP: opts.PlainHTTP,
+		Username:  opts.Username,
+		Password:  opts.Password,
+	})
 	if err != nil {
-		return TemplatePullResult{}, fmt.Errorf("validate pulled template boot index %s: %w", reference, err)
+		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
 	}
 	origin := conchtemplate.OriginImage
 	bootMode := conchtemplate.BootModeCold
@@ -454,6 +498,27 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 		Username:        opts.Username,
 		Password:        opts.Password,
 	})
+}
+
+func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions) error {
+	if s == nil || s.Containerd == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	if s.Templates == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	templateID := strings.TrimSpace(opts.TemplateID)
+	if templateID == "" {
+		return fmt.Errorf("%w: template_id is required", conchimage.ErrInvalidRequest)
+	}
+	rec, err := s.Templates.Get(ctx, templateID)
+	if err != nil {
+		return fmt.Errorf("get template %s: %w", templateID, err)
+	}
+	if err := conchimage.UnpackBootIndex(ctx, s.Containerd, rec.BootIndexDigest); err != nil {
+		return fmt.Errorf("unpack template %s: %w", templateID, err)
+	}
+	return nil
 }
 
 func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions) (TemplateCreateResult, error) {
@@ -527,12 +592,11 @@ func (s *Service) createTemplateFromSource(ctx context.Context, templateID strin
 		if !errdefs.IsNotFound(err) {
 			return templateBuildResult{}, fmt.Errorf("lookup rootfs source image %s: %w", opts.Source, err)
 		}
-		if _, err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
-			ImageName:  opts.Source,
-			PlainHTTP:  opts.PlainHTTP,
-			Username:   opts.Username,
-			Password:   opts.Password,
-			SkipUnpack: true,
+		if err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
+			ImageName: opts.Source,
+			PlainHTTP: opts.PlainHTTP,
+			Username:  opts.Username,
+			Password:  opts.Password,
 		}); err != nil {
 			return templateBuildResult{}, fmt.Errorf("pull rootfs source image %s: %w", opts.Source, err)
 		}

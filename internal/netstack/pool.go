@@ -57,7 +57,13 @@ type Pool struct {
 	slotIDs        *slotstate.Allocator
 }
 
-func NewPool(warmPoolSize int, tapIP string, tapMask int, cniCfg CNIManagerConfig) (*Pool, error) {
+type PoolConfig struct {
+	WarmPoolSize int
+	CNI          CNIManagerConfig
+}
+
+func NewPool(cfg PoolConfig) (*Pool, error) {
+	warmPoolSize := cfg.WarmPoolSize
 	if warmPoolSize == 0 {
 		warmPoolSize = DefaultWarmPoolSize
 	}
@@ -65,17 +71,14 @@ func NewPool(warmPoolSize int, tapIP string, tapMask int, cniCfg CNIManagerConfi
 		return nil, fmt.Errorf("invalid network.warm_pool_size=%d, must be within [1, %d]", warmPoolSize, maxSlots)
 	}
 
-	slotConfig, err := newSlotConfig(tapIP, tapMask)
-	if err != nil {
-		return nil, fmt.Errorf("invalid tap network config: %w", err)
-	}
+	slotConfig := newSlotConfig()
 	if err := os.MkdirAll(networkNamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: create Conch network namespace directory: %w", err)
 	}
 	if err := os.Chmod(networkNamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: secure Conch network namespace directory: %w", err)
 	}
-	cniManager, err := NewCNIManager(cniCfg)
+	cniManager, err := NewCNIManager(cfg.CNI)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +431,39 @@ submitJobs:
 	return nil
 }
 
-func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
+// Get acquires a warm network slot for a sandbox and applies its initial
+// ingress and egress policy before returning the slot to the caller.
+func (p *Pool) Get(ctx context.Context, sandboxID string, policy *SandboxNetworkConfig) (*Slot, error) {
+	if err := ValidateSandboxNetworkInputConfig(ctx, policy); err != nil {
+		return nil, err
+	}
+	slot, err := p.get(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if slot == nil {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("failed to apply initial sandbox network policy: %w", err),
+			p.Discard(context.WithoutCancel(ctx), slot),
+		)
+	}
+	if isNetworkConfigNonEmpty(policy) {
+		if err := writeSandboxNetworkPolicyRules(ctx, slot, policy); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to apply initial sandbox network policy: %w", err),
+				p.Discard(context.WithoutCancel(ctx), slot),
+			)
+		}
+	}
+	return slot, nil
+}
+
+// get only acquires and assigns a warm slot. Initial policy setup is kept in
+// Get so callers never receive a slot before its requested policy is applied.
+func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandboxID is required")
 	}
@@ -461,6 +496,22 @@ func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
 	return s, nil
 }
 
+func (p *Pool) SetSandboxNetworkPolicy(ctx context.Context, slot *Slot, sandboxID string, policy *SandboxNetworkConfig) error {
+	if p == nil {
+		return fmt.Errorf("pool is nil")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	if strings.TrimSpace(sandboxID) == "" || slot.sandboxID != sandboxID {
+		return fmt.Errorf("network slot is not assigned to sandbox %q", sandboxID)
+	}
+	if err := ValidateSandboxNetworkInputConfig(ctx, policy); err != nil {
+		return err
+	}
+	return writeSandboxNetworkPolicyRules(ctx, slot, policy)
+}
+
 func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -474,14 +525,14 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 	netnsPath := slot.NetNSPath()
 	cniID := slot.cniContainerID()
 
-	cniIP, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath)
+	cniResult, err := p.cniManager.SetupSandboxNetwork(ctx, cniID, netnsPath)
 	if err != nil {
 		return fmt.Errorf("failed to setup cni network: %w", err)
 	}
-	slot.recordCNIIP(cniIP)
+	slot.recordCNIResult(cniResult)
 
 	if err := runInNetNSPath(ctx, netnsPath, func() error {
-		return configureGuestTapNetwork(slot, cniIP)
+		return configureGuestTapNetwork(slot, cniResult.IP)
 	}); err != nil {
 		return fmt.Errorf("failed to setup guest tap network: %w", err)
 	}
@@ -495,7 +546,11 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		return ctx.Err()
 	default:
 		if slot != nil {
-			slot.clearSandboxAssignment()
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := prepareSlotForReuse(cleanupCtx, slot); err != nil {
+				discardErr := p.Discard(cleanupCtx, slot)
+				return errors.Join(err, discardErr)
+			}
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {
 				if err := p.warmSlots.Push(slot); err != nil {
@@ -518,6 +573,20 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		}
 		return nil
 	}
+}
+
+func prepareSlotForReuse(ctx context.Context, slot *Slot) error {
+	if slot == nil {
+		return nil
+	}
+	if err := clearSandboxNetworkPolicyRules(ctx, slot); err != nil {
+		return fmt.Errorf("failed to clear sandbox network policy: %w", err)
+	}
+	if err := FlushSandboxConntrack(ctx, slot); err != nil {
+		return fmt.Errorf("failed to flush sandbox conntrack: %w", err)
+	}
+	slot.clearSandboxAssignment()
+	return nil
 }
 
 func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
@@ -557,7 +626,7 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 		cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
 	}
 	if cniErr == nil {
-		slot.clearCNIIP()
+		slot.clearCNIResult()
 		cniTeardownComplete = true
 	} else {
 		errs = append(errs, cniErr)

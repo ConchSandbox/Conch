@@ -24,6 +24,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
@@ -149,4 +150,33 @@ func runInNetNSPath(ctx context.Context, netnsPath string, fn func() error) (ret
 		return fmt.Errorf("error setting network namespace to %s: %w", netnsPath, err)
 	}
 	return fn()
+}
+
+// FlushSandboxConntrack removes every tracked connection from a slot's
+// network namespace so connection state cannot cross sandbox assignments.
+func FlushSandboxConntrack(ctx context.Context, slot *Slot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if slot == nil {
+		return nil
+	}
+
+	return runInNetNSPath(ctx, slot.NetNSPath(), func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Create the handle after entering the target namespace so its netlink
+		// socket cannot bind to the host network namespace.
+		handle, err := netlink.NewHandle(unix.NETLINK_NETFILTER)
+		if err != nil {
+			return fmt.Errorf("create conntrack netlink handle: %w", err)
+		}
+		defer handle.Close()
+
+		if err := handle.ConntrackTableFlush(netlink.ConntrackTable); err != nil {
+			return fmt.Errorf("flush conntrack table: %w", err)
+		}
+		return nil
+	})
 }

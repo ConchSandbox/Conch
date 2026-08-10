@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/vmm"
@@ -65,14 +64,13 @@ type Sandbox struct {
 	sandboxID   string
 	leaseID     string
 	slot        *netstack.Slot
-	vsockConn   net.Conn
 }
 
 func ResumeSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string,
+	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
 		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
@@ -86,7 +84,7 @@ func ResumeSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx, sandboxId)
+	slot, err := pool.Get(ctx, sandboxId, network)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -116,7 +114,7 @@ func ResumeSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, sandboxId, vmmResourceArgs, true,
+		vmmName, vmmBinary, sandboxId, vmmResourceArgs, true,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
@@ -155,8 +153,8 @@ func ResumeSandbox(
 func CreateSandbox(
 	ctx context.Context,
 	vmStartSpec VMStartSpec,
-	vmmName, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string,
+	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
+	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
 ) (s *Sandbox, e error) {
 
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -171,7 +169,7 @@ func CreateSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx, sandboxId)
+	slot, err := pool.Get(ctx, sandboxId, network)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -201,7 +199,7 @@ func CreateSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, sandboxId, vmmResourceArgs, false,
+		vmmName, vmmBinary, sandboxId, vmmResourceArgs, false,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
@@ -252,10 +250,6 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 }
 
 func (s *Sandbox) Close(ctx context.Context) error {
-	if s.vsockConn != nil {
-		s.vsockConn.Close()
-		s.vsockConn = nil
-	}
 	err := s.cleanup.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup sandbox: %w", err)

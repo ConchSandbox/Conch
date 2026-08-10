@@ -19,10 +19,6 @@ server:
 network:
   # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250
   warm_pool_size: 250
-  # Tap interface address inside the sandbox network namespace
-  tap_ip: 192.168.100.2
-  # CIDR mask for tap_ip
-  tap_mask: 24
   cni:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; the Go CNI library does not install them.
@@ -38,6 +34,12 @@ network:
 containerd:
   root_dir: /var/lib/conch/containerd
   state_dir: /run/conch/containerd
+
+vmm:
+  cloud_hypervisor:
+    binary: /usr/local/bin/cloud-hypervisor
+  stratovirt:
+    binary: /usr/bin/stratovirt
 
 sandbox:
   vsock_signal_retry: 10ms

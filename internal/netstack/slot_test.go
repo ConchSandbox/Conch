@@ -3,14 +3,12 @@ package netstack
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
 func TestNewSlotAndCNIState(t *testing.T) {
-	cfg, err := newSlotConfig("", 0)
-	if err != nil {
-		t.Fatalf("newSlotConfig(): %v", err)
-	}
+	cfg := newSlotConfig()
 	slot, err := newSlot(firstSlotID, cfg)
 	if err != nil {
 		t.Fatalf("newSlot(): %v", err)
@@ -30,11 +28,12 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.CNIIP() != "" {
 		t.Fatalf("CNIIP() = %q before setup, want empty", slot.CNIIP())
 	}
-	slot.recordCNIIP("10.12.0.2")
+	slot.recordCNIResult(CNIResult{IP: "10.12.0.2"})
 	if slot.CNIIP() != "10.12.0.2" {
 		t.Fatalf("CNIIP() = %q, want 10.12.0.2", slot.CNIIP())
 	}
-	slot.recordCNIIP("10.12.0.3/20")
+	wantDNS := DNSConfig{Nameservers: []string{"10.0.0.53"}}
+	slot.recordCNIResult(CNIResult{IP: "10.12.0.3/20", DNS: wantDNS})
 	if slot.CNIIP() != "10.12.0.3/20" {
 		t.Fatalf("CNIIP() = %q, want 10.12.0.3/20", slot.CNIIP())
 	}
@@ -43,11 +42,14 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.sandboxID != "sandbox-a" {
 		t.Fatalf("sandboxID = %q, want sandbox-a", slot.sandboxID)
 	}
+	if got := slot.GuestNetworkConfig().DNS; !reflect.DeepEqual(got, wantDNS) {
+		t.Fatalf("guest DNS = %#v, want CNI DNS %#v", got, wantDNS)
+	}
 	slot.clearSandboxAssignment()
 	if slot.sandboxID != "" {
 		t.Fatalf("sandboxID after clear = %q, want empty", slot.sandboxID)
 	}
-	slot.clearCNIIP()
+	slot.clearCNIResult()
 	if slot.CNIIP() != "" {
 		t.Fatalf("CNIIP() after clear = %q, want empty", slot.CNIIP())
 	}
@@ -57,10 +59,7 @@ func TestNewSlotAndCNIState(t *testing.T) {
 }
 
 func TestNewSlotRejectsOutOfRangeID(t *testing.T) {
-	cfg, err := newSlotConfig("", 0)
-	if err != nil {
-		t.Fatalf("newSlotConfig(): %v", err)
-	}
+	cfg := newSlotConfig()
 	for _, id := range []int{firstSlotID - 1, firstSlotID + maxSlots} {
 		t.Run(fmt.Sprintf("id_%d", id), func(t *testing.T) {
 			if _, err := newSlot(id, cfg); err == nil {
@@ -70,8 +69,16 @@ func TestNewSlotRejectsOutOfRangeID(t *testing.T) {
 	}
 }
 
-func TestNewSlotConfigRejectsInvalidTapNetwork(t *testing.T) {
-	if _, err := newSlotConfig("not-an-ip", 24); err == nil {
-		t.Fatal("newSlotConfig() error = nil, want invalid tap IP error")
+func TestNewSlotConfigUsesInternalGuestNetwork(t *testing.T) {
+	cfg := newSlotConfig()
+	if got := cfg.tapIP.String(); got != guestGatewayIP {
+		t.Fatalf("tap IP = %q, want %q", got, guestGatewayIP)
+	}
+	if got := cfg.namespaceIP.String(); got != guestIP {
+		t.Fatalf("guest IP = %q, want %q", got, guestIP)
+	}
+	ones, bits := cfg.tapMask.Size()
+	if ones != guestPrefixLength || bits != 32 {
+		t.Fatalf("tap mask = (%d, %d), want (%d, 32)", ones, bits, guestPrefixLength)
 	}
 }

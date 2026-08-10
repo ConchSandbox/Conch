@@ -118,7 +118,7 @@ func TestPrepareRestoreRejectsShortRootfsChain(t *testing.T) {
 }
 
 func TestCLHPrepareLaunchSkipsSnapshotConfigForColdBoot(t *testing.T) {
-	client := NewCLHClient(0, filepath.Join(t.TempDir(), "clh-api.sock"))
+	client := NewCLHClient(0, filepath.Join(t.TempDir(), "clh-api.sock"), "/opt/vmm/cloud-hypervisor")
 	if err := client.PrepareLaunch(&driver.ResourceArgs{
 		SnapfilePath: filepath.Join(t.TempDir(), "missing-snapshot"),
 	}, false); err != nil {

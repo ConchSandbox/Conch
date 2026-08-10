@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -21,13 +20,13 @@ func hasRootfsEntrypoint() bool {
 
 func startRootfsEntrypoint() bool {
 	logger := ulog.GetLogger()
-	if !hasRootfsEntrypoint() {
+	info, err := os.Stat(rootfsEntrypoint)
+	if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
 		logger.Info("Rootfs conch entrypoint not found")
 		return false
 	}
 
 	cmd := exec.Command(rootfsEntrypoint)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: MergeTarget}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = "/"

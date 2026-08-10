@@ -11,6 +11,16 @@ var (
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
 )
 
+// RegistryPullOptions contains the registry inputs shared by OCI image and
+// Boot Index pull workflows. Command-specific kind policy is applied by the
+// caller before child manifests and layers are fetched.
+type RegistryPullOptions struct {
+	Reference string
+	PlainHTTP bool
+	Username  string
+	Password  string
+}
+
 type PublishBootIndexOptions struct {
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`

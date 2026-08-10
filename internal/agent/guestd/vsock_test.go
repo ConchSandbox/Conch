@@ -1,81 +1,169 @@
 package guestd
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
+
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
+	"github.com/openeuler/Conch/internal/netstack"
 )
 
 func TestVsockHandlerRequiresAgentToken(t *testing.T) {
-	agentAuth.SetToken("")
-	handler := NewVsockHandler("test-version", func() bool { return true })
+	resetAgentAuth(t)
+	handler := newTestVsockHandler(nil, func() bool { return true })
+	request := testInitRequest()
+	request.AgentToken = ""
 
-	resp := handler.HandleMessage("I AM SANDBOX_ID:sandbox-1\n")
-	if resp != "NOT_READY\n" {
-		t.Fatalf("HandleMessage() = %q, want NOT_READY", resp)
+	response := handler.HandleRequest(request)
+	if response.Status != "not_ready" || response.ErrorCode != "INVALID_REQUEST" || response.Retryable {
+		t.Fatalf("HandleRequest() = %#v, want terminal INVALID_REQUEST", response)
 	}
 }
 
-func TestVsockHandlerSetsAgentToken(t *testing.T) {
-	agentAuth.SetToken("")
-	t.Cleanup(func() {
-		agentAuth.SetToken("")
-	})
-	handler := NewVsockHandler("test-version", func() bool { return true })
+func TestVsockHandlerRejectsUnsupportedVersion(t *testing.T) {
+	resetAgentAuth(t)
+	handler := newTestVsockHandler(nil, func() bool { return true })
+	request := testInitRequest()
+	request.Version++
 
-	resp := handler.HandleMessage("I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:secret\n")
-	if resp != "OK\nREADY:test-version\n" {
-		t.Fatalf("HandleMessage() = %q, want READY response", resp)
+	response := handler.HandleRequest(request)
+	if response.ErrorCode != "UNSUPPORTED_VERSION" || response.Retryable {
+		t.Fatalf("HandleRequest() = %#v, want terminal UNSUPPORTED_VERSION", response)
+	}
+}
+
+func TestVsockHandlerAppliesNetworkIdentityAndEnvironment(t *testing.T) {
+	resetAgentAuth(t)
+	t.Cleanup(func() {
+		_ = os.Unsetenv("CONCH_TEST_ENV")
+	})
+	var gotConfig netstack.GuestNetworkConfig
+	var gotRevalidate bool
+	handler := newTestVsockHandler(func(cfg netstack.GuestNetworkConfig, revalidate bool) error {
+		gotConfig = cfg
+		gotRevalidate = revalidate
+		return nil
+	}, func() bool { return true })
+	request := testInitRequest()
+	request.Env = map[string]string{"CONCH_TEST_ENV": "value"}
+
+	response := handler.HandleRequest(request)
+	if response.Status != "ready" {
+		t.Fatalf("HandleRequest() = %#v, want ready", response)
+	}
+	if gotRevalidate || !reflect.DeepEqual(gotConfig, request.Network) {
+		t.Fatalf("applyNetwork() = (%#v, %v), want cold config", gotConfig, gotRevalidate)
+	}
+	if got := os.Getenv("CONCH_TEST_ENV"); got != "value" {
+		t.Fatalf("CONCH_TEST_ENV = %q, want value", got)
+	}
+	if handler.GetSandboxID() != request.SandboxID {
+		t.Fatalf("sandbox ID = %q, want %q", handler.GetSandboxID(), request.SandboxID)
 	}
 	header := http.Header{}
-	header.Set(agentTokenHeaderKey, "secret")
+	header.Set(agentTokenHeaderKey, request.AgentToken)
 	if err := agentAuth.verifyHTTPHeader(header); err != nil {
-		t.Fatalf("agent token was not set from vsock message: %v", err)
+		t.Fatalf("agent token was not set: %v", err)
+	}
+	select {
+	case <-handler.NetworkReady():
+	default:
+		t.Fatal("network ready channel was not closed")
 	}
 }
 
-func TestVsockHandlerAppliesEnvironment(t *testing.T) {
-	agentAuth.SetToken("")
-	t.Cleanup(func() {
-		agentAuth.SetToken("")
-		_ = os.Unsetenv("CONCH_TEST_ENV")
-		_ = os.Unsetenv("CONCH_TEST_JSON_ENV")
-	})
-	handler := NewVsockHandler("test-version", func() bool { return true })
+func TestVsockHandlerRetryRevalidatesNetwork(t *testing.T) {
+	resetAgentAuth(t)
+	var calls []bool
+	handler := newTestVsockHandler(func(_ netstack.GuestNetworkConfig, revalidate bool) error {
+		calls = append(calls, revalidate)
+		return nil
+	}, func() bool { return true })
+	request := testInitRequest()
 
-	resp := handler.HandleMessage("I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:secret\nENV:CONCH_TEST_ENV=line-value\nENV_JSON:{\"CONCH_TEST_JSON_ENV\":\"json-value\"}\n")
-	if resp != "OK\nREADY:test-version\n" {
-		t.Fatalf("HandleMessage() = %q, want READY response", resp)
+	if response := handler.HandleRequest(request); response.Status != "ready" {
+		t.Fatalf("cold response = %#v, want ready", response)
 	}
-	if got := os.Getenv("CONCH_TEST_ENV"); got != "line-value" {
-		t.Fatalf("CONCH_TEST_ENV = %q, want line-value", got)
+	if response := handler.HandleRequest(request); response.Status != "ready" {
+		t.Fatalf("retry response = %#v, want ready", response)
 	}
-	if got := os.Getenv("CONCH_TEST_JSON_ENV"); got != "json-value" {
-		t.Fatalf("CONCH_TEST_JSON_ENV = %q, want json-value", got)
+	if !reflect.DeepEqual(calls, []bool{false, true}) {
+		t.Fatalf("revalidate calls = %v, want [false true]", calls)
+	}
+}
+
+func TestVsockHandlerNetworkFailureIsTerminal(t *testing.T) {
+	resetAgentAuth(t)
+	handler := newTestVsockHandler(func(_ netstack.GuestNetworkConfig, _ bool) error {
+		return errors.New("boom")
+	}, func() bool { return true })
+
+	first := handler.HandleRequest(testInitRequest())
+	second := handler.HandleRequest(testInitRequest())
+	if first.ErrorCode != "NETWORK_CONFIG_FAILED" || first.Retryable || !reflect.DeepEqual(first, second) {
+		t.Fatalf("responses = %#v, %#v; want stable terminal failure", first, second)
+	}
+}
+
+func TestVsockHandlerRevalidationMismatchIsTerminal(t *testing.T) {
+	resetAgentAuth(t)
+	handler := newTestVsockHandler(func(_ netstack.GuestNetworkConfig, revalidate bool) error {
+		if revalidate {
+			return errors.New("address mismatch")
+		}
+		return nil
+	}, func() bool { return true })
+	request := testInitRequest()
+	if response := handler.HandleRequest(request); response.Status != "ready" {
+		t.Fatalf("cold response = %#v, want ready", response)
+	}
+	response := handler.HandleRequest(request)
+	if response.ErrorCode != "NETWORK_MISMATCH" || response.Retryable {
+		t.Fatalf("revalidation response = %#v, want terminal mismatch", response)
 	}
 }
 
 func TestVsockHandlerRejectsInvalidEnvironment(t *testing.T) {
-	agentAuth.SetToken("")
-	t.Cleanup(func() {
-		agentAuth.SetToken("")
-		_ = os.Unsetenv("CONCH_TEST_INVALID_ENV")
-	})
-	handler := NewVsockHandler("test-version", func() bool { return true })
+	resetAgentAuth(t)
+	handler := newTestVsockHandler(nil, func() bool { return true })
+	request := testInitRequest()
+	request.Env = map[string]string{"BAD=KEY": "value"}
 
-	resp := handler.HandleMessage("I AM SANDBOX_ID:sandbox-1\nAGENT_TOKEN:secret\nENV:CONCH_TEST_INVALID_ENV\n")
-	if resp != "NOT_READY\n" {
-		t.Fatalf("HandleMessage() = %q, want NOT_READY", resp)
+	response := handler.HandleRequest(request)
+	if response.ErrorCode != "INVALID_REQUEST" || response.Retryable {
+		t.Fatalf("HandleRequest() = %#v, want terminal INVALID_REQUEST", response)
 	}
-	if got := os.Getenv("CONCH_TEST_INVALID_ENV"); got != "" {
-		t.Fatalf("CONCH_TEST_INVALID_ENV = %q, want empty", got)
+}
+
+func newTestVsockHandler(apply func(netstack.GuestNetworkConfig, bool) error, health func() bool) *VsockHandlerImpl {
+	if apply == nil {
+		apply = func(netstack.GuestNetworkConfig, bool) error { return nil }
 	}
-	header := http.Header{}
-	header.Set(agentTokenHeaderKey, "secret")
-	if err := agentAuth.verifyHTTPHeader(header); err == nil {
-		t.Fatal("agent token was set despite invalid environment")
+	return NewVsockHandler(health, apply)
+}
+
+func testInitRequest() agentprotocol.InitRequest {
+	return agentprotocol.InitRequest{
+		Version:    agentprotocol.ProtocolVersion,
+		SandboxID:  "sandbox-1",
+		AgentToken: "secret",
+		Network: netstack.GuestNetworkConfig{
+			GuestIP:      "192.168.100.21",
+			PrefixLength: 24,
+			Gateway:      "192.168.100.2",
+			DNS:          netstack.DNSConfig{Nameservers: []string{"10.0.0.53"}},
+		},
 	}
+}
+
+func resetAgentAuth(t *testing.T) {
+	t.Helper()
+	agentAuth.SetToken("")
+	t.Cleanup(func() { agentAuth.SetToken("") })
 }
 
 func TestCheckAgentAPIHealthEndpoint(t *testing.T) {

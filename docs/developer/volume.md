@@ -14,7 +14,7 @@ host 目录（host-path），Conch 把它们挂进 guest 内指定路径。
 依赖组件：
 
 - virtiofsd: v1.13.3+
-- stratovirt: v2.5.0+, with vhost-user fs feature
+- Cloud Hypervisor v52.0-conch，或带 vhost-user-fs 特性的 StratoVirt v2.5.0+
 
 ## 2. 组件架构
 
@@ -41,7 +41,7 @@ Volume Mount Resolver              Shared Dir Backend (virtiofs)
    └─ config.json                    VMM Adapter
         |                                   |
         v                                   v
-   guest agent (passive)            stratovirt vhost-user-fs-pci (×1)
+   guest agent (passive)            VMM virtiofs device (×1)
         |
         v
    mount --bind per config.json entry
@@ -60,8 +60,9 @@ runtime 目录与 `volume` 子目录、执行 host 侧 `mount --bind`、写 `con
 单个 virtiofsd、等待 socket ready、生成 VMM 所需 socket/tag，并在 sandbox 删除或创建
 失败时清理 virtiofsd 与 bind。
 
-`VMM Adapter` 把后端返回的 virtiofs 设备转换为具体 VMM 参数。当前 stratovirt 使用
-**单个** `vhost-user-fs-pci`，并在 kernel cmdline 追加极小 sharefs 开关。
+`VMM Adapter` 把后端返回的 virtiofs 设备转换为具体 VMM 参数。Cloud Hypervisor 使用
+`--fs tag=...,socket=...`，StratoVirt 使用**单个** `vhost-user-fs-pci`；两者都会在 kernel
+cmdline 追加极小 sharefs 开关。
 
 `guest agent` 开机检测 cmdline 中 `conch.sharefs=virtiofs` 开关；存在则挂载 virtiofs 到
 固定 guest 路径、读取 `<mp>/config.json`、对每条挂载 `mkdir -p` 目标并 `mount --bind`；
@@ -76,12 +77,9 @@ runtime 目录与 `volume` 子目录、执行 host 侧 `mount --bind`、写 `con
   virtiofsd、一个 `vhost-user-fs` 设备，所有挂载是该共享目录下的子路径，
   guest agent 通过共享目录内的 `config.json` 得到子路径→目标路径映射并
   执行 `mount --bind`。
-- conchd 重启处理：
-  - 在运行VMM：attach 现有 VMM 进程；若该 sandbox 带挂载，则复用现存的
-    host bind（内核 bind mount）与 virtiofsd 进程，重建 volume dir 管
-    理态并注册清理回调。
-  - 已退出VMM： VMM 已退出而 virtiofsd/bind 残留，清理残留 virtiofsd
-    进程、socket 与 runtime目录。
+- conchd 不会在重启后接管旧 VMM、恢复旧 Sandbox 或重建 volume 管理状态。重启前必须
+  删除所有活跃 Sandbox；异常退出遗留的 virtiofsd、bind mount、socket 和 runtime 目录
+  需要人工清理。
 - 一致性：virtiofsd 1.13.x（Rust 版）没有 cache 参数；缓存模式是
   **guest 侧** mount选项。agent 挂 virtiofs 时用默认 cache 模式
   （`mount -t virtiofs conchfs ...`，不带 `-o cache=...`）。实测在本
@@ -135,7 +133,8 @@ virtiofsd --socket-path <runtime>/virtiofs.sock --shared-dir <runtime>/volume
 
 - 仅当 `volume_mounts` 非空时追加该组设备，并给 `-machine` 加 `mem-share=on`
   （vhost-user-fs 要求 guest 内存与 virtiofsd 共享）；无挂载时两者都不加。
-- PCI 地址固定 `0x14`，避开 virtio-pmem 的 `0x12..` 段；单设备不再受槽位限制。
+- PCI 地址位于 virtio-pmem 设备之后：首个 virtiofs 地址为 `0x12 + pmemCount`。上例有两个
+  pmem 组件，因此地址为 `0x14`；地址不是固定值。
 - kernel cmdline 仅追加 ` conch.sharefs=virtiofs`，**不**带任何卷表，无挂载时不追加。
 
 ### 2.5 挂载信息传递：config.json
@@ -213,8 +212,8 @@ volume.virtiofs.runtime_dir
    `strings /usr/local/bin/stratovirt | grep -i "virtiofs"` 判断。
 3. 共享内存：挂卷时 Conch 自动给 `-machine` 加 `mem-share=on`。vhost-user-fs 需要 guest
    内存与 virtiofsd 后端进程共享，否则 StratoVirt 报 "the memory must be shared"。
-4. PCI 地址：单 `vhost-user-fs-pci` 固定 `bus=pcie.0,addr=0x14`，避开 virtio-pmem 占用的
-   `0x12..` 段；StratoVirt 对该设备要求显式 bus 与 addr。
+4. PCI 地址：单 `vhost-user-fs-pci` 固定使用 `bus=pcie.0`，地址按
+   `0x12 + pmemCount` 计算，放在 virtio-pmem 设备之后；StratoVirt 要求显式提供 bus 与 addr。
 
 ### 3.2 SDK 接口
 
@@ -271,6 +270,6 @@ SDK 发送 payload：
 - guest内使用绝对路径，且不允许是 `/`、`/proc`、`/sys`、`/dev`、`/run` 等系统
   关键路径或其子路径。
 - 同一 sandbox 内 `path` 不允许重复。
-- 挂卷与快照互斥：带挂载的 sandbox 不支持 snapshot start、pause、resume、export；相关
-  调用直接报错。
+- 带挂载的 Sandbox 不支持 checkpoint，也不能从 `boot_mode=resume` 的可恢复 Template 启动；
+  已正常创建的挂卷 Sandbox 支持 suspend 和 resume。
 - 用户 host-path 不随 sandbox 删除而删除。
