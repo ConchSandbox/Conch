@@ -197,10 +197,18 @@ func routeExists(link netlink.Link, dst *net.IPNet, gw net.IP) bool {
 }
 
 func routeDstEqual(a, b *net.IPNet) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+	if isDefaultRouteDst(a) || isDefaultRouteDst(b) {
+		return isDefaultRouteDst(a) && isDefaultRouteDst(b)
 	}
 	return a.IP.Equal(b.IP) && maskEqual(a.Mask, b.Mask)
+}
+
+func isDefaultRouteDst(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	ones, bits := dst.Mask.Size()
+	return bits == net.IPv4len*8 && ones == 0 && dst.IP.To4() != nil && dst.IP.To4().Equal(net.IPv4zero)
 }
 
 func installResolverConfig(cfg netstack.DNSConfig) error {
