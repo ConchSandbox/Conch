@@ -170,7 +170,10 @@ func (p *Pool) signalRefillNeeded() {
 
 // Start launches the pool's population loop. It must be called exactly once.
 
-func (p *Pool) Start(ctx context.Context) {
+func (p *Pool) Start(ctx context.Context) error {
+	if err := p.prefill(ctx); err != nil {
+		return err
+	}
 	populateCtx, populateCancel := context.WithCancel(ctx)
 	populateDone := make(chan struct{})
 	p.populateCancel = populateCancel
@@ -179,6 +182,7 @@ func (p *Pool) Start(ctx context.Context) {
 		defer close(populateDone)
 		p.populate(populateCtx)
 	}()
+	return nil
 }
 
 // Close stops the population loop, drains and closes the warm queue, and makes
@@ -262,16 +266,6 @@ func (p *Pool) CleanupStaleResources(ctx context.Context) error {
 }
 
 func (p *Pool) populate(ctx context.Context) {
-	if err := p.prefill(ctx); err != nil &&
-		!errors.Is(err, errWarmPoolClosed) &&
-		!errors.Is(err, context.Canceled) &&
-		!errors.Is(err, context.DeadlineExceeded) {
-		ulog.GetLogger().Warn("pool: initial prefill exited with error; continuing with background refill", ulog.F("error", err))
-	}
-	if ctx.Err() != nil {
-		return
-	}
-
 	retryDelay := populateRetryMinDelay
 	for {
 		if p.warmSlots.IsClosed() {

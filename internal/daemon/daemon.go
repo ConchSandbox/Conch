@@ -173,6 +173,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		for _, record := range records {
 			sandboxIDs = append(sandboxIDs, record.SandboxID)
 		}
+		logger.Info("cleaning up stale sandbox resources", ulog.F("sandbox_count", len(sandboxIDs)))
 		if err := manager.RecoverStaleResources(ctx, sandboxIDs); err != nil {
 			cleanupErr := host.Close()
 			_ = store.Close()
@@ -185,7 +186,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 			cancel()
 			return nil, errors.Join(fmt.Errorf("clean up stale sandboxes during startup: %w", err), cleanupErr)
 		}
-		manager.Start(ctx)
+		if err := manager.Start(ctx); err != nil {
+			cleanupErr := host.Close()
+			_ = store.Close()
+			cancel()
+			return nil, errors.Join(fmt.Errorf("start network pool during startup: %w", err), cleanupErr)
+		}
 	}
 
 	handleSignals(ctx, cancel, s)
