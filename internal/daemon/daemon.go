@@ -53,6 +53,7 @@ type Daemon struct {
 	listener       net.Listener
 	unixSocketPath string
 	cleanupOnce    sync.Once
+	cowProcess     *cow.Process
 
 	// TODO: need ListCachedBuilds()
 }
@@ -101,6 +102,19 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.routes()
 
 	logger := ulog.GetLogger()
+	cowProcess, err := cow.StartProcess(ctx, cfg.Sandbox.CowBinary, cfg.Sandbox.CowSocket)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("start conch-cow: %w", err)
+	}
+	s.cowProcess = cowProcess
+	startupComplete := false
+	defer func() {
+		if !startupComplete {
+			_ = cowProcess.Close()
+		}
+	}()
+	logger.Info("conch-cow initialized", ulog.F("binary", cfg.Sandbox.CowBinary), ulog.F("socket", cfg.Sandbox.CowSocket))
 
 	store, err := state.OpenBolt(cfg.State.Path)
 	if err != nil {
@@ -200,6 +214,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	handleSignals(ctx, cancel, s)
 
+	startupComplete = true
 	logger.Info("Server initialized successfully")
 	return s, nil
 }
@@ -332,6 +347,15 @@ func (s *Daemon) Shutdown() {
 			finish(err)
 			if err != nil {
 				logger.Error("Sandbox cleanup error", ulog.F("error", err))
+			}
+		}
+
+		if s.cowProcess != nil {
+			finish := cleanupdiag.Start("daemon.cow.close")
+			err := s.cowProcess.Close()
+			finish(err)
+			if err != nil {
+				logger.Error("conch-cow cleanup error", ulog.F("error", err))
 			}
 		}
 
