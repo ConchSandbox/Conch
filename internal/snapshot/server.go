@@ -318,7 +318,7 @@ func (s *Server) CreateBootLayout(
 	if err != nil {
 		return nil, err
 	}
-	applyDirectCheckpointPath(layout)
+	applyRequestedMemoryFormat(layout, req.MemoryFormat)
 	if parents.Rootfs != "" {
 		defer func() {
 			if err != nil {
@@ -392,6 +392,14 @@ func applyDirectCheckpointPath(layout *BootLayout) {
 	}
 }
 
+func applyRequestedMemoryFormat(layout *BootLayout, memoryFormat string) {
+	if layout == nil {
+		return
+	}
+	layout.MemoryFormat = strings.TrimSpace(memoryFormat)
+	applyDirectCheckpointPath(layout)
+}
+
 // RestoreBootLayout creates per-sandbox rootfs/VM views and either a writable
 // memory layer or a checkpoint view for restore.
 func (s *Server) RestoreBootLayout(
@@ -430,6 +438,7 @@ func (s *Server) RestoreBootLayout(
 		layout.MemorySizeMB = req.MemorySizeMB
 		memorySizeFromSnapshot = true
 	}
+	applyRequestedMemoryFormat(layout, req.MemoryFormat)
 
 	pmemFiles, err := s.viewRootfsSnapshot(ctx, namespace, parents.Rootfs, rootfsViewSnapshotKey, layout.RootfsMount)
 	if err != nil {
