@@ -11,6 +11,12 @@ var (
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
 )
 
+const (
+	AnnotationMemoryFormat    = "io.conch.memory-format"
+	MemoryFormatFullV1        = "full-v1"
+	MemoryFormatIncrementalV1 = "incremental-v1"
+)
+
 // RegistryPullOptions contains the registry inputs shared by OCI image and
 // Boot Index pull workflows. Command-specific kind policy is applied by the
 // caller before child manifests and layers are fetched.
@@ -44,6 +50,7 @@ type BootIndexInfo struct {
 	Resume            bool               `json:"resume"`
 	VMMName           string             `json:"vmm_name,omitempty"`
 	MemorySizeMB      int64              `json:"memory_size_mb,omitempty"`
+	MemoryFormat      string             `json:"memory_format,omitempty"`
 }
 
 // PublishCheckpointBootIndexOptions publishes captured memory and VMM state as
@@ -56,6 +63,7 @@ type PublishCheckpointBootIndexOptions struct {
 	MemRoot               string `json:"mem_root"`
 	VMMName               string `json:"vmm_name"`
 	MemorySizeMB          int64  `json:"memory_size_mb"`
+	MemoryFormat          string `json:"memory_format"`
 }
 
 // PublishCheckpointBootIndexResult deliberately contains no snapshot keys:

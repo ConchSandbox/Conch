@@ -95,6 +95,9 @@ const (
 )
 
 type SandboxConfig struct {
+	MemoryMode         string        `yaml:"memory_mode"`
+	CowBinary          string        `yaml:"cow_binary"`
+	CowSocket          string        `yaml:"cow_socket"`
 	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
 	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
 	RequestTimeout     time.Duration `yaml:"request_timeout"`
@@ -153,6 +156,9 @@ func DefaultConfig() *Config {
 			StateDir: "/run/conch/containerd",
 		},
 		Sandbox: SandboxConfig{
+			MemoryMode:         "full",
+			CowBinary:          "/usr/bin/conch-cow",
+			CowSocket:          "/run/conch/cow.sock",
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
@@ -268,6 +274,15 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Containerd.StateDir == "" {
 		cfg.Containerd.StateDir = defaultCfg.Containerd.StateDir
 	}
+	if strings.TrimSpace(cfg.Sandbox.MemoryMode) == "" {
+		cfg.Sandbox.MemoryMode = defaultCfg.Sandbox.MemoryMode
+	}
+	if strings.TrimSpace(cfg.Sandbox.CowBinary) == "" {
+		cfg.Sandbox.CowBinary = defaultCfg.Sandbox.CowBinary
+	}
+	if strings.TrimSpace(cfg.Sandbox.CowSocket) == "" {
+		cfg.Sandbox.CowSocket = defaultCfg.Sandbox.CowSocket
+	}
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
 	}
@@ -318,6 +333,19 @@ func LoadConfig(configPath string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
+	switch cfg.Sandbox.MemoryMode {
+	case "full", "auto", "incremental":
+	default:
+		return fmt.Errorf("invalid sandbox.memory_mode=%q: must be full, auto, or incremental", cfg.Sandbox.MemoryMode)
+	}
+	if !filepath.IsAbs(cfg.Sandbox.CowBinary) {
+		return fmt.Errorf("invalid sandbox.cow_binary=%q: must be an absolute path", cfg.Sandbox.CowBinary)
+	}
+	cfg.Sandbox.CowBinary = filepath.Clean(cfg.Sandbox.CowBinary)
+	if !filepath.IsAbs(cfg.Sandbox.CowSocket) {
+		return fmt.Errorf("invalid sandbox.cow_socket=%q: must be an absolute path", cfg.Sandbox.CowSocket)
+	}
+	cfg.Sandbox.CowSocket = filepath.Clean(cfg.Sandbox.CowSocket)
 	if cfg.Network.WarmPoolSize < 0 {
 		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}

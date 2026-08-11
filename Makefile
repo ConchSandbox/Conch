@@ -1,4 +1,4 @@
-.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor build-conch-init-initramfs
+.PHONY: build clean test fmt vet lint help gen-proto gen-proto-go gen-proto-py mod-tidy mod-vendor build-conch-cow build-conch-init-initramfs
 
 # project name
 PROJECT_NAME := Conch
@@ -110,6 +110,11 @@ build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/$* ./cmd/$*
+
+build-conch-cow: ## Build the conch-cow daemon
+	@echo "building cmd/conch-cow..."
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/conch-cow ./cmd/conch-cow
 
 build-conch-init-initramfs: ## Build minimal initramfs that runs conch-init as PID 1
 	@echo "building static conch-init for initramfs..."

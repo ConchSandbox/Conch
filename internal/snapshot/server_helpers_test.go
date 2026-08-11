@@ -119,9 +119,9 @@ func TestBootLayoutMemoryPathsRespectStorageMode(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			layout := &BootLayout{
-				MemMount:     "/runtime/mem",
-				SnapshotDir:  "conch/snapshot",
-				MemoryLayout: tt.mode,
+				MemorySnapshotRoot: "/runtime/mem",
+				SnapshotDir:        "conch/snapshot",
+				MemoryLayout:       tt.mode,
 			}
 			if got := layout.SnapshotMemFile() != ""; got != tt.wantMemoryPath {
 				t.Fatalf("SnapshotMemFile() = %q", layout.SnapshotMemFile())
@@ -130,6 +130,23 @@ func TestBootLayoutMemoryPathsRespectStorageMode(t *testing.T) {
 				t.Fatalf("SnapDir() = %q", layout.SnapDir())
 			}
 		})
+	}
+}
+
+func TestDirectCheckpointMemoryFormatUsesComponentRoot(t *testing.T) {
+	for _, format := range []string{"full-v1", "incremental-v1"} {
+		layout := &BootLayout{
+			MemorySnapshotRoot: "/runtime/mem",
+			SnapshotDir:        "conch/snapshot",
+			MemoryLayout:       MemoryLayoutCheckpointView,
+		}
+		applyRequestedMemoryFormat(layout, format)
+		if layout.MemoryFormat != format {
+			t.Fatalf("MemoryFormat = %q, want %q", layout.MemoryFormat, format)
+		}
+		if got := layout.SnapDir(); got != "/runtime/mem" {
+			t.Fatalf("format %s SnapDir() = %q", format, got)
+		}
 	}
 }
 

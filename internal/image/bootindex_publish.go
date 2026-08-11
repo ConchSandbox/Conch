@@ -129,6 +129,13 @@ func PublishCheckpointBootIndex(
 	if req.MemorySizeMB <= 0 {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: memory_size_mb must be positive", ErrInvalidRequest)
 	}
+	if req.VMMName == "stratovirt" {
+		if req.MemoryFormat != MemoryFormatFullV1 && req.MemoryFormat != MemoryFormatIncrementalV1 {
+			return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: invalid %s value %q", ErrInvalidRequest, AnnotationMemoryFormat, req.MemoryFormat)
+		}
+	} else if req.MemoryFormat != "" {
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: non-stratovirt checkpoint cannot set %s", ErrInvalidRequest, AnnotationMemoryFormat)
+	}
 
 	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
 	publishCtx, done, err := client.WithLease(namespaceCtx)
@@ -145,7 +152,18 @@ func PublishCheckpointBootIndex(
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("source boot index VMM %q does not match capture VMM %q", sourceInfo.VMMName, req.VMMName)
 	}
 
-	memDesc, err := BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot, req.BootIndexTag+"-mem")
+	var memDesc ocispec.Descriptor
+	if req.MemoryFormat == MemoryFormatIncrementalV1 {
+		memDesc, err = BuildIncrementalMemoryComponentInContent(
+			publishCtx,
+			client.ContentStore(),
+			sourceInfo.MemDescriptor,
+			req.MemRoot,
+			req.BootIndexTag+"-mem",
+		)
+	} else {
+		memDesc, err = BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot, req.BootIndexTag+"-mem")
+	}
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("publish captured mem component: %w", err)
 	}
@@ -156,6 +174,7 @@ func PublishCheckpointBootIndex(
 		Tag:               req.BootIndexTag,
 		VMMName:           req.VMMName,
 		MemorySizeMB:      req.MemorySizeMB,
+		MemoryFormat:      req.MemoryFormat,
 	})
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)

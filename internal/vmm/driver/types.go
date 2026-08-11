@@ -1,6 +1,9 @@
 package driver
 
-import "context"
+import (
+	"context"
+	"os"
+)
 
 type ResourceArgs struct {
 	// CPU
@@ -8,8 +11,13 @@ type ResourceArgs struct {
 	CPUMax  int64
 
 	// Memory
-	MemorySize int64
-	MemoryPath string
+	MemorySize        int64
+	MemoryPath        string
+	MemoryFile        *os.File
+	MemoryFD          int
+	MemoryFormat      string
+	UFFDSocketPath    string
+	ResumeStartedHook func(context.Context) error
 
 	// Net
 	NetNSPath string
@@ -40,6 +48,33 @@ type ResourceArgs struct {
 type VirtioFSDevice struct {
 	Tag    string
 	Socket string
+}
+
+type MemoryMapping struct {
+	BaseHostVirtualAddress uint64 `json:"base-host-virt-addr"`
+	Size                   uint64 `json:"size"`
+	Offset                 uint64 `json:"offset"`
+	PageSize               uint64 `json:"page-size"`
+}
+
+type MemoryPageState struct {
+	Resident []uint64 `json:"resident,omitempty"`
+	Empty    []uint64 `json:"empty,omitempty"`
+	PageSize uint64   `json:"page-size"`
+}
+
+type MemoryDirtyBitmap struct {
+	Generation uint64   `json:"generation"`
+	Bitmap     []uint64 `json:"bitmap,omitempty"`
+	PageSize   uint64   `json:"page-size"`
+}
+
+type IncrementalMemoryAdapter interface {
+	CreateExternalMemorySnapshot(snapfilePath string) error
+	QueryMemoryMappings() ([]MemoryMapping, error)
+	QueryMemoryPageState() (MemoryPageState, error)
+	QueryMemoryDirtyBitmap() (MemoryDirtyBitmap, error)
+	ClearMemoryDirtyBitmap(generation uint64) error
 }
 
 type Adapter interface {

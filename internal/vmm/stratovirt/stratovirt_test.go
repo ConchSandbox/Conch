@@ -1,8 +1,12 @@
 package stratovirt
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +15,130 @@ import (
 
 	"github.com/openeuler/Conch/internal/vmm/driver"
 )
+
+type qmpExchange struct {
+	execute   string
+	arguments map[string]any
+	responses []string
+}
+
+func startQMPSequence(t *testing.T, exchanges []qmpExchange) (string, <-chan error) {
+	t.Helper()
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for index, exchange := range exchanges {
+			conn, err := listener.Accept()
+			if err != nil {
+				done <- fmt.Errorf("exchange %d accept: %w", index, err)
+				return
+			}
+			reader := bufio.NewReader(conn)
+			if _, err := fmt.Fprintln(conn, `{"QMP":{"version":{}}}`); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			if _, err := reader.ReadString('\n'); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			if _, err := fmt.Fprintln(conn, `{"event":"CAPABILITY_EVENT"}`); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			if _, err := fmt.Fprintln(conn, `{"return":{}}`); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			commandJSON, err := reader.ReadString('\n')
+			if err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			var command map[string]any
+			if err := json.Unmarshal([]byte(commandJSON), &command); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			if command["execute"] != exchange.execute {
+				_ = conn.Close()
+				done <- fmt.Errorf("exchange %d execute=%v, want %s", index, command["execute"], exchange.execute)
+				return
+			}
+			gotArguments, present := command["arguments"]
+			if exchange.arguments == nil && present {
+				_ = conn.Close()
+				done <- fmt.Errorf("exchange %d has unexpected arguments %#v", index, gotArguments)
+				return
+			}
+			if exchange.arguments != nil {
+				gotJSON, _ := json.Marshal(gotArguments)
+				wantJSON, _ := json.Marshal(exchange.arguments)
+				if !present || string(gotJSON) != string(wantJSON) {
+					_ = conn.Close()
+					done <- fmt.Errorf("exchange %d arguments=%s, want %s", index, gotJSON, wantJSON)
+					return
+				}
+			}
+			for _, response := range exchange.responses {
+				if _, err := fmt.Fprintln(conn, response); err != nil {
+					_ = conn.Close()
+					done <- err
+					return
+				}
+			}
+			_ = conn.Close()
+		}
+		done <- nil
+	}()
+	return socketPath, done
+}
+
+func TestIncrementalMemoryQMPCommands(t *testing.T) {
+	exchanges := []qmpExchange{
+		{execute: "migrate", arguments: map[string]any{"uri": "file:/capture/root,memory=external"}, responses: []string{`{"event":"STOP"}`, `{"return":{}}`}},
+		{execute: "query-migrate", responses: []string{`{"return":{"status":"completed"}}`}},
+		{execute: "query-mem-mappings", responses: []string{`{"return":{"mappings":[{"base-host-virt-addr":8192,"size":4096,"offset":0,"page-size":4096}]}}`}},
+		{execute: "query-mem-page-state", responses: []string{`{"return":{"resident":[1],"empty":[2],"page-size":4096}}`}},
+		{execute: "query-mem-dirty-bitmap", arguments: map[string]any{"clear": false}, responses: []string{`{"return":{"generation":42,"bitmap":[9223372036854775809],"page-size":4096}}`}},
+		{execute: "clear-mem-dirty-bitmap", arguments: map[string]any{"generation": float64(42)}, responses: []string{`{"return":{}}`}},
+	}
+	socketPath, done := startQMPSequence(t, exchanges)
+	client := NewStratovirtClient(1, socketPath, "/unused")
+	if err := client.CreateExternalMemorySnapshot("/capture/root"); err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := client.QueryMemoryMappings()
+	if err != nil || len(mappings) != 1 || mappings[0].BaseHostVirtualAddress != 8192 {
+		t.Fatalf("QueryMemoryMappings() = %#v, %v", mappings, err)
+	}
+	pageState, err := client.QueryMemoryPageState()
+	if err != nil || pageState.PageSize != 4096 || len(pageState.Resident) != 1 || len(pageState.Empty) != 1 {
+		t.Fatalf("QueryMemoryPageState() = %#v, %v", pageState, err)
+	}
+	dirty, err := client.QueryMemoryDirtyBitmap()
+	if err != nil || dirty.Generation != 42 || len(dirty.Bitmap) != 1 || dirty.Bitmap[0] != uint64(1)<<63|1 {
+		t.Fatalf("QueryMemoryDirtyBitmap() = %#v, %v", dirty, err)
+	}
+	if err := client.ClearMemoryDirtyBitmap(dirty.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestStratovirtBuildStartCmd(t *testing.T) {
 	configuredDir := t.TempDir()
@@ -98,6 +226,43 @@ func TestStratovirtBuildRestoreCmdUsesMappedCheckpoint(t *testing.T) {
 	}
 	if strings.Contains(script, "/must/not/be/used/mem.img") {
 		t.Fatalf("restore script consumed MemoryPath:\n%s", script)
+	}
+}
+
+func TestStratovirtBuildIncrementalRestoreCmdUsesInheritedMemfd(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "stratovirt")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
+	script, err := client.BuildStartCmd(&driver.ResourceArgs{
+		CPUBoot:        2,
+		CPUMax:         2,
+		MemorySize:     1024,
+		MemoryFormat:   "incremental-v1",
+		MemoryFD:       3,
+		UFFDSocketPath: "/run/conch/u-one-shot.sock",
+		NetNSPath:      "/run/conch/netns/slot-2",
+		TapName:        "tap0",
+		KernelPath:     "/tmp/kernel",
+		InitrdPath:     "/tmp/initrd",
+		SnapfilePath:   "/mnt/memory",
+		VsockCID:       42,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-S",
+		"-object memory-backend-memfd,size=1024M,id=mem0,fd=3,share=off,mem-prealloc=false",
+		"-numa node,nodeid=0,cpus=0-1,memdev=mem0",
+		"-incoming file:/mnt/memory,memory=external,mapped=false,uffd_sock=/run/conch/u-one-shot.sock",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("incremental restore missing %q:\n%s", want, script)
+		}
 	}
 }
 

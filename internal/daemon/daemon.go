@@ -25,8 +25,10 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/cow"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
@@ -51,6 +53,7 @@ type Daemon struct {
 	listener       net.Listener
 	unixSocketPath string
 	cleanupOnce    sync.Once
+	cowProcess     *cow.Process
 
 	// TODO: need ListCachedBuilds()
 }
@@ -99,6 +102,19 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.routes()
 
 	logger := ulog.GetLogger()
+	cowProcess, err := cow.StartProcess(ctx, cfg.Sandbox.CowBinary, cfg.Sandbox.CowSocket)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("start conch-cow: %w", err)
+	}
+	s.cowProcess = cowProcess
+	startupComplete := false
+	defer func() {
+		if !startupComplete {
+			_ = cowProcess.Close()
+		}
+	}()
+	logger.Info("conch-cow initialized", ulog.F("binary", cfg.Sandbox.CowBinary), ulog.F("socket", cfg.Sandbox.CowSocket))
 
 	store, err := state.OpenBolt(cfg.State.Path)
 	if err != nil {
@@ -137,6 +153,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
 			VolumeManager:      s.volumeManager,
+			CowSocket:          cfg.Sandbox.CowSocket,
 		},
 	})
 	if err != nil {
@@ -159,6 +176,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
+	s.runtimeService.SetMemoryPolicy(memorymode.RequestedMode(cfg.Sandbox.MemoryMode), cow.NewClient(cfg.Sandbox.CowSocket))
 
 	manager := host.SandboxManager()
 	if manager != nil {
@@ -196,6 +214,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	handleSignals(ctx, cancel, s)
 
+	startupComplete = true
 	logger.Info("Server initialized successfully")
 	return s, nil
 }
@@ -331,6 +350,15 @@ func (s *Daemon) Shutdown() {
 			}
 		}
 
+		if s.cowProcess != nil {
+			finish := cleanupdiag.Start("daemon.cow.close")
+			err := s.cowProcess.Close()
+			finish(err)
+			if err != nil {
+				logger.Error("conch-cow cleanup error", ulog.F("error", err))
+			}
+		}
+
 		if s.containerdHost != nil {
 			finish := cleanupdiag.Start("daemon.containerd_host.close")
 			err := s.containerdHost.Close()
@@ -443,6 +471,8 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, conchruntime.ErrSandboxAlreadyExists) {
 			status = http.StatusConflict
+		} else if errors.Is(err, memorymode.ErrPrecondition) {
+			status = http.StatusPreconditionFailed
 		}
 		http.Error(w, "Failed to create sandbox: "+err.Error(), status)
 		return

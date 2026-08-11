@@ -30,6 +30,10 @@ func GetVmmType(vmmName string) (int, bool) {
 }
 
 type ResourceArgs = driver.ResourceArgs
+type MemoryMapping = driver.MemoryMapping
+type MemoryPageState = driver.MemoryPageState
+type MemoryDirtyBitmap = driver.MemoryDirtyBitmap
+type IncrementalMemoryAdapter = driver.IncrementalMemoryAdapter
 type vmmAdapter = driver.Adapter
 
 func newVmmAdapter(vmmName, vmmSocketPath, vmmBinary string) (vmmAdapter, error) {

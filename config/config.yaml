@@ -42,6 +42,12 @@ vmm:
     binary: /usr/bin/stratovirt
 
 sandbox:
+  # Global StratoVirt memory policy: full, auto, or incremental. Defaults to full.
+  memory_mode: full
+  # conch-cow binary started and stopped by conchd.
+  cow_binary: /usr/bin/conch-cow
+  # Local conch-cow control socket.
+  cow_socket: /run/conch/cow.sock
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
   request_timeout: 60s
