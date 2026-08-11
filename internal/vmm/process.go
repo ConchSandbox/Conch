@@ -308,6 +308,13 @@ func (p *Process) Stop() error {
 
 	err = p.cmd.Process.Signal(syscall.SIGTERM)
 	if err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			logger.Debug("VMM process already exited",
+				ulog.F("pid", p.cmd.Process.Pid),
+			)
+			p.adapter.Cleanup()
+			return errors.Join(errs...)
+		}
 		logger.Error("Failed to send SIGTERM to VMM process",
 			ulog.F("pid", p.cmd.Process.Pid),
 			ulog.F("error", err),

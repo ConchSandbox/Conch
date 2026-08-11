@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,7 +73,8 @@ func TestIsSandboxSocketName(t *testing.T) {
 }
 
 type blockingDaemonClient struct {
-	release chan struct{}
+	release      chan struct{}
+	cleanupCalls atomic.Int32
 }
 
 func (c *blockingDaemonClient) BuildStartCmd(*ResourceArgs, bool) (string, error) { return "", nil }
@@ -103,7 +106,31 @@ func (c *blockingDaemonClient) WaitForCreateReady(context.Context, <-chan error)
 func (c *blockingDaemonClient) WaitForRestoreReady(context.Context, <-chan error) error {
 	return nil
 }
-func (c *blockingDaemonClient) Cleanup() {}
+func (c *blockingDaemonClient) Cleanup() { c.cleanupCalls.Add(1) }
+
+func TestStopIgnoresProcessDoneWhenProcessAlreadyFinished(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for process: %v", err)
+	}
+
+	client := &blockingDaemonClient{release: make(chan struct{})}
+	process := &Process{
+		cmd:        cmd,
+		adapter:    client,
+		exitSignal: make(chan error, 1),
+	}
+
+	if err := process.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v, want nil", err)
+	}
+	if got := client.cleanupCalls.Load(); got != 1 {
+		t.Fatalf("Cleanup() calls = %d, want 1", got)
+	}
+}
 
 func TestWaitForAgentAliveReturnsProcessExitError(t *testing.T) {
 	processErr := errors.New("stratovirt exited after creating qmp socket")
