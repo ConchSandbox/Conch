@@ -64,6 +64,8 @@ Sandbox.create(template_id=None, sandbox_id=None,
 - `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。沙箱 ID、访问令牌、协议字段和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 1024 字节；超过限制时会在虚拟机启动前拒绝创建请求。
 - `network` (dict, 可选): 创建时应用的 IP 级网络策略。支持 `allowOut`、`denyOut`、`allowIn`、`denyIn` 和 `allow_internet_access`。
 
+控制面请求失败时，SDK 继续抛出 `RuntimeError`（或现有子类）。当 conchd 返回结构化错误时，异常文本为 `<code>: <error>`，例如 `sandbox.invalid_environment: invalid sandbox environment`。其中 `code` 是可供自动化稳定判断的错误码；`error` 是面向用户的文案，不保证跨版本不变。旧服务端的纯文本错误响应仍会原样显示。
+
 **返回：** 成功返回 `Sandbox` 对象。
 
 **异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。

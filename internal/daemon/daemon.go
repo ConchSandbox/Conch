@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"golang.org/x/sys/unix"
 
 	"github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -30,6 +29,7 @@ import (
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -377,11 +377,11 @@ func (s *Daemon) removeAllSandboxes() error {
 
 func (s *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if !s.controlPlaneReady() {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -402,7 +402,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling create sandbox request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 
@@ -411,7 +411,12 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RAMMB != 0 && req.RAMMB < minimumSandboxRAMMB {
-		http.Error(w, fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB), http.StatusBadRequest)
+		message := fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB)
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(errors.New(message), message))
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Sandbox == nil {
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
@@ -427,24 +432,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Network:      req.Network,
 	})
 	if err != nil {
-		if errors.Is(err, conchruntime.ErrTemplateIDRequired) || errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status": "error",
-				"error":  err.Error(),
-			})
-			return
-		}
-		logger.Error("Failed to create sandbox",
-			ulog.F("sandbox_id", req.SandboxID),
-			ulog.F("error", err),
-		)
-		status := http.StatusInternalServerError
-		if errors.Is(err, conchruntime.ErrSandboxAlreadyExists) {
-			status = http.StatusConflict
-		}
-		http.Error(w, "Failed to create sandbox: "+err.Error(), status)
+		writeAPIError(w, err, ulog.F("operation", "sandbox.create"), ulog.F("sandbox_id", req.SandboxID))
 		return
 	}
 
@@ -460,7 +448,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request) {
 	sandboxID := r.PathValue("sandboxID")
 	if sandboxID == "" {
-		http.Error(w, "Missing sandbox id", http.StatusBadRequest)
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox id is required")))
 		return
 	}
 	var req runtimeapi.SandboxNetworkConfig
@@ -468,27 +456,23 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if s.stateStore == nil || s.runtimeService == nil {
-		http.Error(w, "Sandbox service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	record, err := s.findSandboxRecord(r.Context(), sandboxID)
 	if err != nil {
-		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	if record == nil {
-		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
 	if err := s.runtimeService.UpdateSandboxNetworkConfig(r.Context(), runtimeapi.SandboxNetworkUpdateOptions{
 		SandboxID: record.SandboxID,
 		Network:   &req,
 	}); err != nil {
-		if errors.Is(err, netstack.ErrInvalidSandboxNetworkPolicy) {
-			http.Error(w, "Invalid network config: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		http.Error(w, "Failed to update sandbox network: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -500,34 +484,29 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling delete sandbox request", ulog.F("sandbox_id", sandboxID))
 
 	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if sandboxID == "" {
-		http.Error(w, "Missing sandbox id", http.StatusBadRequest)
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox id is required")))
 		return
 	}
-	if s.stateStore == nil {
-		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+	if s.stateStore == nil || s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
 	record, err := s.findSandboxRecord(r.Context(), sandboxID)
 	if err != nil {
-		logger.Error("Failed to resolve sandbox for deletion",
-			ulog.F("sandbox_id", sandboxID),
-			ulog.F("error", err),
-		)
-		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "sandbox.delete"), ulog.F("sandbox_id", sandboxID))
 		return
 	}
 	if record == nil {
-		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
 	if err := s.runtimeService.RemoveSandbox(r.Context(), record.SandboxID); err != nil {
-		logger.Error("Failed to delete sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		http.Error(w, "Failed to delete sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "sandbox.delete"), ulog.F("sandbox_id", sandboxID))
 		return
 	}
 
@@ -537,22 +516,22 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 	if s.stateStore == nil {
-		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	states, err := parseSandboxStates(r.URL.Query()["state"])
 	if err != nil {
-		http.Error(w, "Invalid state filter: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(err, "invalid sandbox state filter"))
 		return
 	}
 	limit, err := parseSandboxListLimit(r.URL.Query().Get("limit"))
 	if err != nil {
-		http.Error(w, "Invalid limit", http.StatusBadRequest)
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(err, "invalid sandbox list limit"))
 		return
 	}
 	records, err := s.stateStore.ListSandboxes(r.Context())
 	if err != nil {
-		http.Error(w, "Failed to list sandboxes: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	sandboxes := make([]sandboxInspectResponse, 0, len(records))
@@ -570,16 +549,16 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	sandboxID := r.PathValue("sandboxID")
 	if s.stateStore == nil {
-		http.Error(w, "State store unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	record, err := s.findSandboxRecord(r.Context(), sandboxID)
 	if err != nil {
-		http.Error(w, "Failed to get sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	if record == nil {
-		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
 	writeJSON(w, sandboxResponseFromRecord(*record, true))
@@ -680,7 +659,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling suspend sandbox request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 
@@ -688,23 +667,27 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox_id is required")))
+		return
+	}
+	if s.stateStore == nil || s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 
 	record, err := s.findSandboxRecord(r.Context(), req.SandboxID)
 	if err != nil {
-		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	if record == nil {
-		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
 	err = s.runtimeService.SuspendSandbox(r.Context(), record.SandboxID)
 	if err != nil {
-		logger.Error("Failed to suspend sandbox",
-			ulog.F("sandbox_id", req.SandboxID),
-			ulog.F("error", err),
-		)
-		http.Error(w, "Failed to suspend sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "sandbox.suspend"), ulog.F("sandbox_id", req.SandboxID))
 		return
 	}
 
@@ -716,24 +699,32 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	var req sandboxLifecycleRequest
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox_id is required")))
+		return
+	}
+	if s.stateStore == nil || s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	record, err := s.findSandboxRecord(r.Context(), req.SandboxID)
 	if err != nil {
-		http.Error(w, "Failed to resolve sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	if record == nil {
-		http.Error(w, "Sandbox not found", http.StatusNotFound)
+		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
 	if err := s.runtimeService.ResumeSandbox(r.Context(), record.SandboxID); err != nil {
-		http.Error(w, "Failed to resume sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -742,11 +733,19 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	var req sandboxCheckpointRequest
 	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox_id is required")))
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Sandbox == nil {
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
@@ -754,7 +753,7 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 		Labels:    req.Labels,
 	})
 	if err != nil {
-		http.Error(w, "Failed to checkpoint sandbox: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -767,37 +766,41 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 
 func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, "Invalid multipart body: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, errRequestInvalidMultipart.Wrap(err))
 		return
 	}
 	var req templateCreateRequest
 	if err := decodeStrictJSON(strings.NewReader(r.FormValue("metadata")), &req); err != nil {
-		http.Error(w, "Invalid metadata: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, errRequestInvalidMultipart.WrapMessage(err, "invalid multipart metadata: "+err.Error()))
 		return
 	}
 	tmpDir, err := os.MkdirTemp("", "conch-template-api-*")
 	if err != nil {
-		http.Error(w, "Failed to create temp workspace: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	defer os.RemoveAll(tmpDir)
 	kernelPath, err := saveMultipartFile(r, "kernel", tmpDir, "kernel")
 	if err != nil {
-		http.Error(w, "Invalid kernel file: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, err)
 		return
 	}
 	initrdPath, err := saveMultipartFile(r, "initrd", tmpDir, "initrd")
 	if err != nil {
-		http.Error(w, "Invalid initrd file: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, err)
+		return
+	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 	result, err := s.createTemplate(r.Context(), req, kernelPath, initrdPath)
 	if err != nil {
-		http.Error(w, "Failed to create template: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{
@@ -826,6 +829,10 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	result, err := s.runtimeService.PullTemplate(r.Context(), runtimeapi.TemplatePullOptions{
 		Reference: req.Reference,
 		PlainHTTP: req.PlainHTTP,
@@ -834,7 +841,7 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		Labels:    req.Labels,
 	})
 	if err != nil {
-		writeImageError(w, "Failed to pull template", err)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{
@@ -850,6 +857,10 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	if err := s.runtimeService.PushTemplate(r.Context(), runtimeapi.TemplatePushOptions{
 		TemplateID:      req.TemplateID,
 		RemoteReference: req.RemoteReference,
@@ -857,7 +868,7 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 		Username:        req.Username,
 		Password:        req.Password,
 	}); err != nil {
-		http.Error(w, "Failed to push template: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -868,10 +879,14 @@ func (s *Daemon) handleUnpackTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	if err := s.runtimeService.UnpackTemplate(r.Context(), runtimeapi.TemplateUnpackOptions{
 		TemplateID: req.TemplateID,
 	}); err != nil {
-		writeImageError(w, "Failed to unpack template", err)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -882,12 +897,16 @@ func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	items, err := s.runtimeService.ListTemplates(r.Context(), runtimeapi.TemplateListOptions{
 		Origin:   req.Origin,
 		BootMode: req.BootMode,
 	})
 	if err != nil {
-		http.Error(w, "Failed to list templates: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, templateListResponse{Items: items})
@@ -898,9 +917,13 @@ func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	item, err := s.runtimeService.GetTemplate(r.Context(), req.ID)
 	if err != nil {
-		http.Error(w, "Failed to inspect template: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, item)
@@ -911,8 +934,12 @@ func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
 	if err := s.runtimeService.RemoveTemplate(r.Context(), req.ID); err != nil {
-		http.Error(w, "Failed to remove template: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -923,11 +950,11 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling pull image request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -943,11 +970,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := conchimage.Pull(r.Context(), s.daemonClient, opts); err != nil {
-		logger.Error("Failed to pull image",
-			ulog.F("image_name", opts.ImageName),
-			ulog.F("error", err),
-		)
-		writeImageError(w, "Failed to pull image", err)
+		writeAPIError(w, err, ulog.F("operation", "image.pull"), ulog.F("image_name", opts.ImageName))
 		return
 	}
 
@@ -960,11 +983,11 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling push image request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -980,12 +1003,11 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		Password:    req.Password,
 	}
 	if err := conchimage.Push(r.Context(), s.daemonClient, opts); err != nil {
-		logger.Error("Failed to push image",
+		writeAPIError(w, err,
+			ulog.F("operation", "image.push"),
 			ulog.F("local_image", opts.LocalImage),
 			ulog.F("remote_image", opts.RemoteImage),
-			ulog.F("error", err),
 		)
-		writeImageError(w, "Failed to push image", err)
 		return
 	}
 	logger.Info("Image pushed successfully",
@@ -1001,11 +1023,11 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling list image request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -1017,8 +1039,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 		Filters: req.Filters,
 	})
 	if err != nil {
-		logger.Error("Failed to list images", ulog.F("error", err))
-		writeImageError(w, "Failed to list images", err)
+		writeAPIError(w, err, ulog.F("operation", "image.list"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1030,11 +1051,11 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling remove image request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -1047,11 +1068,7 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		Synchronous: req.Synchronous,
 	}
 	if err := conchimage.Remove(r.Context(), s.daemonClient, opts); err != nil {
-		logger.Error("Failed to remove image",
-			ulog.F("image_name", opts.ImageName),
-			ulog.F("error", err),
-		)
-		writeImageError(w, "Failed to remove image", err)
+		writeAPIError(w, err, ulog.F("operation", "image.remove"), ulog.F("image_name", opts.ImageName))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1061,12 +1078,12 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 func saveMultipartFile(r *http.Request, field, dir, name string) (string, error) {
 	file, _, err := r.FormFile(field)
 	if err != nil {
-		return "", err
+		return "", errRequestInvalidMultipart.WrapMessage(err, "invalid multipart field: "+field)
 	}
 	defer file.Close()
 	path := filepath.Join(dir, name)
 	if err := writeMultipartFile(path, file); err != nil {
-		return "", err
+		return "", fmt.Errorf("save multipart field %s: %w", field, err)
 	}
 	return path, nil
 }
@@ -1085,7 +1102,7 @@ func writeMultipartFile(path string, file multipart.File) error {
 
 func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return false
 	}
 	return decodeJSONBody(w, r, out)
@@ -1093,7 +1110,7 @@ func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, out any) bool {
 	if err := decodeStrictJSON(r.Body, out); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		writeAPIError(w, errRequestInvalidBody.WrapMessage(err, "invalid request body: "+err.Error()))
 		return false
 	}
 	return true
@@ -1121,30 +1138,9 @@ func writeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func writeImageError(w http.ResponseWriter, prefix string, err error) {
-	status := http.StatusInternalServerError
-	detail := err.Error()
-	if errors.Is(err, conchimage.ErrInvalidRequest) || errors.Is(err, conchimage.ErrOCIConversionFailed) {
-		status = http.StatusBadRequest
-	} else {
-		var registryErr remoteerrors.ErrUnexpectedStatus
-		if errors.As(err, &registryErr) {
-			if registryErr.StatusCode >= http.StatusContinue && registryErr.StatusCode <= 599 {
-				status = registryErr.StatusCode
-			}
-			if text := http.StatusText(registryErr.StatusCode); text != "" {
-				detail = "registry request failed: " + text
-			} else {
-				detail = "registry request failed"
-			}
-		}
-	}
-	http.Error(w, prefix+": "+detail, status)
-}
-
 func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	var req snapshotInfoRequest
@@ -1152,11 +1148,11 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		writeAPIError(w, conchsnapshot.ErrInvalidArgument.WrapMessage(errors.New("key is required"), "key is required"))
 		return
 	}
 	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -1164,7 +1160,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 		Key: req.Key,
 	})
 	if err != nil {
-		http.Error(w, "Failed to get snapshot info: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "snapshot.info"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1176,11 +1172,11 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling list snapshot request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -1192,8 +1188,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 		Filters: req.Filters,
 	})
 	if err != nil {
-		logger.Error("Failed to list snapshots", ulog.F("error", err))
-		http.Error(w, "Failed to list snapshots: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "snapshot.list"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1205,11 +1200,11 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("Handling remove snapshot request")
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if s.runtimeService == nil || s.runtimeService.Snapshot == nil {
-		http.Error(w, "Snapshot service unavailable", http.StatusServiceUnavailable)
+		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
 
@@ -1218,18 +1213,14 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		writeAPIError(w, conchsnapshot.ErrInvalidArgument.WrapMessage(errors.New("key is required"), "key is required"))
 		return
 	}
 	opts := runtimeapi.RemoveSnapshotOptions{
 		Key: req.Key,
 	}
 	if err := s.runtimeService.RemoveSnapshot(r.Context(), opts); err != nil {
-		logger.Error("Failed to remove snapshot",
-			ulog.F("key", opts.Key),
-			ulog.F("error", err),
-		)
-		http.Error(w, "Failed to remove snapshot: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, err, ulog.F("operation", "snapshot.remove"), ulog.F("key", opts.Key))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

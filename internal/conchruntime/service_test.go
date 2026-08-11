@@ -15,6 +15,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
+	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
@@ -48,7 +49,7 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 		<-f.releaseFirst
 		return nil
 	}
-	return errors.New("sandbox not found")
+	return sandbox.ErrNotFound.New()
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
@@ -94,6 +95,24 @@ func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.Chec
 		return f.checkpointResults[call], nil
 	}
 	return sandbox.CheckpointResult{}, nil
+}
+
+func TestCombineOperationErrorsPreservesPrimaryClassification(t *testing.T) {
+	internalPrimary := errors.New("state write failed")
+	combined := combineOperationErrors(internalPrimary, sandbox.ErrNotFound.New())
+	var appErr *apperror.Error
+	if errors.As(combined, &appErr) {
+		t.Fatalf("secondary application error changed internal primary: %#v", appErr)
+	}
+	if !errors.Is(combined, internalPrimary) {
+		t.Fatal("primary cause was not retained")
+	}
+
+	classifiedPrimary := sandbox.ErrFailedPrecondition.Wrap(errors.New("state changed"))
+	combined = combineOperationErrors(classifiedPrimary, sandbox.ErrNotFound.New())
+	if !errors.As(combined, &appErr) || appErr.Code() != sandbox.ErrFailedPrecondition.Code() {
+		t.Fatalf("classification = %#v, want %s", appErr, sandbox.ErrFailedPrecondition.Code())
+	}
 }
 
 func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T) {
@@ -303,7 +322,7 @@ func TestRemoveSandboxDoesNotCreateStateForUnknownRuntime(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
-	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("sandbox not found")}
+	sandboxOps := &fakeSandboxOps{deleteErr: sandbox.ErrNotFound.New()}
 	svc := New(sandboxOps, nil, store)
 	if err := svc.RemoveSandbox(ctx, "missing-sandbox"); err != nil {
 		t.Fatalf("RemoveSandbox() error = %v", err)
@@ -427,8 +446,8 @@ func TestCreateSandboxRejectsExistingGlobalIDBeforeRuntimeCreate(t *testing.T) {
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-new",
 	})
-	if !errors.Is(err, ErrSandboxAlreadyExists) {
-		t.Fatalf("CreateSandbox() error = %v, want ErrSandboxAlreadyExists", err)
+	if !errors.Is(err, sandbox.ErrAlreadyExists) {
+		t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrAlreadyExists", err)
 	}
 	if ops.createCalls != 0 {
 		t.Fatalf("runtime Create() calls = %d, want 0", ops.createCalls)
@@ -485,8 +504,8 @@ func TestCreateSandboxRejectsMissingOrWhitespaceDefaultTemplate(t *testing.T) {
 			svc.SetSandboxDefaults(SandboxDefaults{TemplateID: defaultTemplate})
 
 			_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: " \n "})
-			if !errors.Is(err, ErrTemplateIDRequired) {
-				t.Fatalf("CreateSandbox() error = %v, want ErrTemplateIDRequired", err)
+			if !errors.Is(err, sandbox.ErrInvalidArgument) {
+				t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidArgument", err)
 			}
 			if sandboxOps.req.TemplateID != "" {
 				t.Fatalf("sandbox create was called with %#v", sandboxOps.req)

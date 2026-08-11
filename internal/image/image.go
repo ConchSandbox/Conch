@@ -9,6 +9,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
 	digestpkg "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -21,7 +22,7 @@ func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 		return fmt.Errorf("containerd client is required")
 	}
 	if req.ImageName == "" {
-		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", ErrInvalidArgument)
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
@@ -32,7 +33,7 @@ func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 		Password:  req.Password,
 	}, false)
 	if err != nil {
-		return err
+		return translateRegistryError(err)
 	}
 	return nil
 }
@@ -46,13 +47,13 @@ func PullBootIndex(ctx context.Context, client *containerdclient.Client, req Reg
 		return BootIndexInfo{}, fmt.Errorf("containerd client is required")
 	}
 	if strings.TrimSpace(req.Reference) == "" {
-		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidRequest)
+		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidArgument)
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
 	fetched, _, err := pullRegistryContent(pullCtx, client, req, true)
 	if err != nil {
-		return BootIndexInfo{}, err
+		return BootIndexInfo{}, translateRegistryError(err)
 	}
 	info, err := InspectBootIndexContent(pullCtx, client.ContentStore(), fetched.Target)
 	if err != nil {
@@ -126,14 +127,14 @@ func validatePullKind(reference, kind string, bootIndexOnly bool) error {
 	if bootIndexOnly {
 		return fmt.Errorf(
 			"%w: %s is not a Conch Boot Index; use `conch image pull %s`",
-			ErrInvalidRequest,
+			ErrInvalidArgument,
 			reference,
 			reference,
 		)
 	}
 	return fmt.Errorf(
 		"%w: %s is a Conch Boot Index (%s); use `conch template pull %s`",
-		ErrInvalidRequest,
+		ErrInvalidArgument,
 		reference,
 		kind,
 		reference,
@@ -145,15 +146,18 @@ func Push(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 		return fmt.Errorf("containerd client is required")
 	}
 	if req.LocalImage == "" {
-		return fmt.Errorf("%w: local_image is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: local_image is required", ErrInvalidArgument)
 	}
 	if req.RemoteImage == "" {
-		return fmt.Errorf("%w: remote_image is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: remote_image is required", ErrInvalidArgument)
 	}
 
 	pushCtx := containerdclient.NewNamespaceContext(ctx)
 	img, err := client.GetImage(pushCtx, req.LocalImage)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return ErrNotFound.Wrap(err)
+		}
 		return fmt.Errorf("lookup image %s: %w", req.LocalImage, err)
 	}
 	resolver := docker.NewResolver(docker.ResolverOptions{
@@ -163,7 +167,7 @@ func Push(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 		},
 	})
 	if err := client.Push(pushCtx, req.RemoteImage, img.Target(), containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
-		return fmt.Errorf("push image %s -> %s: %w", req.LocalImage, req.RemoteImage, err)
+		return translateRegistryError(fmt.Errorf("push image %s -> %s: %w", req.LocalImage, req.RemoteImage, err))
 	}
 	return nil
 }
@@ -175,6 +179,9 @@ func List(ctx context.Context, client *containerdclient.Client, req runtimeapi.L
 	listCtx := containerdclient.NewNamespaceContext(ctx)
 	items, err := client.ImageService().List(listCtx, req.Filters...)
 	if err != nil {
+		if errdefs.IsInvalidArgument(err) {
+			return nil, ErrInvalidArgument.Wrap(err)
+		}
 		return nil, fmt.Errorf("list images: %w", err)
 	}
 	out := make([]runtimeapi.ImageRecord, 0, len(items))
@@ -245,7 +252,7 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 		return fmt.Errorf("containerd client is required")
 	}
 	if req.ImageName == "" {
-		return fmt.Errorf("%w: image_name is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: image_name is required", ErrInvalidArgument)
 	}
 	removeCtx := containerdclient.NewNamespaceContext(ctx)
 	opts := []images.DeleteOpt{}
@@ -253,6 +260,9 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 		opts = append(opts, images.SynchronousDelete())
 	}
 	if err := client.ImageService().Delete(removeCtx, req.ImageName, opts...); err != nil {
+		if errdefs.IsNotFound(err) {
+			return ErrNotFound.Wrap(err)
+		}
 		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
 	}
 	return nil

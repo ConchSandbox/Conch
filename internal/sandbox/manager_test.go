@@ -195,7 +195,7 @@ func TestDeleteMissingSandboxReturnsNotFoundWithoutReleasingBootLayout(t *testin
 	boot := &recordingBootPreparer{}
 	m := &Manager{boot: boot}
 
-	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); err == nil || err.Error() != "sandbox sandbox-a not found" {
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete() error = %v, want sandbox not found", err)
 	}
 	if len(boot.released) != 0 {

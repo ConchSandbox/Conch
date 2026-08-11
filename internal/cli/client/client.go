@@ -34,6 +34,28 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// APIError is returned for a non-success conchd response. Code is stable for
+// automation; Message is intended for people and may change between releases.
+type APIError struct {
+	Path       string
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Code != "" && e.Message != "" {
+		return fmt.Sprintf("%s returned status %d (%s): %s", e.Path, e.StatusCode, e.Code, e.Message)
+	}
+	if e.Message != "" {
+		return fmt.Sprintf("%s returned status %d: %s", e.Path, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("%s returned status %d", e.Path, e.StatusCode)
+}
+
 // New creates a conchd API client.
 func New(opts Options) (*Client, error) {
 	baseURL, httpClient, err := resolveTransport(opts)
@@ -128,7 +150,18 @@ func (c *Client) postJSON(ctx context.Context, path string, payload, out any) er
 func decodeResponse(resp *http.Response, path string, out any) error {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+		apiErr := &APIError{Path: path, StatusCode: resp.StatusCode}
+		var structured struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
+			apiErr.Code = structured.Code
+			apiErr.Message = structured.Error
+		} else {
+			apiErr.Message = strings.TrimSpace(string(body))
+		}
+		return apiErr
 	}
 	if out == nil || resp.StatusCode == http.StatusNoContent {
 		_, _ = io.Copy(io.Discard, resp.Body)

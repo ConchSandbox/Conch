@@ -148,18 +148,34 @@ func TestHandleHealth(t *testing.T) {
 		runtimeService: &conchruntime.Service{Sandbox: &fakeSandboxOps{}, Store: store},
 	}
 	for _, test := range []struct {
-		name   string
-		daemon *Daemon
-		want   int
+		name     string
+		daemon   *Daemon
+		method   string
+		want     int
+		wantCode string
 	}{
-		{name: "not ready", daemon: &Daemon{}, want: http.StatusServiceUnavailable},
-		{name: "ready", daemon: ready, want: http.StatusNoContent},
+		{name: "not ready", daemon: &Daemon{}, method: http.MethodGet, want: http.StatusServiceUnavailable, wantCode: "service.unavailable"},
+		{name: "ready", daemon: ready, method: http.MethodGet, want: http.StatusNoContent},
+		{name: "method not allowed", daemon: ready, method: http.MethodPost, want: http.StatusMethodNotAllowed, wantCode: "request.method_not_allowed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			test.daemon.handleHealth(recorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+			test.daemon.handleHealth(recorder, httptest.NewRequest(test.method, "/health", nil))
 			if recorder.Code != test.want {
 				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+			if test.wantCode == "" {
+				if recorder.Body.Len() != 0 {
+					t.Fatalf("body = %q, want empty", recorder.Body.String())
+				}
+				return
+			}
+			var apiErr apiErrorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&apiErr); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if string(apiErr.Code) != test.wantCode {
+				t.Fatalf("code = %q, want %q", apiErr.Code, test.wantCode)
 			}
 		})
 	}
@@ -319,7 +335,6 @@ func TestSandboxV1Handlers(t *testing.T) {
 			t.Fatalf("create network = %#v", sandboxOps.createReq.Network)
 		}
 	})
-
 	t.Run("update network", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", strings.NewReader(`{
 			"allowOut":["192.0.2.20"],"denyIn":["198.51.100.20"]

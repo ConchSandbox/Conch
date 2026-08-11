@@ -390,11 +390,14 @@ func InspectBootIndexReference(ctx context.Context, client *containerdclient.Cli
 	}
 	reference = strings.TrimSpace(reference)
 	if reference == "" {
-		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidRequest)
+		return BootIndexInfo{}, fmt.Errorf("%w: reference is required", ErrInvalidArgument)
 	}
 	inspectCtx := containerdclient.NewNamespaceContext(ctx)
 	img, err := client.GetImage(inspectCtx, reference)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return BootIndexInfo{}, ErrNotFound.Wrap(err)
+		}
 		return BootIndexInfo{}, fmt.Errorf("lookup boot index reference %s: %w", reference, err)
 	}
 	info, err := InspectBootIndexContent(inspectCtx, client.ContentStore(), img.Target())
@@ -413,11 +416,14 @@ func inspectBootIndex(
 		return nil, BootIndexInfo{}, fmt.Errorf("containerd client is required")
 	}
 	if strings.TrimSpace(bootIndexDigest) == "" {
-		return nil, BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", ErrInvalidRequest)
+		return nil, BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", ErrInvalidArgument)
 	}
 	resolveCtx := containerdclient.NewNamespaceContext(ctx)
 	_, info, err := inspectBootIndexByDigest(resolveCtx, client.ContentStore(), bootIndexDigest)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, BootIndexInfo{}, ErrNotFound.Wrap(err)
+		}
 		return nil, BootIndexInfo{}, err
 	}
 	return resolveCtx, info, nil
@@ -431,7 +437,7 @@ func inspectBootIndexByDigest(ctx context.Context, store content.Store, rawDiges
 	}
 	dgst, err := digest.Parse(strings.TrimSpace(rawDigest))
 	if err != nil {
-		return ocispec.Descriptor{}, BootIndexInfo{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
+		return ocispec.Descriptor{}, BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err))
 	}
 	contentInfo, err := store.Info(ctx, dgst)
 	if err != nil {
@@ -457,10 +463,10 @@ func InspectBootIndexContent(ctx context.Context, store content.Store, desc ocis
 		return BootIndexInfo{}, fmt.Errorf("content store is required")
 	}
 	if desc.MediaType != ocispec.MediaTypeImageIndex {
-		return BootIndexInfo{}, fmt.Errorf("boot index %s has media type %q, want %q", desc.Digest, desc.MediaType, ocispec.MediaTypeImageIndex)
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("boot index %s has media type %q, want %q", desc.Digest, desc.MediaType, ocispec.MediaTypeImageIndex))
 	}
 	if err := validateDescriptor(desc, "boot index"); err != nil {
-		return BootIndexInfo{}, err
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(err)
 	}
 
 	raw, err := content.ReadBlob(ctx, store, desc)
@@ -469,15 +475,15 @@ func InspectBootIndexContent(ctx context.Context, store content.Store, desc ocis
 	}
 	var index ocispec.Index
 	if err := json.Unmarshal(raw, &index); err != nil {
-		return BootIndexInfo{}, fmt.Errorf("unmarshal boot index %s: %w", desc.Digest, err)
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("unmarshal boot index %s: %w", desc.Digest, err))
 	}
 	if index.MediaType != "" && index.MediaType != ocispec.MediaTypeImageIndex {
-		return BootIndexInfo{}, fmt.Errorf("boot index %s declares media type %q", desc.Digest, index.MediaType)
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("boot index %s declares media type %q", desc.Digest, index.MediaType))
 	}
 
 	info, err := inspectBootIndexMetadata(desc, index)
 	if err != nil {
-		return BootIndexInfo{}, err
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(err)
 	}
 	if err := validateContentClosure(ctx, store, desc); err != nil {
 		return BootIndexInfo{}, fmt.Errorf("validate boot index %s closure: %w", desc.Digest, err)
@@ -555,14 +561,14 @@ func validateContentClosure(ctx context.Context, store content.Store, root ocisp
 	children := images.ChildrenHandler(store)
 	handler := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		if err := validateDescriptor(desc, "content"); err != nil {
-			return nil, err
+			return nil, ErrInvalidContent.Wrap(err)
 		}
 		info, err := store.Info(ctx, desc.Digest)
 		if err != nil {
 			return nil, fmt.Errorf("content %s is unavailable: %w", desc.Digest, err)
 		}
 		if desc.Size > 0 && info.Size != desc.Size {
-			return nil, fmt.Errorf("content %s size %d does not match descriptor size %d", desc.Digest, info.Size, desc.Size)
+			return nil, ErrInvalidContent.Wrap(fmt.Errorf("content %s size %d does not match descriptor size %d", desc.Digest, info.Size, desc.Size))
 		}
 		return children.Handle(ctx, desc)
 	})

@@ -227,8 +227,8 @@ func TestValidatePullKind(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validatePullKind("registry.example.invalid/conch/test:latest", tt.kind, tt.bootIndexOnly)
 			if tt.wantReject {
-				if !errors.Is(err, ErrInvalidRequest) {
-					t.Fatalf("validatePullKind() error = %v, want ErrInvalidRequest", err)
+				if !errors.Is(err, ErrInvalidArgument) {
+					t.Fatalf("validatePullKind() error = %v, want ErrInvalidArgument", err)
 				}
 			} else if err != nil {
 				t.Fatalf("validatePullKind() error = %v", err)
