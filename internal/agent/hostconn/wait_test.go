@@ -154,6 +154,22 @@ func TestValidateReadyPreflightDoesNotRequireNetwork(t *testing.T) {
 	}
 }
 
+func TestValidateReadyPreflightRejectsInvalidEnvironment(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"BAD=KEY": "value"},
+		{"KEY": "bad\x00value"},
+	} {
+		err := ValidateReadyPreflight(ReadyOptions{
+			SandboxID:  "sandbox-1",
+			AgentToken: "token",
+			Env:        env,
+		})
+		if !errors.Is(err, agentprotocol.ErrInvalidEnvironment) {
+			t.Fatalf("ValidateReadyPreflight(%q) error = %v, want ErrInvalidEnvironment", env, err)
+		}
+	}
+}
+
 func TestWaitReadyRejectsInvalidNetwork(t *testing.T) {
 	invalid := testGuestNetwork()
 	invalid.Gateway = ""
@@ -168,16 +184,32 @@ func TestWaitReadyRejectsInvalidNetwork(t *testing.T) {
 	}
 }
 
-func TestWaitReadyRejectsPayloadLargerThanLimit(t *testing.T) {
-	err := WaitReady(context.Background(), ReadyOptions{
-		SandboxID:       "sandbox-1",
-		AgentToken:      "token",
-		Env:             map[string]string{"TOO_LARGE": strings.Repeat("x", agentprotocol.MaxPayloadSize)},
-		Network:         testGuestNetwork(),
-		VsockSocketPath: t.TempDir() + "/missing.vsock",
+func TestValidateReadyPreflightRejectsPayloadLargerThanLimit(t *testing.T) {
+	err := ValidateReadyPreflight(ReadyOptions{
+		SandboxID:  "sandbox-1",
+		AgentToken: "token",
+		Env:        map[string]string{"TOO_LARGE": strings.Repeat("x", agentprotocol.MaxPayloadSize)},
 	})
-	if err == nil || !strings.Contains(err.Error(), "payload") {
-		t.Fatalf("WaitReady() error = %v, want payload limit error", err)
+	if !errors.Is(err, agentprotocol.ErrPayloadTooLarge) {
+		t.Fatalf("ValidateReadyPreflight() error = %v, want ErrPayloadTooLarge", err)
+	}
+}
+
+func TestValidateReadyRequestIncludesNetworkInPayloadLimit(t *testing.T) {
+	opts := ReadyOptions{
+		SandboxID:  "sandbox-1",
+		AgentToken: "token",
+		Env: map[string]string{
+			"NEAR_LIMIT": strings.Repeat("x", agentprotocol.MaxPayloadSize-256),
+		},
+		Network: testGuestNetwork(),
+	}
+	opts.Network.DNS.Search = []string{strings.Repeat("a", 512)}
+	if err := ValidateReadyPreflight(opts); err != nil {
+		t.Fatalf("ValidateReadyPreflight() error = %v, want partial request to fit", err)
+	}
+	if _, err := ValidateReadyRequest(opts); !errors.Is(err, agentprotocol.ErrPayloadTooLarge) {
+		t.Fatalf("ValidateReadyRequest() error = %v, want ErrPayloadTooLarge", err)
 	}
 }
 
@@ -189,8 +221,8 @@ func TestExchangeInitHandlesReadyAndTerminalResponses(t *testing.T) {
 		terminal bool
 	}{
 		{name: "ready", response: agentprotocol.ReadyResponse()},
-		{name: "retryable", response: agentprotocol.NotReadyResponse("SERVICES_STARTING", "wait", true), wantErr: true},
-		{name: "terminal", response: agentprotocol.NotReadyResponse("NETWORK_MISMATCH", "bad", false), wantErr: true, terminal: true},
+		{name: "retryable", response: agentprotocol.NotReadyResponse("wait", true), wantErr: true},
+		{name: "terminal", response: agentprotocol.NotReadyResponse("bad", false), wantErr: true, terminal: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client, server := net.Pipe()

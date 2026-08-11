@@ -15,6 +15,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -426,6 +427,28 @@ func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
 	}
 	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateSandboxRejectsInvalidEnvironmentBeforeRuntimeCreate(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"BAD=KEY": "value"},
+		{"KEY": "bad\x00value"},
+	} {
+		ops := &fakeSandboxOps{}
+		svc := New(ops, nil, nil)
+
+		_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+			SandboxID:  "sandbox-1",
+			TemplateID: "tmpl-1",
+			Env:        env,
+		})
+		if !errors.Is(err, agentprotocol.ErrInvalidEnvironment) {
+			t.Fatalf("CreateSandbox(%q) error = %v, want ErrInvalidEnvironment", env, err)
+		}
+		if ops.createCalls != 0 {
+			t.Fatalf("CreateSandbox(%q) runtime Create() calls = %d, want 0", env, ops.createCalls)
+		}
 	}
 }
 

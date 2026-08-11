@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -105,6 +106,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
 	}
+	if err := agentprotocol.ValidateEnvironment(opts.Env); err != nil {
+		return SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
+	}
 	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
 		id, err := NewID()
@@ -160,7 +164,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	createdAt := time.Now().UnixNano()
 	createResult, err := s.Sandbox.Create(req)
 	if err != nil {
-		return SandboxCreateResult{}, err
+		return SandboxCreateResult{}, translateSandboxError(err)
 	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
@@ -764,6 +768,24 @@ func (s *Service) getSandbox(ctx context.Context, id string) (state.SandboxRecor
 		return state.SandboxRecord{}, sandbox.ErrNotFound.Wrap(err)
 	}
 	return rec, err
+}
+
+func translateSandboxError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) {
+		return err
+	}
+	switch {
+	case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
+		return sandbox.ErrInvalidEnvironment.Wrap(err)
+	case errors.Is(err, agentprotocol.ErrPayloadTooLarge):
+		return sandbox.ErrInitializationTooLarge.Wrap(err)
+	default:
+		return err
+	}
 }
 
 func translateTemplateArtifactError(err error) error {

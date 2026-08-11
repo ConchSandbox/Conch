@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
@@ -19,8 +20,8 @@ func TestVsockHandlerRequiresAgentToken(t *testing.T) {
 	request.AgentToken = ""
 
 	response := handler.HandleRequest(request)
-	if response.Status != "not_ready" || response.ErrorCode != "INVALID_REQUEST" || response.Retryable {
-		t.Fatalf("HandleRequest() = %#v, want terminal INVALID_REQUEST", response)
+	if response.Status != "not_ready" || response.Retryable || !strings.Contains(response.Message, "agentToken is required") {
+		t.Fatalf("HandleRequest() = %#v, want terminal validation failure", response)
 	}
 }
 
@@ -31,8 +32,8 @@ func TestVsockHandlerRejectsUnsupportedVersion(t *testing.T) {
 	request.Version++
 
 	response := handler.HandleRequest(request)
-	if response.ErrorCode != "UNSUPPORTED_VERSION" || response.Retryable {
-		t.Fatalf("HandleRequest() = %#v, want terminal UNSUPPORTED_VERSION", response)
+	if response.Status != "not_ready" || response.Retryable || !strings.Contains(response.Message, "unsupported protocol version") {
+		t.Fatalf("HandleRequest() = %#v, want terminal version failure", response)
 	}
 }
 
@@ -104,7 +105,7 @@ func TestVsockHandlerNetworkFailureIsTerminal(t *testing.T) {
 
 	first := handler.HandleRequest(testInitRequest())
 	second := handler.HandleRequest(testInitRequest())
-	if first.ErrorCode != "NETWORK_CONFIG_FAILED" || first.Retryable || !reflect.DeepEqual(first, second) {
+	if first.Status != "not_ready" || first.Retryable || first.Message != "boom" || !reflect.DeepEqual(first, second) {
 		t.Fatalf("responses = %#v, %#v; want stable terminal failure", first, second)
 	}
 }
@@ -122,20 +123,30 @@ func TestVsockHandlerRevalidationMismatchIsTerminal(t *testing.T) {
 		t.Fatalf("cold response = %#v, want ready", response)
 	}
 	response := handler.HandleRequest(request)
-	if response.ErrorCode != "NETWORK_MISMATCH" || response.Retryable {
+	if response.Status != "not_ready" || response.Retryable || response.Message != "address mismatch" {
 		t.Fatalf("revalidation response = %#v, want terminal mismatch", response)
 	}
 }
 
 func TestVsockHandlerRejectsInvalidEnvironment(t *testing.T) {
-	resetAgentAuth(t)
-	handler := newTestVsockHandler(nil, func() bool { return true })
-	request := testInitRequest()
-	request.Env = map[string]string{"BAD=KEY": "value"}
+	for _, env := range []map[string]string{
+		{"BAD=KEY": "value"},
+		{"KEY": "bad\x00value"},
+	} {
+		resetAgentAuth(t)
+		handler := newTestVsockHandler(nil, func() bool { return true })
+		request := testInitRequest()
+		request.Env = env
 
-	response := handler.HandleRequest(request)
-	if response.ErrorCode != "INVALID_REQUEST" || response.Retryable {
-		t.Fatalf("HandleRequest() = %#v, want terminal INVALID_REQUEST", response)
+		response := handler.HandleRequest(request)
+		if response.Status != "not_ready" || response.Retryable || !strings.Contains(response.Message, agentprotocol.ErrInvalidEnvironment.Error()) {
+			t.Fatalf("HandleRequest(%q) = %#v, want terminal validation failure", env, response)
+		}
+		select {
+		case <-handler.NetworkReady():
+			t.Fatalf("HandleRequest(%q) applied network before rejecting environment", env)
+		default:
+		}
 	}
 }
 

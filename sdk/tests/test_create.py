@@ -78,3 +78,33 @@ def test_build_create_payload_keeps_explicit_template_id():
     payload = Sandbox(sandbox_id="sandbox-test", template_id="tmpl-explicit")._build_create_payload()
 
     assert payload["template_id"] == "tmpl-explicit"
+
+
+def test_build_create_payload_preserves_environment():
+    environment = {
+        "EMPTY": "",
+        "WITH_EQUALS": "value=with spaces",
+    }
+
+    payload = Sandbox(
+        sandbox_id="sandbox-test",
+        template_id="tmpl-explicit",
+        env=environment,
+    )._build_create_payload()
+
+    assert payload["env"] == environment
+
+
+def test_build_create_payload_distinguishes_absent_and_empty_environment():
+    without_environment = Sandbox(
+        sandbox_id="sandbox-test",
+        template_id="tmpl-explicit",
+    )._build_create_payload()
+    with_empty_environment = Sandbox(
+        sandbox_id="sandbox-test",
+        template_id="tmpl-explicit",
+        env={},
+    )._build_create_payload()
+
+    assert "env" not in without_environment
+    assert with_empty_environment["env"] == {}

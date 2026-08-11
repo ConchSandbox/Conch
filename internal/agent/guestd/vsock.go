@@ -80,25 +80,29 @@ func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) agen
 		return *h.terminal
 	}
 	if request.Version != agentprotocol.ProtocolVersion {
-		return h.failTerminal("UNSUPPORTED_VERSION", fmt.Errorf("unsupported protocol version %d", request.Version))
+		return h.failTerminal(fmt.Errorf("unsupported protocol version %d", request.Version))
 	}
 	if err := validateInitRequest(request); err != nil {
-		return h.failTerminal("INVALID_REQUEST", err)
+		return h.failTerminal(err)
 	}
 
 	switch h.state {
 	case initAwaitingNetwork:
 		if err := h.applyNetwork(request.Network, false); err != nil {
-			return h.failTerminal("NETWORK_CONFIG_FAILED", err)
+			return h.failTerminal(err)
 		}
-		h.applyIdentity(request)
+		if err := h.applyIdentity(request); err != nil {
+			return h.failTerminal(err)
+		}
 		h.state = initNetworkApplied
 		close(h.networkReady)
 	case initReady:
 		if err := h.applyNetwork(request.Network, true); err != nil {
-			return h.failTerminal("NETWORK_MISMATCH", err)
+			return h.failTerminal(err)
 		}
-		h.applyIdentity(request)
+		if err := h.applyIdentity(request); err != nil {
+			return h.failTerminal(err)
+		}
 		return agentprotocol.ReadyResponse()
 	case initNetworkApplied:
 		// A retry waits for the already-started services; it never starts them again.
@@ -108,7 +112,7 @@ func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) agen
 		h.state = initReady
 		return agentprotocol.ReadyResponse()
 	}
-	return agentprotocol.NotReadyResponse("SERVICES_STARTING", "sandbox services are not ready", true)
+	return agentprotocol.NotReadyResponse("sandbox services are not ready", true)
 }
 
 func validateInitRequest(request agentprotocol.InitRequest) error {
@@ -121,25 +125,25 @@ func validateInitRequest(request agentprotocol.InitRequest) error {
 	if len(request.AgentToken) > 4096 {
 		return fmt.Errorf("agentToken is too large")
 	}
-	for key := range request.Env {
-		if !validEnvKey(key) {
-			return fmt.Errorf("invalid environment key %q", key)
-		}
+	if err := agentprotocol.ValidateEnvironment(request.Env); err != nil {
+		return err
 	}
 	return request.Network.Validate()
 }
 
-func (h *VsockHandlerImpl) failTerminal(code string, err error) agentprotocol.InitResponse {
-	response := agentprotocol.NotReadyResponse(code, err.Error(), false)
+func (h *VsockHandlerImpl) failTerminal(err error) agentprotocol.InitResponse {
+	response := agentprotocol.NotReadyResponse(err.Error(), false)
 	h.terminal = &response
 	return response
 }
 
-func (h *VsockHandlerImpl) applyIdentity(request agentprotocol.InitRequest) {
+func (h *VsockHandlerImpl) applyIdentity(request agentprotocol.InitRequest) error {
+	if err := applyVsockEnv(request.Env); err != nil {
+		return err
+	}
 	agentAuth.SetToken(request.AgentToken)
-	applyVsockEnv(request.Env)
 	if h.sandboxID == request.SandboxID {
-		return
+		return nil
 	}
 	h.sandboxID = request.SandboxID
 	mu.Lock()
@@ -152,29 +156,16 @@ func (h *VsockHandlerImpl) applyIdentity(request agentprotocol.InitRequest) {
 	rootLogger = baseLogger.ReplaceField("sandboxId", request.SandboxID)
 	ulog.SetLogger(rootLogger)
 	ulog.GetLogger().Info("Updated sandbox_id from vsock", ulog.F("new_sandbox_id", request.SandboxID))
+	return nil
 }
 
-func validEnvKey(key string) bool {
-	if key == "" || strings.Contains(key, "=") {
-		return false
-	}
-	for _, r := range key {
-		if r == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func applyVsockEnv(env map[string]string) {
+func applyVsockEnv(env map[string]string) error {
 	for key, value := range env {
 		if err := os.Setenv(key, value); err != nil {
-			ulog.GetLogger().Warn("failed to set sandbox environment variable",
-				ulog.F("key", key),
-				ulog.F("error", err),
-			)
+			return fmt.Errorf("set sandbox environment variable %q: %w", key, err)
 		}
 	}
+	return nil
 }
 
 func (h *VsockHandlerImpl) waitForReady(timeout time.Duration) bool {

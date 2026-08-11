@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -39,6 +41,7 @@ type fakeSandboxOps struct {
 	resumeReq      sandbox.LifecycleRequest
 	deleteReqs     []sandbox.DeleteRequest
 	createErr      error
+	createCalls    int
 	checkpointErr  error
 	checkpointResp sandbox.CheckpointResult
 	updateReq      sandbox.NetworkUpdateRequest
@@ -85,6 +88,7 @@ func (f *fakeSnapshotService) Info(_ context.Context, req runtimeapi.SnapshotInf
 }
 
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
+	f.createCalls++
 	f.createReq = req
 	if f.createErr != nil {
 		return sandbox.CreateResult{}, f.createErr
@@ -335,6 +339,46 @@ func TestSandboxV1Handlers(t *testing.T) {
 			t.Fatalf("create network = %#v", sandboxOps.createReq.Network)
 		}
 	})
+
+	t.Run("rejects invalid environment", func(t *testing.T) {
+		for _, test := range []struct {
+			body     string
+			wantCode string
+		}{
+			{body: `{"sandbox_id":"invalid-env-key","template_id":"tmpl-2","env":{"BAD=KEY":"value"}}`, wantCode: "sandbox.invalid_environment"},
+			{body: `{"sandbox_id":"invalid-env-value","template_id":"tmpl-2","env":{"KEY":123}}`, wantCode: "request.invalid_body"},
+		} {
+			createCalls := sandboxOps.createCalls
+			response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(test.body))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("body = %s, status = %d, response = %s", test.body, response.Code, response.Body.String())
+			}
+			var apiErr apiErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &apiErr); err != nil || string(apiErr.Code) != test.wantCode {
+				t.Fatalf("body = %s, decoded response = %#v, error = %v", test.body, apiErr, err)
+			}
+			if sandboxOps.createCalls != createCalls {
+				t.Fatalf("body = %s, runtime Create() calls = %d, want %d", test.body, sandboxOps.createCalls, createCalls)
+			}
+		}
+	})
+
+	t.Run("maps oversized initialization payload to bad request", func(t *testing.T) {
+		sandboxOps.createErr = fmt.Errorf("marshal initialization: %w", agentprotocol.ErrPayloadTooLarge)
+		t.Cleanup(func() { sandboxOps.createErr = nil })
+		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+			"sandbox_id":"oversized-env","template_id":"tmpl-2"
+		}`))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var apiErr apiErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &apiErr); err != nil || apiErr.Code != "sandbox.initialization_too_large" {
+			t.Fatalf("decoded response = %#v, error = %v", apiErr, err)
+		}
+		sandboxOps.createErr = nil
+	})
+
 	t.Run("update network", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPut, "/api/v1/sandboxes/sandbox-1/network", strings.NewReader(`{
 			"allowOut":["192.0.2.20"],"denyIn":["198.51.100.20"]
