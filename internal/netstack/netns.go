@@ -86,15 +86,21 @@ func createNetworkNamespace(slot *Slot) (retErr error) {
 	return nil
 }
 
-func isNetworkNamespaceMounted(netnsPath string) bool {
+func inspectNetworkNamespace(netnsPath string) (mounted bool, missing bool, err error) {
+	if _, err := os.Stat(netnsPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, true, nil
+		}
+		return false, false, err
+	}
 	var stat unix.Statfs_t
 	if err := unix.Statfs(netnsPath, &stat); err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			return false, true, nil
+		}
+		return false, false, err
 	}
-	if stat.Type != unix.NSFS_MAGIC && stat.Type != unix.PROC_SUPER_MAGIC {
-		return false
-	}
-	return true
+	return stat.Type == unix.NSFS_MAGIC || stat.Type == unix.PROC_SUPER_MAGIC, false, nil
 }
 
 func deleteNetworkNamespace(slot *Slot) error {

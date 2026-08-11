@@ -559,38 +559,58 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 }
 
 func (p *Pool) Release(ctx context.Context, slot *Slot) error {
-	select {
-	case <-ctx.Done():
+	if err := ctx.Err(); err != nil {
 		return ctx.Err()
-	default:
-		if slot != nil {
-			cleanupCtx := context.WithoutCancel(ctx)
-			if err := prepareSlotForReuse(cleanupCtx, slot); err != nil {
-				discardErr := p.Discard(cleanupCtx, slot)
-				return errors.Join(err, discardErr)
-			}
-			slotHealthErr := p.slotHealth(ctx, slot)
-			if slotHealthErr == nil {
-				if err := p.warmSlots.Push(slot); err != nil {
-					if destroyErr := p.destroyNetworkSlot(context.Background(), slot); destroyErr != nil {
-						return errors.Join(
-							fmt.Errorf("failed to enqueue released network slot: %w", err),
-							fmt.Errorf("failed to destroy unqueued released network slot: %w", destroyErr),
-						)
-					}
-					ulog.GetLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
-					return nil
-				}
-				ulog.GetLogger().Info("slot released back to pool", ulog.F("slot_id", slot.ID()))
-			} else {
-				ulog.GetLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID()), ulog.F("error", slotHealthErr))
-				if err := p.Discard(ctx, slot); err != nil {
-					return fmt.Errorf("failed to discard unhealthy network slot %d: %w", slot.ID(), err)
-				}
-			}
-		}
+	}
+	if slot == nil {
 		return nil
 	}
+
+	cleanupCtx := context.WithoutCancel(ctx)
+	mounted, missing, err := inspectNetworkNamespace(slot.NetNSPath())
+	if err != nil {
+		return fmt.Errorf("inspect network namespace: %w", err)
+	}
+	if missing {
+		return p.discardSlotWithMissingNamespace(cleanupCtx, slot)
+	}
+	if !mounted {
+		return fmt.Errorf("network namespace path %s is not a namespace mount", slot.NetNSPath())
+	}
+	if err := prepareSlotForReuse(cleanupCtx, slot); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return p.discardSlotWithMissingNamespace(cleanupCtx, slot)
+		}
+		discardErr := p.Discard(cleanupCtx, slot)
+		return errors.Join(err, discardErr)
+	}
+	slotHealthErr := p.slotHealth(ctx, slot)
+	if slotHealthErr == nil {
+		if err := p.warmSlots.Push(slot); err != nil {
+			if destroyErr := p.destroyNetworkSlot(context.Background(), slot); destroyErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to enqueue released network slot: %w", err),
+					fmt.Errorf("failed to destroy unqueued released network slot: %w", destroyErr),
+				)
+			}
+			ulog.GetLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
+			return nil
+		}
+		ulog.GetLogger().Info("slot released back to pool", ulog.F("slot_id", slot.ID()))
+	} else {
+		ulog.GetLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID()), ulog.F("error", slotHealthErr))
+		if err := p.Discard(ctx, slot); err != nil {
+			return fmt.Errorf("failed to discard unhealthy network slot %d: %w", slot.ID(), err)
+		}
+	}
+	return nil
+}
+
+func (p *Pool) discardSlotWithMissingNamespace(ctx context.Context, slot *Slot) error {
+	if err := p.Discard(ctx, slot); err != nil {
+		return fmt.Errorf("discard slot with missing namespace: %w", err)
+	}
+	return nil
 }
 
 func prepareSlotForReuse(ctx context.Context, slot *Slot) error {
@@ -626,9 +646,11 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	var errs []error
 	netnsPath := slot.NetNSPath()
-	netnsMounted := isNetworkNamespaceMounted(netnsPath)
-	if cniIP := slot.CNIIP(); cniIP != "" {
-		if netnsMounted {
+	mounted, missing, inspectErr := inspectNetworkNamespace(netnsPath)
+	if inspectErr != nil {
+		errs = append(errs, fmt.Errorf("inspect network namespace: %w", inspectErr))
+	} else if !missing {
+		if cniIP := slot.CNIIP(); cniIP != "" && mounted {
 			if err := runInNetNSPath(ctx, netnsPath, func() error {
 				return removeGuestTapNetwork(slot, cniIP)
 			}); err != nil {
@@ -643,7 +665,7 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 		cniErr = fmt.Errorf("cni config not initialized")
 	} else {
 		cniNetNSPath := netnsPath
-		if !netnsMounted {
+		if missing || !mounted {
 			cniNetNSPath = ""
 		}
 		cniErr = p.cniManager.TeardownSandboxNetwork(ctx, slot.cniContainerID(), cniNetNSPath)
@@ -667,8 +689,15 @@ func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return fmt.Errorf("slot is nil")
 	}
-	if _, err := os.Stat(slot.NetNSPath()); err != nil {
-		return fmt.Errorf("namespace missing: %w", err)
+	mounted, missing, err := inspectNetworkNamespace(slot.NetNSPath())
+	if err != nil {
+		return fmt.Errorf("inspect network namespace: %w", err)
+	}
+	if missing {
+		return fmt.Errorf("namespace missing: %w", os.ErrNotExist)
+	}
+	if !mounted {
+		return fmt.Errorf("network namespace path %s is not a namespace mount", slot.NetNSPath())
 	}
 	if slot.sandboxID != "" {
 		return fmt.Errorf("slot is still assigned to sandbox %s", slot.sandboxID)

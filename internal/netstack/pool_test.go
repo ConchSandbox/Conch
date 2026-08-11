@@ -301,6 +301,57 @@ func TestSetupSlotNetworkLeavesRollbackToPool(t *testing.T) {
 	}
 }
 
+func TestReleaseDiscardsSlotWithMissingNamespace(t *testing.T) {
+	allocator, slot := allocatedTestSlot(t)
+	slot.recordCNIResult(CNIResult{IP: "10.12.0.10"})
+	slot.assignSandbox("sandbox-1")
+	removeCalls := 0
+	p := &Pool{
+		cniManager: &CNIManager{backend: &fakeCNIBackend{
+			remove: func(_ context.Context, _ string, path string) error {
+				removeCalls++
+				if path != "" {
+					t.Fatalf("CNI Remove path = %q, want empty for missing namespace", path)
+				}
+				return nil
+			},
+		}},
+		slotIDs:      allocator,
+		refillNeeded: make(chan struct{}, 1),
+	}
+
+	if err := p.Release(context.Background(), slot); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
+	}
+	if reused, err := allocator.Acquire(); err != nil || reused != slot.ID() {
+		t.Fatalf("Acquire() after release = (%d, %v), want (%d, nil)", reused, err, slot.ID())
+	}
+}
+
+func TestReleaseMissingNamespaceKeepsSlotIDWhenCNITeardownFails(t *testing.T) {
+	allocator, slot := allocatedTestSlot(t)
+	slot.recordCNIResult(CNIResult{IP: "10.12.0.10"})
+	wantErr := errors.New("cni remove failed")
+	p := &Pool{
+		cniManager: &CNIManager{backend: &fakeCNIBackend{
+			remove: func(context.Context, string, string) error {
+				return wantErr
+			},
+		}},
+		slotIDs: allocator,
+	}
+
+	if err := p.Release(context.Background(), slot); !errors.Is(err, wantErr) {
+		t.Fatalf("Release() error = %v, want %v", err, wantErr)
+	}
+	if reused, err := allocator.Acquire(); err != nil || reused == slot.ID() {
+		t.Fatalf("Acquire() after failed cleanup = (%d, %v), slot ID %d must remain reserved", reused, err, slot.ID())
+	}
+}
+
 func TestTeardownDerivesCNIIdentityFromSlot(t *testing.T) {
 	_, slot := allocatedTestSlot(t)
 	removeCalls := 0
