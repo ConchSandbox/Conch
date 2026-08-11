@@ -262,12 +262,10 @@ func (m *Manager) reserveSandboxEntry(sandboxID string) (string, *sandboxEntry, 
 	}
 	entry.mu.Unlock()
 
-	existing, ok := actual.(*sandboxEntry)
+	_, ok := actual.(*sandboxEntry)
 	if !ok {
 		return "", nil, fmt.Errorf("invalid sandbox entry type for %s", sandboxID)
 	}
-	existing.mu.Lock()
-	existing.mu.Unlock()
 	return "", nil, fmt.Errorf("sandbox %s already exists", sandboxID)
 }
 
