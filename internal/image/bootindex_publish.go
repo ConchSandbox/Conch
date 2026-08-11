@@ -19,16 +19,16 @@ func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req 
 		return PublishBootIndexResult{}, fmt.Errorf("containerd client is required")
 	}
 	if req.RootfsImageName == "" {
-		return PublishBootIndexResult{}, fmt.Errorf("%w: rootfs_image_name is required", ErrInvalidRequest)
+		return PublishBootIndexResult{}, fmt.Errorf("%w: rootfs_image_name is required", ErrInvalidArgument)
 	}
 	if req.KernelPath == "" {
-		return PublishBootIndexResult{}, fmt.Errorf("%w: kernel_path is required", ErrInvalidRequest)
+		return PublishBootIndexResult{}, fmt.Errorf("%w: kernel_path is required", ErrInvalidArgument)
 	}
 	if req.InitrdPath == "" {
-		return PublishBootIndexResult{}, fmt.Errorf("%w: initrd_path is required", ErrInvalidRequest)
+		return PublishBootIndexResult{}, fmt.Errorf("%w: initrd_path is required", ErrInvalidArgument)
 	}
 	if req.BootIndexTag == "" {
-		return PublishBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidRequest)
+		return PublishBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidArgument)
 	}
 
 	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
@@ -70,11 +70,11 @@ func PushBootIndex(ctx context.Context, client *containerdclient.Client, req Pus
 		return fmt.Errorf("containerd client is required")
 	}
 	if strings.TrimSpace(req.BootIndexDigest) == "" {
-		return fmt.Errorf("%w: boot_index_digest is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: boot_index_digest is required", ErrInvalidArgument)
 	}
 	req.RemoteReference = strings.TrimSpace(req.RemoteReference)
 	if req.RemoteReference == "" {
-		return fmt.Errorf("%w: remote_reference is required", ErrInvalidRequest)
+		return fmt.Errorf("%w: remote_reference is required", ErrInvalidArgument)
 	}
 	pushCtx := containerdclient.NewNamespaceContext(ctx)
 	desc, _, err := inspectBootIndexByDigest(pushCtx, client.ContentStore(), req.BootIndexDigest)
@@ -88,7 +88,7 @@ func PushBootIndex(ctx context.Context, client *containerdclient.Client, req Pus
 		},
 	})
 	if err := client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
-		return fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err)
+		return translateRegistryError(fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err))
 	}
 	return nil
 }
@@ -112,22 +112,22 @@ func PublishCheckpointBootIndex(
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("containerd client is required")
 	}
 	if strings.TrimSpace(req.SourceBootIndexDigest) == "" {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: source_boot_index_digest is required", ErrInvalidRequest)
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: source_boot_index_digest is required", ErrInvalidArgument)
 	}
 	req.BootIndexTag = strings.TrimSpace(req.BootIndexTag)
 	if req.BootIndexTag == "" {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidRequest)
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidArgument)
 	}
 	req.MemRoot = strings.TrimSpace(req.MemRoot)
 	if req.MemRoot == "" {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: mem_root is required", ErrInvalidRequest)
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: mem_root is required", ErrInvalidArgument)
 	}
 	req.VMMName = strings.TrimSpace(req.VMMName)
 	if req.VMMName == "" {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: vmm_name is required", ErrInvalidRequest)
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: vmm_name is required", ErrInvalidArgument)
 	}
 	if req.MemorySizeMB <= 0 {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: memory_size_mb must be positive", ErrInvalidRequest)
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: memory_size_mb must be positive", ErrInvalidArgument)
 	}
 
 	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
@@ -186,6 +186,9 @@ func publishBootIndexRecord(ctx context.Context, client *containerdclient.Client
 			return fmt.Errorf("update boot image record %s: %w", tag, err)
 		}
 		if _, err := client.ImageService().Create(ctx, imageRecord); err != nil {
+			if errdefs.IsAlreadyExists(err) {
+				return ErrAlreadyExists.Wrap(err)
+			}
 			return fmt.Errorf("create boot image record %s: %w", tag, err)
 		}
 	}

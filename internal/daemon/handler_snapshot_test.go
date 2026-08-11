@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -96,8 +97,9 @@ func TestHandleRemoveSnapshotInvalidRequest(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("remove status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	if got, want := rec.Body.String(), "key is required\n"; got != want {
-		t.Fatalf("response = %q, want %q", got, want)
+	var response apiErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.Code != "snapshot.invalid_argument" || response.Error != "key is required" {
+		t.Fatalf("response = %q, decoded = %#v, error = %v", rec.Body.String(), response, err)
 	}
 	if svc.removeCalls != 0 {
 		t.Fatalf("remove calls = %d, want 0", svc.removeCalls)
@@ -113,8 +115,9 @@ func TestHandleSnapshotInfoRequiresKey(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	if got, want := rec.Body.String(), "key is required\n"; got != want {
-		t.Fatalf("response = %q, want %q", got, want)
+	var response apiErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.Code != "snapshot.invalid_argument" || response.Error != "key is required" {
+		t.Fatalf("response = %q, decoded = %#v, error = %v", rec.Body.String(), response, err)
 	}
 }
 

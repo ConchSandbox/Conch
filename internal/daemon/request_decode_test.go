@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -78,8 +79,9 @@ func TestJSONHandlersRejectUnknownFields(t *testing.T) {
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
-			if !strings.Contains(recorder.Body.String(), `unknown field "unexpected"`) {
-				t.Fatalf("body = %q", recorder.Body.String())
+			var response apiErrorResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Code != "request.invalid_body" || !strings.Contains(response.Error, `unknown field "unexpected"`) {
+				t.Fatalf("body = %q, decoded = %#v, error = %v", recorder.Body.String(), response, err)
 			}
 		})
 	}
@@ -113,8 +115,9 @@ func TestTemplateCreateRejectsUnknownMetadataField(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), `unknown field "unexpected"`) {
-		t.Fatalf("body = %q", recorder.Body.String())
+	var response apiErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Code != "request.invalid_multipart" || !strings.Contains(response.Error, `unknown field "unexpected"`) {
+		t.Fatalf("body = %q, decoded = %#v, error = %v", recorder.Body.String(), response, err)
 	}
 }
 

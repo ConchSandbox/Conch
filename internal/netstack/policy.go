@@ -23,8 +23,6 @@ const (
 	sandboxPolicyLockTimeout      = 5 * time.Minute
 )
 
-var ErrInvalidSandboxNetworkPolicy = errors.New("invalid sandbox network policy")
-
 type SandboxNetworkConfig = runtimeapi.SandboxNetworkConfig
 
 type sandboxPolicyIPTables interface {
@@ -57,7 +55,7 @@ func ValidateSandboxNetworkInputConfig(ctx context.Context, cfg *SandboxNetworkC
 	}
 	total := len(cfg.AllowOut) + len(cfg.DenyOut) + len(cfg.AllowIn) + len(cfg.DenyIn)
 	if total > MaxSandboxNetworkDestinations {
-		return fmt.Errorf("%w: at most %d destinations are supported", ErrInvalidSandboxNetworkPolicy, MaxSandboxNetworkDestinations)
+		return fmt.Errorf("%w: at most %d destinations are supported", ErrInvalidPolicy, MaxSandboxNetworkDestinations)
 	}
 	for _, field := range []struct {
 		name    string
@@ -70,7 +68,7 @@ func ValidateSandboxNetworkInputConfig(ctx context.Context, cfg *SandboxNetworkC
 	} {
 		for _, entry := range field.entries {
 			if _, ok := normalizePolicyDestination(entry); !ok {
-				return fmt.Errorf("%w: %s contains unsupported destination %q; only IPv4 addresses and CIDRs are supported", ErrInvalidSandboxNetworkPolicy, field.name, entry)
+				return fmt.Errorf("%w: %s contains unsupported destination %q; only IPv4 addresses and CIDRs are supported", ErrInvalidPolicy, field.name, entry)
 			}
 		}
 	}

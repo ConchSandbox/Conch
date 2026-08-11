@@ -3,7 +3,6 @@ package template
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -23,8 +22,6 @@ const (
 	BootModeCold   BootMode = "cold"
 	BootModeResume BootMode = "resume"
 )
-
-var ErrAlreadyExists = errors.New("template already exists")
 
 // Entry is the non-persistent domain representation of a fully published and
 // validated Template. An Entry has no lifecycle state: if it exists, it is
@@ -56,22 +53,22 @@ func NewID() (string, error) {
 func NormalizeEntry(entry Entry) (Entry, error) {
 	entry.ID = strings.TrimSpace(entry.ID)
 	if entry.ID == "" {
-		return Entry{}, fmt.Errorf("template id is required")
+		return Entry{}, ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
 	}
 	switch entry.Origin {
 	case OriginImage, OriginCheckpoint:
 	default:
-		return Entry{}, fmt.Errorf("unknown template origin %q", entry.Origin)
+		return Entry{}, ErrInvalidArtifact.Wrap(fmt.Errorf("unknown template origin %q", entry.Origin))
 	}
 	switch entry.BootMode {
 	case BootModeCold, BootModeResume:
 	default:
-		return Entry{}, fmt.Errorf("unknown template boot mode %q", entry.BootMode)
+		return Entry{}, ErrInvalidArtifact.Wrap(fmt.Errorf("unknown template boot mode %q", entry.BootMode))
 	}
 	rawDigest := strings.TrimSpace(entry.BootIndexDigest)
 	parsed, err := digest.Parse(rawDigest)
 	if err != nil {
-		return Entry{}, fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err)
+		return Entry{}, ErrInvalidArtifact.Wrap(fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err))
 	}
 	entry.BootIndexDigest = parsed.String()
 	entry.ParentTemplateID = strings.TrimSpace(entry.ParentTemplateID)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,25 @@ func TestImageAPIErrorIncludesStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status 400") {
 		t.Fatalf("error = %v, want status 400", err)
+	}
+}
+
+func TestAPIErrorParsesStructuredResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"status":"error","code":"image.invalid_argument","error":"invalid image argument"}`)
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, Options{BaseURL: server.URL})
+	err := c.PullImage(context.Background(), PullImageRequest{ImageName: "bad"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest || apiErr.Code != "image.invalid_argument" || apiErr.Message != "invalid image argument" {
+		t.Fatalf("APIError = %#v", apiErr)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/sandbox"
 )
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
@@ -111,7 +112,7 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 					t.Fatalf("decode error response: %v", err)
 				}
-				if response["status"] != "error" || response["error"] != conchruntime.ErrTemplateIDRequired.Error() {
+				if response["status"] != "error" || response["error"] != sandbox.ErrInvalidArgument.Error() {
 					t.Fatalf("error response = %#v", response)
 				}
 				return
@@ -193,5 +194,30 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}
+
+func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	server := &Daemon{
+		router:         http.NewServeMux(),
+		runtimeService: conchruntime.New(nil, nil, store),
+	}
+	server.routes()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/template/inspect", bytes.NewBufferString(`{"id":"missing"}`))
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response apiErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Code != "template.not_found" {
+		t.Fatalf("response = %#v, error = %v", response, err)
 	}
 }

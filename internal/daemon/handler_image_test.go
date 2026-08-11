@@ -3,13 +3,12 @@ package daemon
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
 )
@@ -28,19 +27,20 @@ func TestHandlePullImageUnavailable(t *testing.T) {
 	}
 }
 
-func TestWriteImageErrorClassifiesClientErrors(t *testing.T) {
+func TestWriteAPIErrorClassifiesImageErrors(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		err  error
+		name       string
+		err        error
+		wantStatus int
 	}{
-		{name: "invalid request", err: errors.Join(conchimage.ErrInvalidRequest, errors.New("image_name is required"))},
-		{name: "conversion failure", err: errors.Join(conchimage.ErrOCIConversionFailed, errors.New("convert rootfs"))},
+		{name: "invalid request", err: conchimage.ErrInvalidArgument.Wrap(errors.New("image_name is required")), wantStatus: http.StatusBadRequest},
+		{name: "conversion failure", err: conchimage.ErrConversionFailed.Wrap(errors.New("convert rootfs")), wantStatus: http.StatusInternalServerError},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			writeImageError(rec, "Failed to pull image", test.err)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			writeAPIError(rec, test.err)
+			if rec.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, test.wantStatus, rec.Body.String())
 			}
 		})
 	}
@@ -51,23 +51,20 @@ func TestWriteImageErrorPreservesRegistryAuthStatusWithoutLeakingCredentials(t *
 		registryUsername = "registry-user"
 		registryPassword = "registry-password"
 	)
-	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			registryErr := remoteerrors.ErrUnexpectedStatus{
-				Status:        fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
-				StatusCode:    statusCode,
-				RequestMethod: http.MethodGet,
-				RequestURL:    "https://" + registryUsername + ":" + registryPassword + "@registry.example.invalid/v2/conch/manifests/latest",
-			}
+	for _, test := range []struct {
+		name       string
+		statusCode int
+		prototype  *apperror.Error
+	}{
+		{name: "Unauthorized", statusCode: http.StatusUnauthorized, prototype: conchimage.ErrRegistryUnauthenticated},
+		{name: "Forbidden", statusCode: http.StatusForbidden, prototype: conchimage.ErrRegistryPermissionDenied},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			writeImageError(rec, "Failed to pull image", fmt.Errorf("pull failed: %w", registryErr))
+			writeAPIError(rec, test.prototype.Wrap(errors.New("https://"+registryUsername+":"+registryPassword+"@registry.example.invalid/private response")))
 
-			if rec.Code != statusCode {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, statusCode, rec.Body.String())
-			}
-			wantBody := "Failed to pull image: registry request failed: " + http.StatusText(statusCode) + "\n"
-			if rec.Body.String() != wantBody {
-				t.Fatalf("body = %q, want %q", rec.Body.String(), wantBody)
+			if rec.Code != test.statusCode {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, test.statusCode, rec.Body.String())
 			}
 			if strings.Contains(rec.Body.String(), registryUsername) || strings.Contains(rec.Body.String(), registryPassword) {
 				t.Fatalf("response body leaked registry credentials: %q", rec.Body.String())
@@ -76,7 +73,7 @@ func TestWriteImageErrorPreservesRegistryAuthStatusWithoutLeakingCredentials(t *
 	}
 }
 
-func TestWriteImageErrorOnlyTrustsTypedRegistryStatus(t *testing.T) {
+func TestWriteAPIErrorOnlyTrustsApplicationClassification(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		err        error
@@ -88,19 +85,14 @@ func TestWriteImageErrorOnlyTrustsTypedRegistryStatus(t *testing.T) {
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name:       "typed registry status",
+			name:       "classified registry status",
 			wantStatus: http.StatusTooManyRequests,
-			err: remoteerrors.ErrUnexpectedStatus{
-				Status:        "429 Too Many Requests",
-				StatusCode:    http.StatusTooManyRequests,
-				RequestMethod: http.MethodGet,
-				RequestURL:    "https://registry.example.invalid/v2/conch/manifests/latest",
-			},
+			err:        conchimage.ErrRegistryRateLimited.New(),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			writeImageError(rec, "Failed to pull image", test.err)
+			writeAPIError(rec, test.err)
 			if rec.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %s", rec.Code, test.wantStatus, rec.Body.String())
 			}
