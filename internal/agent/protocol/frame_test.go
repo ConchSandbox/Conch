@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -51,8 +52,8 @@ func TestReadFrameRejectsInvalidPayloads(t *testing.T) {
 }
 
 func TestMarshalPayloadRejectsOversizedValue(t *testing.T) {
-	if _, err := MarshalPayload(strings.Repeat("x", MaxPayloadSize)); err == nil {
-		t.Fatal("MarshalPayload() error = nil, want payload limit error")
+	if _, err := MarshalPayload(strings.Repeat("x", MaxPayloadSize)); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("MarshalPayload() error = %v, want ErrPayloadTooLarge", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/openeuler/Conch/internal/agent/hostconn"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
@@ -71,6 +72,7 @@ func RestoreSandbox(
 	vmStartSpec VMStartSpec,
 	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
+	readyOpts *hostconn.ReadyOptions,
 ) (s *Sandbox, e error) {
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
 		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
@@ -96,6 +98,10 @@ func RestoreSandbox(
 		}
 		return nil
 	})
+	readyOpts.Network = slot.GuestNetworkConfig()
+	if _, err := hostconn.ValidateReadyRequest(*readyOpts); err != nil {
+		return nil, fmt.Errorf("validate initialization before VMM start: %w", err)
+	}
 
 	vmmResourceArgs := &vmm.ResourceArgs{
 		CPUBoot:         vcpuNum,
@@ -155,6 +161,7 @@ func CreateSandbox(
 	vmStartSpec VMStartSpec,
 	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
+	readyOpts *hostconn.ReadyOptions,
 ) (s *Sandbox, e error) {
 
 	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
@@ -181,6 +188,10 @@ func CreateSandbox(
 		}
 		return nil
 	})
+	readyOpts.Network = slot.GuestNetworkConfig()
+	if _, err := hostconn.ValidateReadyRequest(*readyOpts); err != nil {
+		return nil, fmt.Errorf("validate initialization before VMM start: %w", err)
+	}
 
 	vmmResourceArgs := &vmm.ResourceArgs{
 		CPUBoot:         vcpuNum,

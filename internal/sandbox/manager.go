@@ -11,6 +11,7 @@ import (
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/netstack"
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
@@ -319,18 +320,13 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	var sbx *Sandbox
 	var createErr error
 	if restore {
-		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
+		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
-	readyOpts.Network = sbx.slot.GuestNetworkConfig()
-	if err := readyOpts.Network.Validate(); err != nil {
-		return sbx, fmt.Errorf("invalid guest network config: %w", err)
-	}
-
 	// WaitReady returns timeout and context cancellation errors directly.
 	if err := hostconn.WaitReady(ctx, readyOpts); err != nil {
 		return sbx, err
@@ -433,6 +429,10 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	if err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxID)
 		switch {
+		case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
+			return CreateResult{}, ErrInvalidEnvironment.Wrap(err)
+		case errors.Is(err, agentprotocol.ErrPayloadTooLarge):
+			return CreateResult{}, ErrInitializationTooLarge.Wrap(err)
 		case errors.Is(err, slotstate.ErrEmpty), errors.Is(err, slotstate.ErrCapacity):
 			return CreateResult{}, ErrResourceExhausted.Wrap(err)
 		}
