@@ -224,10 +224,10 @@ func (p *Pool) CleanupStaleResources(ctx context.Context) error {
 
 	entries, err := os.ReadDir(networkNamespaceDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("list stale network namespaces: %w", err)
 		}
-		return fmt.Errorf("list stale network namespaces: %w", err)
+		entries = nil
 	}
 
 	var errs []error
@@ -251,10 +251,19 @@ func (p *Pool) CleanupStaleResources(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("clean stale network slot %d: %w", id, teardownErr))
 		}
 	}
+	staleCacheCount := 0
+	if len(errs) == 0 {
+		staleCacheCount, err = p.cniManager.reconcileStaleCache(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile stale CNI result cache: %w", err))
+		} else if staleCacheCount > 0 {
+			ulog.GetLogger().Info("cleaned stale CNI result cache", ulog.F("slot_count", staleCacheCount))
+		}
+	}
 
 	// A bridge can be left after all stale slots are removed. Do not touch it
 	// when no stale slot was found, and do not delete it after a failed CNI DEL.
-	if foundStaleSlot && len(errs) == 0 {
+	if (foundStaleSlot || staleCacheCount > 0) && len(errs) == 0 {
 		if link, linkErr := netlink.LinkByName(p.cniManager.bridgeName); linkErr == nil {
 			if deleteErr := netlink.LinkDel(link); deleteErr != nil {
 				errs = append(errs, fmt.Errorf("delete stale Conch bridge: %w", deleteErr))
@@ -617,8 +626,9 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	var errs []error
 	netnsPath := slot.NetNSPath()
+	netnsMounted := isNetworkNamespaceMounted(netnsPath)
 	if cniIP := slot.CNIIP(); cniIP != "" {
-		if isNetworkNamespaceMounted(netnsPath) {
+		if netnsMounted {
 			if err := runInNetNSPath(ctx, netnsPath, func() error {
 				return removeGuestTapNetwork(slot, cniIP)
 			}); err != nil {
@@ -629,10 +639,14 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	var cniErr error
 	cniTeardownComplete := false
-	if p == nil || p.cniManager == nil || p.cniManager.plugin == nil {
+	if p == nil || p.cniManager == nil || p.cniManager.backend == nil {
 		cniErr = fmt.Errorf("cni config not initialized")
 	} else {
-		cniErr = p.teardownSandboxNetworkWithRetry(ctx, slot, netnsPath)
+		cniNetNSPath := netnsPath
+		if !netnsMounted {
+			cniNetNSPath = ""
+		}
+		cniErr = p.cniManager.TeardownSandboxNetwork(ctx, slot.cniContainerID(), cniNetNSPath)
 	}
 	if cniErr == nil {
 		slot.clearCNIResult()
@@ -649,36 +663,6 @@ func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot) error {
 
 	return errors.Join(errs...)
 }
-
-func (p *Pool) teardownSandboxNetworkWithRetry(ctx context.Context, slot *Slot, netnsPath string) error {
-	cniID := slot.cniContainerID()
-	if !isNetworkNamespaceMounted(netnsPath) {
-		netnsPath = ""
-	}
-	var lastErr error
-	for attempt := 0; attempt <= cniTeardownRetryAttempts; attempt++ {
-		err := p.cniManager.TeardownSandboxNetwork(ctx, cniID, netnsPath)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !isCNIBusyTeardownError(err) || attempt == cniTeardownRetryAttempts {
-			return err
-		}
-		delay := cniTeardownRetryDelay * time.Duration(1<<attempt)
-		select {
-		case <-ctx.Done():
-			return errors.Join(lastErr, ctx.Err())
-		case <-time.After(delay):
-		}
-	}
-	return lastErr
-}
-
-func isCNIBusyTeardownError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "resource busy")
-}
-
 func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return fmt.Errorf("slot is nil")
@@ -692,7 +676,7 @@ func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if slot.CNIIP() == "" {
 		return fmt.Errorf("slot has no cni IP")
 	}
-	if p == nil || p.cniManager == nil || p.cniManager.plugin == nil {
+	if p == nil || p.cniManager == nil || p.cniManager.backend == nil {
 		return fmt.Errorf("cni config not initialized")
 	}
 	if err := p.cniManager.checkSandboxInterface(ctx, slot.NetNSPath(), slot.CNIIP()); err != nil {

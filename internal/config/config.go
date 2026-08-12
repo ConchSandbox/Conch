@@ -145,7 +145,6 @@ func DefaultConfig() *Config {
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
-				IfName:        netstack.DefaultCNIIfName,
 			},
 		},
 		Containerd: ContainerdConfig{
@@ -259,9 +258,6 @@ func LoadConfig(configPath string) (*Config, error) {
 		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
 	}
 	cfg.Network.CNI.PluginConfDir = resolveCNIPluginConfDir(configPath, cfg.Network.CNI.PluginConfDir, defaultCfg.Network.CNI.PluginConfDir)
-	if cfg.Network.CNI.IfName == "" {
-		cfg.Network.CNI.IfName = defaultCfg.Network.CNI.IfName
-	}
 	if cfg.Containerd.RootDir == "" {
 		cfg.Containerd.RootDir = defaultCfg.Containerd.RootDir
 	}

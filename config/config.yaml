@@ -21,15 +21,13 @@ network:
   warm_pool_size: 250
   cni:
     # CNI plugin binary search paths used for outer sandbox networking.
-    # These binaries must be installed on the Linux host; the Go CNI library does not install them.
+    # These binaries must be installed on the Linux host; libcni does not install them.
     plugin_bin_dirs:
       - /usr/libexec/cni
     # Directory containing the CNI .conf/.conflist Conch should load for sandbox networking.
     # Change this if your Conch CNI configs live somewhere else.
     # If this default directory has no config, Conch falls back to cni/net.d next to this config file.
     plugin_conf_dir: /etc/conch/cni/net.d
-    # Outer sandbox interface name created by CNI; go-cni currently generates the first interface as <prefix>0
-    if_name: eth0
 
 containerd:
   root_dir: /var/lib/conch/containerd

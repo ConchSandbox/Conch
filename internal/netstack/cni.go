@@ -2,46 +2,46 @@ package netstack
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
-	"time"
 
-	cni "github.com/containerd/go-cni"
+	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/vishvananda/netlink"
 )
 
 const (
-	DefaultCNIIfName           = "eth0"
-	DefaultCNIPluginConfDir    = "/etc/conch/cni/net.d"
-	DefaultCNIPluginBinDir     = "/usr/libexec/cni"
-	defaultCNIPluginMaxConfNum = 1
-	defaultCNIMinNetworkCount  = defaultCNIPluginMaxConfNum + 1 // loopback plus the outer sandbox network
-	defaultCNIIfName           = DefaultCNIIfName
-	defaultCNIInterfacePrefix  = "eth"
-	defaultCNIPluginConfDir    = DefaultCNIPluginConfDir
-	defaultCNIPluginBinDir     = DefaultCNIPluginBinDir
-	cniTeardownRetryAttempts   = 3
-	cniTeardownRetryDelay      = 100 * time.Millisecond
+	DefaultCNIPluginConfDir = "/etc/conch/cni/net.d"
+	DefaultCNIPluginBinDir  = "/usr/libexec/cni"
+
+	defaultCNIPluginConfDir = DefaultCNIPluginConfDir
+	defaultCNIPluginBinDir  = DefaultCNIPluginBinDir
+	cniOuterInterfaceName   = "eth0"
+	cniCacheDir             = "/var/lib/conch/cni"
 )
 
 type CNIManagerConfig struct {
 	PluginBinDirs []string `toml:"plugin_bin_dirs" json:"pluginBinDirs" yaml:"plugin_bin_dirs"`
 	PluginConfDir string   `toml:"plugin_conf_dir" json:"pluginConfDir" yaml:"plugin_conf_dir"`
-	IfName        string   `toml:"if_name" json:"ifName" yaml:"if_name"`
 }
 
-type cniPlugin interface {
-	Setup(context.Context, string, string, ...cni.NamespaceOpts) (*cni.Result, error)
-	Remove(context.Context, string, string, ...cni.NamespaceOpts) error
-	GetConfig() *cni.ConfigResult
+type cniAttachment struct {
+	ContainerID   string
+	NetworkName   string
+	InterfaceName string
+	NetNS         string
+}
+
+type cniBackend interface {
+	Setup(context.Context, string, string) (*types100.Result, error)
+	Remove(context.Context, string, string) error
+	CachedAttachments() ([]cniAttachment, error)
 }
 
 type CNIManager struct {
-	plugin     cniPlugin
-	config     CNIManagerConfig
-	bridgeName string
+	backend           cniBackend
+	ifName            string
+	bridgeName        string
+	bridgeNetworkName string
 }
 
 type CNIResult struct {
@@ -51,65 +51,22 @@ type CNIResult struct {
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	cfg = normalizeCNIManagerConfig(cfg)
-	ifPrefix := strings.TrimRight(cfg.IfName, "0123456789")
-	if ifPrefix == "" {
-		ifPrefix = defaultCNIInterfacePrefix
-	}
-	if generated := fmt.Sprintf("%s0", ifPrefix); generated != cfg.IfName {
-		return nil, fmt.Errorf("if_name %q is incompatible with go-cni interface prefix %q; expected %q", cfg.IfName, ifPrefix, generated)
-	}
-	plugin, err := cni.New(
-		cni.WithMinNetworkCount(defaultCNIMinNetworkCount),
-		cni.WithPluginConfDir(cfg.PluginConfDir),
-		cni.WithPluginMaxConfNum(defaultCNIPluginMaxConfNum),
-		cni.WithPluginDir(cfg.PluginBinDirs),
-		cni.WithInterfacePrefix(ifPrefix),
-	)
+
+	backend, err := newLibCNIBackend(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize cni: %w", err)
+		return nil, err
 	}
-	if err := plugin.Load(cni.WithLoNetwork, cni.WithDefaultConf); err != nil {
-		return nil, fmt.Errorf("failed to load cni config: %w", err)
-	}
-	bridgeName, err := loadedBridgeName(plugin.GetConfig())
+	bridgeNetworkName, bridgeName, err := loadedBridgeNetwork(backend.outerNetwork.config)
 	if err != nil {
-		return nil, fmt.Errorf("inspect loaded cni config: %w", err)
+		return nil, fmt.Errorf("inspect loaded CNI config: %w", err)
 	}
 
 	return &CNIManager{
-		plugin:     plugin,
-		config:     cfg,
-		bridgeName: bridgeName,
+		backend:           backend,
+		ifName:            cniOuterInterfaceName,
+		bridgeName:        bridgeName,
+		bridgeNetworkName: bridgeNetworkName,
 	}, nil
-}
-
-type bridgePluginConfig struct {
-	Bridge string `json:"bridge"`
-}
-
-func loadedBridgeName(config *cni.ConfigResult) (string, error) {
-	if config == nil {
-		return "", fmt.Errorf("CNI returned no loaded configuration")
-	}
-	for _, network := range config.Networks {
-		if network == nil || network.Config == nil || network.Config.Name == "cni-loopback" {
-			continue
-		}
-		for _, plugin := range network.Config.Plugins {
-			if plugin == nil || plugin.Network == nil || plugin.Network.Type != "bridge" {
-				continue
-			}
-			var bridge bridgePluginConfig
-			if err := json.Unmarshal([]byte(plugin.Source), &bridge); err != nil {
-				return "", fmt.Errorf("parse bridge plugin config: %w", err)
-			}
-			if strings.TrimSpace(bridge.Bridge) == "" {
-				return "", fmt.Errorf("loaded bridge network %q has no bridge name", network.Config.Name)
-			}
-			return bridge.Bridge, nil
-		}
-	}
-	return "", fmt.Errorf("loaded CNI configuration has no bridge network")
 }
 
 func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {
@@ -119,81 +76,53 @@ func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {
 	if cfg.PluginConfDir == "" {
 		cfg.PluginConfDir = defaultCNIPluginConfDir
 	}
-	if cfg.IfName == "" {
-		cfg.IfName = defaultCNIIfName
-	}
 	return cfg
 }
 
-func extractCNIIP(result *cni.Result, defaultIfName string) (string, error) {
+func extractCNIIP(result *types100.Result) (string, error) {
 	if result == nil {
 		return "", fmt.Errorf("cni returned nil result")
 	}
-	if defaultIfName == "" {
-		defaultIfName = defaultCNIIfName
-	}
-
-	defaultIface := result.Interfaces[defaultIfName]
-	if defaultIface == nil || len(defaultIface.IPConfigs) == 0 {
-		for _, iface := range result.Interfaces {
-			if iface != nil && len(iface.IPConfigs) > 0 {
-				defaultIface = iface
-				break
-			}
-		}
-	}
-	if defaultIface == nil || len(defaultIface.IPConfigs) == 0 {
-		return "", fmt.Errorf("failed to find network info for sandbox interface %q", defaultIfName)
-	}
-
-	for _, ipConfig := range defaultIface.IPConfigs {
-		if ipConfig == nil || ipConfig.IP == nil {
+	for _, ipConfig := range result.IPs {
+		if ipConfig == nil || ipConfig.Interface == nil || ipConfig.Address.IP.To4() == nil {
 			continue
 		}
-		if ipConfig.IP.To4() != nil {
-			return ipConfig.IP.String(), nil
+		index := *ipConfig.Interface
+		if index < 0 || index >= len(result.Interfaces) || result.Interfaces[index] == nil {
+			return "", fmt.Errorf("cni returned IP with invalid interface index %d", index)
+		}
+		if result.Interfaces[index].Name == cniOuterInterfaceName {
+			return ipConfig.Address.IP.To4().String(), nil
 		}
 	}
-	for _, ipConfig := range defaultIface.IPConfigs {
-		if ipConfig != nil && ipConfig.IP != nil {
-			return ipConfig.IP.String(), nil
-		}
-	}
-	return "", fmt.Errorf("failed to find IP for sandbox interface %q", defaultIfName)
+	return "", fmt.Errorf("cni returned no IPv4 address for interface %q", cniOuterInterfaceName)
 }
 
-func extractCNIDNS(result *cni.Result) (DNSConfig, error) {
+func extractCNIDNS(result *types100.Result) (DNSConfig, error) {
 	if result == nil {
 		return DNSConfig{}, fmt.Errorf("cni returned nil result")
 	}
-	var dns DNSConfig
-	for _, item := range result.DNS {
-		dns.Nameservers = append(dns.Nameservers, item.Nameservers...)
-		dns.Search = append(dns.Search, item.Search...)
-		dns.Options = append(dns.Options, item.Options...)
-		if dns.Domain == "" {
-			dns.Domain = item.Domain
-		}
-	}
-	return NormalizeDNS(dns)
+	return NormalizeDNS(DNSConfig{
+		Nameservers: result.DNS.Nameservers,
+		Domain:      result.DNS.Domain,
+		Search:      result.DNS.Search,
+		Options:     result.DNS.Options,
+	})
 }
 
 // SetupSandboxNetwork performs CNI ADD and extracts the sandbox network result. The caller
 // owns rollback on every error because ADD may have taken effect before failing.
 func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string) (CNIResult, error) {
-	if m == nil || m.plugin == nil {
+	if m == nil || m.backend == nil {
 		return CNIResult{}, fmt.Errorf("cni config not initialized")
 	}
-	result, err := m.plugin.Setup(ctx, cniID, netnsPath)
+	result, err := m.backend.Setup(ctx, cniID, netnsPath)
 	if err != nil {
 		return CNIResult{}, fmt.Errorf("failed to setup cni network: %w", err)
 	}
-	cniIP, err := extractCNIIP(result, m.config.IfName)
+	cniIP, err := extractCNIIP(result)
 	if err != nil {
 		return CNIResult{}, fmt.Errorf("failed to extract cni IP: %w", err)
-	}
-	if net.ParseIP(cniIP).To4() == nil {
-		return CNIResult{}, fmt.Errorf("cni IP %q must be IPv4", cniIP)
 	}
 	dns, err := extractCNIDNS(result)
 	if err != nil {
@@ -206,19 +135,19 @@ func (m *CNIManager) TeardownSandboxNetwork(ctx context.Context, cniID string, n
 	if cniID == "" {
 		return nil
 	}
-	if m == nil || m.plugin == nil {
+	if m == nil || m.backend == nil {
 		return fmt.Errorf("cni config not initialized")
 	}
-	return m.plugin.Remove(ctx, cniID, netnsPath)
+	return m.backend.Remove(ctx, cniID, netnsPath)
 }
 
 func (m *CNIManager) checkSandboxInterface(ctx context.Context, netnsPath string, cniIP string) error {
 	if m == nil {
 		return fmt.Errorf("cni config not initialized")
 	}
-	ifName := m.config.IfName
+	ifName := m.ifName
 	if ifName == "" {
-		ifName = defaultCNIIfName
+		ifName = cniOuterInterfaceName
 	}
 	return runInNetNSPath(ctx, netnsPath, func() error {
 		cniLink, err := netlink.LinkByName(ifName)

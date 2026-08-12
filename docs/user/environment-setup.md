@@ -10,7 +10,7 @@
 | Git、GNU Make | 发行版版本 | 系统包管理器 |
 | Cloud Hypervisor | v52.0-conch | [Conch release](https://github.com/ConchSandbox/cloud-hypervisor/releases/tag/v52.0-conch)，安装为 `/usr/local/bin/cloud-hypervisor` |
 | erofs-utils | 1.9+，`mkfs.erofs` 支持 `--fsalignblks` | 系统包管理器或[源码安装](https://erofs.docs.kernel.org/en/latest/install.html)，命令加入 `PATH` |
-| CNI plugins | `bridge`、`host-local`、`loopback` | [官方 release](https://github.com/containernetworking/plugins/releases)，安装到 `/usr/libexec/cni` |
+| CNI plugins | `bridge`、`host-local` | [官方 release](https://github.com/containernetworking/plugins/releases)，安装到 `/usr/libexec/cni` |
 | iptables、util-linux | 提供 `iptables`、`nsenter` | 系统包管理器 |
 | kmod | 内核模块化构建时提供 `modprobe` | 系统包管理器 |
 
@@ -57,7 +57,7 @@ sudo apt-get install -y git make curl tar \
 
 ### CNI plugins
 
-发行版安装的插件若不在 `/usr/libexec/cni`，将实际目录写入 `network.cni.plugin_bin_dirs`，或从 [CNI plugins release](https://github.com/containernetworking/plugins/releases) 下载对应架构的包并解压到该目录。
+Conch 默认从主机共享目录 `/usr/libexec/cni` 加载 `bridge`、`host-local`。发行版安装的插件如果位于其他目录，将实际路径写入 `network.cni.plugin_bin_dirs`；也可以从 [CNI plugins release](https://github.com/containernetworking/plugins/releases) 下载对应架构的包并解压到该目录。Conch 直接通过 netlink 启用 network namespace 中的 loopback 接口，不需要安装 `loopback` CNI 插件。
 
 ### erofs-utils
 
@@ -73,6 +73,8 @@ sudo install -m 0644 config/cni/net.d/10-conch.conf /etc/conch/cni/net.d/10-conc
 sudo modprobe erofs
 sudo modprobe vhost_vsock
 ```
+
+Conch 将 libcni result cache 固定保存在 `/var/lib/conch/cni/results`；默认 CNI 配置将 host-local IPAM 状态保存在 `/var/lib/conch/cni/networks`。这两个目录都是内部状态路径，不属于用户配置接口。
 
 使用前确认 CNI 配置的子网不与主机、集群或 guest tap 子网重叠。
 
@@ -95,7 +97,6 @@ cloud-hypervisor --version
 mkfs.erofs --help 2>&1 | grep -- --fsalignblks
 test -x /usr/libexec/cni/bridge
 test -x /usr/libexec/cni/host-local
-test -x /usr/libexec/cni/loopback
 test -r /dev/kvm -a -w /dev/kvm
 grep -w erofs /proc/filesystems
 test -e /dev/vhost-vsock
