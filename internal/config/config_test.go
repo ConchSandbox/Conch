@@ -131,7 +131,7 @@ func TestLoadConfig(t *testing.T) {
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: cloud-hypervisor\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
 			"state:\n  path: /tmp/conch-state.db\n" +
 			"network:\n  warm_pool_size: 123\n" +
-			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    if_name: net1\n",
+			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -174,9 +174,6 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Network.CNI.PluginConfDir != "/custom/cni/net.d" {
 		t.Errorf("LoadConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/custom/cni/net.d")
-	}
-	if cfg.Network.CNI.IfName != "net1" {
-		t.Errorf("LoadConfig().Network.CNI.IfName = %q, want %q", cfg.Network.CNI.IfName, "net1")
 	}
 	if cfg.Containerd.RootDir != "/tmp/conch-containerd-root" {
 		t.Errorf("LoadConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/tmp/conch-containerd-root")
@@ -298,6 +295,16 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			name:    "removed inherit host dns field",
 			data:    "network:\n  inherit_host_dns: true\n",
 			wantErr: "field inherit_host_dns not found",
+		},
+		{
+			name:    "removed CNI interface field",
+			data:    "network:\n  cni:\n    if_name: net1\n",
+			wantErr: "field if_name not found",
+		},
+		{
+			name:    "removed CNI cache directory field",
+			data:    "network:\n  cni:\n    cache_dir: /tmp/cni\n",
+			wantErr: "field cache_dir not found",
 		},
 	}
 
@@ -423,9 +430,6 @@ func TestDefaultConfigNetworkSettings(t *testing.T) {
 	}
 	if cfg.Network.CNI.PluginConfDir != netstack.DefaultCNIPluginConfDir {
 		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, netstack.DefaultCNIPluginConfDir)
-	}
-	if cfg.Network.CNI.IfName != netstack.DefaultCNIIfName {
-		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want %s", cfg.Network.CNI.IfName, netstack.DefaultCNIIfName)
 	}
 }
 

@@ -186,6 +186,9 @@ func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry)
 func (s *BoltStore) GetTemplate(ctx context.Context, id string) (conchtemplate.Entry, error) {
 	var rec templateRecord
 	if err := s.get(ctx, []byte("templates"), id, &rec); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return conchtemplate.Entry{}, conchtemplate.ErrNotFound.Wrap(err)
+		}
 		return conchtemplate.Entry{}, err
 	}
 	return templateEntryFromRecord(rec)
@@ -209,6 +212,9 @@ func (s *BoltStore) ListTemplates(ctx context.Context) ([]conchtemplate.Entry, e
 }
 
 func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
+	if _, err := s.GetTemplate(ctx, id); err != nil {
+		return err
+	}
 	return s.delete(ctx, []byte("templates"), id)
 }
 
@@ -318,7 +324,7 @@ func templateEntryFromRecord(rec templateRecord) (conchtemplate.Entry, error) {
 		CreatedAt:        rec.CreatedAt,
 	})
 	if err != nil {
-		return conchtemplate.Entry{}, fmt.Errorf("invalid persisted template %s: %w", rec.ID, err)
+		return conchtemplate.Entry{}, fmt.Errorf("invalid persisted template %s: %v", rec.ID, err)
 	}
 	return entry, nil
 }

@@ -195,7 +195,7 @@ func TestDeleteMissingSandboxReturnsNotFoundWithoutReleasingBootLayout(t *testin
 	boot := &recordingBootPreparer{}
 	m := &Manager{boot: boot}
 
-	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); err == nil || err.Error() != "sandbox sandbox-a not found" {
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete() error = %v, want sandbox not found", err)
 	}
 	if len(boot.released) != 0 {
@@ -225,7 +225,7 @@ func TestCleanupStaleBootResourcesReturnsBootReleaseError(t *testing.T) {
 	}
 }
 
-func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
+func TestReserveSandboxEntryRejectsSameSandboxWithoutWaiting(t *testing.T) {
 	m := &Manager{}
 
 	key, entry, err := m.reserveSandboxEntry("sandbox-a")
@@ -233,6 +233,7 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 		t.Fatalf("reserveSandboxEntry() error = %v", err)
 	}
 	defer m.sandboxes.CompareAndDelete(key, entry)
+	defer entry.mu.Unlock()
 
 	done := make(chan error, 1)
 	go func() {
@@ -242,21 +243,10 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 
 	select {
 	case err := <-done:
-		t.Fatalf("same sandbox reserve completed while entry lock was held: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	entry.mu.Unlock()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("same sandbox reserve succeeded while an entry already existed")
-		}
-		if !strings.Contains(err.Error(), "already exists") {
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
 			t.Fatalf("same sandbox reserve error = %v, want already exists", err)
 		}
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("same sandbox reserve did not unblock after entry lock was released")
+		t.Fatal("same sandbox reserve blocked behind the existing entry lock")
 	}
 }

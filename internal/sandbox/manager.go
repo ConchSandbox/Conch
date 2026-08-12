@@ -11,8 +11,10 @@ import (
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/agent/hostconn"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/netstack"
+	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/internal/volume"
@@ -262,19 +264,17 @@ func (m *Manager) reserveSandboxEntry(sandboxID string) (string, *sandboxEntry, 
 	}
 	entry.mu.Unlock()
 
-	existing, ok := actual.(*sandboxEntry)
+	_, ok := actual.(*sandboxEntry)
 	if !ok {
 		return "", nil, fmt.Errorf("invalid sandbox entry type for %s", sandboxID)
 	}
-	existing.mu.Lock()
-	existing.mu.Unlock()
-	return "", nil, fmt.Errorf("sandbox %s already exists", sandboxID)
+	return "", nil, ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already exists", sandboxID))
 }
 
 func (m *Manager) loadSandboxEntry(mapKey, sandboxID string) (*sandboxEntry, error) {
 	entryVal, exists := m.sandboxes.Load(mapKey)
 	if !exists {
-		return nil, fmt.Errorf("sandbox %s not found", sandboxID)
+		return nil, ErrNotFound.Wrap(fmt.Errorf("sandbox %s not found", sandboxID))
 	}
 	entry, ok := entryVal.(*sandboxEntry)
 	if !ok {
@@ -296,7 +296,7 @@ func (m *Manager) lockCurrentSandboxEntry(mapKey, sandboxID string) (*sandboxEnt
 	entry.mu.Lock()
 	if !m.isCurrentSandboxEntry(mapKey, entry) {
 		entry.mu.Unlock()
-		return nil, nil, fmt.Errorf("sandbox %s not found", sandboxID)
+		return nil, nil, ErrNotFound.Wrap(fmt.Errorf("sandbox %s not found", sandboxID))
 	}
 	return entry, entry.mu.Unlock, nil
 }
@@ -320,18 +320,13 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	var sbx *Sandbox
 	var createErr error
 	if restore {
-		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
+		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network)
+		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
 	}
-	readyOpts.Network = sbx.slot.GuestNetworkConfig()
-	if err := readyOpts.Network.Validate(); err != nil {
-		return sbx, fmt.Errorf("invalid guest network config: %w", err)
-	}
-
 	// WaitReady returns timeout and context cancellation errors directly.
 	if err := hostconn.WaitReady(ctx, readyOpts); err != nil {
 		return sbx, err
@@ -351,6 +346,12 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	logger := ulog.GetLogger()
 	logger.Debug("creating sandbox in manager")
 
+	if m == nil {
+		return CreateResult{}, fmt.Errorf("sandbox manager is not configured")
+	}
+	if _, ok := m.vmmBinaries[req.VMMName]; !ok {
+		return CreateResult{}, ErrInvalidArgument.Wrap(fmt.Errorf("vmm %q is not configured", req.VMMName))
+	}
 	if req.AgentToken == "" {
 		return CreateResult{}, fmt.Errorf("agent token is required")
 	}
@@ -427,6 +428,14 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	sbx, err := m.startSandbox(ctx, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
 	if err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxID)
+		switch {
+		case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
+			return CreateResult{}, ErrInvalidEnvironment.Wrap(err)
+		case errors.Is(err, agentprotocol.ErrPayloadTooLarge):
+			return CreateResult{}, ErrInitializationTooLarge.Wrap(err)
+		case errors.Is(err, slotstate.ErrEmpty), errors.Is(err, slotstate.ErrCapacity):
+			return CreateResult{}, ErrResourceExhausted.Wrap(err)
+		}
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
@@ -446,7 +455,7 @@ func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Devic
 		return nil, nil
 	}
 	if resume {
-		return nil, fmt.Errorf("sandbox with volumeMounts does not support snapshot startup")
+		return nil, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox with volumeMounts does not support snapshot startup"))
 	}
 	if m.volumeManager == nil {
 		return nil, fmt.Errorf("volume manager is not configured")
@@ -486,12 +495,12 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 
 	vsockSocketPath, err := SandboxVsockSocketPath(key)
 	if err != nil {
-		return createRuntimeIDs{}, fmt.Errorf("failed to create sandbox: vsock socket path error: %v", err)
+		return createRuntimeIDs{}, ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox id for vsock socket path: %w", err))
 	}
 
 	vsockCID, err := m.AllocateUniqueCID(req.SandboxID)
 	if err != nil {
-		return createRuntimeIDs{}, fmt.Errorf("failed to create sandbox: CID allocation error: %v", err)
+		return createRuntimeIDs{}, ErrResourceExhausted.Wrap(fmt.Errorf("allocate sandbox CID: %w", err))
 	}
 	vcpuMax := req.VCPUMax
 	if vcpuMax == 0 {
@@ -689,7 +698,7 @@ func (m *Manager) Delete(req DeleteRequest) error {
 	}
 
 	if entry.state != sandboxReady && entry.state != sandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state))
 	}
 	sbx := entry.sbx
 	if sbx == nil {
@@ -712,7 +721,7 @@ func (m *Manager) Suspend(req LifecycleRequest) error {
 	}
 	defer unlock()
 	if entry.state != sandboxReady {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state))
 	}
 	sbx := entry.sbx
 	if sbx == nil {
@@ -737,7 +746,7 @@ func (m *Manager) Resume(req LifecycleRequest) error {
 	}
 	defer unlock()
 	if entry.state != sandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state))
 	}
 	sbx := entry.sbx
 	if sbx == nil {
@@ -760,7 +769,7 @@ func (m *Manager) UpdateNetwork(parent context.Context, req NetworkUpdateRequest
 	}
 	defer unlock()
 	if entry.state != sandboxReady && entry.state != sandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state))
 	}
 	if entry.sbx == nil || entry.sbx.slot == nil {
 		return fmt.Errorf("invalid sandbox entry for %s: network slot is nil", req.SandboxID)
@@ -780,14 +789,14 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 	defer unlock()
 	wasSuspended := entry.state == sandboxSuspended
 	if entry.state != sandboxReady && !wasSuspended {
-		return CheckpointResult{}, fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
+		return CheckpointResult{}, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state))
 	}
 	sbx := entry.sbx
 	if sbx == nil {
 		return CheckpointResult{}, fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
 	}
 	if len(sbx.vmStartSpec.VirtioFS) > 0 {
-		return CheckpointResult{}, fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", req.SandboxID)
+		return CheckpointResult{}, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has volume mounts, checkpoint is not supported", req.SandboxID))
 	}
 	capture := m.checkpointCapture
 	if capture == nil {

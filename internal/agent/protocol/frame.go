@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrPayloadTooLarge reports a protocol message that exceeds MaxPayloadSize.
+var ErrPayloadTooLarge = errors.New("protocol payload is too large")
 
 func MarshalPayload(value any) ([]byte, error) {
 	payload, err := json.Marshal(value)
@@ -14,7 +18,7 @@ func MarshalPayload(value any) ([]byte, error) {
 		return nil, err
 	}
 	if len(payload) == 0 || len(payload) > MaxPayloadSize {
-		return nil, fmt.Errorf("payload is %d bytes, maximum is %d", len(payload), MaxPayloadSize)
+		return nil, fmt.Errorf("%w: payload is %d bytes, maximum is %d", ErrPayloadTooLarge, len(payload), MaxPayloadSize)
 	}
 	return payload, nil
 }

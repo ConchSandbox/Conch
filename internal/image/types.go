@@ -1,15 +1,6 @@
 package image
 
-import (
-	"errors"
-
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-)
-
-var (
-	ErrInvalidRequest      = errors.New("invalid image request")
-	ErrOCIConversionFailed = errors.New("oci conversion failed")
-)
+import ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 // RegistryPullOptions contains the registry inputs shared by OCI image and
 // Boot Index pull workflows. Command-specific kind policy is applied by the

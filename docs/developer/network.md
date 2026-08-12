@@ -48,15 +48,17 @@ Network Slot 是一组可复用的网络资源，包括：
 
 conchd 启动后并发填充 warm pool。创建 Sandbox 时，`Pool.Get` 取出一个 Slot 并绑定 Sandbox ID，同时触发后台补充；池为空时创建请求失败。Sandbox 删除后，`Pool.Release` 检查 namespace、CNI 接口和 tap 是否仍然存在：状态正常的 Slot 返回池中，状态异常的 Slot 被销毁并重新补充。
 
-Slot 销毁时依次移除 tap 和 NAT、执行 CNI `DEL`、删除 network namespace，最后释放 Slot ID。CNI 清理遇到 `resource busy` 时会进行有限次数的退避重试。
+Slot 销毁时依次移除 tap 和 NAT、执行一次 CNI `DEL`、删除 network namespace，最后释放 Slot ID。CNI `DEL` 失败时保留 network namespace 和 Slot ID 并返回错误；启动 cache reconciliation 失败时保留 cache 并终止启动。
 
 ## 4. CNI 边界
 
-Network 模块通过 `containerd/go-cni` 加载 loopback 网络和一个默认 CNI 网络。CNI 负责 bridge/veth、IPAM、路由以及外层网络策略；Conch 不重复实现这些能力。
+Network 模块直接通过 `libcni` 加载一个默认 CNI 网络。ADD、DEL 与启动 cache reconciliation 共用同一个 `libcni.CNIConfig`，确保插件配置和 cache root 一致。CNI 负责 bridge/veth、IPAM、路由以及外层网络策略；Conch 通过 netlink 将 namespace 中的 loopback 接口置为 UP，不再调用 loopback CNI 插件。
 
 CNI Result 是 guest DNS 的唯一来源。Conch 对 CNI 返回的 DNS 进行校验、去重并最多保留 3 个 IPv4 nameserver，然后通过初始化协议下发给 conch-init；Conch 不读取 Host resolv.conf。
 
-`plugin_conf_dir` 应指向 Conch 专用的 CNI 配置目录。`if_name` 默认为 `eth0`，并受 go-cni 的接口前缀规则约束：配置值必须是对应前缀生成的第一个接口，例如 `eth0`。
+`plugin_conf_dir` 应指向 Conch 专用的 CNI 配置目录。外层接口名固定为内部实现值 `eth0`；libcni cache root 固定为 `/var/lib/conch/cni`，result cache 实际位于其 `results` 子目录。这两个值不属于用户配置接口。
+
+libcni cache root 不控制 CNI 插件自身的持久化目录。仓库提供的 host-local 配置另外将 `dataDir` 设置为 `/var/lib/conch/cni/networks`，使默认的 result cache 与 IPAM 租约都位于 Conch 专用目录。
 
 ## 5. 配置
 
@@ -67,16 +69,14 @@ network:
     plugin_bin_dirs:
       - /usr/libexec/cni
     plugin_conf_dir: /etc/conch/cni/net.d
-    if_name: eth0
 ```
 
 - `warm_pool_size`：空闲 Slot 的目标数量，默认 250，最大 4000。
 - `plugin_bin_dirs`：CNI 插件二进制目录。
 - `plugin_conf_dir`：Conch 使用的 CNI 配置目录。
-- `if_name`：CNI 在 namespace 中创建的接口名称。
 
 ## 6. 状态与退出
 
-Slot ID、Slot 与 Sandbox 的绑定关系以及 CNI IP 只保存在内存中，Network Slot 本身不写入 state store。conchd 重启后会创建新的 Pool，不恢复或接管旧 Slot。启动时会在 warm pool 预热前扫描并删除 Conch 遗留的网络资源，再清理旧 Sandbox 状态记录并释放对应的 snapshot view；旧 Sandbox 不会恢复。
+Slot ID、Slot 与 Sandbox 的绑定关系以及 CNI IP 只保存在内存中，Network Slot 本身不写入 state store。conchd 重启后会创建新的 Pool，不恢复或接管旧 Slot。启动时会在 warm pool 预热前先清理仍挂载的旧 network namespace，再通过 libcni 枚举配置 cache root 中的 current-format attachment，并对已经失去 Slot 状态的 `conch-slot-*` attachment 执行 CNI `DEL`。随后清理旧 Sandbox 状态记录并释放对应的 snapshot view；旧 Sandbox 不会恢复。
 
 正常退出时，conchd 会先删除所有 Sandbox，再关闭 containerd host。host 关闭 Pool 时会停止后台补充，并尽力销毁队列中的空闲 Slot。单个 Slot 清理失败只记录日志，不阻止其余关闭流程。

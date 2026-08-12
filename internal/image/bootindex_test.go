@@ -3,6 +3,7 @@ package image
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,6 +297,34 @@ func TestInspectBootIndexContentRejectsMissingClosure(t *testing.T) {
 	_, err = InspectBootIndexContent(ctx, store, indexDesc)
 	if err == nil || !strings.Contains(err.Error(), "closure") {
 		t.Fatalf("InspectBootIndexContent() error = %v, want closure error", err)
+	}
+}
+
+func TestInspectBootIndexContentDistinguishesInvalidContentFromStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := localcontent.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	missing := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageIndex,
+		Digest:    digest.FromString("missing-index"),
+		Size:      1,
+	}
+	if _, err := InspectBootIndexContent(ctx, store, missing); err == nil || errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("missing content error = %v, want unclassified store failure", err)
+	}
+
+	malformedData := []byte("{")
+	malformed := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageIndex,
+		Digest:    digest.FromBytes(malformedData),
+		Size:      int64(len(malformedData)),
+		Data:      malformedData,
+	}
+	if _, err := InspectBootIndexContent(ctx, store, malformed); !errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("malformed content error = %v, want ErrInvalidContent", err)
 	}
 }
 

@@ -23,6 +23,9 @@ func (s *Server) List(ctx context.Context, opts runtimeapi.ListSnapshotsOptions)
 	}
 	items := make(map[string]*snapshots.Info)
 	if err := s.snt.List(ctx, items, opts.Filters...); err != nil {
+		if errdefs.IsInvalidArgument(err) {
+			return nil, ErrInvalidArgument.Wrap(err)
+		}
 		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
 	out := make([]runtimeapi.SnapshotRecord, 0, len(items))
@@ -41,8 +44,8 @@ func (s *Server) Remove(ctx context.Context, opts runtimeapi.RemoveSnapshotOptio
 	if s == nil || s.snt == nil {
 		return fmt.Errorf("snapshot server is not configured")
 	}
-	if opts.Key == "" {
-		return fmt.Errorf("key is required")
+	if strings.TrimSpace(opts.Key) == "" {
+		return ErrInvalidArgument.Wrap(fmt.Errorf("key is required"))
 	}
 	if err := removeSnapshotKey(ctx, s.snt, opts.Key); err != nil {
 		return fmt.Errorf("remove snapshot %s: %w", opts.Key, err)
@@ -68,11 +71,14 @@ func (s *Server) Info(ctx context.Context, opts runtimeapi.SnapshotInfoOptions) 
 		return runtimeapi.SnapshotRecord{}, fmt.Errorf("snapshot server is not configured")
 	}
 	if opts.Key == "" {
-		return runtimeapi.SnapshotRecord{}, fmt.Errorf("key is required")
+		return runtimeapi.SnapshotRecord{}, ErrInvalidArgument.Wrap(fmt.Errorf("key is required"))
 	}
 
 	stat, err := s.snt.Stat(ctx, opts.Key)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return runtimeapi.SnapshotRecord{}, ErrNotFound.Wrap(err)
+		}
 		return runtimeapi.SnapshotRecord{}, fmt.Errorf("stat failed for key %s: %w", opts.Key, err)
 	}
 
@@ -81,6 +87,12 @@ func (s *Server) Info(ctx context.Context, opts runtimeapi.SnapshotInfoOptions) 
 		viewID := fmt.Sprintf("tmp-v-%d-%s", time.Now().UnixNano(), opts.Key)
 		mounts, err = s.snt.View(ctx, viewID, opts.Key)
 		if err != nil {
+			if errdefs.IsNotFound(err) {
+				return runtimeapi.SnapshotRecord{}, ErrNotFound.Wrap(err)
+			}
+			if errdefs.IsFailedPrecondition(err) {
+				return runtimeapi.SnapshotRecord{}, ErrFailedPrecondition.Wrap(err)
+			}
 			return runtimeapi.SnapshotRecord{}, fmt.Errorf("failed to resolve storage path via mounts or view: %w", err)
 		}
 		defer s.snt.Remove(ctx, viewID)

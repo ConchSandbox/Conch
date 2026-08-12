@@ -2,12 +2,14 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
 	bolt "go.etcd.io/bbolt"
 
+	"github.com/openeuler/Conch/internal/apperror"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -174,6 +176,54 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	if _, err := store.GetTemplate(ctx, rec.ID); err == nil {
 		t.Fatalf("GetTemplate() after delete got nil error")
 	}
+}
+
+func TestBoltStoreInvalidPersistedTemplateIsInternal(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	record := templateRecord{
+		ID:              "invalid-template",
+		Origin:          "unknown",
+		BootMode:        string(conchtemplate.BootModeCold),
+		BootIndexDigest: digest.FromString("boot-index").String(),
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("templates")).Put([]byte(record.ID), data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for name, load := range map[string]func() error{
+		"get": func() error {
+			_, err := store.GetTemplate(ctx, record.ID)
+			return err
+		},
+		"list": func() error {
+			_, err := store.ListTemplates(ctx)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := load()
+			if err == nil {
+				t.Fatal("error = nil, want invalid persisted template error")
+			}
+			var appErr *apperror.Error
+			if errors.As(err, &appErr) {
+				t.Fatalf("persisted-state error was classified as %s", appErr.Code())
+			}
+		})
+	}
+
 }
 
 func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {

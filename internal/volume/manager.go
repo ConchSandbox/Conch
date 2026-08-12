@@ -34,31 +34,31 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, er
 		return nil, nil
 	}
 	if len(mounts) > m.maxMounts {
-		return nil, fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts))
+		return nil, ErrInvalidMount.Wrap(fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts)))
 	}
 	if err := ValidateSegment(sandboxID, "sandbox_id"); err != nil {
-		return nil, err
+		return nil, ErrInvalidMount.Wrap(err)
 	}
 	seenTargets := map[string]struct{}{}
 	for _, mount := range mounts {
 		target := filepath.Clean(strings.TrimSpace(mount.Path))
 		if !filepath.IsAbs(target) {
-			return nil, fmt.Errorf("volume mount path must be absolute: %s", mount.Path)
+			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount path must be absolute: %s", mount.Path))
 		}
 		if isBlockedTarget(target) {
-			return nil, fmt.Errorf("volume mount path is not allowed: %s", target)
+			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount path is not allowed: %s", target))
 		}
 		if _, ok := seenTargets[target]; ok {
-			return nil, fmt.Errorf("duplicate volume mount path: %s", target)
+			return nil, ErrInvalidMount.Wrap(fmt.Errorf("duplicate volume mount path: %s", target))
 		}
 		seenTargets[target] = struct{}{}
 
 		source := filepath.Clean(strings.TrimSpace(mount.Source))
 		if source == "" {
-			return nil, fmt.Errorf("volume mount source must not be empty")
+			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must not be empty"))
 		}
 		if !filepath.IsAbs(source) {
-			return nil, fmt.Errorf("volume mount source must be absolute: %s", source)
+			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must be absolute: %s", source))
 		}
 	}
 	return m.backend.Prepare(PrepareRequest{

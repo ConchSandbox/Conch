@@ -84,6 +84,29 @@ def test_control_plane_transport_failures(monkeypatch):
         Sandbox.list()
 
 
+def test_control_plane_structured_error_uses_code_and_message():
+    response = requests.Response()
+    response.status_code = 400
+    response._content = (
+        b'{"status":"error","code":"sandbox.invalid_environment",'
+        b'"error":"invalid sandbox environment"}'
+    )
+    error = requests.HTTPError(response=response)
+
+    assert sandbox_module._request_exception_message(error) == (
+        "sandbox.invalid_environment: invalid sandbox environment"
+    )
+
+
+def test_control_plane_plain_text_error_fallback():
+    response = requests.Response()
+    response.status_code = 500
+    response._content = b"legacy server failure\n"
+    error = requests.HTTPError(response=response)
+
+    assert sandbox_module._request_exception_message(error) == "legacy server failure"
+
+
 def test_network_config_is_hydrated_and_updated(monkeypatch):
     session = FakeSession()
     monkeypatch.setattr(

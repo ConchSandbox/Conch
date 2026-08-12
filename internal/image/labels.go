@@ -45,17 +45,17 @@ func DetectImageKind(ctx context.Context, store content.Store, target ocispec.De
 	}
 	var index ocispec.Index
 	if err := json.Unmarshal(raw, &index); err != nil {
-		return "", fmt.Errorf("unmarshal image index %s: %w", target.Digest, err)
+		return "", ErrInvalidContent.Wrap(fmt.Errorf("unmarshal image index %s: %w", target.Digest, err))
 	}
 	if index.MediaType != "" && index.MediaType != ocispec.MediaTypeImageIndex {
-		return "", fmt.Errorf("image index %s declares media type %q", target.Digest, index.MediaType)
+		return "", ErrInvalidContent.Wrap(fmt.Errorf("image index %s declares media type %q", target.Digest, index.MediaType))
 	}
 	if !hasConchIndexMetadata(index) {
 		return ImageKindOCIImage, nil
 	}
 	info, err := inspectBootIndexMetadata(target, index)
 	if err != nil {
-		return "", fmt.Errorf("invalid Conch Boot Index %s: %w", target.Digest, err)
+		return "", ErrInvalidContent.Wrap(fmt.Errorf("invalid Conch Boot Index %s: %w", target.Digest, err))
 	}
 	if info.Resume {
 		return ImageKindBootIndexResume, nil

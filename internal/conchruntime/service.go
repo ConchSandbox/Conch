@@ -14,6 +14,8 @@ import (
 	"github.com/containerd/errdefs"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
+	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -33,10 +35,6 @@ type SandboxOps interface {
 	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
 }
 
-// ErrTemplateIDRequired reports that neither the request nor conchd supplied
-// a usable template ID for sandbox creation.
-var ErrTemplateIDRequired = errors.New("template_id is required and no default_template_id is configured")
-
 type SnapshotOps interface {
 	List(context.Context, runtimeapi.ListSnapshotsOptions) ([]runtimeapi.SnapshotRecord, error)
 	Remove(context.Context, runtimeapi.RemoveSnapshotOptions) error
@@ -52,8 +50,6 @@ type Service struct {
 	SandboxDefaults SandboxDefaults
 	lifecycleLocks  sandboxLifecycleLocks
 }
-
-var ErrSandboxAlreadyExists = errors.New("sandbox already exists")
 
 type sandboxLifecycleLock struct {
 	mu   sync.Mutex
@@ -110,6 +106,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
 	}
+	if err := agentprotocol.ValidateEnvironment(opts.Env); err != nil {
+		return SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
+	}
 	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
 		id, err := NewID()
@@ -122,7 +121,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	defer unlock()
 	if s.Store != nil {
 		if _, err := s.Store.GetSandbox(ctx, opts.SandboxID); err == nil {
-			return SandboxCreateResult{}, fmt.Errorf("%w: %s", ErrSandboxAlreadyExists, opts.SandboxID)
+			return SandboxCreateResult{}, sandbox.ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already exists", opts.SandboxID))
 		} else if !errors.Is(err, state.ErrNotFound) {
 			return SandboxCreateResult{}, fmt.Errorf("get sandbox state: %w", err)
 		}
@@ -132,7 +131,13 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	s.applySandboxDefaults(&opts)
 	if opts.TemplateID == "" {
-		return SandboxCreateResult{}, ErrTemplateIDRequired
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required and no default_template_id is configured"))
+	}
+	if opts.VCPUNum < 0 || opts.VCPUMax < 0 || (opts.VCPUNum != 0 && opts.VCPUMax != 0 && opts.VCPUMax < opts.VCPUNum) {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
+	}
+	if opts.RamMB < 0 {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must not be negative"))
 	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err
@@ -178,7 +183,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 
 	createResult, err := s.Sandbox.Create(req)
 	if err != nil {
-		return SandboxCreateResult{}, errors.Join(err, deleteCreatingRecord())
+		return SandboxCreateResult{}, combineOperationErrors(translateSandboxError(err), deleteCreatingRecord())
 	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
@@ -196,10 +201,11 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
 		deleteErr := deleteCreatingRecord()
-		if cleanupErr != nil {
-			cleanupErr = fmt.Errorf("clean up sandbox after state create failed: %w", cleanupErr)
-		}
-		return SandboxCreateResult{}, errors.Join(err, cleanupErr, deleteErr)
+		return SandboxCreateResult{}, combineOperationErrors(
+			fmt.Errorf("persist sandbox state: %w", err),
+			cleanupErr,
+			deleteErr,
+		)
 	}
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,
@@ -217,7 +223,7 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 		return fmt.Errorf("sandbox service is not configured")
 	}
 	if strings.TrimSpace(opts.SandboxID) == "" {
-		return fmt.Errorf("sandbox id is required")
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
 	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return err
@@ -229,7 +235,7 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 		return err
 	}
 	if rec.State != state.SandboxReady && rec.State != state.SandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State)
+		return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State))
 	}
 	oldNetwork := rec.Network
 	rec.Network = opts.Network
@@ -241,14 +247,14 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 		rollbackCtx := context.WithoutCancel(ctx)
 		rollbackErr := s.Sandbox.UpdateNetwork(rollbackCtx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: oldNetwork})
 		rec.Network = oldNetwork
-		applyErr := errors.Join(err, rollbackErr)
+		applyErr := combineOperationErrors(err, rollbackErr)
 		if rollbackErr != nil {
 			rec.State = state.SandboxUnknown
-			applyErr = errors.Join(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
+			applyErr = combineOperationErrors(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
 		}
 		rec.LastError = applyErr.Error()
 		rollbackStoreErr := s.upsertSandbox(rollbackCtx, rec)
-		return errors.Join(applyErr, rollbackStoreErr)
+		return combineOperationErrors(applyErr, rollbackStoreErr)
 	}
 	return nil
 }
@@ -280,10 +286,14 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	err := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
-	if err != nil && strings.Contains(err.Error(), "not found") {
+	if err != nil && errors.Is(err, sandbox.ErrNotFound) {
 		err = nil
 	}
 	if err != nil {
@@ -298,6 +308,10 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
@@ -320,6 +334,10 @@ func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 	if s == nil || s.Sandbox == nil {
 		return fmt.Errorf("sandbox service is not configured")
 	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
@@ -341,6 +359,10 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if s == nil || s.Sandbox == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("sandbox service is not configured")
 	}
+	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
+	if opts.SandboxID == "" {
+		return SandboxCheckpointResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
 	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
 	rec, err := s.getSandbox(ctx, opts.SandboxID)
@@ -356,11 +378,11 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	sandboxID := rec.SandboxID
 	parentTemplateID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if parentTemplateID == "" {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s has no checkpoint head template", sandboxID)
+		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head template", sandboxID))
 	}
 	parentBootIndexDigest := strings.TrimSpace(rec.CheckpointHeadBootIndexDigest)
 	if parentBootIndexDigest == "" {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox %s checkpoint head %s has no boot index digest", sandboxID, parentTemplateID)
+		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s checkpoint head %s has no boot index digest", sandboxID, parentTemplateID))
 	}
 
 	templateID, err := conchtemplate.NewID()
@@ -446,7 +468,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	}
 	reference := strings.TrimSpace(opts.Reference)
 	if reference == "" {
-		return TemplatePullResult{}, fmt.Errorf("template reference is required")
+		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template reference is required"))
 	}
 	info, err := conchimage.PullBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
 		Reference: reference,
@@ -455,7 +477,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		Password:  opts.Password,
 	})
 	if err != nil {
-		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, err)
+		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, translateTemplateArtifactError(err))
 	}
 	origin := conchtemplate.OriginImage
 	bootMode := conchtemplate.BootModeCold
@@ -498,11 +520,11 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	}
 	templateID := strings.TrimSpace(opts.TemplateID)
 	if templateID == "" {
-		return fmt.Errorf("template id is required")
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
 	}
 	remoteReference := strings.TrimSpace(opts.RemoteReference)
 	if remoteReference == "" {
-		return fmt.Errorf("remote template reference is required")
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("remote template reference is required"))
 	}
 	rec, err := s.Templates.Get(ctx, templateID)
 	if err != nil {
@@ -510,7 +532,7 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	}
 	bootIndexDigest := strings.TrimSpace(rec.BootIndexDigest)
 	if bootIndexDigest == "" {
-		return fmt.Errorf("template %s has no boot index digest", rec.ID)
+		return conchtemplate.ErrFailedPrecondition.Wrap(fmt.Errorf("template %s has no boot index digest", rec.ID))
 	}
 	return conchimage.PushBootIndex(ctx, s.Containerd, conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
@@ -530,14 +552,14 @@ func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions
 	}
 	templateID := strings.TrimSpace(opts.TemplateID)
 	if templateID == "" {
-		return fmt.Errorf("%w: template_id is required", conchimage.ErrInvalidRequest)
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required"))
 	}
 	rec, err := s.Templates.Get(ctx, templateID)
 	if err != nil {
 		return fmt.Errorf("get template %s: %w", templateID, err)
 	}
 	if err := conchimage.UnpackBootIndex(ctx, s.Containerd, rec.BootIndexDigest); err != nil {
-		return fmt.Errorf("unpack template %s: %w", templateID, err)
+		return fmt.Errorf("unpack template %s: %w", templateID, translateTemplateArtifactError(err))
 	}
 	return nil
 }
@@ -551,7 +573,10 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	}
 	source := strings.TrimSpace(opts.Source)
 	if source == "" {
-		return TemplateCreateResult{}, fmt.Errorf("template source is required")
+		return TemplateCreateResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template source is required"))
+	}
+	if strings.TrimSpace(opts.KernelPath) == "" || strings.TrimSpace(opts.InitrdPath) == "" {
+		return TemplateCreateResult{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("kernel and initrd are required"))
 	}
 	opts.Source = source
 	opts.BootIndexTag = strings.TrimSpace(opts.BootIndexTag)
@@ -638,7 +663,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, templateID strin
 		AlignBytes:  erofsconvert.DefaultAlignBytes,
 	})
 	if err != nil {
-		return templateBuildResult{}, fmt.Errorf("convert rootfs to EROFS: %w", err)
+		return templateBuildResult{}, conchimage.ErrConversionFailed.Wrap(fmt.Errorf("convert rootfs to EROFS: %w", err))
 	}
 
 	bootIndexTag := strings.TrimSpace(opts.BootIndexTag)
@@ -755,9 +780,57 @@ func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) er
 
 func (s *Service) getSandbox(ctx context.Context, id string) (state.SandboxRecord, error) {
 	if s == nil || s.Store == nil {
-		return state.SandboxRecord{}, state.ErrNotFound
+		return state.SandboxRecord{}, fmt.Errorf("sandbox state store is not configured")
 	}
-	return s.Store.GetSandbox(ctx, id)
+	rec, err := s.Store.GetSandbox(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		return state.SandboxRecord{}, sandbox.ErrNotFound.Wrap(err)
+	}
+	return rec, err
+}
+
+func translateSandboxError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) {
+		return err
+	}
+	switch {
+	case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
+		return sandbox.ErrInvalidEnvironment.Wrap(err)
+	case errors.Is(err, agentprotocol.ErrPayloadTooLarge):
+		return sandbox.ErrInitializationTooLarge.Wrap(err)
+	default:
+		return err
+	}
+}
+
+func translateTemplateArtifactError(err error) error {
+	if errors.Is(err, conchimage.ErrInvalidArgument) || errors.Is(err, conchimage.ErrInvalidContent) {
+		return conchtemplate.ErrInvalidArtifact.Wrap(err)
+	}
+	return err
+}
+
+// combineOperationErrors preserves the primary operation's application
+// classification. Secondary rollback or cleanup errors remain available as
+// causes when a primary classification exists, but can never accidentally turn
+// an otherwise internal failure into a client error.
+func combineOperationErrors(primary error, secondary ...error) error {
+	if primary == nil {
+		return errors.Join(secondary...)
+	}
+	additional := errors.Join(secondary...)
+	if additional == nil {
+		return primary
+	}
+	var appErr *apperror.Error
+	if errors.As(primary, &appErr) {
+		return appErr.WrapMessage(errors.Join(primary, additional), appErr.PublicMessage())
+	}
+	return fmt.Errorf("%w; additional operation failures: %v", primary, additional)
 }
 
 func NewID() (string, error) {

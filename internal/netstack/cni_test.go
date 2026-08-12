@@ -7,8 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	cni "github.com/containerd/go-cni"
+	cnilibrary "github.com/containernetworking/cni/libcni"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
+	types100 "github.com/containernetworking/cni/pkg/types/100"
 )
 
 func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
@@ -20,18 +21,14 @@ func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
 	if cfg.PluginConfDir != defaultCNIPluginConfDir {
 		t.Fatalf("PluginConfDir = %q, want %q", cfg.PluginConfDir, defaultCNIPluginConfDir)
 	}
-	if cfg.IfName != defaultCNIIfName {
-		t.Fatalf("IfName = %q, want %q", cfg.IfName, defaultCNIIfName)
-	}
-	if defaultCNIMinNetworkCount != defaultCNIPluginMaxConfNum+1 {
-		t.Fatalf("defaultCNIMinNetworkCount = %d, want defaultCNIPluginMaxConfNum + 1", defaultCNIMinNetworkCount)
-	}
 }
 
 func TestExtractCNIDNS(t *testing.T) {
-	result := &cni.Result{DNS: []cnitypes.DNS{
-		{Nameservers: []string{"10.0.0.53"}, Search: []string{"one.example"}, Options: []string{"timeout:2"}},
-		{Nameservers: []string{"10.0.0.54"}, Search: []string{"two.example"}, Domain: "ignored.example"},
+	result := &types100.Result{DNS: cnitypes.DNS{
+		Nameservers: []string{"10.0.0.53", "10.0.0.54"},
+		Search:      []string{"one.example", "two.example"},
+		Options:     []string{"timeout:2"},
+		Domain:      "ignored.example",
 	}}
 	got, err := extractCNIDNS(result)
 	if err != nil {
@@ -45,7 +42,7 @@ func TestExtractCNIDNS(t *testing.T) {
 }
 
 func TestExtractCNIDNSRejectsInvalidExplicitServer(t *testing.T) {
-	result := &cni.Result{DNS: []cnitypes.DNS{{Nameservers: []string{"127.0.0.53"}}}}
+	result := &types100.Result{DNS: cnitypes.DNS{Nameservers: []string{"127.0.0.53"}}}
 	if _, err := extractCNIDNS(result); err == nil {
 		t.Fatal("extractCNIDNS() error = nil, want invalid CNI DNS error")
 	}
@@ -55,7 +52,6 @@ func TestNormalizeCNIManagerConfigPreservesExplicitValues(t *testing.T) {
 	in := CNIManagerConfig{
 		PluginBinDirs: []string{"/custom/bin"},
 		PluginConfDir: "/custom/net.d",
-		IfName:        "net7",
 	}
 	got := normalizeCNIManagerConfig(in)
 
@@ -64,35 +60,25 @@ func TestNormalizeCNIManagerConfigPreservesExplicitValues(t *testing.T) {
 	}
 }
 
-func TestNewCNIManagerRejectsIncompatibleIfName(t *testing.T) {
-	_, err := NewCNIManager(CNIManagerConfig{IfName: "net1"})
-	if err == nil {
-		t.Fatal("NewCNIManager() error = nil, want incompatible if_name error")
-	}
-	if !strings.Contains(err.Error(), "incompatible") {
-		t.Fatalf("NewCNIManager() error = %v, want incompatible if_name error", err)
-	}
-}
-
 func TestLoadedBridgeNetwork(t *testing.T) {
 	tests := []struct {
-		name       string
-		config     *cni.ConfigResult
-		wantBridge string
-		wantErr    string
+		name        string
+		config      *cnilibrary.NetworkConfigList
+		wantNetwork string
+		wantBridge  string
+		wantErr     string
 	}{
 		{
 			name: "reads loaded bridge plugin",
-			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
-				Config: &cni.NetworkConfList{
-					Name: "custom-network",
-					Plugins: []*cni.NetworkConf{{
-						Network: &cnitypes.PluginConf{Type: "bridge"},
-						Source:  `{"bridge":"custom-bridge"}`,
-					}},
-				},
-			}}},
-			wantBridge: "custom-bridge",
+			config: &cnilibrary.NetworkConfigList{
+				Name: "custom-network",
+				Plugins: []*cnilibrary.PluginConfig{{
+					Network: &cnitypes.PluginConf{Type: "bridge"},
+					Bytes:   []byte(`{"bridge":"custom-bridge"}`),
+				}},
+			},
+			wantNetwork: "custom-network",
+			wantBridge:  "custom-bridge",
 		},
 		{
 			name:    "rejects missing configuration",
@@ -101,62 +87,54 @@ func TestLoadedBridgeNetwork(t *testing.T) {
 		},
 		{
 			name: "rejects missing bridge plugin",
-			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
-				Config: &cni.NetworkConfList{
-					Name:    "custom-network",
-					Plugins: []*cni.NetworkConf{{Network: &cnitypes.PluginConf{Type: "host-local"}}},
-				},
-			}}},
+			config: &cnilibrary.NetworkConfigList{
+				Name:    "custom-network",
+				Plugins: []*cnilibrary.PluginConfig{{Network: &cnitypes.PluginConf{Type: "host-local"}}},
+			},
 			wantErr: "no bridge network",
 		},
 		{
 			name: "rejects missing bridge name",
-			config: &cni.ConfigResult{Networks: []*cni.ConfNetwork{{
-				Config: &cni.NetworkConfList{
-					Name: "custom-network",
-					Plugins: []*cni.NetworkConf{{
-						Network: &cnitypes.PluginConf{Type: "bridge"},
-						Source:  `{}`,
-					}},
-				},
-			}}},
+			config: &cnilibrary.NetworkConfigList{
+				Name: "custom-network",
+				Plugins: []*cnilibrary.PluginConfig{{
+					Network: &cnitypes.PluginConf{Type: "bridge"},
+					Bytes:   []byte(`{}`),
+				}},
+			},
 			wantErr: "has no bridge name",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotBridge, err := loadedBridgeName(tt.config)
+			gotNetwork, gotBridge, err := loadedBridgeNetwork(tt.config)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("loadedBridgeName() error = %v, want substring %q", err, tt.wantErr)
+					t.Fatalf("loadedBridgeNetwork() error = %v, want substring %q", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("loadedBridgeName() error = %v", err)
+				t.Fatalf("loadedBridgeNetwork() error = %v", err)
 			}
-			if gotBridge != tt.wantBridge {
-				t.Fatalf("loadedBridgeName() = %q, want %q", gotBridge, tt.wantBridge)
+			if gotNetwork != tt.wantNetwork || gotBridge != tt.wantBridge {
+				t.Fatalf("loadedBridgeNetwork() = (%q, %q), want (%q, %q)", gotNetwork, gotBridge, tt.wantNetwork, tt.wantBridge)
 			}
 		})
 	}
 }
 
 func TestExtractCNIIP(t *testing.T) {
-	result := &cni.Result{
-		Interfaces: map[string]*cni.Config{
-			"eth0": {
-				IPConfigs: []*cni.IPConfig{
-					{IP: net.ParseIP("fd00::2")},
-					{IP: net.ParseIP("10.12.0.2")},
-				},
-			},
-			"host": {},
+	result := &types100.Result{
+		Interfaces: []*types100.Interface{{Name: "eth0"}, {Name: "host"}},
+		IPs: []*types100.IPConfig{
+			{Interface: types100.Int(0), Address: net.IPNet{IP: net.ParseIP("fd00::2")}},
+			{Interface: types100.Int(0), Address: net.IPNet{IP: net.ParseIP("10.12.0.2")}},
 		},
 	}
 
-	got, err := extractCNIIP(result, "eth0")
+	got, err := extractCNIIP(result)
 	if err != nil {
 		t.Fatalf("extractCNIIP() error = %v", err)
 	}
@@ -165,37 +143,41 @@ func TestExtractCNIIP(t *testing.T) {
 	}
 }
 
-func TestExtractCNIIPFallbackAndErrors(t *testing.T) {
-	result := &cni.Result{
-		Interfaces: map[string]*cni.Config{
-			"net1": {IPConfigs: []*cni.IPConfig{{IP: net.ParseIP("10.12.0.8")}}},
-		},
+func TestExtractCNIIPRejectsOtherInterface(t *testing.T) {
+	result := &types100.Result{
+		Interfaces: []*types100.Interface{{Name: "net1"}},
+		IPs:        []*types100.IPConfig{{Interface: types100.Int(0), Address: net.IPNet{IP: net.ParseIP("10.12.0.8")}}},
 	}
-	got, err := extractCNIIP(result, "eth0")
-	if err != nil {
-		t.Fatalf("extractCNIIP() fallback error = %v", err)
+	if _, err := extractCNIIP(result); err == nil {
+		t.Fatal("extractCNIIP(other interface) error = nil, want error")
 	}
-	if got != "10.12.0.8" {
-		t.Fatalf("fallback IP = %q, want 10.12.0.8", got)
-	}
+}
 
-	if _, err := extractCNIIP(nil, "eth0"); err == nil {
-		t.Fatalf("extractCNIIP(nil) error = nil, want error")
+func TestExtractCNIIPRejectsInvalidResults(t *testing.T) {
+	if _, err := extractCNIIP(nil); err == nil {
+		t.Fatal("extractCNIIP(nil) error = nil, want error")
 	}
-	if _, err := extractCNIIP(&cni.Result{Interfaces: map[string]*cni.Config{"eth0": {}}}, "eth0"); err == nil {
-		t.Fatalf("extractCNIIP(empty interface) error = nil, want error")
+	if _, err := extractCNIIP(&types100.Result{Interfaces: []*types100.Interface{{Name: cniOuterInterfaceName}}}); err == nil {
+		t.Fatal("extractCNIIP(empty interface) error = nil, want error")
 	}
-	if _, err := extractCNIIP(&cni.Result{Interfaces: map[string]*cni.Config{
-		"eth0": {IPConfigs: []*cni.IPConfig{nil, {}}},
-	}}, "eth0"); err == nil {
-		t.Fatalf("extractCNIIP(nil IP configs) error = nil, want error")
+	if _, err := extractCNIIP(&types100.Result{
+		Interfaces: []*types100.Interface{{Name: cniOuterInterfaceName}},
+		IPs:        []*types100.IPConfig{nil, {}},
+	}); err == nil {
+		t.Fatal("extractCNIIP(nil IP configs) error = nil, want error")
+	}
+	if _, err := extractCNIIP(&types100.Result{
+		Interfaces: []*types100.Interface{{Name: cniOuterInterfaceName}},
+		IPs:        []*types100.IPConfig{{Interface: types100.Int(1), Address: net.IPNet{IP: net.ParseIP("10.12.0.2")}}},
+	}); err == nil {
+		t.Fatal("extractCNIIP(invalid interface) error = nil, want error")
 	}
 }
 
 func TestCNIManagerDelegatesTeardown(t *testing.T) {
 	var removeID, removePath string
-	manager := &CNIManager{plugin: &fakeCNIPlugin{
-		remove: func(_ context.Context, id, path string, _ ...cni.NamespaceOpts) error {
+	manager := &CNIManager{backend: &fakeCNIBackend{
+		remove: func(_ context.Context, id, path string) error {
 			removeID, removePath = id, path
 			return nil
 		},

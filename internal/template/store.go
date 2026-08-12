@@ -61,7 +61,11 @@ func (s *PersistentStore) Get(ctx context.Context, id string) (Entry, error) {
 	if s == nil || s.store == nil {
 		return Entry{}, fmt.Errorf("template store is not configured")
 	}
-	entry, err := s.store.GetTemplate(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Entry{}, ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
+	}
+	entry, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -76,14 +80,14 @@ func (s *PersistentStore) List(ctx context.Context, filter Filter) ([]Entry, err
 		switch filter.Origin {
 		case OriginImage, OriginCheckpoint:
 		default:
-			return nil, fmt.Errorf("unknown template origin %q", filter.Origin)
+			return nil, ErrInvalidArgument.Wrap(fmt.Errorf("unknown template origin %q", filter.Origin))
 		}
 	}
 	if filter.BootMode != "" {
 		switch filter.BootMode {
 		case BootModeCold, BootModeResume:
 		default:
-			return nil, fmt.Errorf("unknown template boot mode %q", filter.BootMode)
+			return nil, ErrInvalidArgument.Wrap(fmt.Errorf("unknown template boot mode %q", filter.BootMode))
 		}
 	}
 	items, err := s.store.ListTemplates(ctx)
@@ -111,7 +115,11 @@ func (s *PersistentStore) Delete(ctx context.Context, id string) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	return s.store.DeleteTemplate(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
+	}
+	return s.store.DeleteTemplate(ctx, id)
 }
 
 func copyMap(in map[string]string) map[string]string {

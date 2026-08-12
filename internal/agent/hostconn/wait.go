@@ -2,7 +2,6 @@ package hostconn
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,21 +43,9 @@ type initConn interface {
 
 func WaitReady(ctx context.Context, opts ReadyOptions) error {
 	logger := ulog.GetLogger()
-	if err := ValidateReadyPreflight(opts); err != nil {
+	request, err := ValidateReadyRequest(opts)
+	if err != nil {
 		return err
-	}
-	if err := opts.Network.Validate(); err != nil {
-		return fmt.Errorf("invalid guest network config: %w", err)
-	}
-	request := agentprotocol.InitRequest{
-		Version:    agentprotocol.ProtocolVersion,
-		SandboxID:  opts.SandboxID,
-		AgentToken: opts.AgentToken,
-		Env:        opts.Env,
-		Network:    opts.Network.Clone(),
-	}
-	if _, err := agentprotocol.MarshalPayload(request); err != nil {
-		return fmt.Errorf("marshal vsock initialization request: %w", err)
 	}
 
 	if opts.Retry <= 0 {
@@ -80,10 +67,41 @@ func ValidateReadyPreflight(opts ReadyOptions) error {
 	if opts.AgentToken == "" {
 		return fmt.Errorf("agent token is required")
 	}
-	if _, err := json.Marshal(opts.Env); err != nil {
-		return fmt.Errorf("marshal sandbox environment: %w", err)
+	if err := agentprotocol.ValidateEnvironment(opts.Env); err != nil {
+		return err
+	}
+	request := agentprotocol.InitRequest{
+		Version:    agentprotocol.ProtocolVersion,
+		SandboxID:  opts.SandboxID,
+		AgentToken: opts.AgentToken,
+		Env:        opts.Env,
+	}
+	if _, err := agentprotocol.MarshalPayload(request); err != nil {
+		return fmt.Errorf("marshal vsock initialization preflight: %w", err)
 	}
 	return nil
+}
+
+// ValidateReadyRequest validates the complete initialization message once the
+// sandbox's CNI-derived guest network configuration is available.
+func ValidateReadyRequest(opts ReadyOptions) (agentprotocol.InitRequest, error) {
+	if err := ValidateReadyPreflight(opts); err != nil {
+		return agentprotocol.InitRequest{}, err
+	}
+	if err := opts.Network.Validate(); err != nil {
+		return agentprotocol.InitRequest{}, fmt.Errorf("invalid guest network config: %w", err)
+	}
+	request := agentprotocol.InitRequest{
+		Version:    agentprotocol.ProtocolVersion,
+		SandboxID:  opts.SandboxID,
+		AgentToken: opts.AgentToken,
+		Env:        opts.Env,
+		Network:    opts.Network.Clone(),
+	}
+	if _, err := agentprotocol.MarshalPayload(request); err != nil {
+		return agentprotocol.InitRequest{}, fmt.Errorf("marshal vsock initialization request: %w", err)
+	}
+	return request, nil
 }
 
 func waitReady(ctx context.Context, opts ReadyOptions, request agentprotocol.InitRequest, logger ulog.Logger, dial func(ReadyOptions, ulog.Logger) (initConn, error)) error {
@@ -249,7 +267,7 @@ func exchangeInit(conn initConn, request agentprotocol.InitRequest, sandboxID st
 		return fmt.Errorf("agent protocol version %d, want %d", response.Version, agentprotocol.ProtocolVersion)
 	}
 	if response.Status != "ready" {
-		err := fmt.Errorf("agent reported %s: %s", response.ErrorCode, response.Message)
+		err := fmt.Errorf("agent initialization not ready: %s", response.Message)
 		if !response.Retryable {
 			return fmt.Errorf("%w: %v", errInitRejected, err)
 		}

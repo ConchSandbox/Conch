@@ -2,10 +2,13 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/errdefs"
+
+	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
 func TestSnapshotRemoveRemovesExactlyOneKey(t *testing.T) {
@@ -29,6 +32,19 @@ func TestSnapshotRemoveNotFoundIsNoop(t *testing.T) {
 	snapshotter := newFakeSnapshotter(nil)
 	if err := removeSnapshotKey(context.Background(), snapshotter, "missing"); err != nil {
 		t.Fatalf("removeSnapshotKey() error = %v", err)
+	}
+}
+
+func TestSnapshotRemoveRejectsWhitespaceKey(t *testing.T) {
+	snapshotter := &recordingServerSnapshotter{}
+	server := &Server{snt: snapshotter}
+
+	err := server.Remove(context.Background(), runtimeapi.RemoveSnapshotOptions{Key: " \t "})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Remove() error = %v, want ErrInvalidArgument", err)
+	}
+	if len(snapshotter.removedKeys) != 0 {
+		t.Fatalf("removed keys = %#v, want none", snapshotter.removedKeys)
 	}
 }
 

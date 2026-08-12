@@ -59,8 +59,16 @@ def generate_random_id(prefix: str = "sandbox_") -> str:
 
 def _request_exception_message(exc: requests.exceptions.RequestException) -> str:
     response = getattr(exc, "response", None)
-    if response is not None and getattr(response, "text", None):
-        return response.text
+    if response is not None:
+        try:
+            body = response.json()
+        except (ValueError, TypeError):
+            body = None
+        if isinstance(body, dict) and body.get("error"):
+            code = body.get("code")
+            return f"{code}: {body['error']}" if code else str(body["error"])
+        if getattr(response, "text", None):
+            return response.text.strip()
     return str(exc)
 
 @dataclass
