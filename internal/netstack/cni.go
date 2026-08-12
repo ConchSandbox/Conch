@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"strings"
 
 	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/vishvananda/netlink"
@@ -56,17 +58,111 @@ func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	bridgeNetworkName, bridgeName, err := loadedBridgeNetwork(backend.outerNetwork.config)
+	bridgeNetworkName, bridge, err := loadedBridgeNetwork(backend.outerNetwork.config)
 	if err != nil {
 		return nil, fmt.Errorf("inspect loaded CNI config: %w", err)
+	}
+	subnet, err := parseBridgeSubnet(bridge, bridgeNetworkName)
+	if err != nil {
+		return nil, fmt.Errorf("inspect loaded CNI config: %w", err)
+	}
+	if err := validateCNISubnetOnHost(subnet, bridge.Bridge, enumerateHostNetworkPrefixes); err != nil {
+		return nil, fmt.Errorf("validate CNI subnet %s: %w", subnet, err)
 	}
 
 	return &CNIManager{
 		backend:           backend,
 		ifName:            cniOuterInterfaceName,
-		bridgeName:        bridgeName,
+		bridgeName:        bridge.Bridge,
 		bridgeNetworkName: bridgeNetworkName,
 	}, nil
+}
+
+func parseBridgeSubnet(bridge bridgePluginConfig, networkName string) (netip.Prefix, error) {
+	raw := strings.TrimSpace(bridge.IPAM.Subnet)
+	if raw == "" {
+		return netip.Prefix{}, fmt.Errorf("loaded bridge network %q has no ipam.subnet", networkName)
+	}
+	subnet, err := netip.ParsePrefix(raw)
+	if err != nil || !subnet.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("loaded bridge network %q has invalid IPv4 ipam.subnet %q", networkName, raw)
+	}
+	return subnet.Masked(), nil
+}
+
+type hostNetworkPrefix struct {
+	prefix        netip.Prefix
+	interfaceName string
+}
+
+func validateCNISubnetOnHost(subnet netip.Prefix, bridgeName string, enumerate func() ([]hostNetworkPrefix, error)) error {
+	prefixes, err := enumerate()
+	if err != nil {
+		return fmt.Errorf("inspect host network prefixes: %w", err)
+	}
+	for _, host := range prefixes {
+		if host.interfaceName == bridgeName {
+			continue
+		}
+		if subnet.Overlaps(host.prefix) {
+			return fmt.Errorf("subnet conflicts with host prefix %s on interface %q", host.prefix, host.interfaceName)
+		}
+	}
+	return nil
+}
+
+func enumerateHostNetworkPrefixes() ([]hostNetworkPrefix, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list host interfaces: %w", err)
+	}
+	linkNames := make(map[int]string, len(links))
+	var prefixes []hostNetworkPrefix
+	for _, link := range links {
+		attrs := link.Attrs()
+		if attrs == nil {
+			continue
+		}
+		linkNames[attrs.Index] = attrs.Name
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+		if err != nil {
+			return nil, fmt.Errorf("list IPv4 addresses on interface %q: %w", attrs.Name, err)
+		}
+		for _, addr := range addrs {
+			if prefix, ok := ipv4Prefix(addr.IPNet); ok {
+				prefixes = append(prefixes, hostNetworkPrefix{prefix: prefix, interfaceName: attrs.Name})
+			}
+		}
+	}
+
+	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("list host IPv4 routes: %w", err)
+	}
+	for _, route := range routes {
+		prefix, ok := ipv4Prefix(route.Dst)
+		if !ok || prefix.Bits() == 0 {
+			continue
+		}
+		prefixes = append(prefixes, hostNetworkPrefix{prefix: prefix, interfaceName: linkNames[route.LinkIndex]})
+	}
+	return prefixes, nil
+}
+
+func ipv4Prefix(network *net.IPNet) (netip.Prefix, bool) {
+	if network == nil {
+		return netip.Prefix{}, false
+	}
+	ones, bits := network.Mask.Size()
+	ip := network.IP.To4()
+	if ip == nil || bits != net.IPv4len*8 || ones < 0 {
+		return netip.Prefix{}, false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr.Unmap(), ones).Masked(), true
 }
 
 func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {

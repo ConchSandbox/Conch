@@ -9,8 +9,14 @@ import (
 const testBridgeCNIConfig = `{
   "cniVersion": "1.0.0",
   "name": "conch-test",
-  "type": "bridge",
-  "bridge": "conch-test0"
+  "plugins": [{
+    "type": "bridge",
+    "bridge": "conch-test0",
+    "ipam": {
+      "type": "host-local",
+      "subnet": "198.19.255.0/30"
+    }
+  }]
 }`
 
 func writeTestCNIConfig(t *testing.T, dir, name, config string) {
@@ -25,7 +31,7 @@ func TestLoadDefaultCNINetworkUsesFirstSortedConfig(t *testing.T) {
 	writeTestCNIConfig(t, confDir, "20-second.conf", `{
   "cniVersion": "1.0.0", "name": "second", "type": "bridge", "bridge": "second0"
 }`)
-	writeTestCNIConfig(t, confDir, "10-first.conf", testBridgeCNIConfig)
+	writeTestCNIConfig(t, confDir, "10-first.conflist", testBridgeCNIConfig)
 
 	network, err := loadDefaultCNINetwork(confDir)
 	if err != nil {
@@ -38,7 +44,7 @@ func TestLoadDefaultCNINetworkUsesFirstSortedConfig(t *testing.T) {
 
 func TestNewCNIManagerUsesInternalInterface(t *testing.T) {
 	confDir := t.TempDir()
-	writeTestCNIConfig(t, confDir, "10-conch.conf", testBridgeCNIConfig)
+	writeTestCNIConfig(t, confDir, "10-conch.conflist", testBridgeCNIConfig)
 
 	manager, err := NewCNIManager(CNIManagerConfig{
 		PluginBinDirs: []string{t.TempDir()},

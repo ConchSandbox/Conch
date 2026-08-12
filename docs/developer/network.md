@@ -62,6 +62,8 @@ CNI Result 是 guest DNS 的唯一来源。Conch 对 CNI 返回的 DNS 进行校
 
 libcni cache root 不控制 CNI 插件自身的持久化目录。仓库提供的 host-local 配置另外将 `dataDir` 设置为 `/var/lib/conch/cni/networks`，使默认的 result cache 与 IPAM 租约都位于 Conch 专用目录。
 
+默认 bridge CNI 配置必须提供顶层 IPv4 `ipam.subnet`。conchd 启动时会检查该子网是否与 Host 的接口网段或非默认路由重叠；配置所指定 bridge 自身的网段不参与检查。发现冲突或无法完成检查时，CNI 初始化失败，conchd 不会启动网络池。
+
 ## 5. 配置
 
 ```yaml

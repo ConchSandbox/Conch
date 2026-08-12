@@ -77,11 +77,14 @@ func loadDefaultCNINetwork(confDir string) (*cnilibrary.NetworkConfigList, error
 
 type bridgePluginConfig struct {
 	Bridge string `json:"bridge"`
+	IPAM   struct {
+		Subnet string `json:"subnet"`
+	} `json:"ipam"`
 }
 
-func loadedBridgeNetwork(config *cnilibrary.NetworkConfigList) (string, string, error) {
+func loadedBridgeNetwork(config *cnilibrary.NetworkConfigList) (string, bridgePluginConfig, error) {
 	if config == nil {
-		return "", "", fmt.Errorf("CNI returned no loaded configuration")
+		return "", bridgePluginConfig{}, fmt.Errorf("CNI returned no loaded configuration")
 	}
 	for _, plugin := range config.Plugins {
 		if plugin == nil || plugin.Network == nil || plugin.Network.Type != "bridge" {
@@ -89,14 +92,14 @@ func loadedBridgeNetwork(config *cnilibrary.NetworkConfigList) (string, string, 
 		}
 		var bridge bridgePluginConfig
 		if err := json.Unmarshal(plugin.Bytes, &bridge); err != nil {
-			return "", "", fmt.Errorf("parse bridge plugin config: %w", err)
+			return "", bridgePluginConfig{}, fmt.Errorf("parse bridge plugin config: %w", err)
 		}
 		if strings.TrimSpace(bridge.Bridge) == "" {
-			return "", "", fmt.Errorf("loaded bridge network %q has no bridge name", config.Name)
+			return "", bridgePluginConfig{}, fmt.Errorf("loaded bridge network %q has no bridge name", config.Name)
 		}
-		return config.Name, bridge.Bridge, nil
+		return config.Name, bridge, nil
 	}
-	return "", "", fmt.Errorf("loaded CNI configuration has no bridge network")
+	return "", bridgePluginConfig{}, fmt.Errorf("loaded CNI configuration has no bridge network")
 }
 
 func (b *libCNIBackend) Setup(ctx context.Context, containerID, netnsPath string) (*types100.Result, error) {

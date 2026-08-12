@@ -599,7 +599,7 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		ulog.GetLogger().Info("slot released back to pool", ulog.F("slot_id", slot.ID()))
 	} else {
 		ulog.GetLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID()), ulog.F("error", slotHealthErr))
-		if err := p.Discard(ctx, slot); err != nil {
+		if err := p.Discard(cleanupCtx, slot); err != nil {
 			return fmt.Errorf("failed to discard unhealthy network slot %d: %w", slot.ID(), err)
 		}
 	}

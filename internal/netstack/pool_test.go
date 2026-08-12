@@ -110,6 +110,26 @@ func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	return allocator, slot
 }
 
+func allocatedMissingNamespaceTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
+	t.Helper()
+	allocator := slotstate.NewAllocator(firstSlotID, maxSlots)
+	for {
+		id, err := allocator.Acquire()
+		if err != nil {
+			t.Fatalf("Acquire slot with missing namespace: %v", err)
+		}
+		slot, err := newSlot(id, newSlotConfig())
+		if err != nil {
+			t.Fatalf("newSlot(%d): %v", id, err)
+		}
+		if _, err := os.Stat(slot.NetNSPath()); errors.Is(err, os.ErrNotExist) {
+			return allocator, slot
+		} else if err != nil {
+			t.Fatalf("inspect namespace for slot %d: %v", id, err)
+		}
+	}
+}
+
 func integrationTestPool(t *testing.T) *Pool {
 	return integrationTestPoolWithIPMasq(t, true)
 }
@@ -302,7 +322,7 @@ func TestSetupSlotNetworkLeavesRollbackToPool(t *testing.T) {
 }
 
 func TestReleaseDiscardsSlotWithMissingNamespace(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
+	allocator, slot := allocatedMissingNamespaceTestSlot(t)
 	slot.recordCNIResult(CNIResult{IP: "10.12.0.10"})
 	slot.assignSandbox("sandbox-1")
 	removeCalls := 0
@@ -332,7 +352,7 @@ func TestReleaseDiscardsSlotWithMissingNamespace(t *testing.T) {
 }
 
 func TestReleaseMissingNamespaceKeepsSlotIDWhenCNITeardownFails(t *testing.T) {
-	allocator, slot := allocatedTestSlot(t)
+	allocator, slot := allocatedMissingNamespaceTestSlot(t)
 	slot.recordCNIResult(CNIResult{IP: "10.12.0.10"})
 	wantErr := errors.New("cni remove failed")
 	p := &Pool{

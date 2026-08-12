@@ -2,7 +2,9 @@ package netstack
 
 import (
 	"context"
+	"errors"
 	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -118,10 +120,68 @@ func TestLoadedBridgeNetwork(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadedBridgeNetwork() error = %v", err)
 			}
-			if gotNetwork != tt.wantNetwork || gotBridge != tt.wantBridge {
-				t.Fatalf("loadedBridgeNetwork() = (%q, %q), want (%q, %q)", gotNetwork, gotBridge, tt.wantNetwork, tt.wantBridge)
+			if gotNetwork != tt.wantNetwork || gotBridge.Bridge != tt.wantBridge {
+				t.Fatalf("loadedBridgeNetwork() = (%q, %q), want (%q, %q)", gotNetwork, gotBridge.Bridge, tt.wantNetwork, tt.wantBridge)
 			}
 		})
+	}
+}
+
+func TestParseBridgeSubnet(t *testing.T) {
+	bridge := bridgePluginConfig{Bridge: "cni-conch0"}
+	bridge.IPAM.Subnet = "10.12.1.7/20"
+	subnet, err := parseBridgeSubnet(bridge, "conch-bridge")
+	if err != nil {
+		t.Fatalf("parseBridgeSubnet() error = %v", err)
+	}
+	if want := netip.MustParsePrefix("10.12.0.0/20"); subnet != want {
+		t.Fatalf("parseBridgeSubnet() = %s, want %s", subnet, want)
+	}
+}
+
+func TestParseBridgeSubnetRejectsUnsupportedValues(t *testing.T) {
+	for _, subnet := range []string{"", "not-a-subnet", "fd00::/64"} {
+		bridge := bridgePluginConfig{Bridge: "cni-conch0"}
+		bridge.IPAM.Subnet = subnet
+		if _, err := parseBridgeSubnet(bridge, "conch-bridge"); err == nil {
+			t.Fatalf("parseBridgeSubnet(%q) error = nil, want invalid subnet error", subnet)
+		}
+	}
+}
+
+func TestValidateCNISubnetOnHost(t *testing.T) {
+	subnet := netip.MustParsePrefix("10.12.0.0/20")
+	tests := []struct {
+		name     string
+		prefixes []hostNetworkPrefix
+		wantErr  string
+	}{
+		{name: "no overlap", prefixes: []hostNetworkPrefix{{prefix: netip.MustParsePrefix("192.168.1.0/24"), interfaceName: "eth0"}}},
+		{name: "overlap", prefixes: []hostNetworkPrefix{{prefix: netip.MustParsePrefix("10.12.4.0/24"), interfaceName: "vpn0"}}, wantErr: "conflicts with host prefix 10.12.4.0/24"},
+		{name: "own bridge is ignored", prefixes: []hostNetworkPrefix{{prefix: subnet, interfaceName: "cni-conch0"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCNISubnetOnHost(subnet, "cni-conch0", func() ([]hostNetworkPrefix, error) {
+				return tt.prefixes, nil
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("validateCNISubnetOnHost() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("validateCNISubnetOnHost() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateCNISubnetOnHostPropagatesEnumerationFailure(t *testing.T) {
+	wantErr := errors.New("netlink unavailable")
+	err := validateCNISubnetOnHost(netip.MustParsePrefix("10.12.0.0/20"), "cni-conch0", func() ([]hostNetworkPrefix, error) {
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("validateCNISubnetOnHost() error = %v, want %v", err, wantErr)
 	}
 }
 
