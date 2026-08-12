@@ -14,6 +14,8 @@ Network 模块位于 `internal/netstack`，负责为 Sandbox 创建并复用隔�
 
 `Pool` 拥有 Slot 的状态变化；Sandbox 和 VMM 只读取 Slot 提供的 namespace 路径、tap 名称和 CNI IP。
 
+`Pool` 初始化时会查找主机 `0.0.0.0/0` IPv4 默认路由，并为 CNI bridge 配置主机转发规则。因此，运行 `conchd` 的主机必须存在类似 `default via 192.168.1.1 dev eth0` 的可用路由；否则网络池初始化失败，`conchd` 不会进入可用状态。
+
 ## 2. 网络结构
 
 ```text
