@@ -3,6 +3,7 @@ package state
 import "github.com/openeuler/Conch/internal/runtimeapi"
 
 const (
+	SandboxCreating  = "CREATING"
 	SandboxReady     = "READY"
 	SandboxSuspended = "SUSPENDED"
 	SandboxUnknown   = "UNKNOWN"
@@ -10,6 +11,7 @@ const (
 
 type SandboxRecord struct {
 	SandboxID                     string                           `json:"sandbox_id"`
+	VMMPID                        int                              `json:"vmm_pid,omitempty"`
 	State                         string                           `json:"state"`
 	CreatedAt                     int64                            `json:"created_at"`
 	SourceTemplateID              string                           `json:"source_template_id,omitempty"`

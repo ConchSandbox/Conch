@@ -157,12 +157,32 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	createdAt := time.Now().UnixNano()
+	creatingRecord := state.SandboxRecord{
+		SandboxID:        opts.SandboxID,
+		State:            state.SandboxCreating,
+		CreatedAt:        createdAt,
+		SourceTemplateID: opts.TemplateID,
+		VCPUNum:          opts.VCPUNum,
+		RamMB:            opts.RamMB,
+		Network:          opts.Network,
+	}
+	if err := s.upsertSandbox(ctx, creatingRecord); err != nil {
+		return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
+	}
+	deleteCreatingRecord := func() error {
+		if s.Store == nil {
+			return nil
+		}
+		return s.Store.DeleteSandbox(context.Background(), opts.SandboxID)
+	}
+
 	createResult, err := s.Sandbox.Create(req)
 	if err != nil {
-		return SandboxCreateResult{}, err
+		return SandboxCreateResult{}, errors.Join(err, deleteCreatingRecord())
 	}
 	rec := state.SandboxRecord{
 		SandboxID:                     opts.SandboxID,
+		VMMPID:                        createResult.VMMPID,
 		State:                         state.SandboxReady,
 		CreatedAt:                     createdAt,
 		SourceTemplateID:              opts.TemplateID,
@@ -175,10 +195,11 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	if err := s.upsertSandbox(ctx, rec); err != nil {
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
+		deleteErr := deleteCreatingRecord()
 		if cleanupErr != nil {
-			return SandboxCreateResult{}, errors.Join(err, fmt.Errorf("clean up sandbox after state create failed: %w", cleanupErr))
+			cleanupErr = fmt.Errorf("clean up sandbox after state create failed: %w", cleanupErr)
 		}
-		return SandboxCreateResult{}, err
+		return SandboxCreateResult{}, errors.Join(err, cleanupErr, deleteErr)
 	}
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,

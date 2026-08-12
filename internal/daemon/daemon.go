@@ -170,11 +170,19 @@ func New(cfg *config.Config) (*Daemon, error) {
 			return nil, errors.Join(fmt.Errorf("list stale sandboxes during startup: %w", err), cleanupErr)
 		}
 		sandboxIDs := make([]string, 0, len(records))
+		vmmPIDs := make([]int, 0, len(records))
+		hasCreatingSandbox := false
 		for _, record := range records {
 			sandboxIDs = append(sandboxIDs, record.SandboxID)
+			if record.State == state.SandboxCreating {
+				hasCreatingSandbox = true
+			}
+			if record.VMMPID > 0 {
+				vmmPIDs = append(vmmPIDs, record.VMMPID)
+			}
 		}
-		logger.Info("cleaning up stale sandbox resources", ulog.F("sandbox_count", len(sandboxIDs)))
-		if err := manager.RecoverStaleResources(ctx, sandboxIDs); err != nil {
+		logger.Info("cleaning up resources from abnormal sandbox exits")
+		if err := manager.RecoverStaleResources(ctx, sandboxIDs, vmmPIDs, hasCreatingSandbox); err != nil {
 			cleanupErr := host.Close()
 			_ = store.Close()
 			cancel()

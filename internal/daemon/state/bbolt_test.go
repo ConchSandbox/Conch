@@ -79,6 +79,30 @@ func TestBoltStoreRejectsIncompleteSandboxRecord(t *testing.T) {
 	}
 }
 
+func TestBoltStoreAcceptsCreatingSandboxRecord(t *testing.T) {
+	store, err := OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	defer store.Close()
+
+	rec := SandboxRecord{
+		SandboxID:        "sandbox-creating",
+		State:            SandboxCreating,
+		SourceTemplateID: "tmpl-1",
+	}
+	if err := store.UpsertSandbox(context.Background(), rec); err != nil {
+		t.Fatalf("UpsertSandbox() error = %v", err)
+	}
+	got, err := store.GetSandbox(context.Background(), rec.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if got != rec {
+		t.Fatalf("GetSandbox() = %#v, want %#v", got, rec)
+	}
+}
+
 func TestBoltStoreInitializesCurrentBuckets(t *testing.T) {
 	store, err := OpenBolt(t.TempDir() + "/state.db")
 	if err != nil {

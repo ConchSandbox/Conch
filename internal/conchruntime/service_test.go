@@ -33,6 +33,7 @@ type fakeSandboxOps struct {
 	deleteErr          error
 	updateReq          sandbox.NetworkUpdateRequest
 	updateErr          error
+	createHook         func()
 }
 
 type serializedDeleteOps struct {
@@ -54,6 +55,9 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.createCalls++
 	f.req = req
+	if f.createHook != nil {
+		f.createHook()
+	}
 	result := f.createResult
 	if result.SandboxID == "" {
 		result.SandboxID = req.SandboxID
@@ -394,7 +398,41 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
+func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenVMMExited(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("delete API failed after VMM exited")}
+	svc := New(sandboxOps, nil, store)
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
+	}); err == nil {
+		t.Fatal("CreateSandbox() error = nil, want READY state persistence failure")
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenVMMExitIsUnconfirmed(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("VMM process exit could not be confirmed")}
+	svc := New(sandboxOps, nil, store)
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
+	}); err == nil {
+		t.Fatal("CreateSandbox() error = nil, want READY state persistence failure")
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateSandboxFailureDeletesCreatingRecordAfterSuccessfulCleanup(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	svc := New(&fakeSandboxOps{createErr: errors.New("create failed")}, nil, store)
@@ -407,6 +445,49 @@ func TestCreateSandboxFailureDoesNotPersistRecord(t *testing.T) {
 	}
 	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateSandboxFailureDeletesCreatingRecordWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createErr := errors.Join(errors.New("create failed"), errors.New("VMM cleanup failed"))
+	svc := New(&fakeSandboxOps{createErr: createErr}, nil, store)
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
+	}); err == nil {
+		t.Fatal("CreateSandbox() error = nil, want create failure")
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateSandboxPersistsCreatingRecordBeforeRuntimeCreate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	ops := &fakeSandboxOps{createErr: errors.New("create failed")}
+	ops.createHook = func() {
+		rec, err := store.GetSandbox(ctx, "sandbox-1")
+		if err != nil {
+			t.Fatalf("GetSandbox() during Create: %v", err)
+		}
+		if rec.State != state.SandboxCreating || rec.VMMPID != 0 {
+			t.Fatalf("creating record = %#v, want CREATING without PID", rec)
+		}
+	}
+	svc := New(ops, nil, store)
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
+	}); err == nil {
+		t.Fatal("CreateSandbox() error = nil, want create failure")
+	}
+	if _, err := store.GetSandbox(ctx, "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("GetSandbox() after failed create error = %v, want ErrNotFound", err)
 	}
 }
 
