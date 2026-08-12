@@ -34,6 +34,7 @@ const (
 	guestPrefixLength      = 24
 	networkNamespaceDir    = "/run/conch/netns"
 	networkNamespacePrefix = "slot-"
+	cniContainerIDPrefix   = "conch-slot-"
 	tapInterfaceName       = "tap0"
 )
 
@@ -102,7 +103,7 @@ func (s *Slot) NetNSPath() string {
 }
 
 func (s *Slot) cniContainerID() string {
-	return fmt.Sprintf("conch-slot-%d", s.id)
+	return fmt.Sprintf("%s%d", cniContainerIDPrefix, s.id)
 }
 
 func (s *Slot) recordCNIResult(result CNIResult) {
