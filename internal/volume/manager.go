@@ -29,36 +29,36 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, error) {
+func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) (PreparedSandbox, error) {
 	if len(mounts) == 0 {
-		return nil, nil
+		return PreparedSandbox{}, nil
 	}
 	if len(mounts) > m.maxMounts {
-		return nil, fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts))
+		return PreparedSandbox{}, fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts))
 	}
 	if err := ValidateSegment(sandboxID, "sandbox_id"); err != nil {
-		return nil, err
+		return PreparedSandbox{}, err
 	}
 	seenTargets := map[string]struct{}{}
 	for _, mount := range mounts {
 		target := filepath.Clean(strings.TrimSpace(mount.Path))
 		if !filepath.IsAbs(target) {
-			return nil, fmt.Errorf("volume mount path must be absolute: %s", mount.Path)
+			return PreparedSandbox{}, fmt.Errorf("volume mount path must be absolute: %s", mount.Path)
 		}
 		if isBlockedTarget(target) {
-			return nil, fmt.Errorf("volume mount path is not allowed: %s", target)
+			return PreparedSandbox{}, fmt.Errorf("volume mount path is not allowed: %s", target)
 		}
 		if _, ok := seenTargets[target]; ok {
-			return nil, fmt.Errorf("duplicate volume mount path: %s", target)
+			return PreparedSandbox{}, fmt.Errorf("duplicate volume mount path: %s", target)
 		}
 		seenTargets[target] = struct{}{}
 
 		source := filepath.Clean(strings.TrimSpace(mount.Source))
 		if source == "" {
-			return nil, fmt.Errorf("volume mount source must not be empty")
+			return PreparedSandbox{}, fmt.Errorf("volume mount source must not be empty")
 		}
 		if !filepath.IsAbs(source) {
-			return nil, fmt.Errorf("volume mount source must be absolute: %s", source)
+			return PreparedSandbox{}, fmt.Errorf("volume mount source must be absolute: %s", source)
 		}
 	}
 	return m.backend.Prepare(PrepareRequest{
@@ -67,8 +67,21 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, er
 	})
 }
 
-func (m *Manager) CleanupSandbox(sandboxID string, devices []Device) error {
-	return m.backend.Cleanup(sandboxID, devices)
+// AdoptSandbox binds an existing virtiofsd identity to a pidfd-backed owner.
+// Current daemon recovery removes stale sandboxes rather than calling this;
+// the method keeps the process contract ready for a future rehydrate path.
+func (m *Manager) AdoptSandbox(sandboxID string, devices []Device) (PreparedSandbox, error) {
+	if len(devices) == 0 {
+		return PreparedSandbox{}, nil
+	}
+	if err := ValidateSegment(sandboxID, "sandbox_id"); err != nil {
+		return PreparedSandbox{}, err
+	}
+	return m.backend.Adopt(sandboxID, devices)
+}
+
+func (m *Manager) CleanupSandbox(sandboxID string, prepared PreparedSandbox) error {
+	return m.backend.Cleanup(sandboxID, prepared)
 }
 
 // CleanupStaleResources removes per-sandbox volume backends left by a killed

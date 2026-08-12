@@ -5,8 +5,11 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/volume"
 )
 
 func TestDurationOrDefault(t *testing.T) {
@@ -27,14 +30,12 @@ func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 		t.Fatalf("reserveSandboxEntry() error = %v", err)
 	}
 	defer m.sandboxes.CompareAndDelete(key, entry)
-	defer entry.mu.Unlock()
 
 	done := make(chan error, 1)
 	go func() {
 		otherKey, otherEntry, err := m.reserveSandboxEntry("sandbox-b")
 		if err == nil {
 			m.sandboxes.CompareAndDelete(otherKey, otherEntry)
-			otherEntry.mu.Unlock()
 		}
 		done <- err
 	}()
@@ -46,6 +47,298 @@ func TestReserveSandboxEntryDoesNotBlockDifferentSandbox(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("reserveSandboxEntry() for different sandbox blocked behind another sandbox entry")
+	}
+}
+
+func TestCreatingVolumeExitRecordsCauseBeforeCancel(t *testing.T) {
+	m := &Manager{}
+	entry := &sandboxEntry{state: sandboxCreating, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+	waitErr := errors.New("wait reported exit 7")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	exitCode := 7
+
+	m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{
+		PID:      42,
+		Exited:   true,
+		Cause:    waitErr,
+		ExitCode: &exitCode,
+	}, cancel)
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("create context was not canceled after virtiofsd exit")
+	}
+	if !errors.Is(context.Cause(ctx), waitErr) {
+		t.Fatalf("context cause = %v, want wrapped wait error", context.Cause(ctx))
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.dependencyErr == nil || !errors.Is(entry.dependencyErr, waitErr) {
+		t.Fatalf("dependencyErr = %v, want wrapped wait error", entry.dependencyErr)
+	}
+	if entry.state != sandboxCreating {
+		t.Fatalf("state = %s, want creating until Create owner rolls back", entry.state)
+	}
+}
+
+func TestCommitReadyRejectsRecordedDependencyFailure(t *testing.T) {
+	m := &Manager{}
+	dependencyErr := errors.New("virtiofsd exited during create")
+	entry := &sandboxEntry{
+		state:         sandboxCreating,
+		dependencyErr: dependencyErr,
+		cleanupDone:   make(chan struct{}),
+	}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	err := m.commitReady("sandbox-a", entry, &Sandbox{sandboxID: "sandbox-a"})
+	if !errors.Is(err, dependencyErr) {
+		t.Fatalf("commitReady() error = %v, want dependency failure", err)
+	}
+	if entry.state != sandboxCreating || entry.sbx != nil {
+		t.Fatalf("entry published despite dependency failure: state=%s sbx=%p", entry.state, entry.sbx)
+	}
+}
+
+func TestReadyVolumeObservationWithoutCauseStillCleansSandbox(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	var cleanupCalls atomic.Int32
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(func(context.Context) error {
+		cleanupCalls.Add(1)
+		return nil
+	})
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{PID: 42, Exited: true}, nil)
+
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("sandbox entry remains after active virtiofsd exit")
+	}
+	if entry.state != sandboxExited {
+		t.Fatalf("state = %s, want exited", entry.state)
+	}
+}
+
+func TestSuspendedVolumeObservationWithExitErrorCleansSandbox(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	var cleanupCalls atomic.Int32
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(func(context.Context) error {
+		cleanupCalls.Add(1)
+		return nil
+	})
+	entry := &sandboxEntry{state: sandboxSuspended, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{
+		PID:    42,
+		Exited: true,
+		Cause:  errors.New("signal: killed"),
+		Signal: "SIGKILL",
+	}, nil)
+
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+	if entry.state != sandboxExited {
+		t.Fatalf("state = %s, want exited", entry.state)
+	}
+}
+
+func TestStoppingVolumeObservationDoesNotRepeatCleanup(t *testing.T) {
+	m := &Manager{}
+	var cleanupCalls atomic.Int32
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(func(context.Context) error {
+		cleanupCalls.Add(1)
+		return nil
+	})
+	entry := &sandboxEntry{state: sandboxStopping, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{PID: 42, Exited: true}, nil)
+
+	if got := cleanupCalls.Load(); got != 0 {
+		t.Fatalf("cleanup calls = %d, want 0", got)
+	}
+	if entry.state != sandboxStopping {
+		t.Fatalf("state = %s, want stopping", entry.state)
+	}
+}
+
+func TestVolumeCleanupRunsWithoutHoldingEntryLock(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+	lockAcquired := make(chan struct{})
+	sbx.cleanup.Add(func(context.Context) error {
+		entry.mu.Lock()
+		entry.mu.Unlock()
+		close(lockAcquired)
+		return nil
+	})
+	done := make(chan struct{})
+	go func() {
+		m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{PID: 42, Exited: true}, nil)
+		close(done)
+	}()
+
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup blocked acquiring entry.mu")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("volume cleanup did not finish")
+	}
+}
+
+func TestVolumeExitDeleteAndVMMExitShareOneCleanupOwner(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	var cleanupCalls atomic.Int32
+	cleanupFailure := errors.New("volume cleanup failed")
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(func(context.Context) error {
+		if cleanupCalls.Add(1) == 1 {
+			close(cleanupStarted)
+		}
+		<-releaseCleanup
+		return cleanupFailure
+	})
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	volumeDone := make(chan struct{})
+	go func() {
+		m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{PID: 42, Exited: true}, nil)
+		close(volumeDone)
+	}()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("volume exit did not start cleanup")
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- m.Delete(DeleteRequest{SandboxID: "sandbox-a"}) }()
+	vmmDone := make(chan struct{})
+	go func() {
+		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+		close(vmmDone)
+	}()
+	close(releaseCleanup)
+
+	select {
+	case <-volumeDone:
+	case <-time.After(time.Second):
+		t.Fatal("volume cleanup owner did not finish")
+	}
+	select {
+	case err := <-deleteDone:
+		if !errors.Is(err, cleanupFailure) {
+			t.Fatalf("Delete() error = %v, want shared cleanup failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Delete did not converge on existing cleanup")
+	}
+	select {
+	case <-vmmDone:
+	case <-time.After(time.Second):
+		t.Fatal("VMM exit did not return after losing cleanup ownership")
+	}
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want exactly 1", got)
+	}
+}
+
+func TestDeleteMarksStoppingBeforeVolumeExitAndRemainsCleanupOwner(t *testing.T) {
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	var cleanupCalls atomic.Int32
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(func(context.Context) error {
+		if cleanupCalls.Add(1) == 1 {
+			close(cleanupStarted)
+		}
+		<-releaseCleanup
+		return nil
+	})
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- m.Delete(DeleteRequest{SandboxID: "sandbox-a"}) }()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Delete did not start cleanup")
+	}
+	entry.mu.Lock()
+	stateDuringCleanup := entry.state
+	entry.mu.Unlock()
+	if stateDuringCleanup != sandboxStopping {
+		t.Fatalf("state during Delete cleanup = %s, want stopping", stateDuringCleanup)
+	}
+
+	m.handleVolumeProcessObservation("sandbox-a", entry, volume.ProcessObservation{
+		PID:    42,
+		Exited: true,
+		Cause:  errors.New("signal: killed"),
+		Signal: "SIGKILL",
+	}, nil)
+	close(releaseCleanup)
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("Delete() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Delete cleanup did not finish")
+	}
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want exactly 1", got)
+	}
+}
+
+func TestOldVolumeObservationCannotCleanupReplacementSandbox(t *testing.T) {
+	m := &Manager{}
+	var oldCleanupCalls atomic.Int32
+	oldSandbox := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	oldSandbox.cleanup.Add(func(context.Context) error {
+		oldCleanupCalls.Add(1)
+		return nil
+	})
+	oldEntry := &sandboxEntry{state: sandboxReady, sbx: oldSandbox, cleanupDone: make(chan struct{})}
+	replacement := &sandboxEntry{state: sandboxReady, sbx: &Sandbox{sandboxID: "sandbox-a"}, cleanupDone: make(chan struct{})}
+	m.sandboxes.Store("sandbox-a", replacement)
+
+	m.handleVolumeProcessObservation("sandbox-a", oldEntry, volume.ProcessObservation{PID: 42, Exited: true}, nil)
+
+	if got := oldCleanupCalls.Load(); got != 0 {
+		t.Fatalf("old cleanup calls = %d, want 0", got)
+	}
+	actual, ok := m.sandboxes.Load("sandbox-a")
+	if !ok || actual != replacement {
+		t.Fatalf("replacement entry changed: %#v", actual)
 	}
 }
 
@@ -225,7 +518,7 @@ func TestCleanupStaleBootResourcesReturnsBootReleaseError(t *testing.T) {
 	}
 }
 
-func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
+func TestReserveSandboxEntryRejectsSameSandboxWithoutWaiting(t *testing.T) {
 	m := &Manager{}
 
 	key, entry, err := m.reserveSandboxEntry("sandbox-a")
@@ -234,29 +527,11 @@ func TestReserveSandboxEntrySerializesSameSandbox(t *testing.T) {
 	}
 	defer m.sandboxes.CompareAndDelete(key, entry)
 
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := m.reserveSandboxEntry("sandbox-a")
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		t.Fatalf("same sandbox reserve completed while entry lock was held: %v", err)
-	case <-time.After(50 * time.Millisecond):
+	_, _, err = m.reserveSandboxEntry("sandbox-a")
+	if err == nil {
+		t.Fatal("same sandbox reserve succeeded while an entry already existed")
 	}
-
-	entry.mu.Unlock()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("same sandbox reserve succeeded while an entry already existed")
-		}
-		if !strings.Contains(err.Error(), "already exists") {
-			t.Fatalf("same sandbox reserve error = %v, want already exists", err)
-		}
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("same sandbox reserve did not unblock after entry lock was released")
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("same sandbox reserve error = %v, want already exists", err)
 	}
 }

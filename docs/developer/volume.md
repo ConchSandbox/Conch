@@ -165,6 +165,39 @@ mounts[].path: str    guest 内目标绝对路径，agent mkdir -p 后 bind。
 mounts[].readonly: bool 默认 false。
 ```
 
+### 2.6 virtiofsd 生命周期与故障关闭
+
+virtiofsd 从 `cmd.Start()` 成功起就由唯一 monitor goroutine 调用一次 `cmd.Wait()`。Sandbox
+正常运行时如果 virtiofsd 退出，即使退出码为 0，Sandbox Manager 也会关闭整个 Sandbox；
+继续保留 VMM/guest 会让 guest 的文件访问无限阻塞，不能视为可降级运行。
+
+通知链路只使用广播式 channel，不使用 volume 到 Sandbox Manager 的 callback：
+
+```text
+processHandle.Wait
+  -> virtiofsProcess 保存 ProcessObservation
+  -> close ProcessWatch.Done
+  -> Sandbox Manager 读取 sandboxEntry.state
+     |- CREATING: 保存 dependencyErr，取消 Create，由 Create owner 回滚
+     |- READY/SUSPENDED: 进入 STOPPING，取得唯一 cleanup ownership
+     `- STOPPING/EXITED: 主动清理或旧事件，不重复 cleanup
+```
+
+`ProcessObservation.Cause`、exit code 和 signal 只用于错误信息与日志。退出是否预期只由
+`sandboxEntry` 的状态判断：Delete、Create 回滚和 VMM-exit owner 都必须先进入 `STOPPING`，
+再 kill virtiofsd。volume exit、VMM exit 和 Delete 并发时，只有把状态从
+`READY/SUSPENDED` 改成 `STOPPING` 的调用者执行 cleanup；其他调用者等待同一个
+`cleanupDone`。
+
+child process 由 `cmd.Wait()` 回收；未来 rehydrate 接管的非 child process 使用
+PID/start-time 两次身份校验和 pidfd poll/signal。active cleanup 始终持有
+`PreparedSandbox.Watch` 中的精确 process owner，不会在 monitor 从 backend map 删除后退化为
+按 sandbox ID 或裸 PID 猜测。daemon 启动时的 stale-resource cleanup 与 active owner 是两条
+独立路径。
+
+单元测试验证 monitor、创建竞态、PID 身份保护和 cleanup ownership；真实 guest 中
+`kill -9 <exact-virtiofsd-pid>` 后的 guest I/O 与 VMM/KVM 资源回收仍需 Linux VOL-011 验收。
+
 ## 3. 接口设计
 
 ### 3.1 配置文件

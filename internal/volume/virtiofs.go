@@ -66,12 +66,12 @@ type configMount struct {
 	Readonly bool   `json:"readonly,omitempty"`
 }
 
-func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
+func (b *virtiofsBackend) Prepare(req PrepareRequest) (PreparedSandbox, error) {
 	if len(req.Mounts) == 0 {
-		return nil, nil
+		return PreparedSandbox{}, nil
 	}
 	if err := ValidateSegment(req.SandboxID, "sandbox_id"); err != nil {
-		return nil, err
+		return PreparedSandbox{}, err
 	}
 
 	runtimeDir := filepath.Join(b.runtimeDir, req.SandboxID)
@@ -80,7 +80,7 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 	configPath := filepath.Join(volumeDir, configFileName)
 
 	if err := os.MkdirAll(volumeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create volume dir: %w", err)
+		return PreparedSandbox{}, fmt.Errorf("create volume dir: %w", err)
 	}
 
 	var binds []string
@@ -103,16 +103,16 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		source := filepath.Clean(mount.Source)
 		if _, err := os.Stat(source); err != nil {
 			cleanup()
-			return nil, fmt.Errorf("volume source not accessible: %s: %w", source, err)
+			return PreparedSandbox{}, fmt.Errorf("volume source not accessible: %s: %w", source, err)
 		}
 		bindTarget := filepath.Join(volumeDir, strconv.Itoa(i))
 		if err := os.MkdirAll(bindTarget, 0o755); err != nil {
 			cleanup()
-			return nil, fmt.Errorf("create bind target: %w", err)
+			return PreparedSandbox{}, fmt.Errorf("create bind target: %w", err)
 		}
 		if err := unix.Mount(source, bindTarget, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
 			cleanup()
-			return nil, fmt.Errorf("bind volume source %s: %w", source, err)
+			return PreparedSandbox{}, fmt.Errorf("bind volume source %s: %w", source, err)
 		}
 		binds = append(binds, bindTarget)
 	}
@@ -128,38 +128,122 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 	data, err := json.Marshal(doc)
 	if err != nil {
 		cleanup()
-		return nil, fmt.Errorf("marshal config.json: %w", err)
+		return PreparedSandbox{}, fmt.Errorf("marshal config.json: %w", err)
 	}
 	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		cleanup()
-		return nil, fmt.Errorf("write config.json: %w", err)
+		return PreparedSandbox{}, fmt.Errorf("write config.json: %w", err)
 	}
 
 	cmd := exec.Command(b.binary, b.buildArgs(socket, volumeDir)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	process, err := b.startVirtiofsProcess(req.SandboxID, cmd, socket, socketReadyTimeout)
+	if err != nil {
 		cleanup()
-		return nil, fmt.Errorf("start virtiofsd for sandbox %s: %w", req.SandboxID, err)
+		return PreparedSandbox{}, err
 	}
-	if err := waitUnixSocket(socket, socketReadyTimeout); err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		cleanup()
-		return nil, fmt.Errorf("wait virtiofsd socket %s: %w", socket, err)
-	}
-	b.procs.Store(req.SandboxID, cmd)
 
-	return []Device{{
+	devices := []Device{{
 		SandboxID:  req.SandboxID,
 		Backend:    b.Name(),
 		Tag:        virtiofsTag,
 		Socket:     socket,
 		VolumeDir:  volumeDir,
 		ConfigPath: configPath,
-		PID:        cmd.Process.Pid,
-		StartTime:  processStartTicks(cmd.Process.Pid),
-	}}, nil
+		PID:        process.handle.PID(),
+		StartTime:  process.handle.StartTime(),
+	}}
+	return PreparedSandbox{Devices: devices, Watch: &ProcessWatch{process: process}}, nil
+}
+
+func (b *virtiofsBackend) startVirtiofsProcess(
+	sandboxID string,
+	cmd *exec.Cmd,
+	socket string,
+	timeout time.Duration,
+) (*virtiofsProcess, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start virtiofsd for sandbox %s: %w", sandboxID, err)
+	}
+	child, err := newChildProcess(cmd, processStartTicks(cmd.Process.Pid))
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return nil, err
+	}
+	process := newVirtiofsProcess(sandboxID, child)
+	if _, loaded := b.procs.LoadOrStore(sandboxID, process); loaded {
+		// This child was just started, so it still needs its unique reaper even
+		// though another owner already occupies the sandbox key.
+		go b.monitorProcess(process)
+		closeErr := process.Close()
+		return nil, errors.Join(
+			fmt.Errorf("virtiofsd process for sandbox %s already exists", sandboxID),
+			closeErr,
+		)
+	}
+	go b.monitorProcess(process)
+
+	if socketErr := waitUnixSocket(socket, timeout, process.Done()); socketErr != nil {
+		var startupErr error
+		if result, ok := process.Result(); ok {
+			startupErr = observationError("virtiofsd exited while waiting for its socket", result)
+		}
+		closeErr := process.Close()
+		b.procs.CompareAndDelete(sandboxID, process)
+		if startupErr != nil {
+			return nil, errors.Join(startupErr, closeErr)
+		}
+		return nil, errors.Join(fmt.Errorf("wait virtiofsd socket %s: %w", socket, socketErr), closeErr)
+	}
+	if err := process.markPrepared(); err != nil {
+		closeErr := process.Close()
+		b.procs.CompareAndDelete(sandboxID, process)
+		return nil, errors.Join(err, closeErr)
+	}
+	return process, nil
+}
+
+func (b *virtiofsBackend) monitorProcess(process *virtiofsProcess) {
+	wait := process.handle.Wait()
+	process.storeObservation(wait)
+	b.procs.CompareAndDelete(process.sandboxID, process)
+	close(process.observeDone)
+}
+
+func (b *virtiofsBackend) Adopt(sandboxID string, devices []Device) (PreparedSandbox, error) {
+	if len(devices) == 0 {
+		return PreparedSandbox{}, nil
+	}
+	if len(devices) != 1 {
+		return PreparedSandbox{}, fmt.Errorf("sandbox %s has %d virtiofs devices, want 1", sandboxID, len(devices))
+	}
+	device := devices[0]
+	if device.SandboxID != "" && device.SandboxID != sandboxID {
+		return PreparedSandbox{}, fmt.Errorf("virtiofs device belongs to sandbox %s, not %s", device.SandboxID, sandboxID)
+	}
+	handle, err := newAdoptedProcess(device.PID, device.StartTime)
+	if err != nil {
+		return PreparedSandbox{}, err
+	}
+	process := newVirtiofsProcess(sandboxID, handle)
+	if _, loaded := b.procs.LoadOrStore(sandboxID, process); loaded {
+		return PreparedSandbox{}, errors.Join(
+			fmt.Errorf("virtiofsd process for sandbox %s already exists", sandboxID),
+			handle.Close(),
+		)
+	}
+	go b.monitorProcess(process)
+	if err := process.markPrepared(); err != nil {
+		closeErr := process.Close()
+		b.procs.CompareAndDelete(sandboxID, process)
+		return PreparedSandbox{}, errors.Join(err, closeErr)
+	}
+	return PreparedSandbox{
+		Devices: append([]Device(nil), devices...),
+		Watch:   &ProcessWatch{process: process},
+	}, nil
 }
 
 func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
@@ -168,32 +252,32 @@ func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
 	return []string{"--socket-path", socket, "--shared-dir", volumeDir}
 }
 
-func (b *virtiofsBackend) Cleanup(sandboxID string, devices []Device) error {
+func (b *virtiofsBackend) Cleanup(sandboxID string, prepared PreparedSandbox) error {
 	var errs []error
-
-	if v, ok := b.procs.LoadAndDelete(sandboxID); ok {
-		if cmd, ok := v.(*exec.Cmd); ok && cmd.Process != nil {
-			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-				errs = append(errs, fmt.Errorf("kill virtiofsd: %w", killErr))
-			}
-			_, _ = cmd.Process.Wait()
+	if prepared.Watch != nil && prepared.Watch.process != nil {
+		process := prepared.Watch.process
+		b.procs.CompareAndDelete(sandboxID, process)
+		if closeErr := process.Close(); closeErr != nil {
+			errs = append(errs, closeErr)
 		}
 	} else {
-		for _, device := range devices {
-			if device.PID <= 0 {
-				continue
-			}
-			if !isOurVirtiofsd(device.PID, device.StartTime) {
-				continue
-			}
-			if proc, err := os.FindProcess(device.PID); err == nil {
-				if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-					errs = append(errs, fmt.Errorf("kill virtiofsd pid %d: %w", device.PID, killErr))
-				}
+		// A zero Watch is not an active owner. Persisted/stale device cleanup
+		// still binds a pidfd before signaling so PID reuse cannot be raced.
+		for _, device := range prepared.Devices {
+			if terminateErr := terminateAdoptedProcess(device.PID, device.StartTime); terminateErr != nil {
+				errs = append(errs, terminateErr)
 			}
 		}
 	}
 
+	if resourceErr := b.cleanupVolumeResources(sandboxID, prepared.Devices); resourceErr != nil {
+		errs = append(errs, resourceErr)
+	}
+	return errors.Join(errs...)
+}
+
+func (b *virtiofsBackend) cleanupVolumeResources(sandboxID string, devices []Device) error {
+	var errs []error
 	var volumeDir, runtimeDir string
 	for _, device := range devices {
 		if device.VolumeDir != "" {
@@ -237,16 +321,14 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 			continue
 		}
 		pid, _ := strconv.Atoi(entry.Name())
-		if proc, err := os.FindProcess(pid); err == nil {
-			if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-				errs = append(errs, fmt.Errorf("kill stale virtiofsd pid %d: %w", pid, killErr))
-			}
+		if terminateErr := terminateAdoptedProcess(pid, processStartTicks(pid)); terminateErr != nil {
+			errs = append(errs, fmt.Errorf("terminate stale virtiofsd pid %d: %w", pid, terminateErr))
 		}
 	}
 	entries, err := os.ReadDir(b.runtimeDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return errors.Join(errs...)
 		}
 		return errors.Join(append(errs, err)...)
 	}
@@ -254,9 +336,35 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 		if !entry.IsDir() || ValidateSegment(entry.Name(), "sandbox_id") != nil {
 			continue
 		}
-		if cleanupErr := b.Cleanup(entry.Name(), nil); cleanupErr != nil {
+		if cleanupErr := b.cleanupVolumeResources(entry.Name(), nil); cleanupErr != nil {
 			errs = append(errs, fmt.Errorf("cleanup stale volume for sandbox %s: %w", entry.Name(), cleanupErr))
 		}
+	}
+	return errors.Join(errs...)
+}
+
+func terminateAdoptedProcess(pid int, startTime uint64) error {
+	if !isOurVirtiofsd(pid, startTime) {
+		return nil
+	}
+	handle, err := newAdoptedProcess(pid, startTime)
+	if err != nil {
+		// Identity loss means the original process is already gone or the PID
+		// was reused; either case must converge without signaling the new PID.
+		if !isOurVirtiofsd(pid, startTime) {
+			return nil
+		}
+		return fmt.Errorf("bind pidfd for virtiofsd pid %d: %w", pid, err)
+	}
+	var errs []error
+	if killErr := handle.Kill(); killErr != nil {
+		errs = append(errs, fmt.Errorf("kill virtiofsd pid %d: %w", pid, killErr))
+	}
+	if confirmErr := handle.ConfirmExit(processCloseTimeout); confirmErr != nil {
+		errs = append(errs, fmt.Errorf("confirm virtiofsd pid %d exit: %w", pid, confirmErr))
+	}
+	if closeErr := handle.Close(); closeErr != nil {
+		errs = append(errs, fmt.Errorf("close virtiofsd pid %d handle: %w", pid, closeErr))
 	}
 	return errors.Join(errs...)
 }
@@ -301,8 +409,11 @@ func isMountPoint(path string) (bool, error) {
 	return mountinfo.Mounted(path)
 }
 
-func waitUnixSocket(path string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+func waitUnixSocket(path string, timeout time.Duration, processDone <-chan struct{}) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	var lastErr error
 	for {
 		st, err := os.Stat(path)
@@ -310,12 +421,15 @@ func waitUnixSocket(path string, timeout time.Duration) error {
 			return nil
 		}
 		lastErr = err
-		if time.Now().After(deadline) {
+		select {
+		case <-processDone:
+			return fmt.Errorf("virtiofsd exited before socket became ready")
+		case <-ticker.C:
+		case <-timer.C:
 			if lastErr != nil {
 				return fmt.Errorf("timed out after %s: %w", timeout, lastErr)
 			}
 			return fmt.Errorf("timed out after %s waiting for unix socket", timeout)
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }

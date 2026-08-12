@@ -45,16 +45,25 @@ type Manager struct {
 type sandboxLifecycleState uint8
 
 const (
-	sandboxReady sandboxLifecycleState = iota
+	sandboxCreating sandboxLifecycleState = iota
+	sandboxReady
 	sandboxSuspended
+	sandboxStopping
+	sandboxExited
 )
 
 func (s sandboxLifecycleState) String() string {
 	switch s {
+	case sandboxCreating:
+		return "creating"
 	case sandboxReady:
 		return "ready"
 	case sandboxSuspended:
 		return "suspended"
+	case sandboxStopping:
+		return "stopping"
+	case sandboxExited:
+		return "exited"
 	default:
 		return "unknown"
 	}
@@ -64,6 +73,10 @@ type sandboxEntry struct {
 	mu    sync.Mutex
 	state sandboxLifecycleState
 	sbx   *Sandbox
+
+	dependencyErr error
+	cleanupDone   chan struct{}
+	cleanupErr    error
 }
 
 func New(
@@ -253,21 +266,20 @@ func GenerateAgentToken() (string, error) {
 
 func (m *Manager) reserveSandboxEntry(sandboxID string) (string, *sandboxEntry, error) {
 	mapKey := sandboxID
-	entry := &sandboxEntry{state: sandboxReady}
-	entry.mu.Lock()
+	entry := &sandboxEntry{
+		state:       sandboxCreating,
+		cleanupDone: make(chan struct{}),
+	}
 
 	actual, loaded := m.sandboxes.LoadOrStore(mapKey, entry)
 	if !loaded {
 		return mapKey, entry, nil
 	}
-	entry.mu.Unlock()
 
-	existing, ok := actual.(*sandboxEntry)
+	_, ok := actual.(*sandboxEntry)
 	if !ok {
 		return "", nil, fmt.Errorf("invalid sandbox entry type for %s", sandboxID)
 	}
-	existing.mu.Lock()
-	existing.mu.Unlock()
 	return "", nil, fmt.Errorf("sandbox %s already exists", sandboxID)
 }
 
@@ -355,101 +367,128 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		return CreateResult{}, fmt.Errorf("agent token is required")
 	}
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
-	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	defer timeoutCancel()
+	ctx, cancelCreate := context.WithCancelCause(timeoutCtx)
+	defer cancelCreate(nil)
 
 	mapKey, entry, err := m.reserveSandboxEntry(req.SandboxID)
 	if err != nil {
 		return CreateResult{}, err
 	}
-	defer entry.mu.Unlock()
-	defer func() {
-		if err != nil {
-			m.sandboxes.CompareAndDelete(mapKey, entry)
-		}
-	}()
 
-	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
-	if err != nil {
-		return CreateResult{}, err
-	}
+	leaseCtx := context.Context(ctx)
+	var runtimeIDs createRuntimeIDs
+	var cidAllocated bool
+	var boot PreparedBoot
+	var bootPrepared bool
+	var prepared volume.PreparedSandbox
+	var volumeOwnedByCreate bool
+	var sbx *Sandbox
 
-	runtimeIDs, err := m.allocateCreateRuntimeIDs(req)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	cidAllocated := true
-	defer func() {
-		if err != nil && cidAllocated {
-			if releaseErr := m.ReleaseCID(req.SandboxID); releaseErr != nil {
-				logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxID), ulog.F("error", releaseErr))
-			}
-		}
-	}()
-
-	boot, err := m.prepareSandboxBoot(leaseCtx, req, runtimeIDs)
-	if err != nil {
-		return CreateResult{}, err
-	}
 	defer func() {
 		if err == nil {
 			return
 		}
-		rmErr := m.boot.Release(leaseCtx, ReleaseBootRequest{
-			SandboxID: runtimeIDs.key,
-		})
-		if rmErr != nil {
-			logger.Error("failed to release sandbox boot layout", ulog.F("key", runtimeIDs.key), ulog.F("error", rmErr))
-			return
+
+		dependencyErr := m.markCreatingEntryStopping(mapKey, entry)
+		if dependencyErr != nil && !errors.Is(err, dependencyErr) {
+			err = errors.Join(dependencyErr, err)
 		}
-		logger.Info("released sandbox boot layout due to error", ulog.F("key", runtimeIDs.key))
+
+		var cleanupErrs []error
+		if sbx != nil {
+			if closeErr := sbx.Close(context.Background()); closeErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup sandbox after create failure: %w", closeErr))
+				logger.Warn("failed to cleanup sandbox after create failure",
+					ulog.F("sandbox_id", req.SandboxID),
+					ulog.F("error", closeErr),
+				)
+			}
+		}
+		if volumeOwnedByCreate && m.volumeManager != nil {
+			if cleanupErr := m.volumeManager.CleanupSandbox(req.SandboxID, prepared); cleanupErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup volumes after create failure: %w", cleanupErr))
+				logger.Warn("failed to cleanup volume mounts after create failure",
+					ulog.F("sandbox_id", req.SandboxID),
+					ulog.F("error", cleanupErr),
+				)
+			}
+		}
+		if bootPrepared {
+			if releaseErr := m.boot.Release(context.WithoutCancel(leaseCtx), ReleaseBootRequest{SandboxID: runtimeIDs.key}); releaseErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release sandbox boot layout: %w", releaseErr))
+				logger.Error("failed to release sandbox boot layout", ulog.F("key", runtimeIDs.key), ulog.F("error", releaseErr))
+			}
+		}
+		if cidAllocated {
+			if releaseErr := m.ReleaseCID(req.SandboxID); releaseErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("release CID: %w", releaseErr))
+				logger.Warn("failed to release CID on create failure", ulog.F("sandbox_id", req.SandboxID), ulog.F("error", releaseErr))
+			}
+		}
+
+		cleanupErr := errors.Join(cleanupErrs...)
+		m.finishCreatingFailure(mapKey, entry, cleanupErr)
+		err = errors.Join(err, cleanupErr)
 	}()
 
-	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
-	volumeDevices, err := m.prepareVolumes(req, boot.Runtime.Resume)
+	var leaseID string
+	leaseCtx, leaseID, err = m.prepareRuntimeLease(ctx, req)
 	if err != nil {
 		return CreateResult{}, err
 	}
 
-	volumesPrepared := len(volumeDevices) > 0
-	defer func() {
-		if err == nil || !volumesPrepared || m.volumeManager == nil {
-			return
-		}
-		if cleanupErr := m.volumeManager.CleanupSandbox(req.SandboxID, volumeDevices); cleanupErr != nil {
-			logger.Warn("failed to cleanup volume mounts after create failure",
-				ulog.F("sandbox_id", req.SandboxID),
-				ulog.F("error", cleanupErr),
-			)
-		}
-	}()
-	vmStartSpec.VirtioFS = volumeDevicesToDriver(volumeDevices)
-	sbx, err := m.startSandbox(ctx, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
+	runtimeIDs, err = m.allocateCreateRuntimeIDs(req)
 	if err != nil {
-		m.cleanupCreateFailure(sbx, req.SandboxID)
+		return CreateResult{}, err
+	}
+	cidAllocated = true
+
+	boot, err = m.prepareSandboxBoot(leaseCtx, req, runtimeIDs)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	bootPrepared = true
+
+	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
+	prepared, err = m.prepareVolumes(req, boot.Runtime.Resume)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	volumeOwnedByCreate = prepared.Watch != nil || len(prepared.Devices) > 0
+	m.watchVolumeProcess(mapKey, entry, prepared.Watch, cancelCreate)
+
+	vmStartSpec.VirtioFS = volumeDevicesToDriver(prepared.Devices)
+	sbx, err = m.startSandbox(ctx, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
+	if err != nil {
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
-	registerSandboxVolumeCleanup(sbx, m.volumeManager, req.SandboxID, volumeDevices)
+	if registerSandboxVolumeCleanup(sbx, m.volumeManager, req.SandboxID, prepared) {
+		volumeOwnedByCreate = false
+	}
 
-	entry.sbx = sbx
-	entry.state = sandboxReady
+	result = buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, prepared.Devices)
+	if err := m.commitReady(mapKey, entry, sbx); err != nil {
+		return CreateResult{}, err
+	}
 	m.trackSandbox(ctx, mapKey, entry, req.SandboxID, sbx)
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
-	return buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
+	return result, nil
 }
 
-func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Device, error) {
+func (m *Manager) prepareVolumes(req CreateRequest, resume bool) (volume.PreparedSandbox, error) {
 	if len(req.VolumeMounts) == 0 {
-		return nil, nil
+		return volume.PreparedSandbox{}, nil
 	}
 	if resume {
-		return nil, fmt.Errorf("sandbox with volumeMounts does not support snapshot startup")
+		return volume.PreparedSandbox{}, fmt.Errorf("sandbox with volumeMounts does not support snapshot startup")
 	}
 	if m.volumeManager == nil {
-		return nil, fmt.Errorf("volume manager is not configured")
+		return volume.PreparedSandbox{}, fmt.Errorf("volume manager is not configured")
 	}
 	return m.volumeManager.PrepareSandbox(req.SandboxID, req.VolumeMounts)
 }
@@ -544,16 +583,185 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 	)
 }
 
-func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
-	logger := ulog.GetLogger()
-	if sbx != nil {
-		if closeErr := sbx.Close(context.Background()); closeErr != nil {
-			logger.Warn("failed to cleanup sandbox after create failure",
-				ulog.F("sandbox_id", sandboxID),
-				ulog.F("error", closeErr),
-			)
-		}
+func (m *Manager) commitReady(mapKey string, entry *sandboxEntry, sbx *Sandbox) error {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return fmt.Errorf("sandbox %s is no longer current", mapKey)
 	}
+	if entry.dependencyErr != nil {
+		return entry.dependencyErr
+	}
+	if entry.state != sandboxCreating {
+		return fmt.Errorf("sandbox %s is %s", mapKey, entry.state)
+	}
+	if sbx == nil {
+		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", mapKey)
+	}
+	entry.sbx = sbx
+	entry.state = sandboxReady
+	return nil
+}
+
+func (m *Manager) markCreatingEntryStopping(mapKey string, entry *sandboxEntry) error {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if m.isCurrentSandboxEntry(mapKey, entry) && entry.state == sandboxCreating {
+		entry.state = sandboxStopping
+	}
+	return entry.dependencyErr
+}
+
+func (m *Manager) finishCreatingFailure(mapKey string, entry *sandboxEntry, cleanupErr error) {
+	entry.mu.Lock()
+	entry.cleanupErr = cleanupErr
+	if entry.state != sandboxExited {
+		entry.state = sandboxExited
+		if entry.cleanupDone == nil {
+			entry.cleanupDone = make(chan struct{})
+		}
+		close(entry.cleanupDone)
+	}
+	entry.mu.Unlock()
+	m.sandboxes.CompareAndDelete(mapKey, entry)
+}
+
+func (m *Manager) watchVolumeProcess(
+	mapKey string,
+	entry *sandboxEntry,
+	watch *volume.ProcessWatch,
+	cancelCreate context.CancelCauseFunc,
+) {
+	if watch == nil || watch.Done() == nil {
+		return
+	}
+	go func() {
+		<-watch.Done()
+		result, ok := watch.Result()
+		if !ok {
+			ulog.GetLogger().Warn("virtiofsd monitor completed without a result", ulog.F("sandbox_id", mapKey))
+			return
+		}
+		m.handleVolumeProcessObservation(mapKey, entry, result, cancelCreate)
+	}()
+}
+
+func (m *Manager) handleVolumeProcessObservation(
+	mapKey string,
+	entry *sandboxEntry,
+	result volume.ProcessObservation,
+	cancelCreate context.CancelCauseFunc,
+) {
+	dependencyErr := volumeProcessObservationError(result)
+
+	entry.mu.Lock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		entry.mu.Unlock()
+		return
+	}
+	switch entry.state {
+	case sandboxCreating:
+		if entry.dependencyErr == nil {
+			entry.dependencyErr = dependencyErr
+		}
+		dependencyErr = entry.dependencyErr
+		entry.mu.Unlock()
+		if cancelCreate != nil {
+			cancelCreate(dependencyErr)
+		}
+		return
+	case sandboxReady, sandboxSuspended:
+		entry.mu.Unlock()
+	default:
+		entry.mu.Unlock()
+		return
+	}
+
+	sbx, _, owner, err := m.beginStopping(mapKey, entry, nil)
+	if err != nil || !owner {
+		return
+	}
+	logger := ulog.GetLogger()
+	logger.Warn("virtiofsd observation completed while sandbox was active",
+		ulog.F("sandbox_id", mapKey),
+		ulog.F("pid", result.PID),
+		ulog.F("exited", result.Exited),
+		ulog.F("error", result.Cause),
+	)
+	cleanupErr := m.cleanupSandbox(context.Background(), sbx, mapKey)
+	if cleanupErr != nil {
+		logger.Warn("failed to cleanup sandbox after virtiofsd observation",
+			ulog.F("sandbox_id", mapKey),
+			ulog.F("error", cleanupErr),
+		)
+	}
+	m.finishStopping(mapKey, entry, cleanupErr)
+}
+
+func volumeProcessObservationError(result volume.ProcessObservation) error {
+	message := fmt.Sprintf("virtiofsd exited during sandbox create (pid %d)", result.PID)
+	if !result.Exited {
+		message = fmt.Sprintf("virtiofsd observer failed during sandbox create (pid %d)", result.PID)
+	}
+	if result.Signal != "" {
+		message += fmt.Sprintf(" after signal %s", result.Signal)
+	} else if result.ExitCode != nil {
+		message += fmt.Sprintf(" with exit code %d", *result.ExitCode)
+	}
+	if result.Cause != nil {
+		return fmt.Errorf("%s: %w", message, result.Cause)
+	}
+	return errors.New(message)
+}
+
+func (m *Manager) beginStopping(
+	mapKey string,
+	entry *sandboxEntry,
+	expected *Sandbox,
+) (sbx *Sandbox, done <-chan struct{}, owner bool, err error) {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return nil, nil, false, nil
+	}
+	if expected != nil && entry.sbx != expected {
+		return nil, nil, false, nil
+	}
+	if entry.cleanupDone == nil {
+		entry.cleanupDone = make(chan struct{})
+	}
+	switch entry.state {
+	case sandboxReady, sandboxSuspended:
+		if entry.sbx == nil {
+			return nil, nil, false, fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", mapKey)
+		}
+		entry.state = sandboxStopping
+		return entry.sbx, entry.cleanupDone, true, nil
+	case sandboxStopping, sandboxExited:
+		return entry.sbx, entry.cleanupDone, false, nil
+	default:
+		return nil, nil, false, fmt.Errorf("sandbox %s is %s", mapKey, entry.state)
+	}
+}
+
+func (m *Manager) finishStopping(mapKey string, entry *sandboxEntry, cleanupErr error) {
+	entry.mu.Lock()
+	if entry.state == sandboxStopping {
+		entry.cleanupErr = cleanupErr
+		entry.state = sandboxExited
+		if entry.cleanupDone == nil {
+			entry.cleanupDone = make(chan struct{})
+		}
+		close(entry.cleanupDone)
+	}
+	entry.mu.Unlock()
+	m.sandboxes.CompareAndDelete(mapKey, entry)
+}
+
+func cleanupResult(entry *sandboxEntry) error {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.cleanupErr
 }
 
 func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
@@ -570,16 +778,16 @@ func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandbo
 
 func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
 	logger := ulog.GetLogger()
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !m.isCurrentSandboxEntry(mapKey, entry) || entry.sbx != sbx {
+	ownedSandbox, _, owner, err := m.beginStopping(mapKey, entry, sbx)
+	if err != nil || !owner {
 		return
 	}
 
-	if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
-		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+	cleanupErr := m.cleanupSandbox(context.Background(), ownedSandbox, sandboxID)
+	if cleanupErr != nil {
+		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
 	}
-	m.sandboxes.CompareAndDelete(mapKey, entry)
+	m.finishStopping(mapKey, entry, cleanupErr)
 }
 
 func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
@@ -608,14 +816,16 @@ func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, b
 	}
 }
 
-func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, sandboxID string, devices []volume.Device) {
-	if sb == nil || volumeManager == nil || len(devices) == 0 {
-		return
+func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, sandboxID string, prepared volume.PreparedSandbox) bool {
+	if sb == nil || sb.cleanup == nil || volumeManager == nil || (len(prepared.Devices) == 0 && prepared.Watch == nil) {
+		return false
 	}
-	volumeDevices := append([]volume.Device(nil), devices...)
+	volumePrepared := prepared
+	volumePrepared.Devices = append([]volume.Device(nil), prepared.Devices...)
 	sb.cleanup.Add(func(ctx context.Context) error {
-		return volumeManager.CleanupSandbox(sandboxID, volumeDevices)
+		return volumeManager.CleanupSandbox(sandboxID, volumePrepared)
 	})
+	return true
 }
 
 func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) error {
@@ -682,23 +892,20 @@ func (m *Manager) Delete(req DeleteRequest) error {
 		return err
 	}
 
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !m.isCurrentSandboxEntry(mapKey, entry) {
-		return nil
+	sbx, done, owner, err := m.beginStopping(mapKey, entry, nil)
+	if err != nil {
+		return err
+	}
+	if !owner {
+		if done != nil {
+			<-done
+		}
+		return cleanupResult(entry)
 	}
 
-	if entry.state != sandboxReady && entry.state != sandboxSuspended {
-		return fmt.Errorf("sandbox %s is %s", req.SandboxID, entry.state)
-	}
-	sbx := entry.sbx
-	if sbx == nil {
-		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
-	}
-
-	err = m.cleanupSandbox(context.Background(), sbx, req.SandboxID)
-	m.sandboxes.CompareAndDelete(mapKey, entry)
-	return err
+	cleanupErr := m.cleanupSandbox(context.Background(), sbx, req.SandboxID)
+	m.finishStopping(mapKey, entry, cleanupErr)
+	return cleanupErr
 }
 
 func (m *Manager) Suspend(req LifecycleRequest) error {
