@@ -13,6 +13,5 @@
 - [Template 模块接口](developer/template-interface.md)：Template 数据模型和 Store 接口。
 - [Network 模块设计](developer/network.md)：Network Slot、CNI、guest tap 和网络生命周期。
 - [Volume 设计](developer/volume.md)：virtiofs、VMM 与 guest agent 的卷架构。
-- [Issue #83 virtiofsd 异常退出处理](developer/issue-083-virtiofsd-exit-handling.md)：child 进程抽象、channel 监控与 Sandbox 状态清理规格。
 - [conch-init Agent API](developer/conch-init-api.md)：sandbox 内 Agent 的 Connect RPC 接口。
 - [架构图源文件](developer/arch.drawio)：可编辑的 draw.io 架构图。
