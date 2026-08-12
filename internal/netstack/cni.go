@@ -52,6 +52,11 @@ type CNIResult struct {
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	cfg = normalizeCNIManagerConfig(cfg)
 
+	// Refuse at startup rather than at the first sandbox creation.
+	if err := validateCNIPluginPaths(cfg); err != nil {
+		return nil, err
+	}
+
 	backend, err := newLibCNIBackend(cfg)
 	if err != nil {
 		return nil, err
