@@ -86,7 +86,6 @@ type PreparedSandbox struct {
 type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) (PreparedSandbox, error)
-	Adopt(sandboxID string, devices []Device) (PreparedSandbox, error)
 	Cleanup(sandboxID string, prepared PreparedSandbox) error
 	CleanupStaleResources() error
 }

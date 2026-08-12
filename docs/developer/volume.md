@@ -189,11 +189,11 @@ processHandle.Wait
 `READY/SUSPENDED` 改成 `STOPPING` 的调用者执行 cleanup；其他调用者等待同一个
 `cleanupDone`。
 
-child process 由 `cmd.Wait()` 回收；未来 rehydrate 接管的非 child process 使用
-PID/start-time 两次身份校验和 pidfd poll/signal。active cleanup 始终持有
+child process 由 `cmd.Wait()` 回收。active cleanup 始终持有
 `PreparedSandbox.Watch` 中的精确 process owner，不会在 monitor 从 backend map 删除后退化为
-按 sandbox ID 或裸 PID 猜测。daemon 启动时的 stale-resource cleanup 与 active owner 是两条
-独立路径。
+按 sandbox ID 猜测。conchd 重启不接管旧 Sandbox 或旧 virtiofsd；启动恢复直接调用
+`CleanupStaleResources` 清理遗留进程和目录，因此 stale-resource cleanup 与 active owner 是两条
+独立路径，不构造运行期 `ProcessWatch`。
 
 单元测试验证 monitor、创建竞态、PID 身份保护和 cleanup ownership；真实 guest 中
 `kill -9 <exact-virtiofsd-pid>` 后的 guest I/O 与 VMM/KVM 资源回收仍需 Linux VOL-011 验收。

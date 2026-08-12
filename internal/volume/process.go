@@ -25,8 +25,8 @@ type processHandle interface {
 	Close() error
 }
 
-// virtiofsProcess owns the one Wait call for a child or adopted process. The
-// monitor publishes an immutable observation before closing observeDone.
+// virtiofsProcess owns the one Wait call for a virtiofsd process. The monitor
+// publishes an immutable observation before closing observeDone.
 type virtiofsProcess struct {
 	sandboxID string
 	handle    processHandle

@@ -212,40 +212,6 @@ func (b *virtiofsBackend) monitorProcess(process *virtiofsProcess) {
 	close(process.observeDone)
 }
 
-func (b *virtiofsBackend) Adopt(sandboxID string, devices []Device) (PreparedSandbox, error) {
-	if len(devices) == 0 {
-		return PreparedSandbox{}, nil
-	}
-	if len(devices) != 1 {
-		return PreparedSandbox{}, fmt.Errorf("sandbox %s has %d virtiofs devices, want 1", sandboxID, len(devices))
-	}
-	device := devices[0]
-	if device.SandboxID != "" && device.SandboxID != sandboxID {
-		return PreparedSandbox{}, fmt.Errorf("virtiofs device belongs to sandbox %s, not %s", device.SandboxID, sandboxID)
-	}
-	handle, err := newAdoptedProcess(device.PID, device.StartTime)
-	if err != nil {
-		return PreparedSandbox{}, err
-	}
-	process := newVirtiofsProcess(sandboxID, handle)
-	if _, loaded := b.procs.LoadOrStore(sandboxID, process); loaded {
-		return PreparedSandbox{}, errors.Join(
-			fmt.Errorf("virtiofsd process for sandbox %s already exists", sandboxID),
-			handle.Close(),
-		)
-	}
-	go b.monitorProcess(process)
-	if err := process.markPrepared(); err != nil {
-		closeErr := process.Close()
-		b.procs.CompareAndDelete(sandboxID, process)
-		return PreparedSandbox{}, errors.Join(err, closeErr)
-	}
-	return PreparedSandbox{
-		Devices: append([]Device(nil), devices...),
-		Watch:   &ProcessWatch{process: process},
-	}, nil
-}
-
 func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
 	// virtiofsd 1.13.x (Rust) has no cache flag; the guest uses the default
 	// virtiofs cache mode (see agent mount logic).
@@ -261,11 +227,19 @@ func (b *virtiofsBackend) Cleanup(sandboxID string, prepared PreparedSandbox) er
 			errs = append(errs, closeErr)
 		}
 	} else {
-		// A zero Watch is not an active owner. Persisted/stale device cleanup
-		// still binds a pidfd before signaling so PID reuse cannot be raced.
+		// No active in-memory owner exists on this fallback path. Only signal a
+		// persisted PID when its recorded start time still matches, so a reused
+		// PID is not mistaken for the original virtiofsd.
 		for _, device := range prepared.Devices {
-			if terminateErr := terminateAdoptedProcess(device.PID, device.StartTime); terminateErr != nil {
-				errs = append(errs, terminateErr)
+			if device.PID <= 0 || !isOurVirtiofsd(device.PID, device.StartTime) {
+				continue
+			}
+			proc, findErr := os.FindProcess(device.PID)
+			if findErr != nil {
+				continue
+			}
+			if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) && !errors.Is(killErr, unix.ESRCH) {
+				errs = append(errs, fmt.Errorf("kill virtiofsd pid %d: %w", device.PID, killErr))
 			}
 		}
 	}
@@ -321,8 +295,10 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 			continue
 		}
 		pid, _ := strconv.Atoi(entry.Name())
-		if terminateErr := terminateAdoptedProcess(pid, processStartTicks(pid)); terminateErr != nil {
-			errs = append(errs, fmt.Errorf("terminate stale virtiofsd pid %d: %w", pid, terminateErr))
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
+				errs = append(errs, fmt.Errorf("kill stale virtiofsd pid %d: %w", pid, killErr))
+			}
 		}
 	}
 	entries, err := os.ReadDir(b.runtimeDir)
@@ -339,32 +315,6 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 		if cleanupErr := b.cleanupVolumeResources(entry.Name(), nil); cleanupErr != nil {
 			errs = append(errs, fmt.Errorf("cleanup stale volume for sandbox %s: %w", entry.Name(), cleanupErr))
 		}
-	}
-	return errors.Join(errs...)
-}
-
-func terminateAdoptedProcess(pid int, startTime uint64) error {
-	if !isOurVirtiofsd(pid, startTime) {
-		return nil
-	}
-	handle, err := newAdoptedProcess(pid, startTime)
-	if err != nil {
-		// Identity loss means the original process is already gone or the PID
-		// was reused; either case must converge without signaling the new PID.
-		if !isOurVirtiofsd(pid, startTime) {
-			return nil
-		}
-		return fmt.Errorf("bind pidfd for virtiofsd pid %d: %w", pid, err)
-	}
-	var errs []error
-	if killErr := handle.Kill(); killErr != nil {
-		errs = append(errs, fmt.Errorf("kill virtiofsd pid %d: %w", pid, killErr))
-	}
-	if confirmErr := handle.ConfirmExit(processCloseTimeout); confirmErr != nil {
-		errs = append(errs, fmt.Errorf("confirm virtiofsd pid %d exit: %w", pid, confirmErr))
-	}
-	if closeErr := handle.Close(); closeErr != nil {
-		errs = append(errs, fmt.Errorf("close virtiofsd pid %d handle: %w", pid, closeErr))
 	}
 	return errors.Join(errs...)
 }

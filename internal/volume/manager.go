@@ -67,19 +67,6 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) (PreparedSand
 	})
 }
 
-// AdoptSandbox binds an existing virtiofsd identity to a pidfd-backed owner.
-// Current daemon recovery removes stale sandboxes rather than calling this;
-// the method keeps the process contract ready for a future rehydrate path.
-func (m *Manager) AdoptSandbox(sandboxID string, devices []Device) (PreparedSandbox, error) {
-	if len(devices) == 0 {
-		return PreparedSandbox{}, nil
-	}
-	if err := ValidateSegment(sandboxID, "sandbox_id"); err != nil {
-		return PreparedSandbox{}, err
-	}
-	return m.backend.Adopt(sandboxID, devices)
-}
-
 func (m *Manager) CleanupSandbox(sandboxID string, prepared PreparedSandbox) error {
 	return m.backend.Cleanup(sandboxID, prepared)
 }

@@ -157,7 +157,7 @@ func TestVirtiofsProcessCloseConfirmsExitAfterObserverFailure(t *testing.T) {
 
 func TestVirtiofsProcessClosePreservesConfirmationFailure(t *testing.T) {
 	backend := &virtiofsBackend{}
-	confirmErr := errors.New("pidfd never became ready")
+	confirmErr := errors.New("process exit was not confirmed")
 	handle := newFakeProcessHandle()
 	handle.waitCh <- processWaitResult{Exited: false, Cause: errors.New("poll failed")}
 	handle.confirmErr = confirmErr
