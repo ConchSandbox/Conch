@@ -606,7 +606,10 @@ func (m *Manager) commitReady(mapKey string, entry *sandboxEntry, sbx *Sandbox) 
 func (m *Manager) markCreatingEntryStopping(mapKey string, entry *sandboxEntry) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if m.isCurrentSandboxEntry(mapKey, entry) && entry.state == sandboxCreating {
+	if !m.isCurrentSandboxEntry(mapKey, entry) {
+		return nil
+	}
+	if entry.state == sandboxCreating {
 		entry.state = sandboxStopping
 	}
 	return entry.dependencyErr
@@ -699,9 +702,9 @@ func (m *Manager) handleVolumeProcessObservation(
 }
 
 func volumeProcessObservationError(result volume.ProcessObservation) error {
-	message := fmt.Sprintf("virtiofsd exited during sandbox create (pid %d)", result.PID)
+	message := fmt.Sprintf("virtiofsd exited while sandbox was active (pid %d)", result.PID)
 	if !result.Exited {
-		message = fmt.Sprintf("virtiofsd observer failed during sandbox create (pid %d)", result.PID)
+		message = fmt.Sprintf("virtiofsd observer failed while sandbox was active (pid %d)", result.PID)
 	}
 	if result.Signal != "" {
 		message += fmt.Sprintf(" after signal %s", result.Signal)
