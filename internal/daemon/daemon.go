@@ -38,6 +38,7 @@ import (
 const (
 	shutdownTimeout     = 30 * time.Second
 	minimumSandboxRAMMB = 128
+	unixSocketBindUmask = 0o117
 )
 
 type Daemon struct {
@@ -253,14 +254,13 @@ func (s *Daemon) Start(unixSocket string) error {
 		return fmt.Errorf("failed to remove stale unix socket: %w", err)
 	}
 
+	// bind(2) creates the socket at 0777 &^ umask, and 0777 &^ 0117 == 0660, so
+	// it lands at its final mode with no chmod to race. The umask is global.
+	previousUmask := unix.Umask(unixSocketBindUmask)
 	ln, err := net.Listen("unix", unixSocket)
+	unix.Umask(previousUmask)
 	if err != nil {
 		return fmt.Errorf("failed to listen on unix socket %s: %w", unixSocket, err)
-	}
-	if err := os.Chmod(unixSocket, 0o660); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(unixSocket)
-		return fmt.Errorf("failed to set unix socket permissions: %w", err)
 	}
 
 	s.unixSocketPath = unixSocket
