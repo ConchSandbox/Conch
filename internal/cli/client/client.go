@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	defaultConchAPIURL = "http://localhost:4063"
 	defaultUnixAPIURL  = "http://conchd-unix"
 	defaultHTTPTimeout = 120 * time.Second
 )
@@ -84,23 +83,11 @@ func resolveTransport(opts Options) (string, *http.Client, error) {
 	if baseURL := normalizeBaseURL(os.Getenv("CONCH_API_URL")); baseURL != "" {
 		return baseURL, &http.Client{Timeout: timeout}, nil
 	}
-	if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
-		return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket, timeout), nil
+	unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket())
+	if unixSocket == "" {
+		return "", nil, fmt.Errorf("conchd unix socket is not configured in %s", configPath)
 	}
-	host := strings.TrimSpace(cfg.Server.Host)
-	if host != "" && cfg.Server.Port > 0 {
-		return fmt.Sprintf("http://%s:%d", host, cfg.Server.Port), &http.Client{Timeout: timeout}, nil
-	}
-
-	host = strings.TrimSpace(os.Getenv("CONCHD_HOST"))
-	port := strings.TrimSpace(os.Getenv("CONCHD_PORT"))
-	if host != "" {
-		if port == "" {
-			port = "4063"
-		}
-		return fmt.Sprintf("http://%s:%s", host, port), &http.Client{Timeout: timeout}, nil
-	}
-	return defaultConchAPIURL, &http.Client{Timeout: timeout}, nil
+	return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket, timeout), nil
 }
 
 func normalizeBaseURL(value string) string {

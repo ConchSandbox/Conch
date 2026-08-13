@@ -65,7 +65,6 @@ func main() {
 		ulog.F("app", cfg.App.Name),
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
-		ulog.F("server.address", cfg.GetServerAddress()),
 		ulog.F("server.work_dir", cfg.Server.WorkDir),
 		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
 		ulog.F("server.pid_file", cfg.Server.PIDFile),
@@ -81,14 +80,9 @@ func main() {
 	}
 	defer server.Cleanup()
 
-	serverAddr := cfg.GetServerAddress()
 	serverUnixSocket := cfg.GetServerUnixSocket()
-	if serverUnixSocket != "" {
-		logger.Info("Starting conchd server", ulog.F("network", "unix"), ulog.F("socket", serverUnixSocket))
-	} else {
-		logger.Info("Starting conchd server", ulog.F("network", "tcp"), ulog.F("address", serverAddr))
-	}
-	if err := server.Start(serverAddr, serverUnixSocket); err != nil {
+	logger.Info("Starting conchd server", ulog.F("network", "unix"), ulog.F("socket", serverUnixSocket))
+	if err := server.Start(serverUnixSocket); err != nil {
 		logger.Error("Failed to start server", ulog.F("error", err))
 		server.Cleanup()
 		os.Exit(1)

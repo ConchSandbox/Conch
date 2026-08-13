@@ -21,7 +21,7 @@ func PrintImagePullHelp(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -api-url string")
-	fmt.Fprintln(out, "        conchd API base URL (default: config server endpoint or http://localhost:4063)")
+	fmt.Fprintln(out, "        conchd API base URL (default: conchd unix socket from config)")
 	fmt.Fprintln(out, "  -address string")
 	fmt.Fprintln(out, "        deprecated alias for -api-url")
 	fmt.Fprintln(out, "  -config string")
