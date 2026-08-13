@@ -50,6 +50,7 @@ func SandboxSocketPath(subDir, sandboxId string) (string, error) {
 
 type Process struct {
 	cmd             *exec.Cmd
+	SandboxId       string
 	VmmSocketPath   string
 	VsockSocketPath string
 	apiReadyMu      sync.Mutex
@@ -100,6 +101,7 @@ func NewProcess(
 	}
 
 	p := Process{
+		SandboxId:       sandboxId,
 		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
 		VmmSocketPath:   vmmSocketPath,
 		adapter:         adapter,
@@ -219,6 +221,7 @@ func (p *Process) Create(ctx context.Context) error {
 }
 
 func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
+	defer ulog.TraceCost(ulog.TraceStart(), p.SandboxId, "Restore()")
 	logger := ulog.GetLogger()
 
 	logger.Info("Restoring VMM from snapshot",

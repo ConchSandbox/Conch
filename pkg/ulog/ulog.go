@@ -77,6 +77,8 @@ func F(key string, value interface{}) Field {
 // ulog implements the Logger interface
 type ulog struct {
 	mu          sync.Mutex
+
+	// log level should init once, and not change at runtime.
 	level       LogLevel
 	output      *os.File
 	filePath    string
@@ -370,6 +372,31 @@ func With(fields ...Field) Logger {
 	return GetLogger().With(fields...)
 }
 
+func debugEnabled() bool {
+	logger := GetLogger()
+	levelProvider, ok := logger.(interface{ GetLevel() LogLevel })
+	return !ok || levelProvider.GetLevel() <= DebugLevel
+}
+
+func TraceStart() time.Time {
+	if !debugEnabled() {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
+func TraceCost(start time.Time, traceid string, msg string) time.Time {
+	if !debugEnabled() {
+		return time.Time{}
+	}
+	ms := float64(time.Since(start).Microseconds()) / 1000.0
+	GetLogger().Debug(msg,
+		F("traceid", traceid),
+		F("from", start.Format("05.000")),
+		F("cost", fmt.Sprintf("%.3fms", ms)))
+	return time.Now()
+}
+
 // WithContext returns a new logger with context fields
 func WithContext(ctx context.Context) Logger {
 	return GetLogger().WithContext(ctx)
@@ -611,13 +638,6 @@ func (l *ulog) Close() error {
 // GetFilePath returns the current log file path
 func (l *ulog) GetFilePath() string {
 	return l.filePath
-}
-
-// SetLevel sets the log level
-func (l *ulog) SetLevel(level LogLevel) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.level = level
 }
 
 // GetLevel returns the current log level

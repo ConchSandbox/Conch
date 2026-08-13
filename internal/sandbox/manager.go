@@ -515,6 +515,7 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 }
 
 func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, runtimeIDs createRuntimeIDs) (PreparedBoot, error) {
+	defer ulog.TraceCost(ulog.TraceStart(), req.SandboxID, "prepareSandboxBoot()")
 	if m.boot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}

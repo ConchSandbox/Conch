@@ -418,6 +418,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
+	defer ulog.TraceCost(ulog.TraceStart(), req.SandboxID, "handleCreateSandbox()")
 	if req.RAMMB != 0 && req.RAMMB < minimumSandboxRAMMB {
 		message := fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB)
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(errors.New(message), message))

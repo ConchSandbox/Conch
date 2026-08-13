@@ -311,36 +311,6 @@ func TestLoggerLevelFiltering(t *testing.T) {
 	}
 }
 
-func TestLoggerSetLevel(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	err := Init(Config{
-		Level:      ErrorLevel,
-		OutputPath: tmpDir,
-		Stdout:     false,
-	})
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	logger := GetLogger()
-	if ulog, ok := logger.(*ulog); ok {
-		// Check initial level
-		if ulog.GetLevel() != ErrorLevel {
-			t.Errorf("Initial level = %v, want %v", ulog.GetLevel(), ErrorLevel)
-		}
-
-		// Change level
-		ulog.SetLevel(DebugLevel)
-		if ulog.GetLevel() != DebugLevel {
-			t.Errorf("Updated level = %v, want %v", ulog.GetLevel(), DebugLevel)
-		}
-
-		// Cleanup
-		_ = ulog.Close()
-	}
-}
-
 func TestField(t *testing.T) {
 	field := F("key", "value")
 	if field.Key != "key" {

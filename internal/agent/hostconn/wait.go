@@ -42,6 +42,7 @@ type initConn interface {
 }
 
 func WaitReady(ctx context.Context, opts ReadyOptions) error {
+	defer ulog.TraceCost(ulog.TraceStart(), opts.SandboxID, "WaitReady()")
 	logger := ulog.GetLogger()
 	request, err := ValidateReadyRequest(opts)
 	if err != nil {
