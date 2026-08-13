@@ -25,7 +25,6 @@ dependencies = [
     "connectrpc==0.11.0",
     "protoc-gen-connect-python==0.9.0",
     "protobuf>=4.21.0",
-    "PyYAML>=5.4.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +44,3 @@ zip-safe = false
 
 [tool.setuptools.exclude-package-data]
 "*" = ["__pycache__/*", "*.pyc"]
-
-[project.scripts]
-conch-sdk-init-config = "conch.init_config:main"

@@ -71,20 +71,10 @@ func TestGetLogConfig(t *testing.T) {
 	}
 }
 
-func TestGetServerAddress(t *testing.T) {
-	cfg := &Config{
-		Server: ServerConfig{Host: "127.0.0.1", Port: 9999},
-	}
-	expected := "127.0.0.1:9999"
-	if got := cfg.GetServerAddress(); got != expected {
-		t.Errorf("GetServerAddress() = %q, want %q", got, expected)
-	}
-}
-
 func TestGetServerUnixSocket(t *testing.T) {
 	socketPath := "/var/run/conchd/conchd.sock"
 	cfg := &Config{
-		Server: ServerConfig{UnixSocket: &socketPath},
+		Server: ServerConfig{UnixSocket: socketPath},
 	}
 	if got := cfg.GetServerUnixSocket(); got != socketPath {
 		t.Errorf("GetServerUnixSocket() = %q, want %q", got, socketPath)
@@ -125,7 +115,7 @@ func TestLoadConfig(t *testing.T) {
 	data := []byte(
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
-			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
+			"server:\n  unix_socket: /tmp/conchd-test.sock\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n" +
 			"vmm:\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
 			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: cloud-hypervisor\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
@@ -151,14 +141,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Log.Output != "both" {
 		t.Errorf("LoadConfig().Log.Output = %q, want %q", cfg.Log.Output, "both")
 	}
-	if cfg.Server.Host != "127.0.0.1" {
-		t.Errorf("LoadConfig().Server.Host = %q, want %q", cfg.Server.Host, "127.0.0.1")
-	}
-	if cfg.Server.Port != 4567 {
-		t.Errorf("LoadConfig().Server.Port = %d, want %d", cfg.Server.Port, 4567)
-	}
-	if cfg.GetServerUnixSocket() != "" {
-		t.Errorf("LoadConfig().Server.UnixSocket = %q, want empty", cfg.GetServerUnixSocket())
+	if cfg.GetServerUnixSocket() != "/tmp/conchd-test.sock" {
+		t.Errorf("LoadConfig().Server.UnixSocket = %q, want %q", cfg.GetServerUnixSocket(), "/tmp/conchd-test.sock")
 	}
 	if cfg.Server.PIDFile != "/tmp/conchd.pid" {
 		t.Errorf("LoadConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/tmp/conchd.pid")
@@ -436,8 +420,8 @@ func TestDefaultConfigNetworkSettings(t *testing.T) {
 func TestDefaultConfigContainerdSettings(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Server.UnixSocket == nil || *cfg.Server.UnixSocket != "/var/run/conchd/conchd.sock" {
-		t.Errorf("DefaultConfig().Server.UnixSocket = %v, want %q", cfg.Server.UnixSocket, "/var/run/conchd/conchd.sock")
+	if cfg.Server.UnixSocket != "/var/run/conchd/conchd.sock" {
+		t.Errorf("DefaultConfig().Server.UnixSocket = %q, want %q", cfg.Server.UnixSocket, "/var/run/conchd/conchd.sock")
 	}
 	if cfg.Server.PIDFile != "/var/run/conchd/conchd.pid" {
 		t.Errorf("DefaultConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/var/run/conchd/conchd.pid")

@@ -9,12 +9,10 @@ log:
   output: stdout
 
 server:
-  # If unix_socket is set as empty, conchd listens on host:port via TCP. Otherwise, conchd listens on local socket by default
+  # conchd serves the API on this local Unix socket only; leave it empty to use the built-in default path
   unix_socket: /var/run/conchd/conchd.sock
   pid_file: /var/run/conchd/conchd.pid
   work_dir: /var/run/conch
-  host: 127.0.0.1
-  port: 4063
 
 network:
   # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250

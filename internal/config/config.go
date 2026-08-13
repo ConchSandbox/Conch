@@ -42,13 +42,12 @@ type LogConfig struct {
 	Output string `yaml:"output"` // "stdout", "file", or "both"
 }
 
-// ServerConfig holds server configuration
+// ServerConfig holds server configuration. conchd only ever serves the API on
+// a local Unix socket; there is no TCP listener.
 type ServerConfig struct {
-	Host       string  `yaml:"host"`
-	Port       int     `yaml:"port"`
-	UnixSocket *string `yaml:"unix_socket"`
-	PIDFile    string  `yaml:"pid_file"`
-	WorkDir    string  `yaml:"work_dir"`
+	UnixSocket string `yaml:"unix_socket"`
+	PIDFile    string `yaml:"pid_file"`
+	WorkDir    string `yaml:"work_dir"`
 }
 
 // NetworkConfig holds network pool configuration
@@ -134,9 +133,7 @@ func DefaultConfig() *Config {
 			Output: "stdout",
 		},
 		Server: ServerConfig{
-			Host:       "127.0.0.1",
-			Port:       4063,
-			UnixSocket: &defaultUnixSocket,
+			UnixSocket: defaultUnixSocket,
 			PIDFile:    defaultPIDFile,
 			WorkDir:    defaultWorkDir,
 		},
@@ -233,13 +230,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Log.Output == "" {
 		cfg.Log.Output = defaultCfg.Log.Output
 	}
-	if cfg.Server.Host == "" {
-		cfg.Server.Host = defaultCfg.Server.Host
-	}
-	if cfg.Server.Port == 0 {
-		cfg.Server.Port = defaultCfg.Server.Port
-	}
-	if cfg.Server.UnixSocket == nil {
+	if strings.TrimSpace(cfg.Server.UnixSocket) == "" {
 		cfg.Server.UnixSocket = defaultCfg.Server.UnixSocket
 	}
 	if cfg.Server.PIDFile == "" {
@@ -414,17 +405,12 @@ func (c *Config) GetLogConfig() (ulog.Config, error) {
 	}, nil
 }
 
-// GetServerAddress returns the server address in "host:port" format
-func (c *Config) GetServerAddress() string {
-	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
-}
-
-// GetServerUnixSocket returns the configured unix socket path when explicitly set.
+// GetServerUnixSocket returns the unix socket path the API is served on.
 func (c *Config) GetServerUnixSocket() string {
-	if c == nil || c.Server.UnixSocket == nil {
+	if c == nil {
 		return ""
 	}
-	return *c.Server.UnixSocket
+	return strings.TrimSpace(c.Server.UnixSocket)
 }
 
 // parseLogLevel converts string log level to ulog.LogLevel
