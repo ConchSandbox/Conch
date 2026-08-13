@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
@@ -437,4 +441,60 @@ func serveSandboxRequest(server *Daemon, method, path string, body io.Reader) *h
 	recorder := httptest.NewRecorder()
 	server.router.ServeHTTP(recorder, httptest.NewRequest(method, path, body))
 	return recorder
+}
+
+// Mutates the process-global umask, so it must not run in parallel.
+func startUnixSocketDaemon(t *testing.T, ambientUmask int) string {
+	t.Helper()
+	previous := unix.Umask(ambientUmask)
+	t.Cleanup(func() { unix.Umask(previous) })
+
+	// sun_path is capped at 108 bytes, which a t.TempDir() name can overflow.
+	dir, err := os.MkdirTemp("", "conchsock")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := filepath.Join(dir, "conchd.sock")
+	server := &Daemon{router: http.NewServeMux()}
+	go func() { _ = server.Start(path) }()
+	t.Cleanup(server.Shutdown)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("unix socket %s was never created", path)
+	return ""
+}
+
+// Ambient umask 0 is the case the fix exists for: bind(2) would land at 0777,
+// and connect(2) needs only the write bit.
+func TestStartCreatesUnixSocketAt0660(t *testing.T) {
+	for _, ambientUmask := range []int{0, 0o011, 0o022, 0o077} {
+		path := startUnixSocketDaemon(t, ambientUmask)
+
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("umask %04o: stat socket: %v", ambientUmask, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o660 {
+			t.Errorf("umask %04o: socket mode = %04o, want 0660", ambientUmask, mode)
+		}
+		if restored := unix.Umask(ambientUmask); restored != ambientUmask {
+			t.Errorf("umask %04o: process umask left at %04o", ambientUmask, restored)
+		}
+
+		// Without this, the mode assertion would also pass on a socket that
+		// nobody can reach.
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			t.Fatalf("umask %04o: dial socket: %v", ambientUmask, err)
+		}
+		_ = conn.Close()
+	}
 }
