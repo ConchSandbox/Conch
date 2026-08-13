@@ -261,6 +261,16 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			wantErr: "sandbox.default_spec.ram_mb",
 		},
 		{
+			name:    "default vcpu exceeds maximum",
+			data:    "sandbox:\n  default_spec:\n    vcpu_num: 65\n    vcpu_max: 65\n",
+			wantErr: "sandbox.default_spec CPU",
+		},
+		{
+			name:    "default ram exceeds maximum",
+			data:    "sandbox:\n  default_spec:\n    ram_mb: 262145\n",
+			wantErr: "sandbox.default_spec.ram_mb",
+		},
+		{
 			name:    "unsupported volume backend",
 			data:    "volume:\n  backend: 9p\n",
 			wantErr: "volume.backend",

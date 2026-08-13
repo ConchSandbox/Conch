@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"gopkg.in/yaml.v3"
 )
@@ -281,11 +282,14 @@ func validateConfig(cfg *Config) error {
 	if backend != "" && backend != defaultVolumeBackend {
 		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)
 	}
-	if cfg.Sandbox.DefaultSpec.VCPUNum < 1 || cfg.Sandbox.DefaultSpec.VCPUMax < cfg.Sandbox.DefaultSpec.VCPUNum {
+	if cfg.Sandbox.DefaultSpec.VCPUNum < 1 ||
+		cfg.Sandbox.DefaultSpec.VCPUMax < cfg.Sandbox.DefaultSpec.VCPUNum ||
+		cfg.Sandbox.DefaultSpec.VCPUNum > runtimeapi.SandboxMaxVCPU ||
+		cfg.Sandbox.DefaultSpec.VCPUMax > runtimeapi.SandboxMaxVCPU {
 		return fmt.Errorf("invalid sandbox.default_spec CPU configuration")
 	}
-	if cfg.Sandbox.DefaultSpec.RamMB < 1 {
-		return fmt.Errorf("invalid sandbox.default_spec.ram_mb=%d: must be positive", cfg.Sandbox.DefaultSpec.RamMB)
+	if cfg.Sandbox.DefaultSpec.RamMB < 1 || cfg.Sandbox.DefaultSpec.RamMB > runtimeapi.SandboxMaxRAMMB {
+		return fmt.Errorf("invalid sandbox.default_spec.ram_mb=%d: must be between 1 and %d", cfg.Sandbox.DefaultSpec.RamMB, runtimeapi.SandboxMaxRAMMB)
 	}
 	if err := validateVMMBinaryConfig("cloud_hypervisor", cfg.Sandbox.CloudHypervisor); err != nil {
 		return err

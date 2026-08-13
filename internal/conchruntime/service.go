@@ -146,6 +146,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if opts.RamMB < 1 {
 		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
 	}
+	if err := s.validateSandboxLimits(opts); err != nil {
+		return SandboxCreateResult{}, err
+	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err
 	}
@@ -223,6 +226,22 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:      opts.RamMB,
 		CreatedAt:  createdAt,
 	}, nil
+}
+
+func (s *Service) validateSandboxLimits(opts SandboxCreateOptions) error {
+	if opts.VCPUNum > runtimeapi.SandboxMaxVCPU || opts.VCPUMax > runtimeapi.SandboxMaxVCPU {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested vcpu_num=%d and vcpu_max=%d exceed maximum %d",
+			opts.VCPUNum, opts.VCPUMax, runtimeapi.SandboxMaxVCPU,
+		))
+	}
+	if opts.RamMB > runtimeapi.SandboxMaxRAMMB {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested ram_mb=%d exceeds maximum %d",
+			opts.RamMB, runtimeapi.SandboxMaxRAMMB,
+		))
+	}
+	return nil
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {

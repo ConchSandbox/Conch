@@ -52,6 +52,13 @@ type SandboxDefaults struct {
 	RamMB      int64
 }
 
+// Sandbox admission limits are intentionally fixed and are not part of the
+// operator configuration surface.
+const (
+	SandboxMaxVCPU  int64 = 64
+	SandboxMaxRAMMB int64 = 256 * 1024
+)
+
 type SandboxCreateResult struct {
 	SandboxID  string
 	IP         string

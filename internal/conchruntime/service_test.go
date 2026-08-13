@@ -21,6 +21,7 @@ import (
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -761,6 +762,32 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	}
 	if sandboxOps.req.VCPUNum != 6 || sandboxOps.req.VCPUMax != 8 || sandboxOps.req.RAMMB != 8192 {
 		t.Fatalf("resources = vcpu:%d max:%d ram:%d", sandboxOps.req.VCPUNum, sandboxOps.req.VCPUMax, sandboxOps.req.RAMMB)
+	}
+}
+
+func TestCreateSandboxEnforcesResourceLimits(t *testing.T) {
+	tests := []struct {
+		name string
+		opts SandboxCreateOptions
+	}{
+		{name: "vcpu number", opts: SandboxCreateOptions{VCPUNum: runtimeapi.SandboxMaxVCPU + 1, VCPUMax: runtimeapi.SandboxMaxVCPU + 1, RamMB: 1024}},
+		{name: "vcpu maximum", opts: SandboxCreateOptions{VCPUNum: 2, VCPUMax: runtimeapi.SandboxMaxVCPU + 1, RamMB: 1024}},
+		{name: "memory", opts: SandboxCreateOptions{VCPUNum: 2, VCPUMax: 2, RamMB: runtimeapi.SandboxMaxRAMMB + 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeSandboxOps{}
+			svc := New(ops, nil, nil)
+			svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
+			tt.opts.SandboxID = "sandbox-limited"
+			_, err := svc.CreateSandbox(context.Background(), tt.opts)
+			if !errors.Is(err, sandbox.ErrResourceExhausted) {
+				t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrResourceExhausted", err)
+			}
+			if ops.createCalls != 0 {
+				t.Fatalf("runtime Create() calls = %d, want 0", ops.createCalls)
+			}
+		})
 	}
 }
 
