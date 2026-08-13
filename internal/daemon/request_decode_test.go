@@ -3,13 +3,17 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/conchruntime"
 )
 
@@ -35,6 +39,40 @@ func TestDecodeStrictJSON(t *testing.T) {
 				t.Fatalf("decodeStrictJSON() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestDecodeJSONBodyRejectsOversizedRequest(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat(" ", maxJSONBodyBytes+1)))
+	var out map[string]any
+
+	if decodeJSONBody(recorder, request, &out) {
+		t.Fatal("decodeJSONBody() accepted oversized request")
+	}
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response apiErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.Code != errRequestBodyTooLarge.Code() {
+		t.Fatalf("body = %q, decoded = %#v, error = %v", recorder.Body.String(), response, err)
+	}
+}
+
+func TestWriteLimitedFileRejectsOversizedInputAndRemovesPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upload")
+	err := writeLimitedFile(path, strings.NewReader("123456"), 5)
+	if err == nil {
+		t.Fatal("writeLimitedFile() accepted oversized input")
+	}
+	if !errors.Is(err, errRequestBodyTooLarge.New()) {
+		var appErr *apperror.Error
+		if !errors.As(err, &appErr) || appErr.Code() != errRequestBodyTooLarge.Code() {
+			t.Fatalf("writeLimitedFile() error = %v, want %s", err, errRequestBodyTooLarge.Code())
+		}
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("partial file remains: stat error = %v", statErr)
 	}
 }
 

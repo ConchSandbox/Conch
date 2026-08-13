@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	pb "github.com/openeuler/Conch/api/go_proto"
@@ -24,11 +25,20 @@ const (
 	fileGetFileStreamPath   = agentconnect.FileServiceGetFileStreamProcedure
 	fileListFilesPath       = agentconnect.FileServiceListFilesProcedure
 	fileSearchFilesPath     = agentconnect.FileServiceSearchFilesProcedure
+	agentReadHeaderTimeout  = 10 * time.Second
+	agentIdleTimeout        = 60 * time.Second
+	agentMaxHeaderBytes     = 64 << 10
+	agentMaxConcurrentRPCs  = 128
 )
 
 func serveAgentAPI(listener net.Listener) error {
 	httpServer := &http.Server{
-		Handler: h2c.NewHandler(newAgentHTTPHandler(), &http2.Server{}),
+		Handler: h2c.NewHandler(newAgentHTTPHandler(), &http2.Server{
+			MaxConcurrentStreams: agentMaxConcurrentRPCs,
+		}),
+		ReadHeaderTimeout: agentReadHeaderTimeout,
+		IdleTimeout:       agentIdleTimeout,
+		MaxHeaderBytes:    agentMaxHeaderBytes,
 	}
 	return httpServer.Serve(listener)
 }
