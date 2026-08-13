@@ -4,6 +4,7 @@ import os
 import sys
 import subprocess
 import time
+import ipaddress
 
 from conch import Sandbox
 
@@ -92,7 +93,16 @@ def run_claude_once(box, ip):
     print(f'claude stderr: {result.stderr}')
 
 def run_claude_tui(box, ip):
-    os.system(f'ssh root@{ip}')
+    address = str(ipaddress.IPv4Address(ip))
+    subprocess.run([
+        "ssh",
+        "-t",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"root@{address}",
+    ], check=True)
 
 def main():
     if __name__ != '__main__':
