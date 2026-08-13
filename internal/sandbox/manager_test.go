@@ -73,6 +73,80 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	}
 }
 
+func TestTrackVirtiofsExitCleansSandbox(t *testing.T) {
+	cleanupDone := make(chan struct{})
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error {
+		close(cleanupDone)
+		return nil
+	})
+
+	done := make(chan struct{})
+	m.trackVirtiofs("sandbox-a", entry, "sandbox-a", sbx, done)
+	close(done)
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("sandbox cleanup was not triggered after virtiofsd exit")
+	}
+	entry.mu.Lock()
+	entry.mu.Unlock()
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("sandbox entry remains after virtiofsd exit")
+	}
+}
+
+func TestTrackVirtiofsExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
+	cleanupCalls := 0
+	cleanupStarted := make(chan struct{})
+	continueCleanup := make(chan struct{})
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error {
+		cleanupCalls++
+		close(cleanupStarted)
+		<-continueCleanup
+		return nil
+	})
+
+	done := make(chan struct{})
+	m.trackVirtiofs("sandbox-a", entry, "sandbox-a", sbx, done)
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- m.Delete(DeleteRequest{SandboxID: "sandbox-a"})
+	}()
+
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Delete did not start sandbox cleanup")
+	}
+	close(done)
+	close(continueCleanup)
+
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("Delete() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Delete blocked after virtiofsd exit")
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("sandbox cleanup calls = %d, want 1", cleanupCalls)
+	}
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("sandbox entry remains after Delete")
+	}
+}
+
+func newExitTestSandbox(cleanup func(context.Context) error) (*Manager, *sandboxEntry, *Sandbox) {
+	m := &Manager{boot: &recordingBootPreparer{}, cidAllocator: NewCIDAllocator()}
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	sbx.cleanup.Add(cleanup)
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
+	m.sandboxes.Store("sandbox-a", entry)
+	return m, entry, sbx
+}
+
 func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
 	tests := []struct {
 		name            string

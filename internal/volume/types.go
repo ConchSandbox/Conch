@@ -43,6 +43,7 @@ type PrepareRequest struct {
 type Backend interface {
 	Name() string
 	Prepare(req PrepareRequest) ([]Device, error)
+	Exited(sandboxID string) <-chan struct{}
 	Cleanup(sandboxID string, devices []Device) error
 	CleanupStaleResources() error
 }

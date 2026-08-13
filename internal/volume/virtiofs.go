@@ -38,6 +38,36 @@ type virtiofsBackend struct {
 	procs      sync.Map
 }
 
+type virtiofsProcess struct {
+	process *os.Process
+	done    chan struct{}
+}
+
+func watchVirtiofs(cmd *exec.Cmd) *virtiofsProcess {
+	process := &virtiofsProcess{
+		process: cmd.Process,
+		done:    make(chan struct{}),
+	}
+	go func() {
+		_ = cmd.Wait()
+		close(process.done)
+	}()
+	return process
+}
+
+func (p *virtiofsProcess) Done() <-chan struct{} {
+	return p.done
+}
+
+func (p *virtiofsProcess) KillAndWait() error {
+	err := p.process.Kill()
+	if err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	<-p.done
+	return nil
+}
+
 func NewVirtiofsBackend(cfg VirtiofsConfig) Backend {
 	if strings.TrimSpace(cfg.Binary) == "" {
 		cfg.Binary = DefaultBinary
@@ -142,13 +172,13 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		cleanup()
 		return nil, fmt.Errorf("start virtiofsd for sandbox %s: %w", req.SandboxID, err)
 	}
+	process := watchVirtiofs(cmd)
 	if err := waitUnixSocket(socket, socketReadyTimeout); err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		_ = process.KillAndWait()
 		cleanup()
 		return nil, fmt.Errorf("wait virtiofsd socket %s: %w", socket, err)
 	}
-	b.procs.Store(req.SandboxID, cmd)
+	b.procs.Store(req.SandboxID, process)
 
 	return []Device{{
 		SandboxID:  req.SandboxID,
@@ -157,9 +187,21 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		Socket:     socket,
 		VolumeDir:  volumeDir,
 		ConfigPath: configPath,
-		PID:        cmd.Process.Pid,
-		StartTime:  processStartTicks(cmd.Process.Pid),
+		PID:        process.process.Pid,
+		StartTime:  processStartTicks(process.process.Pid),
 	}}, nil
+}
+
+func (b *virtiofsBackend) Exited(sandboxID string) <-chan struct{} {
+	value, ok := b.procs.Load(sandboxID)
+	if !ok {
+		return nil
+	}
+	process, ok := value.(*virtiofsProcess)
+	if !ok {
+		return nil
+	}
+	return process.Done()
 }
 
 func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
@@ -172,11 +214,10 @@ func (b *virtiofsBackend) Cleanup(sandboxID string, devices []Device) error {
 	var errs []error
 
 	if v, ok := b.procs.LoadAndDelete(sandboxID); ok {
-		if cmd, ok := v.(*exec.Cmd); ok && cmd.Process != nil {
-			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
+		if process, ok := v.(*virtiofsProcess); ok {
+			if killErr := process.KillAndWait(); killErr != nil {
 				errs = append(errs, fmt.Errorf("kill virtiofsd: %w", killErr))
 			}
-			_, _ = cmd.Process.Wait()
 		}
 	} else {
 		for _, device := range devices {

@@ -67,6 +67,10 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, er
 	})
 }
 
+func (m *Manager) Exited(sandboxID string) <-chan struct{} {
+	return m.backend.Exited(sandboxID)
+}
+
 func (m *Manager) CleanupSandbox(sandboxID string, devices []Device) error {
 	return m.backend.Cleanup(sandboxID, devices)
 }
