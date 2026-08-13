@@ -4,6 +4,7 @@ from enum import Enum
 from io import IOBase, TextIOBase
 from typing import IO, Callable, Iterator, Optional, Dict, Any, List, Tuple, Literal, overload, TypedDict, Union
 from dataclasses import dataclass, field
+from functools import lru_cache
 from urllib.parse import quote, quote_plus
 import requests
 import requests_unixsocket
@@ -12,17 +13,12 @@ import secrets
 
 # Try relative imports first (when imported as a package), fall back to absolute imports
 from .client import AgentClient
-from .config_loader import load_config
 from .errors import InvalidArgumentError, NotFoundError, SandboxError
 
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
 TEMPLATE_ID_KEY = "template_id"
-VMM_NAME_KEY = "vmm_name"
-VCPU_NUM_KEY = "vcpu_num"
-VCPU_MAX_KEY = "vcpu_max"
-RAM_MB_KEY = "ram_mb"
 STATUS_KEY = "status"
 MESSAGE_KEY = "message"
 
@@ -30,11 +26,8 @@ TEMPLATE_ID_RESP_KEY = "template_id"
 VOLUME_MOUNTS_KEY = "volumeMounts"
 
 
-# Config keys
-CFG_SANDBOX_SECTION = "sandbox"
-CFG_IMAGE_SECTION = "image"
-CFG_UNIX_SOCKET_KEY = "unix_socket"
-CFG_API_URL_KEY = "api_url"
+# Control plane endpoint: conchd listens on this local Unix socket by default
+DEFAULT_UNIX_SOCKET = "/var/run/conchd/conchd.sock"
 
 # API paths
 SANDBOX_COLLECTION_PATH = "/api/v1/sandboxes"
@@ -55,6 +48,15 @@ UNKNOWN_EXIT_CODE = -1
 
 def generate_random_id(prefix: str = "sandbox_") -> str:
     return prefix + secrets.token_hex(RANDOM_ID_HEX_BYTES)
+
+
+@lru_cache(maxsize=1)
+def warn_onproxy():
+    """Warn once per process: a proxy usually breaks local conchd requests."""
+    if os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY'):
+        print('warning: http proxy enabled')
+    if os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY'):
+        print('warning: https proxy enabled')
 
 
 def _request_exception_message(exc: requests.exceptions.RequestException) -> str:
@@ -647,20 +649,16 @@ class Sandbox:
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
             env: Optional[Dict[str, str]] = None,
             network: Optional[Dict[str, Any]] = None,
+            vmm_name: Optional[str] = None,
     ):
-        self._config: Dict[str, Any] = load_config()
-        sandbox_cfg = self._config[CFG_SANDBOX_SECTION]
+        warn_onproxy()
 
-        configured_unix_socket = sandbox_cfg.get(CFG_UNIX_SOCKET_KEY, "")
-        configured_api_url = sandbox_cfg.get(CFG_API_URL_KEY, "")
-        self.unix_socket = configured_unix_socket
-        self.api_url = configured_api_url.rstrip('/')
-        self._session = requests_unixsocket.Session() if self.unix_socket else requests.Session()
+        self.unix_socket = DEFAULT_UNIX_SOCKET
+        self._session = requests_unixsocket.Session()
 
-        config_sandbox_id = sandbox_cfg.get(SANDBOX_ID_KEY, "")
-        self.sandbox_id = sandbox_id or config_sandbox_id or generate_random_id()
-        # Template defaulting belongs to conchd. SDK configuration must not
-        # override sandbox.default_template_id when the caller omits the ID.
+        self.sandbox_id = sandbox_id or generate_random_id()
+        # Template defaulting belongs to conchd. The SDK must not override
+        # sandbox.default_template_id when the caller omits the ID.
         self.template_id = template_id
 
         self.ip = None
@@ -670,6 +668,8 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
+        # Empty means conchd picks its configured sandbox.default_vmm_name.
+        self.vmm_name = vmm_name
         self.image_name = None
         self.snapshot_id = None
         self.started_at = None
@@ -700,21 +700,13 @@ class Sandbox:
             self.control_plane_only = False
 
     def _build_control_plane_url(self, path: str) -> str:
-        if self.unix_socket:
-            encoded_socket = quote_plus(self.unix_socket)
-            return f"http+unix://{encoded_socket}{path}"
-        if self.api_url:
-            return f"{self.api_url}{path}"
-        raise ValueError("Either sandbox.unix_socket or sandbox.api_url must be configured")
+        return f"http+unix://{quote_plus(self.unix_socket)}{path}"
 
     def _post_control_plane_requests(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self._build_control_plane_url(path)
         response = self._session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
-
-    def _get_vmm_name(self) -> str:
-        return self._config[CFG_IMAGE_SECTION].get(VMM_NAME_KEY, "")
 
     def _get_control_plane_response(self, path: str):
         response = self._session.get(self._build_control_plane_url(path))
@@ -745,16 +737,22 @@ class Sandbox:
         return {} if response.status_code == HTTP_NO_CONTENT else response.json()
 
     def _build_create_payload(self) -> Dict[str, Any]:
-        config = self._config[CFG_IMAGE_SECTION]
-        payload = {
-            VMM_NAME_KEY: self._get_vmm_name(),
+        # Resource fields are omitted when unset so conchd applies its own
+        # sandbox.default_vcpu_num / default_vcpu_max / default_ram_mb.
+        payload: Dict[str, Any] = {
             SANDBOX_ID_KEY: self.sandbox_id,
-            VCPU_NUM_KEY: self.vcpu_num or config[VCPU_NUM_KEY],
-            VCPU_MAX_KEY: self.vcpu_max or config[VCPU_MAX_KEY],
-            RAM_MB_KEY: self.ram_mb or config[RAM_MB_KEY],
         }
+        if self.vcpu_num:
+            payload["vcpu_num"] = self.vcpu_num
+        if self.vcpu_max:
+            payload["vcpu_max"] = self.vcpu_max
+        if self.ram_mb:
+            payload["ram_mb"] = self.ram_mb
         if self.template_id and self.template_id.strip():
             payload[TEMPLATE_ID_KEY] = self.template_id
+        # conchd matches the VMM name verbatim, so trim before sending.
+        if self.vmm_name and self.vmm_name.strip():
+            payload["vmm_name"] = self.vmm_name.strip()
         if self.volume_mounts:
             payload[VOLUME_MOUNTS_KEY] = self.volume_mounts
         if self.env is not None:
@@ -833,7 +831,7 @@ class Sandbox:
         try:
             sbx = cls()
             return sbx._get_control_plane_response(SERVICE_HEALTH_PATH).status_code == HTTP_NO_CONTENT
-        except (requests.exceptions.RequestException, ValueError, FileNotFoundError, KeyError):
+        except requests.exceptions.RequestException:
             return False
 
     @classmethod
@@ -953,6 +951,7 @@ class Sandbox:
             volume_mounts: Optional[List[Dict[str, Any]]] = None,
             env: Optional[Dict[str, str]] = None,
             network: Optional[Dict[str, Any]] = None,
+            vmm_name: Optional[str] = None,
     ) -> "Sandbox":
         sbx = cls(
             sandbox_id=sandbox_id,
@@ -963,6 +962,7 @@ class Sandbox:
             volume_mounts=volume_mounts,
             env=env,
             network=network,
+            vmm_name=vmm_name,
         )
         return sbx._do_create()
 

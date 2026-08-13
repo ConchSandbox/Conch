@@ -1,6 +1,8 @@
+import os
+
+import pytest
+
 from conch import Sandbox
-from conch.config_loader import load_config
-from conch.sandbox import VMM_NAME_KEY
 
 
 def test_create_default(sandbox):
@@ -12,7 +14,9 @@ def test_create_default(sandbox):
 
 def test_create_with_template_id():
     """Create sandbox with specified source."""
-    template_id = load_config()["sandbox"]["template_id"]
+    template_id = os.getenv("CONCH_TEST_TEMPLATE_ID")
+    if not template_id:
+        pytest.skip("set CONCH_TEST_TEMPLATE_ID to run this test")
     sbx = Sandbox.create(template_id=template_id)
     try:
         assert sbx.sandbox_id is not None
@@ -46,26 +50,63 @@ def test_context_manager():
         assert result.exit_code == 0
 
 
-def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
-    config = load_config()
-    config["image"].pop(VMM_NAME_KEY, None)
-
-    monkeypatch.setattr("conch.sandbox.load_config", lambda: config)
+def test_build_create_payload_without_vmm_name_uses_server_default():
     sbx = Sandbox(sandbox_id="sandbox-test", template_id="tmpl_test")
 
     payload = sbx._build_create_payload()
-    assert payload[VMM_NAME_KEY] == ""
+    assert "vmm_name" not in payload
     assert "namespace" not in payload
 
 
-def test_build_create_payload_omits_template_id_for_daemon_default(monkeypatch):
-    config = load_config()
-    config["sandbox"]["template_id"] = "tmpl-client-config-must-not-override-daemon"
-    monkeypatch.setattr("conch.sandbox.load_config", lambda: config)
-
+def test_build_create_payload_omits_template_id_for_daemon_default():
     payload = Sandbox(sandbox_id="sandbox-test")._build_create_payload()
 
     assert "template_id" not in payload
+
+
+def test_build_create_payload_keeps_explicit_vmm_name():
+    payload = Sandbox(
+        sandbox_id="sandbox-test",
+        vmm_name="cloud-hypervisor",
+    )._build_create_payload()
+
+    assert payload["vmm_name"] == "cloud-hypervisor"
+
+
+def test_build_create_payload_trims_vmm_name():
+    payload = Sandbox(
+        sandbox_id="sandbox-test",
+        vmm_name="  stratovirt  ",
+    )._build_create_payload()
+
+    assert payload["vmm_name"] == "stratovirt"
+
+
+def test_build_create_payload_omits_whitespace_vmm_name():
+    payload = Sandbox(sandbox_id="sandbox-test", vmm_name=" \t ")._build_create_payload()
+
+    assert "vmm_name" not in payload
+
+
+def test_build_create_payload_omits_unset_resources_for_daemon_defaults():
+    payload = Sandbox(sandbox_id="sandbox-test")._build_create_payload()
+
+    assert "vcpu_num" not in payload
+    assert "vcpu_max" not in payload
+    assert "ram_mb" not in payload
+
+
+def test_build_create_payload_keeps_explicit_resources():
+    payload = Sandbox(
+        sandbox_id="sandbox-test",
+        vcpu_num=4,
+        vcpu_max=8,
+        ram_mb=8192,
+    )._build_create_payload()
+
+    assert payload["vcpu_num"] == 4
+    assert payload["vcpu_max"] == 8
+    assert payload["ram_mb"] == 8192
 
 
 def test_build_create_payload_omits_whitespace_template_id():

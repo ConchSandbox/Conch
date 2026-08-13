@@ -49,12 +49,12 @@ with Sandbox.create(template_id="tmpl_xxx") as sbx:
 ```text
 Sandbox.create(template_id=None, sandbox_id=None,
                vcpu_num=None, vcpu_max=None, ram_mb=None,
-               volume_mounts=None, env=None, network=None) -> Sandbox
+               volume_mounts=None, env=None, network=None,
+               vmm_name=None) -> Sandbox
 ```
 
 基于 Template 创建沙箱。省略 `template_id` 时，由 conchd 使用
 `sandbox.default_template_id`；该默认值未配置或为空白时，conchd 返回明确的 HTTP 400。
-连接地址由 SDK 配置决定，不属于创建请求参数，也不会写入 HTTP 请求体。
 
 **参数：**
 - `template_id` (str, 可选): 要启动的 `tmpl_xxx`；省略时使用 conchd 默认 Template
@@ -63,12 +63,13 @@ Sandbox.create(template_id=None, sandbox_id=None,
 - `volume_mounts` (list, 可选): 卷挂载配置
 - `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。键不能为空且不能包含 `=` 或 NUL，值不能包含 NUL。沙箱 ID、访问令牌、协议字段、网络配置和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 16 KiB；明显超限的环境会在虚拟机启动前拒绝，完整消息会在发送前再次校验。
 - `network` (dict, 可选): 创建时应用的 IP 级网络策略。支持 `allowOut`、`denyOut`、`allowIn`、`denyIn` 和 `allow_internet_access`。
+- `vmm_name` (str, 可选): 指定 VMM，例如 `stratovirt`、`cloud-hypervisor`；省略时使用 conchd 的 `sandbox.default_vmm_name`。该名称须在 conchd 的 `vmm` 配置段中存在，否则返回 HTTP 400。
 
 控制面请求失败时，SDK 继续抛出 `RuntimeError`（或现有子类）。当 conchd 返回结构化错误时，异常文本为 `<code>: <error>`，例如 `sandbox.invalid_environment: invalid sandbox environment`。其中 `code` 是可供自动化稳定判断的错误码；`error` 是面向用户的文案，不保证跨版本不变。旧服务端的纯文本错误响应仍会原样显示。
 
 **返回：** 成功返回 `Sandbox` 对象。
 
-**异常：** 配置文件不存在时抛出 `FileNotFoundError`；配置格式无效时抛出 `ValueError`；缺少必需的配置段或字段时可能抛出 `KeyError`；请求 conchd 失败时抛出 `RuntimeError`。
+**异常：** 请求 conchd 失败时抛出 `RuntimeError`。
 
 **示例：**
 ```python
@@ -85,8 +86,6 @@ sbx.delete()
 sbx = Sandbox.create(template_id="tmpl_123")
 sbx.commands.run(cmd='python3', content='print("Restored")')
 sbx.delete()
-
-# 自定义配置文件应在进程首次调用 SDK 前通过 CONCH_SDK_CONFIG 设置
 
 # 使用上下文管理器
 with Sandbox.create(template_id="tmpl_123") as sbx:
@@ -164,7 +163,7 @@ sandbox.delete(sandbox_id=None) -> bool
 Sandbox.delete_sandbox(sandbox_id) -> bool
 ```
 
-无需创建实例即可删除指定沙箱。连接地址从 SDK 配置读取，不作为删除请求参数发送。
+无需创建实例即可删除指定沙箱。
 
 **示例：**
 ```python
@@ -563,7 +562,8 @@ print(result)
 ```python
 Sandbox(sandbox_id=None, template_id=None,
         vcpu_num=None, vcpu_max=None, ram_mb=None,
-        volume_mounts=None, env=None, network=None)
+        volume_mounts=None, env=None, network=None,
+        vmm_name=None)
 ```
 
 **主要参数：**
@@ -578,8 +578,9 @@ Sandbox(sandbox_id=None, template_id=None,
 | `volume_mounts` | list | 创建沙箱时使用的卷挂载配置 |
 | `env` | dict | 创建沙箱时传入的环境变量 |
 | `network` | dict | 创建时应用的 IP 级网络策略 |
+| `vmm_name` | str | 指定 VMM，省略时由 conchd 决定 |
 
-**注意：** 构造函数仅初始化本地状态，不创建沙箱。SDK 首次使用时读取配置并在进程内缓存；可通过 `CONCH_SDK_CONFIG` 指定配置文件。控制面地址不属于沙箱操作参数。请使用 `Sandbox.create()` 类方法创建沙箱。
+**注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法创建沙箱。
 
 ---
 

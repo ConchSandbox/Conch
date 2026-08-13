@@ -4,6 +4,9 @@ import requests
 from conch import Sandbox
 import conch.sandbox as sandbox_module
 
+TEST_UNIX_SOCKET = "/run/test/conchd.sock"
+TEST_CONTROL_PLANE_URL = "http+unix://%2Frun%2Ftest%2Fconchd.sock"
+
 
 class FakeResponse:
     def __init__(self, status_code=200, data=None):
@@ -43,12 +46,8 @@ class FakeSession:
 
 
 def test_control_plane_methods_use_configured_endpoint(monkeypatch):
-    monkeypatch.setattr(
-        sandbox_module,
-        "load_config",
-        lambda: {"sandbox": {"api_url": "http://control.example"}},
-    )
-    monkeypatch.setattr(sandbox_module.requests, "Session", lambda: FakeSession())
+    monkeypatch.setattr(sandbox_module, "DEFAULT_UNIX_SOCKET", TEST_UNIX_SOCKET)
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", lambda: FakeSession())
 
     assert Sandbox.service_health() is True
     assert Sandbox.list() == [{"sandboxID": "sandbox-1"}]
@@ -72,12 +71,8 @@ def test_control_plane_transport_failures(monkeypatch):
         def get(self, url, params=None):
             raise requests.ConnectionError("unavailable")
 
-    monkeypatch.setattr(sandbox_module.requests, "Session", FailingSession)
-    monkeypatch.setattr(
-        sandbox_module,
-        "load_config",
-        lambda: {"sandbox": {"api_url": "http://control.example"}},
-    )
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", FailingSession)
+    monkeypatch.setattr(sandbox_module, "DEFAULT_UNIX_SOCKET", TEST_UNIX_SOCKET)
 
     assert Sandbox.service_health() is False
     with pytest.raises(RuntimeError, match="unavailable"):
@@ -109,12 +104,8 @@ def test_control_plane_plain_text_error_fallback():
 
 def test_network_config_is_hydrated_and_updated(monkeypatch):
     session = FakeSession()
-    monkeypatch.setattr(
-        sandbox_module,
-        "load_config",
-        lambda: {"sandbox": {"api_url": "http://control.example"}},
-    )
-    monkeypatch.setattr(sandbox_module.requests, "Session", lambda: session)
+    monkeypatch.setattr(sandbox_module, "DEFAULT_UNIX_SOCKET", TEST_UNIX_SOCKET)
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", lambda: session)
 
     sandbox = Sandbox.get("sandbox-1")
     assert sandbox.network == {"denyOut": ["192.0.2.10"]}
@@ -124,7 +115,7 @@ def test_network_config_is_hydrated_and_updated(monkeypatch):
         allow_internet_access=False,
     ) is True
     assert session.put_request == (
-        "http://control.example/api/v1/sandboxes/sandbox-1/network",
+        TEST_CONTROL_PLANE_URL + "/api/v1/sandboxes/sandbox-1/network",
         {
             "allowOut": ["198.51.100.10"],
             "denyIn": ["203.0.113.0/24"],
