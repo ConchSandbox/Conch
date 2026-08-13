@@ -15,6 +15,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/sandboxid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -70,10 +71,6 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 	if len(req.Mounts) == 0 {
 		return nil, nil
 	}
-	if err := ValidateSegment(req.SandboxID, "sandbox_id"); err != nil {
-		return nil, err
-	}
-
 	runtimeDir := filepath.Join(b.runtimeDir, req.SandboxID)
 	volumeDir := filepath.Join(runtimeDir, volumeDirName)
 	socket := filepath.Join(runtimeDir, socketName)
@@ -251,7 +248,7 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 		return errors.Join(append(errs, err)...)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || ValidateSegment(entry.Name(), "sandbox_id") != nil {
+		if !entry.IsDir() || sandboxid.Validate(entry.Name()) != nil {
 			continue
 		}
 		if cleanupErr := b.Cleanup(entry.Name(), nil); cleanupErr != nil {
