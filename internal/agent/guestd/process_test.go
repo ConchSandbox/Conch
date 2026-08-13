@@ -3,6 +3,7 @@ package guestd
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -94,6 +95,49 @@ func TestStartProcessRejectsStdinWithPTY(t *testing.T) {
 	})
 	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "stdin cannot be used with pty") {
 		t.Fatalf("StartProcess(stdin with pty) error = %v, want InvalidArgument", err)
+	}
+}
+
+func TestPTYSizeBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cfg      *pb.PTY
+		wantCols uint16
+		wantRows uint16
+		wantErr  bool
+	}{
+		{name: "defaults", cfg: nil, wantCols: 80, wantRows: 24},
+		{name: "zero uses defaults", cfg: &pb.PTY{}, wantCols: 80, wantRows: 24},
+		{name: "maximum", cfg: &pb.PTY{Cols: math.MaxUint16, Rows: math.MaxUint16}, wantCols: math.MaxUint16, wantRows: math.MaxUint16},
+		{name: "cols too large", cfg: &pb.PTY{Cols: math.MaxUint16 + 1, Rows: 24}, wantErr: true},
+		{name: "rows too large", cfg: &pb.PTY{Cols: 80, Rows: math.MaxUint16 + 1}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			size, err := ptySize(tc.cfg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("ptySize() error = nil, want boundary error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ptySize() error = %v", err)
+			}
+			if size.Cols != tc.wantCols || size.Rows != tc.wantRows {
+				t.Fatalf("ptySize() = %dx%d, want %dx%d", size.Cols, size.Rows, tc.wantCols, tc.wantRows)
+			}
+		})
+	}
+}
+
+func TestStartProcessRejectsOversizedPTYBeforeExecution(t *testing.T) {
+	server := &AgentServer{}
+	err := startProcessErrorForTest(t, server, &pb.StartProcessRequest{
+		Cmd: "this-command-must-not-run",
+		Pty: &pb.PTY{Cols: math.MaxUint16 + 1, Rows: 24},
+	})
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "invalid pty size") {
+		t.Fatalf("StartProcess(oversized pty) error = %v, want InvalidArgument", err)
 	}
 }
 
