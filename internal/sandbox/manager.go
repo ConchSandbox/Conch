@@ -413,6 +413,10 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	}
 
 	volumesPrepared := len(volumeDevices) > 0
+	var virtiofsExit <-chan struct{}
+	if volumesPrepared {
+		virtiofsExit = volumeDevices[0].Exited
+	}
 	defer func() {
 		if err == nil || !volumesPrepared || m.volumeManager == nil {
 			return
@@ -443,7 +447,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 
 	entry.sbx = sbx
 	entry.state = sandboxReady
-	m.trackSandbox(ctx, mapKey, entry, req.SandboxID, sbx)
+	m.trackSandbox(ctx, mapKey, entry, req.SandboxID, sbx, virtiofsExit)
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
@@ -566,14 +570,22 @@ func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
 	}
 }
 
-func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
+func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox, virtiofsExit <-chan struct{}) {
 	logger := ulog.GetLogger()
 	go func() {
-		waitErr := sbx.Wait(ctx)
-		if waitErr != nil {
-			logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
-		}
+		vmmExit := make(chan struct{})
+		go func() {
+			waitErr := sbx.Wait(ctx)
+			if waitErr != nil {
+				logger.Warn("failed to wait for sandbox, cleaning up", ulog.F("error", waitErr))
+			}
+			close(vmmExit)
+		}()
 
+		select {
+		case <-vmmExit:
+		case <-virtiofsExit:
+		}
 		m.handleSandboxExit(mapKey, entry, sandboxID, sbx)
 	}()
 }
