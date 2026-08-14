@@ -397,6 +397,9 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	result, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
@@ -414,6 +417,8 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 		CheckpointHeadTemplateID:      "tmpl-1",
 		CheckpointHeadBootIndexDigest: bootIndexDigest,
 		IP:                            result.IP,
+		VCPUNum:                       2,
+		RamMB:                         1024,
 	}
 	if rec != want {
 		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
@@ -429,6 +434,9 @@ func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenVMMExited(t *tes
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want READY state persistence failure")
 	}
@@ -446,6 +454,9 @@ func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenVMMExitIsUnconfi
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want READY state persistence failure")
 	}
@@ -462,6 +473,9 @@ func TestCreateSandboxFailureDeletesCreatingRecordAfterSuccessfulCleanup(t *test
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want create failure")
 	}
@@ -479,6 +493,9 @@ func TestCreateSandboxFailureDeletesCreatingRecordWhenCleanupFails(t *testing.T)
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want create failure")
 	}
@@ -505,6 +522,9 @@ func TestCreateSandboxPersistsCreatingRecordBeforeRuntimeCreate(t *testing.T) {
 	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-1",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want create failure")
 	}
@@ -524,6 +544,9 @@ func TestCreateSandboxRejectsInvalidEnvironmentBeforeRuntimeCreate(t *testing.T)
 		_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
 			SandboxID:  "sandbox-1",
 			TemplateID: "tmpl-1",
+			VCPUNum:    2,
+			VCPUMax:    2,
+			RamMB:      1024,
 			Env:        env,
 		})
 		if !errors.Is(err, agentprotocol.ErrInvalidEnvironment) {
@@ -559,6 +582,7 @@ func TestCreateSandboxValidatesExplicitSandboxID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeSandboxOps{}
 			svc := New(ops, nil, nil)
+			svc.SetSandboxDefaults(SandboxDefaults{VCPUNum: 2, VCPUMax: 2, RamMB: 1024})
 
 			result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
 				SandboxID:  tt.sandboxID,
@@ -591,6 +615,7 @@ func TestCreateSandboxGeneratesIDWhenSandboxIDIsNotProvided(t *testing.T) {
 		t.Run(fmt.Sprintf("input_%q", sandboxID), func(t *testing.T) {
 			ops := &fakeSandboxOps{}
 			svc := New(ops, nil, nil)
+			svc.SetSandboxDefaults(SandboxDefaults{VCPUNum: 2, VCPUMax: 2, RamMB: 1024})
 
 			result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
 				SandboxID:  sandboxID,
@@ -625,6 +650,9 @@ func TestCreateSandboxRejectsExistingGlobalIDBeforeRuntimeCreate(t *testing.T) {
 	_, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
 		SandboxID:  "sandbox-1",
 		TemplateID: "tmpl-new",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
 	})
 	if !errors.Is(err, sandbox.ErrAlreadyExists) {
 		t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrAlreadyExists", err)
@@ -634,26 +662,24 @@ func TestCreateSandboxRejectsExistingGlobalIDBeforeRuntimeCreate(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxAppliesDefaults(t *testing.T) {
+func TestCreateSandboxAppliesConfiguredBackend(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	svc := New(sandboxOps, nil, nil)
-	svc.SetSandboxDefaults(SandboxDefaults{
-		TemplateID: "tmpl_default",
-		VMMName:    "cloud-hypervisor",
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor"})
+
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+		SandboxID:  "sandbox-1",
+		TemplateID: "tmpl-1",
 		VCPUNum:    2,
 		VCPUMax:    4,
 		RamMB:      4096,
-	})
-
-	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
-		SandboxID: "sandbox-1",
-		Env:       map[string]string{"SOME_RANDOM_KEY": "key123"},
+		Env:        map[string]string{"SOME_RANDOM_KEY": "key123"},
 	})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
 
-	if sandboxOps.req.TemplateID != "tmpl_default" {
+	if sandboxOps.req.TemplateID != "tmpl-1" {
 		t.Fatalf("TemplateID = %q", sandboxOps.req.TemplateID)
 	}
 	if sandboxOps.req.VMMName != "cloud-hypervisor" {
@@ -676,21 +702,12 @@ func TestCreateSandboxAppliesDefaults(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxRejectsMissingOrWhitespaceDefaultTemplate(t *testing.T) {
-	for _, defaultTemplate := range []string{"", " \t "} {
-		t.Run(fmt.Sprintf("default %q", defaultTemplate), func(t *testing.T) {
-			sandboxOps := &fakeSandboxOps{}
-			svc := New(sandboxOps, nil, nil)
-			svc.SetSandboxDefaults(SandboxDefaults{TemplateID: defaultTemplate})
-
-			_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: " \n "})
-			if !errors.Is(err, sandbox.ErrInvalidArgument) {
-				t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidArgument", err)
-			}
-			if sandboxOps.req.TemplateID != "" {
-				t.Fatalf("sandbox create was called with %#v", sandboxOps.req)
-			}
-		})
+func TestCreateSandboxRejectsMissingTemplate(t *testing.T) {
+	sandboxOps := &fakeSandboxOps{}
+	svc := New(sandboxOps, nil, nil)
+	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: " \n ", VCPUNum: 2, VCPUMax: 2, RamMB: 1024})
+	if !errors.Is(err, sandbox.ErrInvalidArgument) {
+		t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidArgument", err)
 	}
 }
 
@@ -700,9 +717,7 @@ func TestCreateSandboxGeneratesSingleSandboxID(t *testing.T) {
 		BootIndexDigest: digest.FromString("generated-sandbox-boot-index").String(),
 	}}
 	svc := New(sandboxOps, nil, store)
-	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
-
-	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: "tmpl-1"})
+	result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: "tmpl-1", VCPUNum: 2, VCPUMax: 2, RamMB: 1024})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}
@@ -755,12 +770,15 @@ func TestCreateSandboxPersistsNetworkPolicy(t *testing.T) {
 		BootIndexDigest: digest.FromString("sandbox-network").String(),
 	}}
 	svc := New(sandboxOps, nil, store)
-	svc.SetSandboxDefaults(SandboxDefaults{TemplateID: "tmpl-default"})
 	policy := &netstack.SandboxNetworkConfig{DenyOut: []string{"192.0.2.10"}}
 
 	if _, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
-		SandboxID: "sandbox-network",
-		Network:   policy,
+		SandboxID:  "sandbox-network",
+		TemplateID: "tmpl-network",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
+		Network:    policy,
 	}); err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
 	}

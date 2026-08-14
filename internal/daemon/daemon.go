@@ -100,19 +100,19 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := ulog.GetLogger()
 
-	store, err := state.OpenBolt(cfg.State.Path)
+	store, err := state.OpenBolt(cfg.StatePath())
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
 	s.stateStore = store
-	logger.Info("State store initialized", ulog.F("path", cfg.State.Path))
+	logger.Info("State store initialized", ulog.F("path", cfg.StatePath()))
 	s.volumeManager, err = volume.NewManager(volume.Config{
 		MaxMounts: cfg.Volume.MaxMounts,
 		Backend:   cfg.Volume.Backend,
 		Virtiofs: volume.VirtiofsConfig{
 			Binary:     cfg.Volume.Virtiofs.Binary,
-			RuntimeDir: cfg.Volume.Virtiofs.RuntimeDir,
+			RuntimeDir: cfg.VirtiofsRuntimeDir(),
 		},
 	})
 	if err != nil {
@@ -121,8 +121,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
-		RootDir:       cfg.Containerd.RootDir,
-		StateDir:      cfg.Containerd.StateDir,
+		RootDir:       cfg.ContainerdRootDir(),
+		StateDir:      cfg.ContainerdStateDir(),
 		TemplateStore: store,
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
@@ -132,7 +132,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 				WarmPoolSize: cfg.Network.WarmPoolSize,
 				CNI:          cfg.Network.CNI,
 			},
-			VMMBinaries:        cfg.VMM.BinaryPaths(),
+			VMMBinaries:        cfg.Sandbox.BinaryPaths(),
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
@@ -153,11 +153,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.runtimeService.Snapshot = host.SnapshotServer()
 	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
-		TemplateID: cfg.Sandbox.DefaultTemplateID,
-		VMMName:    cfg.Sandbox.DefaultVMMName,
-		VCPUNum:    cfg.Sandbox.DefaultVCPUNum,
-		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
-		RamMB:      cfg.Sandbox.DefaultRAMMB,
+		TemplateID: cfg.Sandbox.DefaultSpec.TemplateID,
+		VMMName:    cfg.Sandbox.Backend,
+		VCPUNum:    cfg.Sandbox.DefaultSpec.VCPUNum,
+		VCPUMax:    cfg.Sandbox.DefaultSpec.VCPUMax,
+		RamMB:      cfg.Sandbox.DefaultSpec.RamMB,
 	})
 
 	manager := host.SandboxManager()

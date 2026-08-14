@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/openeuler/Conch/internal/conchruntime"
-	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/sandbox"
 )
@@ -17,12 +16,12 @@ import (
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
-	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: "tmpl-default"})
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{VMMName: "stratovirt"})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"tmpl-default","vcpu_num":2,"vcpu_max":2,"ram_mb":1024}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -36,7 +35,7 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 		t.Fatalf("sandbox identity = response:%q request:%q", response.SandboxID, sandboxOps.createReq.SandboxID)
 	}
 	if sandboxOps.createReq.TemplateID != "tmpl-default" {
-		t.Fatalf("template ID = %q, want daemon default", sandboxOps.createReq.TemplateID)
+		t.Fatalf("template ID = %q, want request value", sandboxOps.createReq.TemplateID)
 	}
 }
 
@@ -90,14 +89,19 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 		{name: "omitted uses configured default", defaultTemplate: "tmpl-default", body: `{}`, wantStatus: http.StatusOK, wantTemplate: "tmpl-default"},
 		{name: "whitespace default is rejected", defaultTemplate: " \t ", body: `{}`, wantStatus: http.StatusBadRequest},
 		{name: "absent default is rejected", body: `{}`, wantStatus: http.StatusBadRequest},
-		{name: "explicit template wins", defaultTemplate: "tmpl-default", body: `{"template_id":"tmpl-explicit"}`, wantStatus: http.StatusOK, wantTemplate: "tmpl-explicit"},
+		{name: "explicit template is required", body: `{"template_id":"tmpl-explicit","vcpu_num":2,"vcpu_max":2,"ram_mb":1024}`, wantStatus: http.StatusOK, wantTemplate: "tmpl-explicit"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
 			runtimeService := conchruntime.New(sandboxOps, nil, nil)
-			runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: tt.defaultTemplate})
+			runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
+				TemplateID: tt.defaultTemplate,
+				VCPUNum:    2,
+				VCPUMax:    2,
+				RamMB:      1024,
+			})
 			server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 			server.routes()
 
@@ -124,32 +128,17 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 	}
 }
 
-func TestHandleCreateSandboxUsesConfiguredDefaultsForOmittedResources(t *testing.T) {
+func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
-	defaults := config.DefaultConfig().Sandbox
-	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
-		VMMName: defaults.DefaultVMMName,
-		VCPUNum: defaults.DefaultVCPUNum,
-		VCPUMax: defaults.DefaultVCPUMax,
-		RamMB:   defaults.DefaultRAMMB,
-	})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"tmpl_123","sandbox_id":"sandbox-123"}`))
 	server.router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-
-	got := sandboxOps.createReq
-	if got.VMMName != defaults.DefaultVMMName || got.VCPUNum != defaults.DefaultVCPUNum ||
-		got.VCPUMax != defaults.DefaultVCPUMax || got.RAMMB != defaults.DefaultRAMMB {
-		t.Fatalf("resources = vmm:%q vcpu:%d/%d ram:%d; want vmm:%q vcpu:%d/%d ram:%d",
-			got.VMMName, got.VCPUNum, got.VCPUMax, got.RAMMB,
-			defaults.DefaultVMMName, defaults.DefaultVCPUNum, defaults.DefaultVCPUMax, defaults.DefaultRAMMB)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
 }
 

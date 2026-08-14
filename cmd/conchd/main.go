@@ -52,10 +52,10 @@ func main() {
 	}
 
 	logger := ulog.GetLogger()
-	if err := util.WritePIDFile(cfg.Server.PIDFile); err != nil {
+	if err := util.WritePIDFile(cfg.PIDFilePath()); err != nil {
 		logger.Fatal("Failed to acquire pid file", ulog.F("error", err))
 	}
-	defer util.RemovePIDFile(cfg.Server.PIDFile)
+	defer util.RemovePIDFile(cfg.PIDFilePath())
 
 	logger.Info("Parsed cli flags",
 		ulog.F("configPath", *configPath),
@@ -67,9 +67,7 @@ func main() {
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.work_dir", cfg.Server.WorkDir),
 		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
-		ulog.F("server.pid_file", cfg.Server.PIDFile),
-		ulog.F("containerd.root_dir", cfg.Containerd.RootDir),
-		ulog.F("containerd.state_dir", cfg.Containerd.StateDir),
+		ulog.F("server.state_dir", cfg.Server.StateDir),
 		ulog.F("containerd.namespace", containerdclient.Namespace),
 		ulog.F("network.warm_pool_size", cfg.Network.WarmPoolSize),
 	)

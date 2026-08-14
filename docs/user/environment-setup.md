@@ -74,7 +74,7 @@ sudo modprobe erofs
 sudo modprobe vhost_vsock
 ```
 
-Conch 将 libcni result cache 固定保存在 `/var/lib/conch/cni/results`；默认 CNI 配置将 host-local IPAM 状态保存在 `/var/lib/conch/cni/networks`。这两个目录都是内部状态路径，不属于用户配置接口。
+Conch 将 libcni result cache 保存在 `<server.state_dir>/cni/results`；host-local IPAM 状态保存在 `<server.state_dir>/cni/networks`。这两个目录由 `server.state_dir` 派生，不单独暴露为用户配置接口。
 
 使用前确认 CNI 配置的子网不与主机、集群或 guest tap 子网重叠。
 
@@ -83,7 +83,7 @@ Conch 将 libcni result cache 固定保存在 `/var/lib/conch/cni/results`；默
 如果二进制安装在其他位置，在本地配置中填写其绝对路径：
 
 ```yaml
-vmm:
+sandbox:
   cloud_hypervisor:
     binary: /actual/path/to/cloud-hypervisor
 volume:
