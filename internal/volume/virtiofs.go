@@ -31,12 +31,22 @@ const (
 	configVersion  = 1
 
 	socketReadyTimeout = 3 * time.Second
+	processExitTimeout = 5 * time.Second
 )
 
 type virtiofsBackend struct {
 	binary     string
 	runtimeDir string
 	procs      sync.Map
+}
+
+func watchVirtiofs(cmd *exec.Cmd) <-chan struct{} {
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	return exited
 }
 
 func NewVirtiofsBackend(cfg VirtiofsConfig) Backend {
@@ -139,9 +149,12 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		cleanup()
 		return nil, fmt.Errorf("start virtiofsd for sandbox %s: %w", req.SandboxID, err)
 	}
+	exited := watchVirtiofs(cmd)
 	if err := waitUnixSocket(socket, socketReadyTimeout); err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		killErr := cmd.Process.Kill()
+		if killErr == nil || errors.Is(killErr, unix.ESRCH) || errors.Is(killErr, os.ErrProcessDone) {
+			<-exited
+		}
 		cleanup()
 		return nil, fmt.Errorf("wait virtiofsd socket %s: %w", socket, err)
 	}
@@ -156,6 +169,7 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		ConfigPath: configPath,
 		PID:        cmd.Process.Pid,
 		StartTime:  processStartTicks(cmd.Process.Pid),
+		Exited:     exited,
 	}}, nil
 }
 
@@ -168,12 +182,27 @@ func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {
 func (b *virtiofsBackend) Cleanup(sandboxID string, devices []Device) error {
 	var errs []error
 
-	if v, ok := b.procs.LoadAndDelete(sandboxID); ok {
-		if cmd, ok := v.(*exec.Cmd); ok && cmd.Process != nil {
-			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-				errs = append(errs, fmt.Errorf("kill virtiofsd: %w", killErr))
-			}
-			_, _ = cmd.Process.Wait()
+	if v, ok := b.procs.Load(sandboxID); ok {
+		cmd, ok := v.(*exec.Cmd)
+		if !ok || cmd.Process == nil {
+			return fmt.Errorf("invalid virtiofsd process for sandbox %s", sandboxID)
+		}
+		killErr := cmd.Process.Kill()
+		if killErr != nil && !errors.Is(killErr, unix.ESRCH) && !errors.Is(killErr, os.ErrProcessDone) {
+			return fmt.Errorf("kill virtiofsd: %w", killErr)
+		}
+		if len(devices) == 0 || devices[0].Exited == nil {
+			return fmt.Errorf("virtiofsd exit signal is missing for sandbox %s", sandboxID)
+		}
+		select {
+		case <-devices[0].Exited:
+			b.procs.CompareAndDelete(sandboxID, v)
+		case <-time.After(processExitTimeout):
+			return fmt.Errorf(
+				"timed out after %s waiting for virtiofsd pid %d to exit",
+				processExitTimeout,
+				cmd.Process.Pid,
+			)
 		}
 	} else {
 		for _, device := range devices {

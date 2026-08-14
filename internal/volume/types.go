@@ -31,6 +31,8 @@ type Device struct {
 	ConfigPath string `json:"config_path,omitempty"`
 	PID        int    `json:"pid,omitempty"`
 	StartTime  uint64 `json:"start_time,omitempty"`
+	// Exited is runtime-only and is intentionally excluded from persistence.
+	Exited <-chan struct{} `json:"-"`
 }
 
 type PrepareRequest struct {
