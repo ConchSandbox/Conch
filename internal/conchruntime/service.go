@@ -22,6 +22,7 @@ import (
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -116,6 +117,12 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 			return SandboxCreateResult{}, err
 		}
 		opts.SandboxID = id
+	} else {
+		if err := sandboxid.Validate(opts.SandboxID); err != nil {
+			return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
+				fmt.Errorf("invalid sandbox_id: %w", err),
+			)
+		}
 	}
 	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()

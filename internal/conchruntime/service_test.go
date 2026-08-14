@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -530,6 +532,80 @@ func TestCreateSandboxRejectsInvalidEnvironmentBeforeRuntimeCreate(t *testing.T)
 		if ops.createCalls != 0 {
 			t.Fatalf("CreateSandbox(%q) runtime Create() calls = %d, want 0", env, ops.createCalls)
 		}
+	}
+}
+
+func TestCreateSandboxValidatesExplicitSandboxID(t *testing.T) {
+	tests := []struct {
+		name      string
+		sandboxID string
+		wantErr   bool
+		wantText  string
+	}{
+		{name: "letters and separators", sandboxID: "sandbox.V1_test-01"},
+		{name: "maximum length", sandboxID: strings.Repeat("a", 32)},
+		{name: "too long", sandboxID: strings.Repeat("a", 33), wantErr: true, wantText: "length must be between 2 and 32"},
+		{name: "command substitution", sandboxID: "x$(sleep${IFS}5)", wantErr: true, wantText: "only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed"},
+		{name: "shell separator", sandboxID: "x;id", wantErr: true},
+		{name: "path separator", sandboxID: "x/y", wantErr: true},
+		{name: "embedded whitespace", sandboxID: "x y", wantErr: true},
+		{name: "newline", sandboxID: "x\ny", wantErr: true},
+		{name: "leading separator", sandboxID: "-sandbox", wantErr: true},
+		{name: "single character", sandboxID: "a", wantErr: true, wantText: "length must be between 2 and 32"},
+		{name: "non ASCII", sandboxID: "sandbox-\u6d4b\u8bd5", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeSandboxOps{}
+			svc := New(ops, nil, nil)
+
+			result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+				SandboxID:  tt.sandboxID,
+				TemplateID: "tmpl-1",
+			})
+			if tt.wantErr {
+				if !errors.Is(err, sandbox.ErrInvalidArgument) {
+					t.Fatalf("CreateSandbox() error = %v, want sandbox.ErrInvalidArgument", err)
+				}
+				if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+					t.Fatalf("CreateSandbox() error = %q, want text %q", err, tt.wantText)
+				}
+				if ops.createCalls != 0 {
+					t.Fatalf("runtime Create() calls = %d, want 0", ops.createCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateSandbox() error = %v", err)
+			}
+			if result.SandboxID != tt.sandboxID || ops.req.SandboxID != tt.sandboxID {
+				t.Fatalf("sandbox ID = result:%q request:%q, want %q", result.SandboxID, ops.req.SandboxID, tt.sandboxID)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxGeneratesIDWhenSandboxIDIsNotProvided(t *testing.T) {
+	for _, sandboxID := range []string{"", " \t\n "} {
+		t.Run(fmt.Sprintf("input_%q", sandboxID), func(t *testing.T) {
+			ops := &fakeSandboxOps{}
+			svc := New(ops, nil, nil)
+
+			result, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+				SandboxID:  sandboxID,
+				TemplateID: "tmpl-1",
+			})
+			if err != nil {
+				t.Fatalf("CreateSandbox() error = %v", err)
+			}
+			if len(result.SandboxID) != 32 || sandboxid.Validate(result.SandboxID) != nil {
+				t.Fatalf("generated sandbox ID = %q, want 32-character safe ID", result.SandboxID)
+			}
+			if ops.req.SandboxID != result.SandboxID {
+				t.Fatalf("runtime sandbox ID = %q, want %q", ops.req.SandboxID, result.SandboxID)
+			}
+		})
 	}
 }
 

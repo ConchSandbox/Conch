@@ -365,11 +365,10 @@ result = sbx.commands.run(
 
 ```python
 handle = sbx.commands.run(
-    cmd='python3',
-    args=['-m', 'http.server', '18080'],
-    cwd='/tmp',
+    cmd='sh',
+    args=['-c', 'echo started; sleep 10; echo finished'],
     background=True,
-    tag='http-srv',
+    tag='short-job',
 )
 ```
 
@@ -386,7 +385,7 @@ command.disconnect() -> None
 通过 `pid` 或 `tag` 读取后台进程输出。
 
 ```python
-command = sbx.commands.connect(tag='http-srv')
+command = sbx.commands.connect(tag='short-job')
 result = command.wait(on_stdout=lambda text: print(text, end=''))
 ```
 
@@ -417,7 +416,7 @@ command.kill(signal=15) -> bool
 通过 `pid` 或 `tag` 发送非零信号，默认 `15`；目标不存在返回 `False`。
 
 ```python
-sbx.commands.kill(tag='http-srv', signal=15)
+sbx.commands.kill(tag='short-job', signal=15)
 # 或：handle.kill(signal=15)
 ```
 
@@ -506,24 +505,39 @@ raw = sbx.files.read('/home/user/output.txt', format='bytes')
 
 ```text
 sandbox.files.list(path, depth=1) -> list[EntryInfo]
-sandbox.files.search(path, pattern, exclude_patterns=None) -> list[EntryInfo]
 ```
 
-列出目录或按 glob 搜索文件。
+列出目录中的文件和子目录。
 
 **参数：**
 - `path` (str): 目录路径
 - `depth` (int, 可选): 列举深度，默认 `1`
-- `pattern` (str): 搜索 glob 模式
-- `exclude_patterns` (list[str], 可选): 搜索排除模式
 
 **示例：**
 ```python
 # 列出沙箱当前目录所有文件
 files = sbx.files.list('/home/user')
 print(files)
+```
 
-# 搜索指定目录
+返回 `list[EntryInfo]`。
+
+#### 搜索文件
+
+```text
+sandbox.files.search(path, pattern, exclude_patterns=None) -> list[EntryInfo]
+```
+
+按 glob 模式搜索文件。
+
+**参数：**
+- `path` (str): 搜索目录路径
+- `pattern` (str): 搜索 glob 模式
+- `exclude_patterns` (list[str], 可选): 搜索排除模式
+
+**示例：**
+```python
+# 搜索指定目录中的 Python 文件
 files = sbx.files.search('/home/user', '*.py')
 for item in files:
     print(item.path, item.size)

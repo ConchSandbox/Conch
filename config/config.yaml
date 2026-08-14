@@ -16,7 +16,7 @@ server:
 
 network:
   # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250
-  warm_pool_size: 250
+  warm_pool_size: 100
   cni:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; libcni does not install them.

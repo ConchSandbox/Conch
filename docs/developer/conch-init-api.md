@@ -166,10 +166,15 @@ command = sandbox.commands.run(
     background=True,
     tag="http-srv",
     pty=None,
+    timeout=0,
 )
 
 print(command)
 ```
+
+> 注意：这是长时间运行的 HTTP 服务。启动后不要直接对返回的 `CommandHandle` 调用 `wait()`；`wait()` 会一直等到进程退出，而 HTTP 服务通常不会自行退出。需要读取启动日志时，应使用 `connect()` 配合有限输出读取，并在结束时调用 `disconnect()`；需要停止服务时再调用 `kill()`。
+
+`timeout` 的单位为秒。对于长时间运行的服务，设置为 `0` 表示不限制最长存活时间；服务结束时应通过 `kill()` 显式停止。设置为正数时，超时后 `conch-init` 会终止进程。
 
 输出中的 PID 由系统动态分配：
 
@@ -255,7 +260,7 @@ stream ProcessEvent
 
 ```jsonl
 {"start":{"pid":23456}}
-{"data":{"stdout":"U2VydmluZyBIVFRQIG9uIDAuMC4wLjAgcG9ydCAxODA4MCAuLi4K"}}
+{"data":{"stdout":"aGVhcnRiZWF0IDEK"}}
 {"data":{"stderr":"d2Fybgo="}}
 {"data":{"pty":"aW50ZXJhY3RpdmUgb3V0cHV0DQo="}}
 {"end":{"exitCode":0,"exited":true,"status":"exited","error":""}}
@@ -267,25 +272,7 @@ stream ProcessEvent
 
 ### SDK
 
-```python
-command = sandbox.commands.connect(tag="http-srv")
-print(command)  # process handle (pid=42, tag=http-srv)
-
-result = command.wait(
-    on_stdout=lambda data: print(data, end=""),
-    on_stderr=lambda data: print(data, end=""),
-)
-print("exit_code:", result.exit_code)
-```
-
-短命后台进程的实际输出示例：
-
-```text
-background-ready
-exit_code: 0
-```
-
-长时间运行且持续写日志的服务可通过 `Connect` 读取后续 stdout。下面的 worker 在连接建立后持续输出心跳：
+下面使用持续输出心跳的进程说明长时间连接。`background=True` 会立即返回后台进程句柄，`timeout=0` 表示不限制进程运行时间。由于该进程不会自行退出，不要对这个句柄调用 `wait()`，否则程序会一直阻塞。只启动进程时，保存返回的句柄即可；需要读取后续输出时，再通过 `connect()` 建立连接。
 
 ```python
 starter = sandbox.commands.run(
@@ -301,44 +288,38 @@ while True:
 """,
     background=True,
     tag="heartbeat-worker",
+    timeout=0,
 )
-# StartProcess 的输出流不再使用，改由 Connect 读取。
-starter.disconnect()
+print(starter)  # process handle (pid=42, tag=heartbeat-worker)
+```
+
+需要查看长时间连接的输出时，将日志读取放到后台线程，主线程负责停止控制。连接建立前已经产生的历史输出不会保证再次返回。
+
+```python
+import threading
 
 command = sandbox.commands.connect(tag="heartbeat-worker")
-received = []
-for stdout, stderr, pty in command:
-    if stdout:
-        print(stdout, end="")
-        received.append(stdout)
-    # 收到两次心跳后主动停止本次输出读取。
-    if "".join(received).count("heartbeat") >= 2:
-        command.disconnect()
-        break
 
-# wait() 同样会持续读取输出，直到服务退出；交互式场景不要直接阻塞等待。
-process = next(item for item in sandbox.commands.list() if item.tag == "heartbeat-worker")
-print("running:", process.running)
-print("exit_code:", process.exit_code)
+def read_logs():
+    for stdout, stderr, pty in command:
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="")
 
-# 仅断开本次输出流，服务仍继续运行。
-process = next(item for item in sandbox.commands.list() if item.tag == "heartbeat-worker")
-print("still_running:", process.running)
-
-# 需要停止服务时显式发送信号。
-sandbox.commands.kill(tag="heartbeat-worker", signal=15)
+reader = threading.Thread(target=read_logs, daemon=True)
+reader.start()
+try:
+    input("Press Enter or Ctrl-C to stop: ")
+except KeyboardInterrupt:
+    pass
+finally:
+    command.disconnect()
+    sandbox.commands.kill(tag="heartbeat-worker", signal=2)
+    reader.join(timeout=1)
 ```
 
-服务未退出时的状态示例：
-
-```text
-service-ready
-heartbeat 1
-heartbeat 2
-running: True
-exit_code: -1
-still_running: True
-```
+`disconnect()` 只关闭日志连接，不会终止进程；`kill()` 才会停止进程。如果进程不响应，再使用 `signal=9` 强制终止。
 
 `stdout` 的事件分片不保证与日志行一一对应，调用方应按自身协议累积和解析输出。`disconnect()` 只关闭当前客户端的 `Connect` 输出流，不会终止后台进程。长服务只有在退出或收到信号后才会在流中发送 `end` 事件；此后 `CommandHandle.wait()` 才返回最终的退出码。
 
@@ -347,7 +328,7 @@ still_running: True
 ```json
 {
   "process": {
-    "tag": "http-srv"
+    "tag": "heartbeat-worker"
   }
 }
 ```

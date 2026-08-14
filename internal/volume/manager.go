@@ -36,9 +36,6 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, er
 	if len(mounts) > m.maxMounts {
 		return nil, ErrInvalidMount.Wrap(fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts)))
 	}
-	if err := ValidateSegment(sandboxID, "sandbox_id"); err != nil {
-		return nil, ErrInvalidMount.Wrap(err)
-	}
 	seenTargets := map[string]struct{}{}
 	for _, mount := range mounts {
 		target := filepath.Clean(strings.TrimSpace(mount.Path))

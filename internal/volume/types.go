@@ -1,7 +1,5 @@
 package volume
 
-import "regexp"
-
 // Mount is a single user-declared volume mount: the host Source directory is
 // bind-mounted into the sandbox shared dir and exposed to the guest at Path.
 type Mount struct {
@@ -45,23 +43,4 @@ type Backend interface {
 	Prepare(req PrepareRequest) ([]Device, error)
 	Cleanup(sandboxID string, devices []Device) error
 	CleanupStaleResources() error
-}
-
-var safeSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-
-func ValidateSegment(value, field string) error {
-	if !safeSegmentRE.MatchString(value) {
-		return &ValidationError{Field: field, Value: value, Pattern: safeSegmentRE.String()}
-	}
-	return nil
-}
-
-type ValidationError struct {
-	Field   string
-	Value   string
-	Pattern string
-}
-
-func (e *ValidationError) Error() string {
-	return e.Field + " must match " + e.Pattern + " (got " + e.Value + ")"
 }
