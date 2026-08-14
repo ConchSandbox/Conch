@@ -12,13 +12,14 @@ import (
 )
 
 type ImagePushOptions struct {
-	LocalImage  string
-	RemoteImage string
-	PlainHTTP   bool
-	Username    string
-	Password    string
-	ConfigPath  string
-	Timeout     string
+	LocalImage    string
+	RemoteImage   string
+	PlainHTTP     bool
+	Username      string
+	Password      string
+	PasswordStdin bool
+	ConfigPath    string
+	Timeout       string
 }
 
 func PrintImagePushHelp(out io.Writer) {
@@ -34,7 +35,9 @@ func PrintImagePushHelp(out io.Writer) {
 	fmt.Fprintln(out, "  --username string")
 	fmt.Fprintln(out, "        registry username")
 	fmt.Fprintln(out, "  --password string")
-	fmt.Fprintln(out, "        registry password")
+	fmt.Fprintln(out, "        registry password (visible to every local user via ps; prefer --password-stdin)")
+	fmt.Fprintln(out, "  --password-stdin")
+	fmt.Fprintln(out, "        read the registry password from stdin")
 	fmt.Fprintln(out, "  --timeout duration")
 	fmt.Fprintln(out, "        timeout for this push operation")
 	fmt.Fprintln(out, "  --config string")
@@ -58,6 +61,10 @@ func RunImagePush(ctx context.Context, args []string) error {
 			return fmt.Errorf("conch image push: invalid --timeout %q", opts.Timeout)
 		}
 	}
+	username, password, err := registryCredentials("", opts.Username, opts.Password, opts.PasswordStdin)
+	if err != nil {
+		return fmt.Errorf("conch image push: %w", err)
+	}
 	conchClient, err := client.New(client.Options{ConfigPath: opts.ConfigPath, Timeout: apiTimeout})
 	if err != nil {
 		return fmt.Errorf("conch image push: create API client: %w", err)
@@ -66,8 +73,8 @@ func RunImagePush(ctx context.Context, args []string) error {
 		LocalImage:  opts.LocalImage,
 		RemoteImage: opts.RemoteImage,
 		PlainHTTP:   opts.PlainHTTP,
-		Username:    opts.Username,
-		Password:    opts.Password,
+		Username:    username,
+		Password:    password,
 	}); err != nil {
 		return fmt.Errorf("conch image push: %w", err)
 	}
@@ -100,6 +107,8 @@ func ParseImagePushArgs(args []string) (ImagePushOptions, error) {
 			i++
 		case strings.HasPrefix(arg, "--password="):
 			opts.Password = strings.TrimPrefix(arg, "--password=")
+		case arg == "--password-stdin":
+			opts.PasswordStdin = true
 		case arg == "--timeout":
 			if i+1 >= len(args) {
 				return ImagePushOptions{}, fmt.Errorf("conch image push: missing value for %s", arg)

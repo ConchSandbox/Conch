@@ -29,10 +29,14 @@ func PrintImagePullHelp(out io.Writer) {
 	fmt.Fprintln(out, "  --plain-http")
 	fmt.Fprintln(out, "        allow plain HTTP / disable TLS verification for source image pulls")
 	fmt.Fprintln(out, "  --user string")
-	fmt.Fprintln(out, "        registry credentials in username:password format for source image pulls")
+	fmt.Fprintln(out, "        registry credentials as username:password, or just username when the")
+	fmt.Fprintln(out, "        password comes from --password-stdin")
+	fmt.Fprintln(out, "        (a password here is visible to every local user via ps)")
+	fmt.Fprintln(out, "  --password-stdin")
+	fmt.Fprintln(out, "        read the registry password from stdin")
 	fmt.Fprintln(out, "Example:")
 	fmt.Fprintln(out, "  conch image pull docker.io/library/nginx:latest")
-	fmt.Fprintln(out, "  conch image pull --plain-http --user example-user:example-password docker.io/library/nginx:latest")
+	fmt.Fprintln(out, "  cat password.txt | conch image pull --plain-http --user example-user --password-stdin docker.io/library/nginx:latest")
 }
 
 func RunImagePull(ctx context.Context, args []string) error {
@@ -43,6 +47,7 @@ func RunImagePull(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "", "config file path")
 	plainHTTP := fs.Bool("plain-http", false, "allow plain HTTP / disable TLS verification for source image pulls")
 	user := fs.String("user", "", "registry credentials in username:password format for source image pulls")
+	passwordStdin := fs.Bool("password-stdin", false, "read the registry password from stdin")
 	fs.Usage = func() { PrintImagePullHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -53,7 +58,7 @@ func RunImagePull(ctx context.Context, args []string) error {
 	}
 	imageName := fs.Arg(0)
 
-	username, password, err := ParseRegistryUser(*user)
+	username, password, err := registryCredentials(*user, "", "", *passwordStdin)
 	if err != nil {
 		return fmt.Errorf("conch image pull: %w", err)
 	}

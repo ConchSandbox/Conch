@@ -14,28 +14,30 @@ import (
 )
 
 type templateCreateOptions struct {
-	source     string
-	kernel     string
-	initrd     string
-	tag        string
-	configPath string
-	apiURL     string
-	address    string
-	plainHTTP  bool
-	username   string
-	password   string
-	user       string
+	source        string
+	kernel        string
+	initrd        string
+	tag           string
+	configPath    string
+	apiURL        string
+	address       string
+	plainHTTP     bool
+	username      string
+	password      string
+	user          string
+	passwordStdin bool
 }
 
 type templateRegistryOptions struct {
-	configPath string
-	apiURL     string
-	address    string
-	plainHTTP  bool
-	username   string
-	password   string
-	user       string
-	timeout    string
+	configPath    string
+	apiURL        string
+	address       string
+	plainHTTP     bool
+	username      string
+	password      string
+	user          string
+	passwordStdin bool
+	timeout       string
 }
 
 func printTemplateHelp(out io.Writer) {
@@ -84,7 +86,9 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  --username string")
 	fmt.Fprintln(out, "        registry username")
 	fmt.Fprintln(out, "  --password string")
-	fmt.Fprintln(out, "        registry password")
+	fmt.Fprintln(out, "        registry password (visible to every local user via ps; prefer --password-stdin)")
+	fmt.Fprintln(out, "  --password-stdin")
+	fmt.Fprintln(out, "        read the registry password from stdin")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd -t localhost/conch/nginx:latest")
@@ -212,16 +216,14 @@ func registerTemplateRegistryFlags(fs *flag.FlagSet, opts *templateRegistryOptio
 	fs.StringVar(&opts.user, "user", "", "registry credentials in username:password format")
 	fs.StringVar(&opts.username, "username", "", "registry username")
 	fs.StringVar(&opts.password, "password", "", "registry password")
+	fs.BoolVar(&opts.passwordStdin, "password-stdin", false, "read the registry password from stdin")
 	if push {
 		fs.StringVar(&opts.timeout, "timeout", "", "timeout for the registry push")
 	}
 }
 
 func templateRegistryCredentials(opts templateRegistryOptions) (string, string, error) {
-	if opts.user == "" {
-		return opts.username, opts.password, nil
-	}
-	return ParseRegistryUser(opts.user)
+	return registryCredentials(opts.user, opts.username, opts.password, opts.passwordStdin)
 }
 
 func RunTemplateCreate(ctx context.Context, args []string) error {
@@ -229,14 +231,12 @@ func RunTemplateCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.user != "" {
-		username, password, err := ParseRegistryUser(opts.user)
-		if err != nil {
-			return fmt.Errorf("conch template create: %w", err)
-		}
-		opts.username = username
-		opts.password = password
+	username, password, err := registryCredentials(opts.user, opts.username, opts.password, opts.passwordStdin)
+	if err != nil {
+		return fmt.Errorf("conch template create: %w", err)
 	}
+	opts.username = username
+	opts.password = password
 	return createTemplate(ctx, "conch template create", opts)
 }
 
