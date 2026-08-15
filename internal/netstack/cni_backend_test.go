@@ -1,9 +1,12 @@
 package netstack
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	cnilibrary "github.com/containernetworking/cni/libcni"
 )
 
 const testBridgeCNIConfig = `{
@@ -17,6 +20,23 @@ func writeTestCNIConfig(t *testing.T, dir, name, config string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(config), 0o600); err != nil {
 		t.Fatalf("write CNI config: %v", err)
+	}
+}
+
+func TestSetHostLocalIPAMDataDir(t *testing.T) {
+	network := &cnilibrary.NetworkConfigList{Plugins: []*cnilibrary.PluginConfig{{
+		Bytes: []byte(`{"type":"bridge","ipam":{"type":"host-local","dataDir":"/old"}}`),
+	}}}
+	if err := setHostLocalIPAMDataDir(network, "/state/conch/cni/networks"); err != nil {
+		t.Fatalf("setHostLocalIPAMDataDir() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(network.Plugins[0].Bytes, &config); err != nil {
+		t.Fatalf("decode rewritten CNI config: %v", err)
+	}
+	ipam := config["ipam"].(map[string]any)
+	if got := ipam["dataDir"]; got != "/state/conch/cni/networks" {
+		t.Fatalf("host-local dataDir = %q, want /state/conch/cni/networks", got)
 	}
 }
 

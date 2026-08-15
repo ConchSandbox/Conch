@@ -27,7 +27,7 @@ VOLUME_MOUNTS_KEY = "volumeMounts"
 
 
 # Control plane endpoint: conchd listens on this local Unix socket by default
-DEFAULT_UNIX_SOCKET = "/var/run/conchd/conchd.sock"
+DEFAULT_UNIX_SOCKET = "/var/run/conch/conchd.sock"
 
 # API paths
 SANDBOX_COLLECTION_PATH = "/api/v1/sandboxes"
@@ -657,8 +657,7 @@ class Sandbox:
         self._session = requests_unixsocket.Session()
 
         self.sandbox_id = sandbox_id or generate_random_id()
-        # Template defaulting belongs to conchd. The SDK must not override
-        # sandbox.default_template_id when the caller omits the ID.
+        # Unset template and resource fields are filled from sandbox.default_spec.
         self.template_id = template_id
 
         self.ip = None
@@ -668,7 +667,7 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
-        # Empty means conchd picks its configured sandbox.default_vmm_name.
+        # Empty means conchd picks its configured sandbox.backend.
         self.vmm_name = vmm_name
         self.image_name = None
         self.snapshot_id = None
@@ -737,8 +736,7 @@ class Sandbox:
         return {} if response.status_code == HTTP_NO_CONTENT else response.json()
 
     def _build_create_payload(self) -> Dict[str, Any]:
-        # Resource fields are omitted when unset so conchd applies its own
-        # sandbox.default_vcpu_num / default_vcpu_max / default_ram_mb.
+        # Resource fields are omitted when unset so conchd applies default_spec.
         payload: Dict[str, Any] = {
             SANDBOX_ID_KEY: self.sandbox_id,
         }

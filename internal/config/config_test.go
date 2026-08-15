@@ -72,12 +72,11 @@ func TestGetLogConfig(t *testing.T) {
 }
 
 func TestGetServerUnixSocket(t *testing.T) {
-	socketPath := "/var/run/conchd/conchd.sock"
 	cfg := &Config{
-		Server: ServerConfig{UnixSocket: socketPath},
+		Server: ServerConfig{WorkDir: "/run/conch-test"},
 	}
-	if got := cfg.GetServerUnixSocket(); got != socketPath {
-		t.Errorf("GetServerUnixSocket() = %q, want %q", got, socketPath)
+	if got := cfg.GetServerUnixSocket(); got != "/run/conch-test/conchd.sock" {
+		t.Errorf("GetServerUnixSocket() = %q, want /run/conch-test/conchd.sock", got)
 	}
 }
 
@@ -115,13 +114,10 @@ func TestLoadConfig(t *testing.T) {
 	data := []byte(
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
-			"server:\n  unix_socket: /tmp/conchd-test.sock\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
-			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n" +
-			"vmm:\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
-			"sandbox:\n  default_template_id: registry.example.invalid/conch/sandbox:latest\n  default_vmm_name: cloud-hypervisor\n  default_vcpu_num: 3\n  default_vcpu_max: 5\n  default_ram_mb: 2048\n" +
-			"state:\n  path: /tmp/conch-state.db\n" +
+			"server:\n  work_dir: /tmp/conch\n  state_dir: /tmp/conch-state\n" +
+			"sandbox:\n  backend: cloud-hypervisor\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
 			"network:\n  warm_pool_size: 123\n" +
-			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n",
+			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -141,14 +137,11 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Log.Output != "both" {
 		t.Errorf("LoadConfig().Log.Output = %q, want %q", cfg.Log.Output, "both")
 	}
-	if cfg.GetServerUnixSocket() != "/tmp/conchd-test.sock" {
-		t.Errorf("LoadConfig().Server.UnixSocket = %q, want %q", cfg.GetServerUnixSocket(), "/tmp/conchd-test.sock")
-	}
-	if cfg.Server.PIDFile != "/tmp/conchd.pid" {
-		t.Errorf("LoadConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/tmp/conchd.pid")
-	}
 	if cfg.Server.WorkDir != "/tmp/conch" {
 		t.Errorf("LoadConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/tmp/conch")
+	}
+	if cfg.Server.StateDir != "/tmp/conch-state" {
+		t.Errorf("LoadConfig().Server.StateDir = %q, want /tmp/conch-state", cfg.Server.StateDir)
 	}
 	if cfg.Network.WarmPoolSize != 123 {
 		t.Errorf("LoadConfig().Network.WarmPoolSize = %d, want %d", cfg.Network.WarmPoolSize, 123)
@@ -156,38 +149,20 @@ func TestLoadConfig(t *testing.T) {
 	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/custom/cni/bin" {
 		t.Errorf("LoadConfig().Network.CNI.PluginBinDirs = %v, want [/custom/cni/bin]", cfg.Network.CNI.PluginBinDirs)
 	}
-	if cfg.Network.CNI.PluginConfDir != "/custom/cni/net.d" {
-		t.Errorf("LoadConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/custom/cni/net.d")
+	if cfg.Network.CNI.CacheDir != "/tmp/conch-state/cni" {
+		t.Errorf("LoadConfig().Network.CNI.CacheDir = %q, want /tmp/conch-state/cni", cfg.Network.CNI.CacheDir)
 	}
-	if cfg.Containerd.RootDir != "/tmp/conch-containerd-root" {
-		t.Errorf("LoadConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/tmp/conch-containerd-root")
+	if cfg.Sandbox.CloudHypervisor == nil || cfg.Sandbox.CloudHypervisor.Binary != "/opt/vmm/cloud-hypervisor" {
+		t.Errorf("LoadConfig().Sandbox.CloudHypervisor = %#v, want configured binary", cfg.Sandbox.CloudHypervisor)
 	}
-	if cfg.Containerd.StateDir != "/tmp/conch-containerd-state" {
-		t.Errorf("LoadConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/tmp/conch-containerd-state")
+	if cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/opt/vmm/stratovirt" {
+		t.Errorf("LoadConfig().Sandbox.Stratovirt = %#v, want configured binary", cfg.Sandbox.Stratovirt)
 	}
-	if cfg.VMM.CloudHypervisor == nil || cfg.VMM.CloudHypervisor.Binary != "/opt/vmm/cloud-hypervisor" {
-		t.Errorf("LoadConfig().VMM.CloudHypervisor = %#v, want configured binary", cfg.VMM.CloudHypervisor)
+	if cfg.Sandbox.Backend != "cloud-hypervisor" {
+		t.Errorf("LoadConfig().Sandbox.Backend = %q, want cloud-hypervisor", cfg.Sandbox.Backend)
 	}
-	if cfg.VMM.Stratovirt == nil || cfg.VMM.Stratovirt.Binary != "/opt/vmm/stratovirt" {
-		t.Errorf("LoadConfig().VMM.Stratovirt = %#v, want configured binary", cfg.VMM.Stratovirt)
-	}
-	if cfg.Sandbox.DefaultTemplateID != "registry.example.invalid/conch/sandbox:latest" {
-		t.Errorf("LoadConfig().Sandbox.DefaultTemplateID = %q, want %q", cfg.Sandbox.DefaultTemplateID, "registry.example.invalid/conch/sandbox:latest")
-	}
-	if cfg.Sandbox.DefaultVMMName != "cloud-hypervisor" {
-		t.Errorf("LoadConfig().Sandbox.DefaultVMMName = %q, want %q", cfg.Sandbox.DefaultVMMName, "cloud-hypervisor")
-	}
-	if cfg.Sandbox.DefaultVCPUNum != 3 {
-		t.Errorf("LoadConfig().Sandbox.DefaultVCPUNum = %d, want %d", cfg.Sandbox.DefaultVCPUNum, 3)
-	}
-	if cfg.Sandbox.DefaultVCPUMax != 5 {
-		t.Errorf("LoadConfig().Sandbox.DefaultVCPUMax = %d, want %d", cfg.Sandbox.DefaultVCPUMax, 5)
-	}
-	if cfg.Sandbox.DefaultRAMMB != 2048 {
-		t.Errorf("LoadConfig().Sandbox.DefaultRAMMB = %d, want %d", cfg.Sandbox.DefaultRAMMB, 2048)
-	}
-	if cfg.State.Path != "/tmp/conch-state.db" {
-		t.Errorf("LoadConfig().State.Path = %q, want %q", cfg.State.Path, "/tmp/conch-state.db")
+	if cfg.StatePath() != "/tmp/conch-state/state.db" {
+		t.Errorf("LoadConfig().StatePath() = %q, want /tmp/conch-state/state.db", cfg.StatePath())
 	}
 }
 
@@ -204,6 +179,26 @@ func TestLoadConfigRejectsRemovedCRISection(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "field cri not found") {
 		t.Fatalf("LoadConfig() error = %q, want an unknown cri field error", err)
+	}
+}
+
+func TestLoadConfigRejectsRemovedPathSettings(t *testing.T) {
+	tests := []string{
+		"server:\n  unix_socket: /tmp/conchd.sock\n",
+		"server:\n  pid_file: /tmp/conchd.pid\n",
+		"containerd:\n  root_dir: /tmp/containerd\n",
+		"state:\n  path: /tmp/state.db\n",
+		"network:\n  cni:\n    plugin_conf_dir: /tmp/cni\n",
+		"volume:\n  virtiofs:\n    runtime_dir: /tmp/sandboxes\n",
+	}
+	for _, data := range tests {
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(data), 0o640); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		if _, err := LoadConfig(cfgPath); err == nil || !strings.Contains(err.Error(), "field") {
+			t.Fatalf("LoadConfig() error = %q, want removed path setting to be rejected", err)
+		}
 	}
 }
 
@@ -241,29 +236,54 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			wantErr: "volume.max_mounts",
 		},
 		{
+			name:    "relative work directory",
+			data:    "server:\n  work_dir: runtime/conch\n",
+			wantErr: "server.work_dir",
+		},
+		{
+			name:    "relative state directory",
+			data:    "server:\n  state_dir: state/conch\n",
+			wantErr: "server.state_dir",
+		},
+		{
+			name:    "negative default vcpu",
+			data:    "sandbox:\n  default_spec:\n    vcpu_num: -1\n",
+			wantErr: "sandbox.default_spec CPU",
+		},
+		{
+			name:    "default vcpu max below vcpu",
+			data:    "sandbox:\n  default_spec:\n    vcpu_num: 4\n    vcpu_max: 2\n",
+			wantErr: "sandbox.default_spec CPU",
+		},
+		{
+			name:    "negative default ram",
+			data:    "sandbox:\n  default_spec:\n    ram_mb: -1\n",
+			wantErr: "sandbox.default_spec.ram_mb",
+		},
+		{
 			name:    "unsupported volume backend",
 			data:    "volume:\n  backend: 9p\n",
 			wantErr: "volume.backend",
 		},
 		{
 			name:    "cloud hypervisor missing binary",
-			data:    "vmm:\n  cloud_hypervisor: {}\n",
+			data:    "sandbox:\n  cloud_hypervisor: {}\n",
 			wantErr: "vmm.cloud_hypervisor.binary is required",
 		},
 		{
 			name:    "stratovirt missing binary",
-			data:    "vmm:\n  stratovirt: {}\n",
+			data:    "sandbox:\n  stratovirt: {}\n",
 			wantErr: "vmm.stratovirt.binary is required",
 		},
 		{
 			name:    "relative cloud hypervisor binary",
-			data:    "vmm:\n  cloud_hypervisor:\n    binary: bin/cloud-hypervisor\n",
+			data:    "sandbox:\n  cloud_hypervisor:\n    binary: bin/cloud-hypervisor\n",
 			wantErr: "vmm.cloud_hypervisor.binary",
 		},
 		{
 			name:    "default VMM is not configured",
-			data:    "vmm:\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n",
-			wantErr: `sandbox.default_vmm_name "stratovirt" is not configured`,
+			data:    "sandbox:\n  backend: cloud-hypervisor\n",
+			wantErr: `sandbox.backend "cloud-hypervisor" is not configured`,
 		},
 		{
 			name:    "unknown top-level field",
@@ -385,24 +405,6 @@ func TestLoadConfigAllowsGroupReadOnly(t *testing.T) {
 	}
 }
 
-func TestResolveCNIPluginConfDirFallback(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	localConfDir := filepath.Join(tmpDir, "cni", "net.d")
-	defaultConfDir := filepath.Join(tmpDir, "etc", "conch", "cni", "net.d")
-	if err := os.MkdirAll(localConfDir, 0755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(localConfDir, "10-conch.conf"), []byte("{}\n"), 0644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	got := resolveCNIPluginConfDir(cfgPath, defaultConfDir, defaultConfDir)
-	if got != localConfDir {
-		t.Errorf("resolveCNIPluginConfDir() = %q, want %q", got, localConfDir)
-	}
-}
-
 func TestDefaultConfigNetworkSettings(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -417,52 +419,40 @@ func TestDefaultConfigNetworkSettings(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigContainerdSettings(t *testing.T) {
+func TestDefaultConfigRuntimePaths(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Server.UnixSocket != "/var/run/conchd/conchd.sock" {
-		t.Errorf("DefaultConfig().Server.UnixSocket = %q, want %q", cfg.Server.UnixSocket, "/var/run/conchd/conchd.sock")
-	}
-	if cfg.Server.PIDFile != "/var/run/conchd/conchd.pid" {
-		t.Errorf("DefaultConfig().Server.PIDFile = %q, want %q", cfg.Server.PIDFile, "/var/run/conchd/conchd.pid")
-	}
 	if cfg.Server.WorkDir != "/var/run/conch" {
-		t.Errorf("DefaultConfig().Server.WorkDir = %q, want %q", cfg.Server.WorkDir, "/var/run/conch")
+		t.Errorf("DefaultConfig().Server.WorkDir = %q, want /var/run/conch", cfg.Server.WorkDir)
 	}
-	if cfg.Containerd.RootDir != "/var/lib/conch/containerd" {
-		t.Errorf("DefaultConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/var/lib/conch/containerd")
+	if cfg.Server.StateDir != "/var/lib/conch" {
+		t.Errorf("DefaultConfig().Server.StateDir = %q, want /var/lib/conch", cfg.Server.StateDir)
 	}
-	if cfg.Containerd.StateDir != "/run/conch/containerd" {
-		t.Errorf("DefaultConfig().Containerd.StateDir = %q, want %q", cfg.Containerd.StateDir, "/run/conch/containerd")
+	if cfg.GetServerUnixSocket() != "/var/run/conch/conchd.sock" || cfg.PIDFilePath() != "/var/run/conch/conchd.pid" {
+		t.Errorf("unexpected server runtime paths: socket=%q pid=%q", cfg.GetServerUnixSocket(), cfg.PIDFilePath())
 	}
-	if cfg.State.Path != "/var/lib/conch/state.db" {
-		t.Errorf("DefaultConfig().State.Path = %q, want %q", cfg.State.Path, "/var/lib/conch/state.db")
+	if cfg.ContainerdRootDir() != "/var/lib/conch/containerd" || cfg.ContainerdStateDir() != "/var/run/conch/containerd" {
+		t.Errorf("unexpected containerd paths: root=%q state=%q", cfg.ContainerdRootDir(), cfg.ContainerdStateDir())
 	}
-	if cfg.VMM.CloudHypervisor != nil || cfg.VMM.Stratovirt != nil {
-		t.Errorf("DefaultConfig().VMM = %#v, want no configured VMM binaries", cfg.VMM)
+	if cfg.VirtiofsRuntimeDir() != "/var/run/conch/sandboxes" || cfg.StatePath() != "/var/lib/conch/state.db" {
+		t.Errorf("unexpected state paths: virtiofs=%q store=%q", cfg.VirtiofsRuntimeDir(), cfg.StatePath())
 	}
-	if cfg.Sandbox.DefaultTemplateID != "" {
-		t.Errorf("DefaultConfig().Sandbox.DefaultTemplateID = %q", cfg.Sandbox.DefaultTemplateID)
+	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/usr/bin/stratovirt" {
+		t.Errorf("DefaultConfig().Sandbox.Stratovirt = %#v, want /usr/bin/stratovirt", cfg.Sandbox.Stratovirt)
 	}
-	if cfg.Sandbox.DefaultVMMName != DefaultVMMName {
-		t.Errorf("DefaultConfig().Sandbox.DefaultVMMName = %q, want %q", cfg.Sandbox.DefaultVMMName, DefaultVMMName)
+	if cfg.Sandbox.Backend != DefaultSandboxBackend {
+		t.Errorf("DefaultConfig().Sandbox.Backend = %q, want %q", cfg.Sandbox.Backend, DefaultSandboxBackend)
 	}
-	if cfg.Sandbox.DefaultVCPUNum != 2 {
-		t.Errorf("DefaultConfig().Sandbox.DefaultVCPUNum = %d, want 2", cfg.Sandbox.DefaultVCPUNum)
-	}
-	if cfg.Sandbox.DefaultVCPUMax != 2 {
-		t.Errorf("DefaultConfig().Sandbox.DefaultVCPUMax = %d, want 2", cfg.Sandbox.DefaultVCPUMax)
-	}
-	if cfg.Sandbox.DefaultRAMMB != 4096 {
-		t.Errorf("DefaultConfig().Sandbox.DefaultRAMMB = %d, want 4096", cfg.Sandbox.DefaultRAMMB)
+	if cfg.Sandbox.DefaultSpec.VCPUNum != 2 || cfg.Sandbox.DefaultSpec.VCPUMax != 2 || cfg.Sandbox.DefaultSpec.RamMB != 2048 {
+		t.Errorf("DefaultConfig().Sandbox.DefaultSpec = %#v, want 2 vCPU / 2048 MiB", cfg.Sandbox.DefaultSpec)
 	}
 }
 
-func TestDefaultVMMNameStaysStratovirt(t *testing.T) {
-	if DefaultVMMName != "stratovirt" {
-		t.Fatalf("DefaultVMMName = %q, want stratovirt", DefaultVMMName)
+func TestDefaultSandboxBackendStaysStratovirt(t *testing.T) {
+	if DefaultSandboxBackend != "stratovirt" {
+		t.Fatalf("DefaultSandboxBackend = %q, want stratovirt", DefaultSandboxBackend)
 	}
-	if got := DefaultConfig().Sandbox.DefaultVMMName; got != "stratovirt" {
-		t.Fatalf("DefaultConfig().Sandbox.DefaultVMMName = %q, want stratovirt", got)
+	if got := DefaultConfig().Sandbox.Backend; got != "stratovirt" {
+		t.Fatalf("DefaultConfig().Sandbox.Backend = %q, want stratovirt", got)
 	}
 }

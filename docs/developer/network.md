@@ -58,9 +58,10 @@ Network 模块直接通过 `libcni` 加载一个默认 CNI 网络。ADD、DEL �
 
 CNI Result 是 guest DNS 的唯一来源。Conch 对 CNI 返回的 DNS 进行校验、去重并最多保留 3 个 IPv4 nameserver，然后通过初始化协议下发给 conch-init；Conch 不读取 Host resolv.conf。
 
-`plugin_conf_dir` 应指向 Conch 专用的 CNI 配置目录。外层接口名固定为内部实现值 `eth0`；libcni cache root 固定为 `/var/lib/conch/cni`，result cache 实际位于其 `results` 子目录。这两个值不属于用户配置接口。
+Conch 固定从 `/etc/conch/cni/net.d` 加载专用 CNI 配置。外层接口名固定为内部实现值 `eth0`；libcni cache root 派生为 `<server.state_dir>/cni`，result cache 实际位于其 `results` 子目录。该路径不单独暴露为用户配置接口。
 
-libcni cache root 不控制 CNI 插件自身的持久化目录。仓库提供的 host-local 配置另外将 `dataDir` 设置为 `/var/lib/conch/cni/networks`，使默认的 result cache 与 IPAM 租约都位于 Conch 专用目录。
+Conch 在加载 CNI 配置时将 host-local IPAM 的 `dataDir` 设为
+`<server.state_dir>/cni/networks`，使 result cache 与 IPAM 租约都随持久状态根目录迁移。
 
 ## 5. 配置
 
@@ -70,12 +71,10 @@ network:
   cni:
     plugin_bin_dirs:
       - /usr/libexec/cni
-    plugin_conf_dir: /etc/conch/cni/net.d
 ```
 
 - `warm_pool_size`：空闲 Slot 的目标数量，默认 250，最大 4000。
 - `plugin_bin_dirs`：CNI 插件二进制目录。
-- `plugin_conf_dir`：Conch 使用的 CNI 配置目录。
 
 ## 6. 状态与退出
 

@@ -138,13 +138,13 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	s.applySandboxDefaults(&opts)
 	if opts.TemplateID == "" {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required and no default_template_id is configured"))
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required and no default_spec.template_id is configured"))
 	}
-	if opts.VCPUNum < 0 || opts.VCPUMax < 0 || (opts.VCPUNum != 0 && opts.VCPUMax != 0 && opts.VCPUMax < opts.VCPUNum) {
+	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
 		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
 	}
-	if opts.RamMB < 0 {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must not be negative"))
+	if opts.RamMB < 1 {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
 	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err

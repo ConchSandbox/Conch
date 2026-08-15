@@ -9,10 +9,24 @@ log:
   output: stdout
 
 server:
-  # conchd serves the API on this local Unix socket only; leave it empty to use the built-in default path
-  unix_socket: /var/run/conchd/conchd.sock
-  pid_file: /var/run/conchd/conchd.pid
   work_dir: /var/run/conch
+  state_dir: /var/lib/conch
+
+sandbox:
+  backend: stratovirt
+  vsock_signal_retry: 10ms
+  vsock_signal_timeout: 60s
+  request_timeout: 60s
+  default_spec:
+    template_id: ""
+    vcpu_num: 2
+    vcpu_max: 2
+    ram_mb: 2048
+  stratovirt:
+    binary: /usr/bin/stratovirt
+  cloud_hypervisor:
+    binary: /usr/local/bin/cloud-hypervisor
+
 
 network:
   # Number of ready-to-use network slots Conch keeps warm. Must not exceed the internal total-slot limit of 4000. Default: 250
@@ -22,40 +36,9 @@ network:
     # These binaries must be installed on the Linux host; libcni does not install them.
     plugin_bin_dirs:
       - /usr/libexec/cni
-    # Directory containing the CNI .conf/.conflist Conch should load for sandbox networking.
-    # Change this if your Conch CNI configs live somewhere else.
-    # If this default directory has no config, Conch falls back to cni/net.d next to this config file.
-    plugin_conf_dir: /etc/conch/cni/net.d
-
-containerd:
-  root_dir: /var/lib/conch/containerd
-  state_dir: /run/conch/containerd
-
-vmm:
-  cloud_hypervisor:
-    binary: /usr/local/bin/cloud-hypervisor
-  stratovirt:
-    binary: /usr/bin/stratovirt
-
-sandbox:
-  vsock_signal_retry: 10ms
-  vsock_signal_timeout: 60s
-  request_timeout: 60s
-  # Default Template used when a create request does not specify template_id.
-  default_template_id: ""
-  # Hypervisor launched when a create request does not specify vmm_name.
-  # Supported: "cloud-hypervisor", "stratovirt"
-  default_vmm_name: stratovirt
-  default_vcpu_num: 2
-  default_vcpu_max: 2
-  default_ram_mb: 4096
 
 volume:
   max_mounts: 10
   backend: virtiofs
   virtiofs:
     binary: /usr/libexec/virtiofsd
-    runtime_dir: /run/conch/sandboxes
-
-state:
-  path: /var/lib/conch/state.db

@@ -16,19 +16,19 @@ import (
 
 var WorkDir = defaultWorkDir
 
-const defaultWorkDir = "/var/run/conch"
+const (
+	defaultWorkDir  = "/var/run/conch"
+	defaultStateDir = "/var/lib/conch"
+)
 
 // Config holds the application configuration
 type Config struct {
-	App        AppConfig        `yaml:"app"`
-	Log        LogConfig        `yaml:"log"`
-	Server     ServerConfig     `yaml:"server"`
-	Network    NetworkConfig    `yaml:"network"`
-	Containerd ContainerdConfig `yaml:"containerd"`
-	VMM        VMMConfig        `yaml:"vmm"`
-	Sandbox    SandboxConfig    `yaml:"sandbox"`
-	Volume     VolumeConfig     `yaml:"volume"`
-	State      StateConfig      `yaml:"state"`
+	App     AppConfig     `yaml:"app"`
+	Log     LogConfig     `yaml:"log"`
+	Server  ServerConfig  `yaml:"server"`
+	Network NetworkConfig `yaml:"network"`
+	Sandbox SandboxConfig `yaml:"sandbox"`
+	Volume  VolumeConfig  `yaml:"volume"`
 }
 
 // AppConfig holds application-specific configuration
@@ -45,9 +45,8 @@ type LogConfig struct {
 // ServerConfig holds server configuration. conchd only ever serves the API on
 // a local Unix socket; there is no TCP listener.
 type ServerConfig struct {
-	UnixSocket string `yaml:"unix_socket"`
-	PIDFile    string `yaml:"pid_file"`
-	WorkDir    string `yaml:"work_dir"`
+	WorkDir  string `yaml:"work_dir"`
+	StateDir string `yaml:"state_dir"`
 }
 
 // NetworkConfig holds network pool configuration
@@ -59,25 +58,34 @@ type NetworkConfig struct {
 // CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
 type CNIConfig = netstack.CNIManagerConfig
 
-// ContainerdConfig holds containerd runtime configuration
-type ContainerdConfig struct {
-	RootDir  string `yaml:"root_dir"`
-	StateDir string `yaml:"state_dir"`
-}
-
-// VMMConfig holds the optional configuration for each supported VMM.
-// A nil entry means that the corresponding VMM is unavailable.
-type VMMConfig struct {
-	CloudHypervisor *VMMBinaryConfig `yaml:"cloud_hypervisor"`
-	Stratovirt      *VMMBinaryConfig `yaml:"stratovirt"`
-}
-
 type VMMBinaryConfig struct {
 	Binary string `yaml:"binary"`
 }
 
+const (
+	DefaultSandboxBackend = "stratovirt"
+	defaultVolumeBackend  = "virtiofs"
+)
+
+type SandboxConfig struct {
+	VsockSignalRetry   time.Duration    `yaml:"vsock_signal_retry"`
+	VsockSignalTimeout time.Duration    `yaml:"vsock_signal_timeout"`
+	RequestTimeout     time.Duration    `yaml:"request_timeout"`
+	Backend            string           `yaml:"backend"`
+	DefaultSpec        SandboxSpec      `yaml:"default_spec"`
+	CloudHypervisor    *VMMBinaryConfig `yaml:"cloud_hypervisor"`
+	Stratovirt         *VMMBinaryConfig `yaml:"stratovirt"`
+}
+
+type SandboxSpec struct {
+	TemplateID string `yaml:"template_id"`
+	VCPUNum    int64  `yaml:"vcpu_num"`
+	VCPUMax    int64  `yaml:"vcpu_max"`
+	RamMB      int64  `yaml:"ram_mb"`
+}
+
 // BinaryPaths returns the explicitly configured binary for each available VMM.
-func (c VMMConfig) BinaryPaths() map[string]string {
+func (c SandboxConfig) BinaryPaths() map[string]string {
 	paths := make(map[string]string, 2)
 	if c.CloudHypervisor != nil {
 		paths["cloud-hypervisor"] = c.CloudHypervisor.Binary
@@ -88,22 +96,6 @@ func (c VMMConfig) BinaryPaths() map[string]string {
 	return paths
 }
 
-const (
-	DefaultVMMName       = "stratovirt"
-	defaultVolumeBackend = "virtiofs"
-)
-
-type SandboxConfig struct {
-	VsockSignalRetry   time.Duration `yaml:"vsock_signal_retry"`
-	VsockSignalTimeout time.Duration `yaml:"vsock_signal_timeout"`
-	RequestTimeout     time.Duration `yaml:"request_timeout"`
-	DefaultTemplateID  string        `yaml:"default_template_id"`
-	DefaultVMMName     string        `yaml:"default_vmm_name"`
-	DefaultVCPUNum     int64         `yaml:"default_vcpu_num"`
-	DefaultVCPUMax     int64         `yaml:"default_vcpu_max"`
-	DefaultRAMMB       int64         `yaml:"default_ram_mb"`
-}
-
 type VolumeConfig struct {
 	MaxMounts int                  `yaml:"max_mounts"`
 	Backend   string               `yaml:"backend"`
@@ -111,19 +103,11 @@ type VolumeConfig struct {
 }
 
 type VolumeVirtiofsConfig struct {
-	Binary     string `yaml:"binary"`
-	RuntimeDir string `yaml:"runtime_dir"`
-}
-
-type StateConfig struct {
-	Path string `yaml:"path"`
+	Binary string `yaml:"binary"`
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
-	defaultUnixSocket := "/var/run/conchd/conchd.sock"
-	defaultPIDFile := "/var/run/conchd/conchd.pid"
-	defaultWorkDir := "/var/run/conch"
 	return &Config{
 		App: AppConfig{
 			Name: "conch",
@@ -133,41 +117,35 @@ func DefaultConfig() *Config {
 			Output: "stdout",
 		},
 		Server: ServerConfig{
-			UnixSocket: defaultUnixSocket,
-			PIDFile:    defaultPIDFile,
-			WorkDir:    defaultWorkDir,
+			WorkDir:  defaultWorkDir,
+			StateDir: defaultStateDir,
 		},
 		Network: NetworkConfig{
 			WarmPoolSize: netstack.DefaultWarmPoolSize,
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
+				CacheDir:      defaultStateDir + "/cni",
 			},
-		},
-		Containerd: ContainerdConfig{
-			RootDir:  "/var/lib/conch/containerd",
-			StateDir: "/run/conch/containerd",
 		},
 		Sandbox: SandboxConfig{
 			VsockSignalRetry:   10 * time.Millisecond,
 			VsockSignalTimeout: 60 * time.Second,
 			RequestTimeout:     60 * time.Second,
-			DefaultTemplateID:  "",
-			DefaultVMMName:     DefaultVMMName,
-			DefaultVCPUNum:     2,
-			DefaultVCPUMax:     2,
-			DefaultRAMMB:       4096,
+			Backend:            DefaultSandboxBackend,
+			DefaultSpec: SandboxSpec{
+				VCPUNum: 2,
+				VCPUMax: 2,
+				RamMB:   2048,
+			},
+			Stratovirt: &VMMBinaryConfig{Binary: "/usr/bin/stratovirt"},
 		},
 		Volume: VolumeConfig{
 			MaxMounts: 10,
 			Backend:   defaultVolumeBackend,
 			Virtiofs: VolumeVirtiofsConfig{
-				Binary:     "virtiofsd",
-				RuntimeDir: "/run/conch/sandboxes",
+				Binary: "virtiofsd",
 			},
-		},
-		State: StateConfig{
-			Path: "/var/lib/conch/state.db",
 		},
 	}
 }
@@ -230,14 +208,11 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Log.Output == "" {
 		cfg.Log.Output = defaultCfg.Log.Output
 	}
-	if strings.TrimSpace(cfg.Server.UnixSocket) == "" {
-		cfg.Server.UnixSocket = defaultCfg.Server.UnixSocket
-	}
-	if cfg.Server.PIDFile == "" {
-		cfg.Server.PIDFile = defaultCfg.Server.PIDFile
-	}
 	if cfg.Server.WorkDir == "" {
 		cfg.Server.WorkDir = defaultCfg.Server.WorkDir
+	}
+	if cfg.Server.StateDir == "" {
+		cfg.Server.StateDir = defaultCfg.Server.StateDir
 	}
 	if cfg.Network.WarmPoolSize == 0 {
 		cfg.Network.WarmPoolSize = defaultCfg.Network.WarmPoolSize
@@ -245,16 +220,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if len(cfg.Network.CNI.PluginBinDirs) == 0 {
 		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
 	}
-	if cfg.Network.CNI.PluginConfDir == "" {
-		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
-	}
-	cfg.Network.CNI.PluginConfDir = resolveCNIPluginConfDir(configPath, cfg.Network.CNI.PluginConfDir, defaultCfg.Network.CNI.PluginConfDir)
-	if cfg.Containerd.RootDir == "" {
-		cfg.Containerd.RootDir = defaultCfg.Containerd.RootDir
-	}
-	if cfg.Containerd.StateDir == "" {
-		cfg.Containerd.StateDir = defaultCfg.Containerd.StateDir
-	}
+	cfg.Network.CNI.CacheDir = filepath.Join(cfg.Server.StateDir, "cni")
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
 	}
@@ -264,20 +230,20 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
 	}
-	if cfg.Sandbox.DefaultTemplateID == "" {
-		cfg.Sandbox.DefaultTemplateID = defaultCfg.Sandbox.DefaultTemplateID
+	if cfg.Sandbox.Backend == "" {
+		cfg.Sandbox.Backend = defaultCfg.Sandbox.Backend
 	}
-	if cfg.Sandbox.DefaultVMMName == "" {
-		cfg.Sandbox.DefaultVMMName = defaultCfg.Sandbox.DefaultVMMName
+	if cfg.Sandbox.Stratovirt == nil {
+		cfg.Sandbox.Stratovirt = defaultCfg.Sandbox.Stratovirt
 	}
-	if cfg.Sandbox.DefaultVCPUNum == 0 {
-		cfg.Sandbox.DefaultVCPUNum = defaultCfg.Sandbox.DefaultVCPUNum
+	if cfg.Sandbox.DefaultSpec.VCPUNum == 0 {
+		cfg.Sandbox.DefaultSpec.VCPUNum = defaultCfg.Sandbox.DefaultSpec.VCPUNum
 	}
-	if cfg.Sandbox.DefaultVCPUMax == 0 {
-		cfg.Sandbox.DefaultVCPUMax = defaultCfg.Sandbox.DefaultVCPUMax
+	if cfg.Sandbox.DefaultSpec.VCPUMax == 0 {
+		cfg.Sandbox.DefaultSpec.VCPUMax = defaultCfg.Sandbox.DefaultSpec.VCPUMax
 	}
-	if cfg.Sandbox.DefaultRAMMB == 0 {
-		cfg.Sandbox.DefaultRAMMB = defaultCfg.Sandbox.DefaultRAMMB
+	if cfg.Sandbox.DefaultSpec.RamMB == 0 {
+		cfg.Sandbox.DefaultSpec.RamMB = defaultCfg.Sandbox.DefaultSpec.RamMB
 	}
 	if cfg.Volume.MaxMounts == 0 {
 		cfg.Volume.MaxMounts = defaultCfg.Volume.MaxMounts
@@ -287,12 +253,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Volume.Virtiofs.Binary == "" {
 		cfg.Volume.Virtiofs.Binary = defaultCfg.Volume.Virtiofs.Binary
-	}
-	if cfg.Volume.Virtiofs.RuntimeDir == "" {
-		cfg.Volume.Virtiofs.RuntimeDir = defaultCfg.Volume.Virtiofs.RuntimeDir
-	}
-	if cfg.State.Path == "" {
-		cfg.State.Path = defaultCfg.State.Path
 	}
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
@@ -305,6 +265,12 @@ func LoadConfig(configPath string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
+	if !filepath.IsAbs(cfg.Server.WorkDir) {
+		return fmt.Errorf("invalid server.work_dir=%q: must be an absolute path", cfg.Server.WorkDir)
+	}
+	if !filepath.IsAbs(cfg.Server.StateDir) {
+		return fmt.Errorf("invalid server.state_dir=%q: must be an absolute path", cfg.Server.StateDir)
+	}
 	if cfg.Network.WarmPoolSize < 0 {
 		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}
@@ -315,17 +281,21 @@ func validateConfig(cfg *Config) error {
 	if backend != "" && backend != defaultVolumeBackend {
 		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)
 	}
-	if err := validateVMMBinaryConfig("cloud_hypervisor", cfg.VMM.CloudHypervisor); err != nil {
+	if cfg.Sandbox.DefaultSpec.VCPUNum < 1 || cfg.Sandbox.DefaultSpec.VCPUMax < cfg.Sandbox.DefaultSpec.VCPUNum {
+		return fmt.Errorf("invalid sandbox.default_spec CPU configuration")
+	}
+	if cfg.Sandbox.DefaultSpec.RamMB < 1 {
+		return fmt.Errorf("invalid sandbox.default_spec.ram_mb=%d: must be positive", cfg.Sandbox.DefaultSpec.RamMB)
+	}
+	if err := validateVMMBinaryConfig("cloud_hypervisor", cfg.Sandbox.CloudHypervisor); err != nil {
 		return err
 	}
-	if err := validateVMMBinaryConfig("stratovirt", cfg.VMM.Stratovirt); err != nil {
+	if err := validateVMMBinaryConfig("stratovirt", cfg.Sandbox.Stratovirt); err != nil {
 		return err
 	}
-	vmmBinaries := cfg.VMM.BinaryPaths()
-	if len(vmmBinaries) > 0 {
-		if _, ok := vmmBinaries[cfg.Sandbox.DefaultVMMName]; !ok {
-			return fmt.Errorf("sandbox.default_vmm_name %q is not configured under vmm", cfg.Sandbox.DefaultVMMName)
-		}
+	vmmBinaries := cfg.Sandbox.BinaryPaths()
+	if _, ok := vmmBinaries[cfg.Sandbox.Backend]; !ok {
+		return fmt.Errorf("sandbox.backend %q is not configured", cfg.Sandbox.Backend)
 	}
 	return nil
 }
@@ -343,34 +313,6 @@ func validateVMMBinaryConfig(name string, cfg *VMMBinaryConfig) error {
 	}
 	cfg.Binary = filepath.Clean(binary)
 	return nil
-}
-
-func resolveCNIPluginConfDir(configPath, confDir, defaultConfDir string) string {
-	if confDir != defaultConfDir || hasCNIConfig(confDir) {
-		return confDir
-	}
-	localConfDir := filepath.Join(filepath.Dir(configPath), "cni", "net.d")
-	if hasCNIConfig(localConfDir) {
-		return localConfDir
-	}
-	return confDir
-}
-
-func hasCNIConfig(confDir string) bool {
-	entries, err := os.ReadDir(confDir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		ext := filepath.Ext(entry.Name())
-		if ext == ".conf" || ext == ".conflist" {
-			return true
-		}
-	}
-	return false
 }
 
 // GetLogConfig converts LogConfig to ulog.Config
@@ -405,13 +347,23 @@ func (c *Config) GetLogConfig() (ulog.Config, error) {
 	}, nil
 }
 
-// GetServerUnixSocket returns the unix socket path the API is served on.
+// GetServerUnixSocket returns the fixed API socket path under WorkDir.
 func (c *Config) GetServerUnixSocket() string {
 	if c == nil {
 		return ""
 	}
-	return strings.TrimSpace(c.Server.UnixSocket)
+	return filepath.Join(c.Server.WorkDir, "conchd.sock")
 }
+
+func (c *Config) PIDFilePath() string { return filepath.Join(c.Server.WorkDir, "conchd.pid") }
+
+func (c *Config) ContainerdRootDir() string { return filepath.Join(c.Server.StateDir, "containerd") }
+
+func (c *Config) ContainerdStateDir() string { return filepath.Join(c.Server.WorkDir, "containerd") }
+
+func (c *Config) VirtiofsRuntimeDir() string { return filepath.Join(c.Server.WorkDir, "sandboxes") }
+
+func (c *Config) StatePath() string { return filepath.Join(c.Server.StateDir, "state.db") }
 
 // parseLogLevel converts string log level to ulog.LogLevel
 func parseLogLevel(level string) (ulog.LogLevel, error) {

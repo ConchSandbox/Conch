@@ -21,6 +21,9 @@ func TestNormalizeCNIManagerConfigDefaults(t *testing.T) {
 	if cfg.PluginConfDir != defaultCNIPluginConfDir {
 		t.Fatalf("PluginConfDir = %q, want %q", cfg.PluginConfDir, defaultCNIPluginConfDir)
 	}
+	if cfg.CacheDir != defaultCNICacheDir {
+		t.Fatalf("CacheDir = %q, want %q", cfg.CacheDir, defaultCNICacheDir)
+	}
 }
 
 func TestExtractCNIDNS(t *testing.T) {
@@ -52,6 +55,7 @@ func TestNormalizeCNIManagerConfigPreservesExplicitValues(t *testing.T) {
 	in := CNIManagerConfig{
 		PluginBinDirs: []string{"/custom/bin"},
 		PluginConfDir: "/custom/net.d",
+		CacheDir:      "/custom/cache",
 	}
 	got := normalizeCNIManagerConfig(in)
 

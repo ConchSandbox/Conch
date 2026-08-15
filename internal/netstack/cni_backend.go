@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,19 +20,48 @@ type cniNetwork struct {
 	ifName string
 }
 
+func setHostLocalIPAMDataDir(network *cnilibrary.NetworkConfigList, dataDir string) error {
+	if network == nil {
+		return fmt.Errorf("CNI network config is required")
+	}
+	for _, plugin := range network.Plugins {
+		if plugin == nil || len(plugin.Bytes) == 0 {
+			continue
+		}
+		var config map[string]any
+		if err := json.Unmarshal(plugin.Bytes, &config); err != nil {
+			return fmt.Errorf("parse CNI plugin configuration: %w", err)
+		}
+		ipam, ok := config["ipam"].(map[string]any)
+		if !ok || ipam["type"] != "host-local" {
+			continue
+		}
+		ipam["dataDir"] = dataDir
+		data, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("encode CNI plugin configuration: %w", err)
+		}
+		plugin.Bytes = data
+	}
+	return nil
+}
+
 type libCNIBackend struct {
 	client       *cnilibrary.CNIConfig
 	outerNetwork cniNetwork
 }
 
 func newLibCNIBackend(cfg CNIManagerConfig) (*libCNIBackend, error) {
-	client := cnilibrary.NewCNIConfigWithCacheDir(cfg.PluginBinDirs, cniCacheDir, &invoke.DefaultExec{
+	client := cnilibrary.NewCNIConfigWithCacheDir(cfg.PluginBinDirs, cfg.CacheDir, &invoke.DefaultExec{
 		RawExec:       &invoke.RawExec{Stderr: os.Stderr},
 		PluginDecoder: version.PluginDecoder{},
 	})
 
 	outer, err := loadDefaultCNINetwork(cfg.PluginConfDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := setHostLocalIPAMDataDir(outer, filepath.Join(cfg.CacheDir, "networks")); err != nil {
 		return nil, err
 	}
 

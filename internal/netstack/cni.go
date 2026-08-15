@@ -16,12 +16,14 @@ const (
 	defaultCNIPluginConfDir = DefaultCNIPluginConfDir
 	defaultCNIPluginBinDir  = DefaultCNIPluginBinDir
 	cniOuterInterfaceName   = "eth0"
-	cniCacheDir             = "/var/lib/conch/cni"
+	defaultCNICacheDir      = "/var/lib/conch/cni"
+	cniCacheDir             = defaultCNICacheDir
 )
 
 type CNIManagerConfig struct {
 	PluginBinDirs []string `toml:"plugin_bin_dirs" json:"pluginBinDirs" yaml:"plugin_bin_dirs"`
-	PluginConfDir string   `toml:"plugin_conf_dir" json:"pluginConfDir" yaml:"plugin_conf_dir"`
+	PluginConfDir string   `toml:"-" json:"-" yaml:"-"`
+	CacheDir      string   `toml:"-" json:"-" yaml:"-"`
 }
 
 type cniAttachment struct {
@@ -75,6 +77,9 @@ func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {
 	}
 	if cfg.PluginConfDir == "" {
 		cfg.PluginConfDir = defaultCNIPluginConfDir
+	}
+	if cfg.CacheDir == "" {
+		cfg.CacheDir = defaultCNICacheDir
 	}
 	return cfg
 }

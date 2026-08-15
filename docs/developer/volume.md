@@ -177,7 +177,6 @@ volume:
   backend: virtiofs
   virtiofs:
     binary: /usr/libexec/virtiofsd
-    runtime_dir: /run/conch/sandboxes
 ```
 
 字段：
@@ -197,9 +196,8 @@ volume.virtiofs.binary
   PATH 中，此时必须配成绝对路径，否则 exec.LookPath 失败，挂卷时报
   "executable file not found in $PATH"。
 
-volume.virtiofs.runtime_dir
-  per-sandbox runtime 目录的父目录，实际目录 = <runtime_dir>/<sandbox-id>/。
-  默认值：/run/conch/sandboxes
+virtiofsd 的每个 sandbox runtime 目录固定在
+`<server.work_dir>/sandboxes/<sandbox-id>/`，不作为用户配置项。
 ```
 
 其他重要配置说明：
