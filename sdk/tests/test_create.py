@@ -51,7 +51,7 @@ def test_context_manager():
 
 
 def test_build_create_payload_without_vmm_name_uses_server_default():
-    sbx = Sandbox(sandbox_id="sandbox-test", template_id="tmpl_test")
+    sbx = Sandbox(sandbox_id="sandbox-test", template_id="template-test")
 
     payload = sbx._build_create_payload()
     assert "vmm_name" not in payload
@@ -116,9 +116,9 @@ def test_build_create_payload_omits_whitespace_template_id():
 
 
 def test_build_create_payload_keeps_explicit_template_id():
-    payload = Sandbox(sandbox_id="sandbox-test", template_id="tmpl-explicit")._build_create_payload()
+    payload = Sandbox(sandbox_id="sandbox-test", template_id="template-explicit")._build_create_payload()
 
-    assert payload["template_id"] == "tmpl-explicit"
+    assert payload["template_id"] == "template-explicit"
 
 
 def test_build_create_payload_preserves_environment():
@@ -129,7 +129,7 @@ def test_build_create_payload_preserves_environment():
 
     payload = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="tmpl-explicit",
+        template_id="template-explicit",
         env=environment,
     )._build_create_payload()
 
@@ -139,11 +139,11 @@ def test_build_create_payload_preserves_environment():
 def test_build_create_payload_distinguishes_absent_and_empty_environment():
     without_environment = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="tmpl-explicit",
+        template_id="template-explicit",
     )._build_create_payload()
     with_empty_environment = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="tmpl-explicit",
+        template_id="template-explicit",
         env={},
     )._build_create_payload()
 

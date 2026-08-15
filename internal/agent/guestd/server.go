@@ -35,6 +35,7 @@ func serveAgentAPI(listener net.Listener) error {
 	httpServer := &http.Server{
 		Handler: h2c.NewHandler(newAgentHTTPHandler(), &http2.Server{
 			MaxConcurrentStreams: agentMaxConcurrentRPCs,
+			IdleTimeout:          agentIdleTimeout,
 		}),
 		ReadHeaderTimeout: agentReadHeaderTimeout,
 		IdleTimeout:       agentIdleTimeout,

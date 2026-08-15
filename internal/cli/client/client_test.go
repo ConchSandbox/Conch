@@ -245,10 +245,9 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 			}
 			templateInitrdBody = string(raw)
 			_ = json.NewEncoder(w).Encode(TemplateCreateResponse{
-				Status:          "ok",
-				TemplateID:      "tmpl_123",
-				BootIndexDigest: "sha256:template",
-				BootIndexTag:    "localhost/conch/template:latest",
+				Status:     "ok",
+				TemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				BuildRef:   "localhost/conch/template:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			})
 		case listSnapshots:
 			if err := json.NewDecoder(r.Body).Decode(&listSnapshotsReq); err != nil {
@@ -272,25 +271,24 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 
 	c := newTestClient(t, Options{BaseURL: server.URL})
 	templateResp, err := c.CreateTemplate(context.Background(), TemplateCreateRequest{
-		Source:       "docker.io/library/busybox:latest",
-		KernelPath:   kernel.Name(),
-		InitrdPath:   initrd.Name(),
-		BootIndexTag: "localhost/conch/template:latest",
-		PlainHTTP:    true,
-		Username:     "user",
-		Password:     "pass",
-		Labels:       map[string]string{"role": "base"},
+		Source:     "docker.io/library/busybox:latest",
+		KernelPath: kernel.Name(),
+		InitrdPath: initrd.Name(),
+		PlainHTTP:  true,
+		Username:   "user",
+		Password:   "pass",
+		Labels:     map[string]string{"role": "base"},
 	})
 	if err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
-	if templateMetadata.Source != "docker.io/library/busybox:latest" || templateMetadata.BootIndexTag != "localhost/conch/template:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
+	if templateMetadata.Source != "docker.io/library/busybox:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
 		t.Fatalf("template metadata = %#v", templateMetadata)
 	}
 	if templateKernelBody != "kernel-content" || templateInitrdBody != "initrd-content" {
 		t.Fatalf("uploaded template bodies kernel=%q initrd=%q", templateKernelBody, templateInitrdBody)
 	}
-	if templateResp.TemplateID != "tmpl_123" || templateResp.BootIndexDigest != "sha256:template" {
+	if templateResp.TemplateID != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("template response = %#v", templateResp)
 	}
 
@@ -330,7 +328,7 @@ func TestCheckpointSandboxRequest(t *testing.T) {
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","template_id":"tmpl_test"}`)),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"status":"ok","template_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)),
 				Header:     make(http.Header),
 			}, nil
 		}),
@@ -342,28 +340,28 @@ func TestCheckpointSandboxRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckpointSandbox: %v", err)
 	}
-	if resp.TemplateID != "tmpl_test" {
-		t.Fatalf("templateID = %q, want %q", resp.TemplateID, "tmpl_test")
+	if resp.TemplateID != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("TemplateID = %q", resp.TemplateID)
 	}
 	if got.SandboxID != "sandbox-123" {
 		t.Fatalf("sandbox_id = %q, want %q", got.SandboxID, "sandbox-123")
 	}
 }
 
-func TestTemplateRecordIncludesBootIndexDigestInJSON(t *testing.T) {
-	const payload = `{"id":"tmpl_test","boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+func TestTemplateRecordIncludesTemplateIDInJSON(t *testing.T) {
+	const payload = `{"template_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
 	var record TemplateRecord
 	if err := json.Unmarshal([]byte(payload), &record); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if record.BootIndexDigest != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Fatalf("BootIndexDigest = %q", record.BootIndexDigest)
+	if record.TemplateID != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("TemplateID = %q", record.TemplateID)
 	}
 	raw, err := json.Marshal(record)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	if !strings.Contains(string(raw), `"boot_index_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`) {
+	if !strings.Contains(string(raw), `"template_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`) {
 		t.Fatalf("TemplateRecord JSON = %s", raw)
 	}
 	for _, removedField := range []string{`"state"`, `"updated_at"`, `"last_error"`} {
@@ -384,10 +382,9 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 				t.Fatalf("decode pull request: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(TemplatePullResponse{
-				Status:          "ok",
-				TemplateID:      "tmpl_pulled",
-				BootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				BuildRef:        pullReq.Reference,
+				Status:     "ok",
+				TemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				BuildRef:   "localhost/conch/template:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			})
 		case pushTemplate:
 			if err := json.NewDecoder(r.Body).Decode(&pushReq); err != nil {
@@ -416,7 +413,7 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullTemplate() error = %v", err)
 	}
-	if pulled.TemplateID != "tmpl_pulled" || pulled.BuildRef != pullReq.Reference || !pullReq.PlainHTTP {
+	if pulled.TemplateID == "" || pulled.BuildRef == pullReq.Reference || !pullReq.PlainHTTP {
 		t.Fatalf("PullTemplate() response = %#v, request = %#v", pulled, pullReq)
 	}
 
@@ -429,14 +426,14 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PushTemplate() error = %v", err)
 	}
-	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
+	if pushReq.TemplateID != pulled.TemplateID || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 
 	if err := c.UnpackTemplate(context.Background(), TemplateUnpackRequest{TemplateID: pulled.TemplateID}); err != nil {
 		t.Fatalf("UnpackTemplate() error = %v", err)
 	}
-	if unpackReq.TemplateID != "tmpl_pulled" {
+	if unpackReq.TemplateID != pulled.TemplateID {
 		t.Fatalf("UnpackTemplate() request = %#v", unpackReq)
 	}
 }
@@ -461,14 +458,14 @@ func TestCreateSandboxIncludesExplicitRAM(t *testing.T) {
 	}
 
 	_, err := c.CreateSandbox(context.Background(), SandboxCreateRequest{
-		TemplateID: "tmpl_123",
+		TemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SandboxID:  "sandbox-123",
 		RAMMB:      4096,
 	})
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if got.TemplateID != "tmpl_123" || got.SandboxID != "sandbox-123" {
+	if got.TemplateID == "" || got.SandboxID != "sandbox-123" {
 		t.Fatalf("create request = %#v", got)
 	}
 	if got.RAMMB != 4096 {

@@ -11,21 +11,23 @@ The Template module is a metadata catalog for sandbox templates. It provides
 
 ### Entry
 
-`Entry` describes a Template through its identity, boot configuration, lineage,
-provenance, and creation metadata.
+`Entry` describes a Template through its boot configuration, lineage,
+provenance, and creation metadata. A Template has no independent identifier:
+its identity and storage key are its immutable Boot Index digest.
 
 | Field | Type | Description | Constraints |
 | --- | --- | --- | --- |
-| `ID` | `string` | Uniquely identifies the Template record. | Required. |
 | `Origin` | `Origin` | Identifies the process that produced the Template. | Required. |
 | `BootMode` | `BootMode` | Identifies how the Template starts a Sandbox. | Required. |
-| `BootIndexDigest` | `string` | References the OCI Boot Index associated with the Template. | Required; must be a valid OCI digest. |
-| `ParentTemplateID` | `string` | Identifies the parent Template when this record derives from another Template. | Optional. |
+| `BootIndexDigest` | `string` | Identifies the Template and references its OCI Boot Index. | Required; must be a valid OCI digest. |
+| `ParentBootIndexDigest` | `string` | Identifies the parent Template when this record derives from another Template. | Optional. |
 | `SourceSandboxID` | `string` | Identifies the Sandbox used to produce the Template. | Optional. |
-| `ImageName` | `string` | Records the source image name associated with the Template. | Optional. |
-| `BuildRef` | `string` | Records the external build reference associated with the Template. | Optional. |
+| `SourceRef` | `string` | Records the registry reference supplied to `pull`. | Optional. |
 | `Labels` | `map[string]string` | Stores caller-defined metadata as key-value pairs. | Optional. |
 | `CreatedAt` | `int64` | Records when the Template record was created. | Unix nanoseconds; assigned by `Create` when zero. |
+
+The corresponding containerd image record is also derived from the digest:
+`localhost/conch/template:<algorithm>-<encoded-digest>`.
 
 #### Origin
 
@@ -55,9 +57,9 @@ provenance, and creation metadata.
 | Operation | Summary |
 | --- | --- |
 | [`Create`](#create) | Creates a Template record. |
-| [`Get`](#get) | Retrieves a Template record by ID. |
+| [`Get`](#get) | Retrieves a Template record by Boot Index digest. |
 | [`List`](#list) | Lists Template records using optional filters. |
-| [`Delete`](#delete) | Deletes a Template record by ID. |
+| [`Delete`](#delete) | Deletes a Template record by Boot Index digest. |
 
 ### Create
 
@@ -68,18 +70,19 @@ Create(ctx context.Context, entry Entry) (Entry, error)
 Creates a new Template record after validating the `Entry` constraints above.
 A zero `CreatedAt` is set to the current Unix time in nanoseconds.
 
-The record is inserted atomically. An existing record is never overwritten; a
-duplicate `ID` returns `ErrAlreadyExists`. On success, `Create` returns the
-normalized record that was stored.
+The record is inserted atomically using `BootIndexDigest` as the key. An
+existing record is never overwritten; a duplicate digest returns
+`ErrAlreadyExists`. On success, `Create` returns the normalized record that was
+stored.
 
 ### Get
 
 ```go
-Get(ctx context.Context, id string) (Entry, error)
+Get(ctx context.Context, bootIndexDigest string) (Entry, error)
 ```
 
-Returns the Template record identified by `id`. The returned `Entry` is
-normalized using the same field rules as `Create`.
+Returns the Template record identified by `bootIndexDigest`. The returned
+`Entry` is normalized using the same field rules as `Create`.
 
 `Get` returns an error when the record does not exist, cannot be read, or
 contains invalid data.
@@ -99,10 +102,13 @@ Every returned `Entry` is normalized using the same field rules as `Create`.
 ### Delete
 
 ```go
-Delete(ctx context.Context, id string) error
+Delete(ctx context.Context, bootIndexDigest string) error
 ```
 
-Deletes the Template record identified by `id`. The operation is idempotent:
-deleting an unknown `id` succeeds without changing stored data.
+Deletes the Template record identified by `bootIndexDigest`. The operation is
+idempotent: deleting an unknown digest succeeds without changing stored data.
 
 `Delete` returns an error when the storage operation cannot be completed.
+The runtime service additionally removes the digest-derived canonical
+containerd image record; containerd GC then decides when unreferenced content
+is reclaimed.

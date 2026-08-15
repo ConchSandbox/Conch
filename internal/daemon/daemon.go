@@ -768,9 +768,8 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
+		"status":      "ok",
+		"template_id": result.TemplateID,
 	})
 }
 
@@ -821,23 +820,21 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
-		"boot_index_tag":    result.BootIndexTag,
+		"status":      "ok",
+		"template_id": result.TemplateID,
+		"build_ref":   result.BuildRef,
 	})
 }
 
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
-		Source:       req.Source,
-		KernelPath:   kernelPath,
-		InitrdPath:   initrdPath,
-		BootIndexTag: req.BootIndexTag,
-		PlainHTTP:    req.PlainHTTP,
-		Username:     req.Username,
-		Password:     req.Password,
-		Labels:       req.Labels,
+		Source:     req.Source,
+		KernelPath: kernelPath,
+		InitrdPath: initrdPath,
+		PlainHTTP:  req.PlainHTTP,
+		Username:   req.Username,
+		Password:   req.Password,
+		Labels:     req.Labels,
 	})
 }
 
@@ -862,10 +859,9 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
-		"build_ref":         result.BuildRef,
+		"status":      "ok",
+		"template_id": result.TemplateID,
+		"build_ref":   result.BuildRef,
 	})
 }
 

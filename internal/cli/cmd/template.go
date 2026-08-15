@@ -17,7 +17,6 @@ type templateCreateOptions struct {
 	source     string
 	kernel     string
 	initrd     string
-	tag        string
 	configPath string
 	apiURL     string
 	address    string
@@ -69,8 +68,6 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        kernel file path")
 	fmt.Fprintln(out, "  --initrd string")
 	fmt.Fprintln(out, "        initrd file path")
-	fmt.Fprintln(out, "  -t, --tag string")
-	fmt.Fprintln(out, "        output Conch image tag")
 	fmt.Fprintln(out, "  -api-url string")
 	fmt.Fprintln(out, "        conchd API base URL (default: conchd unix socket from config)")
 	fmt.Fprintln(out, "  -address string")
@@ -87,7 +84,7 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        registry password")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
-	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd -t localhost/conch/nginx:latest")
+	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd")
 }
 
 func RunTemplate(ctx context.Context, args []string) error {
@@ -155,9 +152,8 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template pull: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Template: %s\n", result.TemplateID)
 	fmt.Fprintf(os.Stdout, "Boot image: %s\n", result.BuildRef)
-	fmt.Fprintf(os.Stdout, "Image digest: %s\n", result.BootIndexDigest)
+	fmt.Fprintf(os.Stdout, "Template ID: %s\n", result.TemplateID)
 	return nil
 }
 
@@ -262,8 +258,6 @@ func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) 
 	fs.StringVar(&opts.source, "source", "", "source rootfs image")
 	fs.StringVar(&opts.kernel, "kernel", "", "kernel file path")
 	fs.StringVar(&opts.initrd, "initrd", "", "initrd file path")
-	fs.StringVar(&opts.tag, "tag", "", "boot index image tag")
-	fs.StringVar(&opts.tag, "t", "", "boot index image tag")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
 	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
@@ -282,13 +276,12 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 		return fmt.Errorf("%s: create API client: %w", command, err)
 	}
 	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
-		Source:       opts.source,
-		KernelPath:   opts.kernel,
-		InitrdPath:   opts.initrd,
-		BootIndexTag: opts.tag,
-		PlainHTTP:    opts.plainHTTP,
-		Username:     opts.username,
-		Password:     opts.password,
+		Source:     opts.source,
+		KernelPath: opts.kernel,
+		InitrdPath: opts.initrd,
+		PlainHTTP:  opts.plainHTTP,
+		Username:   opts.username,
+		Password:   opts.password,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", command, err)
@@ -298,12 +291,11 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 }
 
 func printTemplateCreateSummary(out io.Writer, res client.TemplateCreateResponse) {
-	fmt.Fprintf(out, "Template: %s\n", res.TemplateID)
-	if res.BootIndexTag != "" {
-		fmt.Fprintf(out, "Boot image: %s\n", res.BootIndexTag)
+	if res.BuildRef != "" {
+		fmt.Fprintf(out, "Boot image: %s\n", res.BuildRef)
 	}
-	if res.BootIndexDigest != "" {
-		fmt.Fprintf(out, "Image digest: %s\n", res.BootIndexDigest)
+	if res.TemplateID != "" {
+		fmt.Fprintf(out, "Template ID: %s\n", res.TemplateID)
 	}
 }
 
@@ -339,7 +331,7 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("conch template inspect: exactly one template ID is required")
+		return fmt.Errorf("conch template inspect: exactly one Template ID is required")
 	}
 	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
@@ -361,7 +353,7 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("conch template rm: exactly one template ID is required")
+		return fmt.Errorf("conch template rm: exactly one Template ID is required")
 	}
 	id := fs.Arg(0)
 	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
@@ -377,13 +369,13 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 
 func printTemplates(out io.Writer, items []client.TemplateRecord) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tORIGIN\tBOOT_MODE\tBOOT_INDEX_DIGEST\tSOURCE_SANDBOX\tBUILD_REF")
+	fmt.Fprintln(tw, "TEMPLATE_ID\tORIGIN\tBOOT_MODE\tSOURCE_REF\tSOURCE_SANDBOX\tBUILD_REF")
 	for _, item := range items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			item.ID,
+			displayTemplateValue(item.TemplateID),
 			displayTemplateValue(item.Origin),
 			displayTemplateValue(item.BootMode),
-			displayTemplateValue(item.BootIndexDigest),
+			displayTemplateValue(item.SourceRef),
 			displayTemplateValue(item.SourceSandboxID),
 			displayTemplateValue(item.BuildRef),
 		)

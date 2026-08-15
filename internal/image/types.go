@@ -16,12 +16,16 @@ type PublishBootIndexOptions struct {
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`
 	InitrdPath      string `json:"initrd_path"`
-	BootIndexTag    string `json:"boot_index_tag"`
 }
 
 type PublishBootIndexResult struct {
 	BootIndexDigest string `json:"boot_index_digest"`
-	ImageName       string `json:"image_name"`
+	BuildRef        string `json:"build_ref"`
+}
+
+type PullBootIndexResult struct {
+	Info     BootIndexInfo
+	BuildRef string
 }
 
 // BootIndexInfo is the validated, content-addressed view of a Conch Boot
@@ -43,7 +47,6 @@ type BootIndexInfo struct {
 // layout is defined by VMMName.
 type PublishCheckpointBootIndexOptions struct {
 	SourceBootIndexDigest string `json:"source_boot_index_digest"`
-	BootIndexTag          string `json:"boot_index_tag"`
 	MemRoot               string `json:"mem_root"`
 	VMMName               string `json:"vmm_name"`
 	MemorySizeMB          int64  `json:"memory_size_mb"`
@@ -53,7 +56,7 @@ type PublishCheckpointBootIndexOptions struct {
 // publishing checkpoint content must not create checkpoint snapshots.
 type PublishCheckpointBootIndexResult struct {
 	BootIndexDigest string `json:"boot_index_digest"`
-	ImageName       string `json:"image_name"`
+	BuildRef        string `json:"build_ref"`
 }
 
 // PushBootIndexOptions publishes the descriptor closure rooted at an

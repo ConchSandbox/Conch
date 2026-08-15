@@ -26,7 +26,7 @@ func PrintTemplateUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch template unpack tmpl_ab2345da0a69b4e18aa24ad6")
+	fmt.Fprintln(out, "  conch template unpack sha256:<digest>")
 }
 
 func runTemplateUnpack(ctx context.Context, args []string) error {
@@ -41,9 +41,9 @@ func runTemplateUnpack(ctx context.Context, args []string) error {
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("conch template unpack: exactly one template ID is required")
+		return fmt.Errorf("conch template unpack: exactly one Template ID is required")
 	}
-	templateID := fs.Arg(0)
+	id := fs.Arg(0)
 
 	conchClient, err := client.New(client.Options{
 		BaseURL:    ResolveConchAPIURL(*apiURL, *addr),
@@ -53,10 +53,10 @@ func runTemplateUnpack(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch template unpack: create API client: %w", err)
 	}
 	if err := conchClient.UnpackTemplate(ctx, client.TemplateUnpackRequest{
-		TemplateID: templateID,
+		TemplateID: id,
 	}); err != nil {
 		return fmt.Errorf("conch template unpack: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Unpacked template: %s\n", templateID)
+	fmt.Fprintf(os.Stdout, "Unpacked template: %s\n", id)
 	return nil
 }

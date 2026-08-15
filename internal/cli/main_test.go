@@ -330,7 +330,7 @@ func TestPrintTemplateUnpackHelpIncludesExample(t *testing.T) {
 		"conchd API base URL",
 		"config file path",
 		"every component",
-		"conch template unpack tmpl_",
+		"conch template unpack sha256:<digest>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unpack help output missing %q:\n%s", want, got)
@@ -415,10 +415,9 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 		}
 		initrdBody = string(raw)
 		_ = json.NewEncoder(w).Encode(client.TemplateCreateResponse{
-			Status:          "ok",
-			TemplateID:      "tmpl_123",
-			BootIndexDigest: "sha256:template",
-			BootIndexTag:    "localhost/conch/busybox:latest",
+			Status:     "ok",
+			TemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			BuildRef:   "localhost/conch/template:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		})
 	}))
 	defer server.Close()
@@ -429,12 +428,11 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 		"--source", "public.ecr.aws/docker/library/busybox:latest",
 		"--kernel", kernelPath,
 		"--initrd", initrdPath,
-		"-t", "localhost/conch/busybox:latest",
 	})
 	if err != nil {
 		t.Fatalf("runTemplateCreate: %v", err)
 	}
-	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" || metadata.BootIndexTag != "localhost/conch/busybox:latest" {
+	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 	if kernelBody != "kernel-content" || initrdBody != "initrd-content" {

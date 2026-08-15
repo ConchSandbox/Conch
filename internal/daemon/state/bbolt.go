@@ -27,16 +27,14 @@ type BoltStore struct {
 }
 
 type templateRecord struct {
-	ID               string            `json:"id"`
-	Origin           string            `json:"origin"`
-	BootMode         string            `json:"boot_mode"`
-	BootIndexDigest  string            `json:"boot_index_digest"`
-	ParentTemplateID string            `json:"parent_template_id,omitempty"`
-	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
-	ImageName        string            `json:"image_name,omitempty"`
-	BuildRef         string            `json:"build_ref,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	CreatedAt        int64             `json:"created_at"`
+	Origin                string            `json:"origin"`
+	BootMode              string            `json:"boot_mode"`
+	BootIndexDigest       string            `json:"boot_index_digest"`
+	ParentBootIndexDigest string            `json:"parent_boot_index_digest,omitempty"`
+	SourceSandboxID       string            `json:"source_sandbox_id,omitempty"`
+	SourceRef             string            `json:"source_ref,omitempty"`
+	Labels                map[string]string `json:"labels,omitempty"`
+	CreatedAt             int64             `json:"created_at"`
 }
 
 func OpenBolt(path string) (*BoltStore, error) {
@@ -128,15 +126,12 @@ func (s *BoltStore) UpsertSandbox(ctx context.Context, rec SandboxRecord) error 
 	}
 	if rec.State == SandboxCreating {
 		if strings.TrimSpace(rec.SourceTemplateID) == "" {
-			return fmt.Errorf("creating sandbox source template id is required")
+			return fmt.Errorf("creating sandbox source Template ID is required")
 		}
 		return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
 	}
 	if strings.TrimSpace(rec.CheckpointHeadTemplateID) == "" {
-		return fmt.Errorf("sandbox checkpoint head template id is required")
-	}
-	if strings.TrimSpace(rec.CheckpointHeadBootIndexDigest) == "" {
-		return fmt.Errorf("sandbox checkpoint head boot index digest is required")
+		return fmt.Errorf("sandbox checkpoint head Template ID is required")
 	}
 	return s.upsert(ctx, []byte("sandboxes"), rec.SandboxID, rec)
 }
@@ -165,33 +160,29 @@ func (s *BoltStore) DeleteSandbox(ctx context.Context, id string) error {
 }
 
 func (s *BoltStore) CreateTemplate(_ context.Context, entry conchtemplate.Entry) error {
-	normalized, err := conchtemplate.NormalizeEntry(entry)
-	if err != nil {
-		return err
-	}
-	rec := templateRecordFromEntry(normalized)
+	rec := templateRecordFromEntry(entry)
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("marshal template entry: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		templates := tx.Bucket([]byte("templates"))
-		if templates.Get([]byte(normalized.ID)) != nil {
-			return fmt.Errorf("%w: %s", conchtemplate.ErrAlreadyExists, normalized.ID)
+		if templates.Get([]byte(entry.BootIndexDigest)) != nil {
+			return fmt.Errorf("%w: %s", conchtemplate.ErrAlreadyExists, entry.BootIndexDigest)
 		}
-		return templates.Put([]byte(normalized.ID), data)
+		return templates.Put([]byte(entry.BootIndexDigest), data)
 	})
 }
 
-func (s *BoltStore) GetTemplate(ctx context.Context, id string) (conchtemplate.Entry, error) {
+func (s *BoltStore) GetTemplate(ctx context.Context, bootIndexDigest string) (conchtemplate.Entry, error) {
 	var rec templateRecord
-	if err := s.get(ctx, []byte("templates"), id, &rec); err != nil {
+	if err := s.get(ctx, []byte("templates"), bootIndexDigest, &rec); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return conchtemplate.Entry{}, conchtemplate.ErrNotFound.Wrap(err)
 		}
 		return conchtemplate.Entry{}, err
 	}
-	return templateEntryFromRecord(rec)
+	return templateEntryFromRecord(rec), nil
 }
 
 func (s *BoltStore) ListTemplates(ctx context.Context) ([]conchtemplate.Entry, error) {
@@ -201,21 +192,14 @@ func (s *BoltStore) ListTemplates(ctx context.Context) ([]conchtemplate.Entry, e
 		if err := json.Unmarshal(data, &rec); err != nil {
 			return err
 		}
-		entry, err := templateEntryFromRecord(rec)
-		if err != nil {
-			return err
-		}
-		out = append(out, entry)
+		out = append(out, templateEntryFromRecord(rec))
 		return nil
 	})
 	return out, err
 }
 
-func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
-	if _, err := s.GetTemplate(ctx, id); err != nil {
-		return err
-	}
-	return s.delete(ctx, []byte("templates"), id)
+func (s *BoltStore) DeleteTemplate(ctx context.Context, bootIndexDigest string) error {
+	return s.delete(ctx, []byte("templates"), bootIndexDigest)
 }
 
 // PublishCheckpoint atomically creates a complete checkpoint Template Entry
@@ -223,18 +207,15 @@ func (s *BoltStore) DeleteTemplate(ctx context.Context, id string) error {
 // happen before this transaction, so a failed transaction can only leave safe
 // orphaned content.
 func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplate.Entry) error {
-	entry, err := conchtemplate.NormalizeEntry(checkpoint)
-	if err != nil {
-		return err
-	}
-	templateID := entry.ID
+	entry := checkpoint
+	bootIndexDigest := entry.BootIndexDigest
 	sandboxID := strings.TrimSpace(entry.SourceSandboxID)
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox id is required")
 	}
-	expectedHeadID := strings.TrimSpace(entry.ParentTemplateID)
-	if expectedHeadID == "" {
-		return fmt.Errorf("expected checkpoint head template id is required")
+	expectedHeadDigest := strings.TrimSpace(entry.ParentBootIndexDigest)
+	if expectedHeadDigest == "" {
+		return fmt.Errorf("expected checkpoint head boot index digest is required")
 	}
 	if entry.Origin != conchtemplate.OriginCheckpoint {
 		return fmt.Errorf(
@@ -258,8 +239,8 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplat
 	return s.db.Update(func(tx *bolt.Tx) error {
 		templates := tx.Bucket([]byte("templates"))
 		sandboxes := tx.Bucket([]byte("sandboxes"))
-		if templates.Get([]byte(templateID)) != nil {
-			return fmt.Errorf("%w: %s", conchtemplate.ErrAlreadyExists, templateID)
+		if templates.Get([]byte(bootIndexDigest)) != nil {
+			return fmt.Errorf("%w: %s", conchtemplate.ErrAlreadyExists, bootIndexDigest)
 		}
 
 		var sandboxRecord SandboxRecord
@@ -268,27 +249,22 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplat
 		} else if err := json.Unmarshal(data, &sandboxRecord); err != nil {
 			return fmt.Errorf("unmarshal sandbox record %s: %w", sandboxID, err)
 		}
-		currentHeadID := strings.TrimSpace(sandboxRecord.CheckpointHeadTemplateID)
-		if currentHeadID == "" {
-			return fmt.Errorf("sandbox %s has no checkpoint head template", sandboxID)
-		}
-		currentHeadDigest := strings.TrimSpace(sandboxRecord.CheckpointHeadBootIndexDigest)
+		currentHeadDigest := strings.TrimSpace(sandboxRecord.CheckpointHeadTemplateID)
 		if currentHeadDigest == "" {
-			return fmt.Errorf("sandbox %s checkpoint head %s has no boot index digest", sandboxID, currentHeadID)
+			return fmt.Errorf("sandbox %s has no checkpoint head Template ID", sandboxID)
 		}
-		if currentHeadID != expectedHeadID {
-			return fmt.Errorf("sandbox %s checkpoint head template changed from %s to %s", sandboxID, expectedHeadID, currentHeadID)
+		if currentHeadDigest != expectedHeadDigest {
+			return fmt.Errorf("sandbox %s checkpoint head boot index digest changed from %s to %s", sandboxID, expectedHeadDigest, currentHeadDigest)
 		}
 		if sourceID := entry.SourceSandboxID; sourceID != strings.TrimSpace(sandboxRecord.SandboxID) {
-			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)
+			return fmt.Errorf("template %s source sandbox %s does not match %s", bootIndexDigest, sourceID, sandboxRecord.SandboxID)
 		}
-		sandboxRecord.CheckpointHeadTemplateID = templateID
-		sandboxRecord.CheckpointHeadBootIndexDigest = entry.BootIndexDigest
+		sandboxRecord.CheckpointHeadTemplateID = entry.BootIndexDigest
 		sandboxData, err := json.Marshal(sandboxRecord)
 		if err != nil {
 			return fmt.Errorf("marshal sandbox record: %w", err)
 		}
-		if err := templates.Put([]byte(templateID), templateData); err != nil {
+		if err := templates.Put([]byte(bootIndexDigest), templateData); err != nil {
 			return err
 		}
 		return sandboxes.Put([]byte(sandboxID), sandboxData)
@@ -297,34 +273,26 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplat
 
 func templateRecordFromEntry(entry conchtemplate.Entry) templateRecord {
 	return templateRecord{
-		ID:               entry.ID,
-		Origin:           string(entry.Origin),
-		BootMode:         string(entry.BootMode),
-		BootIndexDigest:  entry.BootIndexDigest,
-		ParentTemplateID: entry.ParentTemplateID,
-		SourceSandboxID:  entry.SourceSandboxID,
-		ImageName:        entry.ImageName,
-		BuildRef:         entry.BuildRef,
-		Labels:           entry.Labels,
-		CreatedAt:        entry.CreatedAt,
+		Origin:                string(entry.Origin),
+		BootMode:              string(entry.BootMode),
+		BootIndexDigest:       entry.BootIndexDigest,
+		ParentBootIndexDigest: entry.ParentBootIndexDigest,
+		SourceSandboxID:       entry.SourceSandboxID,
+		SourceRef:             entry.SourceRef,
+		Labels:                entry.Labels,
+		CreatedAt:             entry.CreatedAt,
 	}
 }
 
-func templateEntryFromRecord(rec templateRecord) (conchtemplate.Entry, error) {
-	entry, err := conchtemplate.NormalizeEntry(conchtemplate.Entry{
-		ID:               rec.ID,
-		Origin:           conchtemplate.Origin(rec.Origin),
-		BootMode:         conchtemplate.BootMode(rec.BootMode),
-		BootIndexDigest:  rec.BootIndexDigest,
-		ParentTemplateID: rec.ParentTemplateID,
-		SourceSandboxID:  rec.SourceSandboxID,
-		ImageName:        rec.ImageName,
-		BuildRef:         rec.BuildRef,
-		Labels:           rec.Labels,
-		CreatedAt:        rec.CreatedAt,
-	})
-	if err != nil {
-		return conchtemplate.Entry{}, fmt.Errorf("invalid persisted template %s: %v", rec.ID, err)
+func templateEntryFromRecord(rec templateRecord) conchtemplate.Entry {
+	return conchtemplate.Entry{
+		Origin:                conchtemplate.Origin(rec.Origin),
+		BootMode:              conchtemplate.BootMode(rec.BootMode),
+		BootIndexDigest:       rec.BootIndexDigest,
+		ParentBootIndexDigest: rec.ParentBootIndexDigest,
+		SourceSandboxID:       rec.SourceSandboxID,
+		SourceRef:             rec.SourceRef,
+		Labels:                rec.Labels,
+		CreatedAt:             rec.CreatedAt,
 	}
-	return entry, nil
 }

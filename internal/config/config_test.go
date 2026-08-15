@@ -11,6 +11,8 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
+const testDefaultTemplateID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestGetLogConfig(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -115,7 +117,7 @@ func TestLoadConfig(t *testing.T) {
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  work_dir: /tmp/conch\n  state_dir: /tmp/conch-state\n" +
-			"sandbox:\n  backend: cloud-hypervisor\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
+			"sandbox:\n  backend: cloud-hypervisor\n  default_spec:\n    template_id: " + testDefaultTemplateID + "\n    vcpu_num: 3\n    vcpu_max: 5\n    ram_mb: 2048\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
 			"network:\n  warm_pool_size: 123\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n",
 	)
@@ -160,6 +162,18 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Sandbox.Backend != "cloud-hypervisor" {
 		t.Errorf("LoadConfig().Sandbox.Backend = %q, want cloud-hypervisor", cfg.Sandbox.Backend)
+	}
+	if cfg.Sandbox.DefaultSpec.TemplateID != testDefaultTemplateID {
+		t.Errorf("LoadConfig().Sandbox.DefaultSpec.TemplateID = %q, want %q", cfg.Sandbox.DefaultSpec.TemplateID, testDefaultTemplateID)
+	}
+	if cfg.Sandbox.DefaultSpec.VCPUNum != 3 {
+		t.Errorf("LoadConfig().Sandbox.DefaultSpec.VCPUNum = %d, want %d", cfg.Sandbox.DefaultSpec.VCPUNum, 3)
+	}
+	if cfg.Sandbox.DefaultSpec.VCPUMax != 5 {
+		t.Errorf("LoadConfig().Sandbox.DefaultSpec.VCPUMax = %d, want %d", cfg.Sandbox.DefaultSpec.VCPUMax, 5)
+	}
+	if cfg.Sandbox.DefaultSpec.RamMB != 2048 {
+		t.Errorf("LoadConfig().Sandbox.DefaultSpec.RamMB = %d, want %d", cfg.Sandbox.DefaultSpec.RamMB, 2048)
 	}
 	if cfg.StatePath() != "/tmp/conch-state/state.db" {
 		t.Errorf("LoadConfig().StatePath() = %q, want /tmp/conch-state/state.db", cfg.StatePath())

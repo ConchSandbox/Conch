@@ -33,6 +33,7 @@ Run 'conch template <command> --help' for command-specific usage.
 }
 
 func TestTemplateRegistryFlags(t *testing.T) {
+	const id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var pull templateRegistryOptions
 	pullFlags := flag.NewFlagSet("template pull", flag.ContinueOnError)
 	registerTemplateRegistryFlags(pullFlags, &pull, false)
@@ -50,7 +51,7 @@ func TestTemplateRegistryFlags(t *testing.T) {
 	var push templateRegistryOptions
 	pushFlags := flag.NewFlagSet("template push", flag.ContinueOnError)
 	registerTemplateRegistryFlags(pushFlags, &push, true)
-	if err := pushFlags.Parse([]string{"--username", "bob", "--password", "token", "--timeout", "5m", "tmpl_1", "mirror.example/template:copy"}); err != nil {
+	if err := pushFlags.Parse([]string{"--username", "bob", "--password", "token", "--timeout", "5m", id, "mirror.example/template:copy"}); err != nil {
 		t.Fatalf("parse push flags: %v", err)
 	}
 	if push.username != "bob" || push.password != "token" || push.timeout != "5m" || len(pushFlags.Args()) != 2 {
@@ -59,12 +60,12 @@ func TestTemplateRegistryFlags(t *testing.T) {
 }
 
 func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
+	const id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var buf bytes.Buffer
 	printTemplates(&buf, []client.TemplateRecord{{
-		ID:              "tmpl_ab2345da0a69b4e18aa24ad6",
-		Origin:          "image",
-		BootMode:        "cold",
-		BootIndexDigest: "sha256:boot",
+		Origin:     "image",
+		BootMode:   "cold",
+		TemplateID: id,
 	}})
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
@@ -78,7 +79,7 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 	}{
 		{header: "ORIGIN", value: "image"},
 		{header: "BOOT_MODE", value: "cold"},
-		{header: "BOOT_INDEX_DIGEST", value: "sha256:boot"},
+		{header: "TEMPLATE_ID", value: id},
 	} {
 		if got, want := strings.Index(row, column.value), strings.Index(header, column.header); got != want {
 			t.Errorf("%s column starts at %d, want %d:\n%s", column.header, got, want, buf.String())

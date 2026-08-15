@@ -23,12 +23,12 @@ func TestDecodeStrictJSON(t *testing.T) {
 		body    string
 		wantErr bool
 	}{
-		{name: "known fields", body: `{"template_id":"tmpl_123","volumeMounts":[{"source":"/tmp/data","path":"/data","readonly":true}]}`},
-		{name: "trailing whitespace", body: "{\"template_id\":\"tmpl_123\"}\n\t"},
-		{name: "unknown top-level field", body: `{"template_id":"tmpl_123","volume_mounts":[]}`, wantErr: true},
-		{name: "unknown nested field", body: `{"template_id":"tmpl_123","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`, wantErr: true},
-		{name: "multiple values", body: `{"template_id":"tmpl_123"}{"sandbox_id":"sandbox-2"}`, wantErr: true},
-		{name: "trailing garbage", body: `{"template_id":"tmpl_123"} trailing`, wantErr: true},
+		{name: "known fields", body: `{"template_id":"` + testTemplateIDExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","readonly":true}]}`},
+		{name: "trailing whitespace", body: "{\"template_id\":\"" + testTemplateIDExplicit + "\"}\n\t"},
+		{name: "unknown top-level field", body: `{"template_id":"` + testTemplateIDExplicit + `","volume_mounts":[]}`, wantErr: true},
+		{name: "unknown nested field", body: `{"template_id":"` + testTemplateIDExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`, wantErr: true},
+		{name: "multiple values", body: `{"template_id":"` + testTemplateIDExplicit + `"}{"sandbox_id":"sandbox-2"}`, wantErr: true},
+		{name: "trailing garbage", body: `{"template_id":"` + testTemplateIDExplicit + `"} trailing`, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -162,7 +162,6 @@ func TestTemplateCreateRejectsUnknownMetadataField(t *testing.T) {
 func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	metadata := `{
 		"source":"example.invalid/image:latest",
-		"boot_index_tag":"example.invalid/conch/boot:latest",
 		"plain_http":true,
 		"username":"tester",
 		"password":"secret",
@@ -173,7 +172,7 @@ func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	if err := decodeStrictJSON(strings.NewReader(metadata), &req); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if req.Source != "example.invalid/image:latest" || req.BootIndexTag != "example.invalid/conch/boot:latest" || !req.PlainHTTP ||
+	if req.Source != "example.invalid/image:latest" || !req.PlainHTTP ||
 		req.Username != "tester" || req.Password != "secret" ||
 		req.Labels["purpose"] != "strict-json-test" {
 		t.Fatalf("decoded metadata = %#v", req)
@@ -188,12 +187,12 @@ func TestSandboxCreateRejectsUnknownFieldsWithoutSideEffects(t *testing.T) {
 	}{
 		{
 			name:         "top-level field",
-			body:         `{"template_id":"tmpl_123","sandbox_id":"must-not-exist","volume_mounts":[]}`,
+			body:         `{"template_id":"` + testTemplateIDExplicit + `","sandbox_id":"must-not-exist","volume_mounts":[]}`,
 			unknownField: "volume_mounts",
 		},
 		{
 			name:         "nested field",
-			body:         `{"template_id":"tmpl_123","sandbox_id":"must-not-exist","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`,
+			body:         `{"template_id":"` + testTemplateIDExplicit + `","sandbox_id":"must-not-exist","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`,
 			unknownField: "read_only",
 		},
 	}

@@ -20,44 +20,48 @@ Template 是 Conch 中创建 Sandbox 使用的模板，使用 `conch template` �
 conch template create \
   --source docker.io/openeuler/openeuler:24.03-lts-sp2 \
   --kernel /var/lib/conch/kernel \
-  --initrd /var/lib/conch/conch.initrd \
-  -t localhost/conch/openeuler:latest
+  --initrd /var/lib/conch/conch.initrd
 ```
+
+创建、拉取和 checkpoint 都会建立由 digest 唯一派生的内部 canonical image record，例如
+`localhost/conch/template:sha256-1111...`。这个 record 是 containerd GC 的引用根，不需要用户命名。
+该本地命名空间由 Template 生命周期独占，pull 操作不允许把它作为远端输入，普通 `conch image rm` 也不能删除 canonical record。
 
 示例：
 
 ```console
 # 列出所有 Template
 $ conch template ls
-ID                             ORIGIN      BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
-tmpl_ab2345da0a69b4e18aa24ad6  image       cold       sha256:1111...     -               localhost/conch/openeuler:latest
+TEMPLATE_ID  ORIGIN  BOOT_MODE  SOURCE_REF  SOURCE_SANDBOX  BUILD_REF
+sha256:1111...     image   cold       -           -               localhost/conch/template:sha256-1111...
 
 # 查看指定 Template
-$ conch template inspect tmpl_ab2345da0a69b4e18aa24ad6
-ID                             ORIGIN  BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
-tmpl_ab2345da0a69b4e18aa24ad6  image   cold       sha256:1111...     -               localhost/conch/openeuler:latest
+$ conch template inspect sha256:1111...
+TEMPLATE_ID  ORIGIN  BOOT_MODE  SOURCE_REF  SOURCE_SANDBOX  BUILD_REF
+sha256:1111...     image   cold       -           -               localhost/conch/template:sha256-1111...
 
 # 删除指定 Template
-$ conch template rm tmpl_ab2345da0a69b4e18aa24ad6
-Removed template: tmpl_ab2345da0a69b4e18aa24ad6
+$ conch template rm sha256:1111...
+Removed template: sha256:1111...
 ```
+
+删除时会移除 Template metadata 和对应的 canonical image record；实际 content 由 containerd GC 在不再被其他记录引用后回收。
 
 ## 2. Template 分发
 
-`conch template push / pull` 用于向镜像仓库发布 Template，或从镜像仓库拉取 Template。拉取时会校验 Boot Index、创建本地 Template 并返回新的 Template ID。
+`conch template push / pull` 用于向镜像仓库发布 Template，或从镜像仓库拉取 Template。`pull` 的输入是用户熟悉的远端 registry reference；拉取后会校验 Boot Index，并返回 Template ID 和本地 canonical build ref。`push` 则使用 Template ID 选择本地 Template，再指定远端目标 reference。
 
 示例：
 
 ```console
 # 将 Template 发布到镜像仓库
-$ conch template push tmpl_ab2345da0a69b4e18aa24ad6 registry.example.com/conch/openeuler:latest
-Pushed template: tmpl_ab2345da0a69b4e18aa24ad6 -> registry.example.com/conch/openeuler:latest
+$ conch template push sha256:1111... registry.example.com/conch/openeuler:latest
+Pushed template: sha256:1111... -> registry.example.com/conch/openeuler:latest
 
 # 从镜像仓库拉取 Template
 $ conch template pull registry.example.com/conch/openeuler:latest
-Template: tmpl_c35e71ba26e24b6a92eca151
-Boot image: registry.example.com/conch/openeuler:latest
-Image digest: sha256:2222...
+Boot image: localhost/conch/template:sha256-2222...
+Template ID: sha256:2222...
 ```
 
 ## 3. Image 管理

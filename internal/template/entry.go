@@ -1,8 +1,6 @@
 package template
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -27,34 +25,19 @@ const (
 // validated Template. An Entry has no lifecycle state: if it exists, it is
 // ready to be consumed.
 type Entry struct {
-	ID               string
-	Origin           Origin
-	BootMode         BootMode
-	BootIndexDigest  string
-	ParentTemplateID string
-	SourceSandboxID  string
-	ImageName        string
-	BuildRef         string
-	Labels           map[string]string
-	CreatedAt        int64
-}
-
-// NewID generates a Template identity without reading or mutating storage.
-func NewID() (string, error) {
-	var data [12]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", fmt.Errorf("generate template id: %w", err)
-	}
-	return "tmpl_" + hex.EncodeToString(data[:]), nil
+	Origin                Origin
+	BootMode              BootMode
+	BootIndexDigest       string
+	ParentBootIndexDigest string
+	SourceSandboxID       string
+	SourceRef             string
+	Labels                map[string]string
+	CreatedAt             int64
 }
 
 // NormalizeEntry validates a complete Template and returns a defensive,
 // canonical copy suitable for persistence.
 func NormalizeEntry(entry Entry) (Entry, error) {
-	entry.ID = strings.TrimSpace(entry.ID)
-	if entry.ID == "" {
-		return Entry{}, ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
-	}
 	switch entry.Origin {
 	case OriginImage, OriginCheckpoint:
 	default:
@@ -71,10 +54,9 @@ func NormalizeEntry(entry Entry) (Entry, error) {
 		return Entry{}, ErrInvalidArtifact.Wrap(fmt.Errorf("invalid boot index digest %q: %w", rawDigest, err))
 	}
 	entry.BootIndexDigest = parsed.String()
-	entry.ParentTemplateID = strings.TrimSpace(entry.ParentTemplateID)
+	entry.ParentBootIndexDigest = strings.TrimSpace(entry.ParentBootIndexDigest)
 	entry.SourceSandboxID = strings.TrimSpace(entry.SourceSandboxID)
-	entry.ImageName = strings.TrimSpace(entry.ImageName)
-	entry.BuildRef = strings.TrimSpace(entry.BuildRef)
+	entry.SourceRef = strings.TrimSpace(entry.SourceRef)
 	entry.Labels = copyMap(entry.Labels)
 	return entry, nil
 }

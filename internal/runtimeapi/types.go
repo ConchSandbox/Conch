@@ -75,25 +75,22 @@ type SandboxCheckpointOptions struct {
 }
 
 type SandboxCheckpointResult struct {
-	TemplateID      string
-	BootIndexDigest string
+	TemplateID string
 }
 
 type TemplateCreateOptions struct {
-	Source       string
-	KernelPath   string
-	InitrdPath   string
-	BootIndexTag string
-	PlainHTTP    bool
-	Username     string
-	Password     string
-	Labels       map[string]string
+	Source     string
+	KernelPath string
+	InitrdPath string
+	PlainHTTP  bool
+	Username   string
+	Password   string
+	Labels     map[string]string
 }
 
 type TemplateCreateResult struct {
-	TemplateID      string
-	BootIndexDigest string
-	BootIndexTag    string
+	TemplateID string
+	BuildRef   string
 }
 
 type TemplatePullOptions struct {
@@ -105,9 +102,8 @@ type TemplatePullOptions struct {
 }
 
 type TemplatePullResult struct {
-	TemplateID      string
-	BootIndexDigest string
-	BuildRef        string
+	TemplateID string
+	BuildRef   string
 }
 
 type TemplatePushOptions struct {
@@ -128,14 +124,13 @@ type TemplateListOptions struct {
 }
 
 type TemplateRecord struct {
-	ID               string            `json:"id"`
+	TemplateID       string            `json:"template_id"`
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
-	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
-	ImageName        string            `json:"image_name,omitempty"`
-	BuildRef         string            `json:"build_ref,omitempty"`
+	SourceRef        string            `json:"source_ref,omitempty"`
+	BuildRef         string            `json:"build_ref"`
 	Labels           map[string]string `json:"labels,omitempty"`
 	CreatedAt        int64             `json:"created_at,omitempty"`
 }

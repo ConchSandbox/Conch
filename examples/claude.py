@@ -13,7 +13,7 @@ from conch import Sandbox
 #     export ANTHROPIC_API_KEY="your_key"
 #     export ANTHROPIC_BASE_URL="your_url"
 #     export CLAUDE_SSH_AUTHORIZED_KEYS="$(cat ~/.ssh/id_rsa.pub)"
-#     export CONCH_TEMPLATE_ID="tmpl_xxx"
+#     export CONCH_TEMPLATE_ID="<template-id>"
 #   Option 2: Enter values interactively when prompted
 
 def get_config(name, prompt, default=None, required=True):

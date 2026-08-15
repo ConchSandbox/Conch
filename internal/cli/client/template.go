@@ -24,7 +24,7 @@ const (
 )
 
 type TemplateIDRequest struct {
-	ID string `json:"id"`
+	ID string `json:"template_id"`
 }
 
 type TemplateListRequest struct {
@@ -47,10 +47,9 @@ type TemplatePullRequest struct {
 }
 
 type TemplatePullResponse struct {
-	Status          string `json:"status"`
-	TemplateID      string `json:"template_id"`
-	BootIndexDigest string `json:"boot_index_digest"`
-	BuildRef        string `json:"build_ref"`
+	Status     string `json:"status"`
+	TemplateID string `json:"template_id"`
+	BuildRef   string `json:"build_ref"`
 }
 
 type TemplatePushRequest struct {
@@ -66,30 +65,27 @@ type TemplateUnpackRequest struct {
 }
 
 type TemplateCreateRequest struct {
-	Source       string
-	KernelPath   string
-	InitrdPath   string
-	BootIndexTag string
-	PlainHTTP    bool
-	Username     string
-	Password     string
-	Labels       map[string]string
+	Source     string
+	KernelPath string
+	InitrdPath string
+	PlainHTTP  bool
+	Username   string
+	Password   string
+	Labels     map[string]string
 }
 
 type TemplateCreateMetadata struct {
-	Source       string            `json:"source"`
-	BootIndexTag string            `json:"boot_index_tag,omitempty"`
-	PlainHTTP    bool              `json:"plain_http,omitempty"`
-	Username     string            `json:"username,omitempty"`
-	Password     string            `json:"password,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
+	Source    string            `json:"source"`
+	PlainHTTP bool              `json:"plain_http,omitempty"`
+	Username  string            `json:"username,omitempty"`
+	Password  string            `json:"password,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type TemplateCreateResponse struct {
-	Status          string `json:"status,omitempty"`
-	TemplateID      string `json:"template_id"`
-	BootIndexDigest string `json:"boot_index_digest"`
-	BootIndexTag    string `json:"boot_index_tag"`
+	Status     string `json:"status,omitempty"`
+	TemplateID string `json:"template_id"`
+	BuildRef   string `json:"build_ref"`
 }
 
 func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]TemplateRecord, error) {
@@ -130,12 +126,11 @@ func (c *Client) UnpackTemplate(ctx context.Context, req TemplateUnpackRequest) 
 
 func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {
 	metadata, err := json.Marshal(TemplateCreateMetadata{
-		Source:       req.Source,
-		BootIndexTag: req.BootIndexTag,
-		PlainHTTP:    req.PlainHTTP,
-		Username:     req.Username,
-		Password:     req.Password,
-		Labels:       req.Labels,
+		Source:    req.Source,
+		PlainHTTP: req.PlainHTTP,
+		Username:  req.Username,
+		Password:  req.Password,
+		Labels:    req.Labels,
 	})
 	if err != nil {
 		return TemplateCreateResponse{}, fmt.Errorf("marshal template create metadata: %w", err)
