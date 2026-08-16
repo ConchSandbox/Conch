@@ -280,12 +280,19 @@ func buildSharefsCmdline(virtioFS []driver.VirtioFSDevice) string {
 	return " conch.sharefs=virtiofs"
 }
 
+const stratovirtPmemIothreadID = "pmemio"
+
+// buildStratovirtPmemDevices renders the -object/-device pair for each rootfs
+// erofs layer. Without iothread=<id> StratoVirt runs pmem queue notify and the
+// sync_all behind a flush on the main event loop, so a slow fsync stalls every
+// other device; the layers share one iothread since their flushes are rare.
+// Requires StratoVirt >= f66399e0, which added the option.
 func buildStratovirtPmemDevices(pmemPaths []string) string {
 	if len(pmemPaths) == 0 {
 		return ""
 	}
 
-	var devices []string
+	devices := []string{fmt.Sprintf("-object iothread,id=%s", stratovirtPmemIothreadID)}
 	for i, path := range pmemPaths {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -303,8 +310,14 @@ func buildStratovirtPmemDevices(pmemPaths []string) string {
 		sizeStr := fmt.Sprintf("%dM", size/(1024*1024))
 
 		object := fmt.Sprintf("-object memory-backend-file,size=%s,id=%s,mem-path=%s,share=off", sizeStr, memID, path)
-		device := fmt.Sprintf("-device virtio-pmem-pci,id=%s,memdev=%s,bus=pcie.0,addr=%s", devID, memID, addr)
+		device := fmt.Sprintf("-device virtio-pmem-pci,id=%s,memdev=%s,bus=pcie.0,addr=%s,iothread=%s",
+			devID, memID, addr, stratovirtPmemIothreadID)
 		devices = append(devices, object, device)
+	}
+
+	// Only the iothread object was rendered: no usable pmem path.
+	if len(devices) == 1 {
+		return ""
 	}
 
 	return strings.Join(devices, " \\\n")
