@@ -18,11 +18,10 @@ func TestStoreCRUDAndList(t *testing.T) {
 
 	bootIndexDigest := digest.FromString("cold boot index").String()
 	entry, err := store.Create(ctx, Entry{
-		ID:              "tmpl_1",
 		Origin:          OriginImage,
 		BootMode:        BootModeCold,
 		BootIndexDigest: bootIndexDigest,
-		ImageName:       "image-ref",
+		SourceRef:       "image-ref",
 		Labels:          map[string]string{"purpose": "test"},
 	})
 	if err != nil {
@@ -32,7 +31,7 @@ func TestStoreCRUDAndList(t *testing.T) {
 		t.Fatalf("CreatedAt = %d", entry.CreatedAt)
 	}
 
-	got, err := store.Get(ctx, entry.ID)
+	got, err := store.Get(ctx, "  "+entry.BootIndexDigest+"  ")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -47,14 +46,14 @@ func TestStoreCRUDAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(items) != 1 || items[0].ID != entry.ID {
+	if len(items) != 1 || items[0].BootIndexDigest != entry.BootIndexDigest {
 		t.Fatalf("List() = %#v", items)
 	}
 
-	if err := store.Delete(ctx, entry.ID); err != nil {
+	if err := store.Delete(ctx, "  "+entry.BootIndexDigest+"  "); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	if _, err := store.Get(ctx, entry.ID); err == nil {
+	if _, err := store.Get(ctx, entry.BootIndexDigest); err == nil {
 		t.Fatal("Get() after Delete() error = nil")
 	}
 }
@@ -67,30 +66,30 @@ func TestStoreCreateValidatesCompleteEntry(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "missing id",
+			name: "missing digest",
 			entry: Entry{
-				Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: validDigest,
+				Origin: OriginImage, BootMode: BootModeCold,
 			},
-			want: "template id is required",
+			want: "invalid boot index digest",
 		},
 		{
 			name: "invalid origin",
 			entry: Entry{
-				ID: "tmpl_1", Origin: "archive", BootMode: BootModeCold, BootIndexDigest: validDigest,
+				Origin: "archive", BootMode: BootModeCold, BootIndexDigest: validDigest,
 			},
 			want: "unknown template origin",
 		},
 		{
 			name: "invalid boot mode",
 			entry: Entry{
-				ID: "tmpl_1", Origin: OriginImage, BootMode: "warm", BootIndexDigest: validDigest,
+				Origin: OriginImage, BootMode: "warm", BootIndexDigest: validDigest,
 			},
 			want: "unknown template boot mode",
 		},
 		{
 			name: "invalid digest",
 			entry: Entry{
-				ID: "tmpl_1", Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: "sha256:invalid",
+				Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: "sha256:invalid",
 			},
 			want: "invalid boot index digest",
 		},
@@ -105,13 +104,12 @@ func TestStoreCreateValidatesCompleteEntry(t *testing.T) {
 	}
 }
 
-func TestStoreDuplicateIDDoesNotOverwrite(t *testing.T) {
+func TestStoreDuplicateDigestDoesNotOverwrite(t *testing.T) {
 	ctx := context.Background()
 	raw := newMemoryStateStore()
 	store := NewStore(raw)
 	firstDigest := digest.FromString("first").String()
 	first, err := store.Create(ctx, Entry{
-		ID:              "tmpl_same",
 		Origin:          OriginImage,
 		BootMode:        BootModeCold,
 		BootIndexDigest: firstDigest,
@@ -121,37 +119,19 @@ func TestStoreDuplicateIDDoesNotOverwrite(t *testing.T) {
 	}
 
 	_, err = store.Create(ctx, Entry{
-		ID:              first.ID,
 		Origin:          OriginCheckpoint,
 		BootMode:        BootModeResume,
-		BootIndexDigest: digest.FromString("second").String(),
+		BootIndexDigest: first.BootIndexDigest,
 	})
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("second Create() error = %v, want ErrAlreadyExists", err)
 	}
-	got, err := store.Get(ctx, first.ID)
+	got, err := store.Get(ctx, first.BootIndexDigest)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	if got.BootIndexDigest != firstDigest || got.Origin != OriginImage || got.BootMode != BootModeCold {
 		t.Fatalf("first entry was overwritten: %#v", got)
-	}
-}
-
-func TestNewID(t *testing.T) {
-	first, err := NewID()
-	if err != nil {
-		t.Fatalf("NewID() error = %v", err)
-	}
-	second, err := NewID()
-	if err != nil {
-		t.Fatalf("NewID() error = %v", err)
-	}
-	if !strings.HasPrefix(first, "tmpl_") || len(first) != len("tmpl_")+24 {
-		t.Fatalf("NewID() = %q", first)
-	}
-	if first == second {
-		t.Fatalf("NewID() returned duplicate %q", first)
 	}
 }
 
@@ -164,15 +144,15 @@ func newMemoryStateStore() *memoryStateStore {
 }
 
 func (s *memoryStateStore) CreateTemplate(_ context.Context, entry Entry) error {
-	if _, exists := s.entries[entry.ID]; exists {
+	if _, exists := s.entries[entry.BootIndexDigest]; exists {
 		return ErrAlreadyExists
 	}
-	s.entries[entry.ID] = entry
+	s.entries[entry.BootIndexDigest] = entry
 	return nil
 }
 
-func (s *memoryStateStore) GetTemplate(_ context.Context, id string) (Entry, error) {
-	entry, exists := s.entries[id]
+func (s *memoryStateStore) GetTemplate(_ context.Context, bootIndexDigest string) (Entry, error) {
+	entry, exists := s.entries[bootIndexDigest]
 	if !exists {
 		return Entry{}, errors.New("not found")
 	}
@@ -187,7 +167,7 @@ func (s *memoryStateStore) ListTemplates(context.Context) ([]Entry, error) {
 	return out, nil
 }
 
-func (s *memoryStateStore) DeleteTemplate(_ context.Context, id string) error {
-	delete(s.entries, id)
+func (s *memoryStateStore) DeleteTemplate(_ context.Context, bootIndexDigest string) error {
+	delete(s.entries, bootIndexDigest)
 	return nil
 }

@@ -33,11 +33,12 @@ func PrintSandboxCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch sandbox create [--template-id <template-id>] [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
+	fmt.Fprintln(out, "  Create a sandbox from a Template ID. A Template ID is its Boot Index digest.")
 	fmt.Fprintln(out, "  Unset template and resource fields use conchd sandbox.default_spec.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  --template-id string")
-	fmt.Fprintln(out, "        template ID (default: conchd sandbox.default_spec.template_id)")
+	fmt.Fprintln(out, "        Template ID (default: conchd sandbox.default_spec.template_id)")
 	fmt.Fprintln(out, "  --sandbox-id string")
 	fmt.Fprintln(out, "        sandbox ID (default: generated)")
 	fmt.Fprintln(out, "  --ram-mb int")
@@ -122,7 +123,7 @@ func printSandboxList(out io.Writer, records []client.SandboxRecord) error {
 		return records[i].SandboxID < records[j].SandboxID
 	})
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTEMPLATE\tCPU\tMEMORY_MB\tSTARTED_AT")
+	fmt.Fprintln(tw, "ID\tTEMPLATE_ID\tCPU\tMEMORY_MB\tSTARTED_AT")
 	for _, record := range records {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
 			record.SandboxID, record.TemplateID,
@@ -134,7 +135,7 @@ func printSandboxList(out io.Writer, records []client.SandboxRecord) error {
 func runSandboxCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sandbox create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	templateID := fs.String("template-id", "", "template ID (uses daemon default if omitted)")
+	templateID := fs.String("template-id", "", "Template ID (uses daemon default if omitted)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
 	configPath := fs.String("config", "", "config file path")
 	ramMB := fs.Int64("ram-mb", 0, "memory size in MiB")
@@ -190,7 +191,7 @@ func runSandboxCheckpoint(ctx context.Context, args []string) error {
 	if checkpoint.Status != "ok" {
 		return fmt.Errorf("conch sandbox checkpoint: unexpected status %q", checkpoint.Status)
 	}
-	fmt.Fprintf(os.Stdout, "Template: %s\n", checkpoint.TemplateID)
+	fmt.Fprintf(os.Stdout, "Template ID: %s\n", checkpoint.TemplateID)
 	return nil
 }
 

@@ -117,32 +117,32 @@ func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (Pre
 		return PreparedBoot{}, err
 	}
 	if err := validateResolvedBoot(resolved, entry.BootMode, strings.TrimSpace(req.VMMName)); err != nil {
-		return PreparedBoot{}, fmt.Errorf("template %s: %w", entry.ID, err)
+		return PreparedBoot{}, fmt.Errorf("template %s: %w", entry.BootIndexDigest, err)
 	}
 	return p.prepareResolvedBoot(ctx, key, req.VMMName, req.RAMMB, resolved)
 }
 
 func (p *bootPreparer) resolveTemplate(
 	ctx context.Context,
-	templateID string,
+	id string,
 ) (conchimage.ResolvedBoot, template.Entry, error) {
-	templateID = strings.TrimSpace(templateID)
-	if templateID == "" {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template_id is required")
 	}
-	entry, err := p.templates.Get(ctx, templateID)
+	entry, err := p.templates.Get(ctx, id)
 	if err != nil {
 		return conchimage.ResolvedBoot{}, template.Entry{}, err
 	}
 	bootIndexDigest := strings.TrimSpace(entry.BootIndexDigest)
 	if bootIndexDigest == "" {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template %s has no boot index digest", entry.ID)
+		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template has no boot index digest")
 	}
 	resolved, err := p.resolveBoot(ctx, bootIndexDigest)
 	if err != nil {
 		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
 			"resolve template %s boot index %s: %w",
-			entry.ID,
+			entry.BootIndexDigest,
 			bootIndexDigest,
 			err,
 		)

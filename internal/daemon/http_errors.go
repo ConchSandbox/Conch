@@ -28,6 +28,11 @@ var (
 		"request.invalid_multipart",
 		"invalid multipart request",
 	)
+	errRequestBodyTooLarge = apperror.Define(
+		apperror.PayloadTooLarge,
+		"request.body_too_large",
+		"request body is too large",
+	)
 	errServiceUnavailable = apperror.Define(
 		apperror.Unavailable,
 		"service.unavailable",
@@ -85,6 +90,8 @@ func httpStatusForErrorKind(kind apperror.Kind) int {
 		return http.StatusConflict
 	case apperror.ResourceExhausted:
 		return http.StatusTooManyRequests
+	case apperror.PayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case apperror.UpstreamFailure:
 		return http.StatusBadGateway
 	case apperror.Unavailable:

@@ -57,15 +57,12 @@ func (s *PersistentStore) Create(ctx context.Context, entry Entry) (Entry, error
 	return normalized, nil
 }
 
-func (s *PersistentStore) Get(ctx context.Context, id string) (Entry, error) {
+func (s *PersistentStore) Get(ctx context.Context, rawDigest string) (Entry, error) {
 	if s == nil || s.store == nil {
 		return Entry{}, fmt.Errorf("template store is not configured")
 	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Entry{}, ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
-	}
-	entry, err := s.store.GetTemplate(ctx, id)
+	bootIndexDigest := strings.TrimSpace(rawDigest)
+	entry, err := s.store.GetTemplate(ctx, bootIndexDigest)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -111,15 +108,11 @@ func (s *PersistentStore) List(ctx context.Context, filter Filter) ([]Entry, err
 	return out, nil
 }
 
-func (s *PersistentStore) Delete(ctx context.Context, id string) error {
+func (s *PersistentStore) Delete(ctx context.Context, rawDigest string) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ErrInvalidArgument.Wrap(fmt.Errorf("template id is required"))
-	}
-	return s.store.DeleteTemplate(ctx, id)
+	return s.store.DeleteTemplate(ctx, strings.TrimSpace(rawDigest))
 }
 
 func copyMap(in map[string]string) map[string]string {

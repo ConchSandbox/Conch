@@ -9,10 +9,108 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
+
+const canonicalTemplateRepository = "localhost/conch/template"
+
+// CanonicalTemplateRef returns the sole local image-record name owned by a
+// Template. Template identity is the immutable Boot Index digest, so this
+// mapping must remain deterministic and injective.
+func CanonicalTemplateRef(rawDigest string) (string, error) {
+	parsed, err := digest.Parse(strings.TrimSpace(rawDigest))
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid boot index digest %q: %v", ErrInvalidArgument, rawDigest, err)
+	}
+	return canonicalTemplateRepository + ":" + parsed.Algorithm().String() + "-" + parsed.Encoded(), nil
+}
+
+// IsCanonicalTemplateRef reports whether ref belongs to the digest-derived
+// image-record namespace reserved for Template lifecycle management.
+func IsCanonicalTemplateRef(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	prefix := canonicalTemplateRepository + ":"
+	if !strings.HasPrefix(ref, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(ref, prefix)
+	separator := strings.IndexByte(suffix, '-')
+	if separator <= 0 || separator == len(suffix)-1 {
+		return false
+	}
+	canonical, err := CanonicalTemplateRef(suffix[:separator] + ":" + suffix[separator+1:])
+	return err == nil && canonical == ref
+}
+
+// EnsureCanonicalBootIndexRecord creates or validates the canonical local
+// image record for target. Content is not copied; the record is another GC
+// root for the same immutable descriptor closure.
+func EnsureCanonicalBootIndexRecord(
+	ctx context.Context,
+	client *containerdclient.Client,
+	target ocispec.Descriptor,
+	kind string,
+) (string, error) {
+	if client == nil || client.Client == nil {
+		return "", fmt.Errorf("containerd client is required")
+	}
+	if target.Digest == "" {
+		return "", fmt.Errorf("%w: boot index target digest is required", ErrInvalidArgument)
+	}
+	if kind != ImageKindBootIndexCold && kind != ImageKindBootIndexResume {
+		return "", fmt.Errorf("%w: invalid boot index image kind %q", ErrInvalidArgument, kind)
+	}
+	name, err := CanonicalTemplateRef(target.Digest.String())
+	if err != nil {
+		return "", err
+	}
+	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
+	existing, err := client.ImageService().Get(namespaceCtx, name)
+	if err == nil && existing.Target.Digest != target.Digest {
+		return "", fmt.Errorf("canonical template image %s targets %s, want %s", name, existing.Target.Digest, target.Digest)
+	}
+	if err != nil && !errdefs.IsNotFound(err) {
+		return "", fmt.Errorf("lookup canonical template image %s: %w", name, err)
+	}
+	if err := publishBootIndexRecord(namespaceCtx, client, name, target, kind); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// RemoveCanonicalBootIndexRecord removes only the image metadata root. The
+// embedded containerd GC decides when the descriptor closure can be reclaimed.
+func RemoveCanonicalBootIndexRecord(ctx context.Context, client *containerdclient.Client, rawDigest string) error {
+	if client == nil || client.Client == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	parsed, err := digest.Parse(strings.TrimSpace(rawDigest))
+	if err != nil {
+		return fmt.Errorf("%w: invalid boot index digest %q: %v", ErrInvalidArgument, rawDigest, err)
+	}
+	name, err := CanonicalTemplateRef(parsed.String())
+	if err != nil {
+		return err
+	}
+	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
+	record, err := client.ImageService().Get(namespaceCtx, name)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("lookup canonical template image %s: %w", name, err)
+	}
+	if record.Target.Digest != parsed {
+		return fmt.Errorf("canonical template image %s targets %s, want %s", name, record.Target.Digest, parsed)
+	}
+	if err := client.ImageService().Delete(namespaceCtx, name, images.DeleteTarget(&record.Target)); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("remove canonical template image %s: %w", name, err)
+	}
+	return nil
+}
 
 func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req PublishBootIndexOptions) (PublishBootIndexResult, error) {
 	if client == nil || client.Client == nil {
@@ -27,10 +125,6 @@ func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req 
 	if req.InitrdPath == "" {
 		return PublishBootIndexResult{}, fmt.Errorf("%w: initrd_path is required", ErrInvalidArgument)
 	}
-	if req.BootIndexTag == "" {
-		return PublishBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidArgument)
-	}
-
 	namespaceCtx := containerdclient.NewNamespaceContext(ctx)
 	publishCtx, done, err := client.WithLease(namespaceCtx)
 	if err != nil {
@@ -46,19 +140,19 @@ func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req 
 		RootfsDescriptor: rootfsImage.Target,
 		KernelPath:       req.KernelPath,
 		InitrdPath:       req.InitrdPath,
-		Tag:              req.BootIndexTag,
 	})
 	if err != nil {
 		return PublishBootIndexResult{}, fmt.Errorf("build boot index content: %w", err)
 	}
 
-	if err := publishBootIndexRecord(publishCtx, client, req.BootIndexTag, indexDesc, ImageKindBootIndexCold); err != nil {
+	buildRef, err := EnsureCanonicalBootIndexRecord(publishCtx, client, indexDesc, ImageKindBootIndexCold)
+	if err != nil {
 		return PublishBootIndexResult{}, err
 	}
 
 	return PublishBootIndexResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		ImageName:       req.BootIndexTag,
+		BuildRef:        buildRef,
 	}, nil
 }
 
@@ -114,10 +208,6 @@ func PublishCheckpointBootIndex(
 	if strings.TrimSpace(req.SourceBootIndexDigest) == "" {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: source_boot_index_digest is required", ErrInvalidArgument)
 	}
-	req.BootIndexTag = strings.TrimSpace(req.BootIndexTag)
-	if req.BootIndexTag == "" {
-		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: boot_index_tag is required", ErrInvalidArgument)
-	}
 	req.MemRoot = strings.TrimSpace(req.MemRoot)
 	if req.MemRoot == "" {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: mem_root is required", ErrInvalidArgument)
@@ -145,7 +235,7 @@ func PublishCheckpointBootIndex(
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("source boot index VMM %q does not match capture VMM %q", sourceInfo.VMMName, req.VMMName)
 	}
 
-	memDesc, err := BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot, req.BootIndexTag+"-mem")
+	memDesc, err := BuildNativeComponentInContent(publishCtx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot)
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("publish captured mem component: %w", err)
 	}
@@ -153,19 +243,19 @@ func PublishCheckpointBootIndex(
 		RootfsDescriptor:  sourceInfo.RootfsDescriptor,
 		MemDescriptor:     memDesc,
 		SandboxDescriptor: sourceInfo.SandboxDescriptor,
-		Tag:               req.BootIndexTag,
 		VMMName:           req.VMMName,
 		MemorySizeMB:      req.MemorySizeMB,
 	})
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)
 	}
-	if err := publishBootIndexRecord(publishCtx, client, req.BootIndexTag, indexDesc, ImageKindBootIndexResume); err != nil {
+	buildRef, err := EnsureCanonicalBootIndexRecord(publishCtx, client, indexDesc, ImageKindBootIndexResume)
+	if err != nil {
 		return PublishCheckpointBootIndexResult{}, err
 	}
 	return PublishCheckpointBootIndexResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		ImageName:       req.BootIndexTag,
+		BuildRef:        buildRef,
 	}, nil
 }
 

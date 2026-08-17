@@ -18,6 +18,8 @@ sandbox:
   vsock_signal_timeout: 60s
   request_timeout: 60s
   default_spec:
+    # Default Template ID used when a create request does not specify one.
+    # A Template ID is the Template's Boot Index digest.
     template_id: ""
     vcpu_num: 2
     vcpu_max: 2

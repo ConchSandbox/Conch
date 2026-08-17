@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -416,10 +417,16 @@ func cleanupTempScript(path string) {
 	}
 }
 
-func ptySize(cfg *pb.PTY) *pty.Winsize {
+func ptySize(cfg *pb.PTY) (*pty.Winsize, error) {
 	size := &pty.Winsize{Cols: 80, Rows: 24}
 	if cfg == nil {
-		return size
+		return size, nil
+	}
+	if cfg.Cols > math.MaxUint16 {
+		return nil, fmt.Errorf("pty cols must not exceed %d", math.MaxUint16)
+	}
+	if cfg.Rows > math.MaxUint16 {
+		return nil, fmt.Errorf("pty rows must not exceed %d", math.MaxUint16)
 	}
 	if cfg.Cols > 0 {
 		size.Cols = uint16(cfg.Cols)
@@ -427,7 +434,7 @@ func ptySize(cfg *pb.PTY) *pty.Winsize {
 	if cfg.Rows > 0 {
 		size.Rows = uint16(cfg.Rows)
 	}
-	return size
+	return size, nil
 }
 
 func sendForegroundEnd(stream processConnectStream, exitCode int32, errMsg string) error {
@@ -611,7 +618,11 @@ func (s *AgentServer) executeCmd(ctx context.Context, cmdName string, args []str
 }
 
 func executePtyCmd(ctx context.Context, cmd *exec.Cmd, ptyConfig *pb.PTY, stream processConnectStream, cancel context.CancelFunc) (int, bool, error) {
-	tty, err := pty.StartWithSize(cmd, ptySize(ptyConfig))
+	size, err := ptySize(ptyConfig)
+	if err != nil {
+		return -1, false, err
+	}
+	tty, err := pty.StartWithSize(cmd, size)
 	if err != nil {
 		return -1, false, err
 	}
@@ -701,6 +712,9 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 	if req.Pty != nil && len(req.Stdin) > 0 {
 		return connectError(connect.CodeInvalidArgument, "stdin cannot be used with pty")
+	}
+	if _, err := ptySize(req.Pty); err != nil {
+		return connectErrorf(connect.CodeInvalidArgument, "invalid pty size: %v", err)
 	}
 
 	// Prepare work dir
@@ -877,7 +891,11 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 		return process.cmd.Start()
 	}
 
-	tty, err := pty.StartWithSize(process.cmd, ptySize(ptyConfig))
+	size, err := ptySize(ptyConfig)
+	if err != nil {
+		return err
+	}
+	tty, err := pty.StartWithSize(process.cmd, size)
 	if err != nil {
 		return err
 	}

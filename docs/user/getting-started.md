@@ -38,8 +38,7 @@ sudo ./bin/conch template create \
   --config config/config.local.yaml \
   --source docker.io/library/nginx:latest \
   --kernel /path/to/guest/kernel \
-  --initrd build-artifacts/conch-init-initramfs.cpio.gz \
-  -t localhost/conch/nginx:latest
+  --initrd build-artifacts/conch-init-initramfs.cpio.gz
 ```
 
 命令会返回 Template ID。使用该 ID 创建并控制 Sandbox：
@@ -49,7 +48,7 @@ sudo ./bin/conch template ls --config config/config.local.yaml
 
 sudo ./bin/conch sandbox create \
   --config config/config.local.yaml \
-  --template-id tmpl_xxx \
+  --template-id <template-id> \
   --sandbox-id sandbox_demo
 
 sudo ./bin/conch sandbox suspend --config config/config.local.yaml sandbox_demo

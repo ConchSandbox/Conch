@@ -31,7 +31,7 @@ class FakeSession:
             return FakeResponse(data=[{"sandboxID": "sandbox-1"}])
         return FakeResponse(data={
             "sandboxID": "sandbox-1",
-            "templateID": "tmpl-1",
+            "templateID": "template-1",
             "domain": "192.0.2.10",
             "metadata": {"owner": "test"},
             "network": {"denyOut": ["192.0.2.10"]},
@@ -53,7 +53,7 @@ def test_control_plane_methods_use_configured_endpoint(monkeypatch):
     assert Sandbox.list() == [{"sandboxID": "sandbox-1"}]
 
     sandbox = Sandbox.get("sandbox-1")
-    assert sandbox.template_id == "tmpl-1"
+    assert sandbox.template_id == "template-1"
     assert sandbox.metadata == {"owner": "test"}
     assert sandbox.control_plane_only is True
     with pytest.raises(RuntimeError, match="Agent credentials unavailable"):

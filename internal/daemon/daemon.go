@@ -36,8 +36,14 @@ import (
 )
 
 const (
-	shutdownTimeout     = 30 * time.Second
-	minimumSandboxRAMMB = 128
+	shutdownTimeout               = 30 * time.Second
+	minimumSandboxRAMMB           = 128
+	maxJSONBodyBytes              = 1 << 20
+	maxTemplateFileBytes          = 64 << 20 // 64 MB
+	maxTemplateMultipartBodyBytes = 2*maxTemplateFileBytes + maxJSONBodyBytes
+	serverReadHeaderTimeout       = 10 * time.Second
+	serverIdleTimeout             = 60 * time.Second
+	serverMaxHeaderBytes          = 64 << 10
 )
 
 type Daemon struct {
@@ -267,7 +273,12 @@ func (s *Daemon) Start(unixSocket string) error {
 	logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
 
 	s.listener = ln
-	s.httpServer = &http.Server{Handler: s.router}
+	s.httpServer = &http.Server{
+		Handler:           s.router,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
 	// Listener is bound, so clients can connect before Serve accepts.
 	util.NotifyReady()
 	err = s.httpServer.Serve(ln)
@@ -757,9 +768,8 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
+		"status":      "ok",
+		"template_id": result.TemplateID,
 	})
 }
 
@@ -768,10 +778,17 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTemplateMultipartBodyBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeAPIError(w, errRequestBodyTooLarge.Wrap(err))
+			return
+		}
 		writeAPIError(w, errRequestInvalidMultipart.Wrap(err))
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	var req templateCreateRequest
 	if err := decodeStrictJSON(strings.NewReader(r.FormValue("metadata")), &req); err != nil {
 		writeAPIError(w, errRequestInvalidMultipart.WrapMessage(err, "invalid multipart metadata: "+err.Error()))
@@ -803,23 +820,21 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
-		"boot_index_tag":    result.BootIndexTag,
+		"status":      "ok",
+		"template_id": result.TemplateID,
+		"build_ref":   result.BuildRef,
 	})
 }
 
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
-		Source:       req.Source,
-		KernelPath:   kernelPath,
-		InitrdPath:   initrdPath,
-		BootIndexTag: req.BootIndexTag,
-		PlainHTTP:    req.PlainHTTP,
-		Username:     req.Username,
-		Password:     req.Password,
-		Labels:       req.Labels,
+		Source:     req.Source,
+		KernelPath: kernelPath,
+		InitrdPath: initrdPath,
+		PlainHTTP:  req.PlainHTTP,
+		Username:   req.Username,
+		Password:   req.Password,
+		Labels:     req.Labels,
 	})
 }
 
@@ -844,10 +859,9 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":            "ok",
-		"template_id":       result.TemplateID,
-		"boot_index_digest": result.BootIndexDigest,
-		"build_ref":         result.BuildRef,
+		"status":      "ok",
+		"template_id": result.TemplateID,
+		"build_ref":   result.BuildRef,
 	})
 }
 
@@ -1088,13 +1102,31 @@ func saveMultipartFile(r *http.Request, field, dir, name string) (string, error)
 }
 
 func writeMultipartFile(path string, file multipart.File) error {
+	return writeLimitedFile(path, file, maxTemplateFileBytes)
+}
+
+func writeLimitedFile(path string, reader io.Reader, maxBytes int64) (retErr error) {
 	out, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, file); err != nil {
+	defer func() {
+		if err := out.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+		if retErr != nil {
+			_ = os.Remove(path)
+		}
+	}()
+	written, err := io.Copy(out, io.LimitReader(reader, maxBytes+1))
+	if err != nil {
 		return err
+	}
+	if written > maxBytes {
+		return errRequestBodyTooLarge.WrapMessage(
+			fmt.Errorf("multipart file exceeds maximum size %d bytes", maxBytes),
+			fmt.Sprintf("multipart file exceeds maximum size %d bytes", maxBytes),
+		)
 	}
 	return nil
 }
@@ -1108,7 +1140,13 @@ func decodePostJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, out any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	if err := decodeStrictJSON(r.Body, out); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeAPIError(w, errRequestBodyTooLarge.Wrap(err))
+			return false
+		}
 		writeAPIError(w, errRequestInvalidBody.WrapMessage(err, "invalid request body: "+err.Error()))
 		return false
 	}

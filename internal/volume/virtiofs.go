@@ -122,6 +122,12 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 			return nil, fmt.Errorf("bind volume source %s: %w", source, err)
 		}
 		binds = append(binds, bindTarget)
+		if mount.Readonly {
+			if err := makeMountReadonly(bindTarget); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("make volume source %s readonly: %w", source, err)
+			}
+		}
 	}
 
 	doc := configDocument{Version: configVersion}
@@ -171,6 +177,21 @@ func (b *virtiofsBackend) Prepare(req PrepareRequest) ([]Device, error) {
 		StartTime:  processStartTicks(cmd.Process.Pid),
 		Exited:     exited,
 	}}, nil
+}
+
+func makeMountReadonly(path string) error {
+	attr := &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY}
+	err := unix.MountSetattr(unix.AT_FDCWD, path, unix.AT_RECURSIVE, attr)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, unix.ENOSYS) {
+		ulog.Warn("kernel does not support recursive readonly mounts; host export remains writable",
+			ulog.F("path", path),
+			ulog.F("error", err))
+		return nil
+	}
+	return err
 }
 
 func (b *virtiofsBackend) buildArgs(socket, volumeDir string) []string {

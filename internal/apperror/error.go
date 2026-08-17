@@ -20,6 +20,7 @@ const (
 	Conflict
 	FailedPrecondition
 	ResourceExhausted
+	PayloadTooLarge
 	UpstreamFailure
 	Unavailable
 	DeadlineExceeded

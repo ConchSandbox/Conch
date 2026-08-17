@@ -13,7 +13,7 @@ import (
 const DirPerm = 0755
 const FilePerm = 0644
 const HealthMsgOK = "OK"
-const agentFileChunkBytes = 1024 * 1024
+const agentFileChunkBytes = 1 << 20
 
 type AgentServer struct {
 	processMu    sync.Mutex

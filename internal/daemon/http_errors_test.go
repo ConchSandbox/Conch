@@ -42,6 +42,7 @@ func TestHTTPStatusForErrorKind(t *testing.T) {
 		{apperror.Conflict, http.StatusConflict},
 		{apperror.FailedPrecondition, http.StatusConflict},
 		{apperror.ResourceExhausted, http.StatusTooManyRequests},
+		{apperror.PayloadTooLarge, http.StatusRequestEntityTooLarge},
 		{apperror.UpstreamFailure, http.StatusBadGateway},
 		{apperror.Unavailable, http.StatusServiceUnavailable},
 		{apperror.DeadlineExceeded, http.StatusGatewayTimeout},

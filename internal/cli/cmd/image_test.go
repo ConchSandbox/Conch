@@ -91,7 +91,7 @@ func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 	images := []client.ImageRecord{
 		{Name: "localhost:5000/busybox:latest", TargetDigest: "sha256:source"},
 		{Name: "localhost/conch/busybox:latest", TargetDigest: "sha256:index", Kind: "boot-index-cold"},
-		{Name: "conch-erofs-rootfs:tmpl-1", TargetDigest: "sha256:rootfs"},
+		{Name: "conch-erofs-rootfs:build-1", TargetDigest: "sha256:rootfs"},
 		{Name: "localhost/conch/rootfs-component:rootfs", TargetDigest: "sha256:rootfs", Kind: "boot-component-rootfs"},
 		{Name: "localhost/conch/sandbox-component:sandbox", TargetDigest: "sha256:sandbox", Kind: "boot-component-sandbox"},
 		{Name: "localhost/conch/mem-snapshot-component:mem", TargetDigest: "sha256:mem", Kind: "boot-component-memory"},

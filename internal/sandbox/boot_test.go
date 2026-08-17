@@ -21,7 +21,7 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	got, err := preparer.Prepare(ctx, PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
 		RAMMB:      512,
@@ -61,7 +61,7 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	snapshots := &fakeSnapshotBackend{}
 
 	got, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(ctx, PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-stratovirt",
 		VMMName:    "stratovirt",
 		RAMMB:      768,
@@ -91,7 +91,7 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	got, err := preparer.Prepare(ctx, PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
 	})
@@ -122,7 +122,6 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 
 func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	entry := template.Entry{
-		ID:       "tmpl_missing",
 		Origin:   template.OriginImage,
 		BootMode: template.BootModeCold,
 	}
@@ -131,7 +130,7 @@ func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: digest.FromString("missing").String(),
 		SandboxID:  "sandbox-a",
 	})
 	if err == nil || !strings.Contains(err.Error(), "has no boot index digest") {
@@ -161,7 +160,7 @@ func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 			resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, resume, vmmName)}
 			snapshots := &fakeSnapshotBackend{}
 			_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-				TemplateID: entry.ID,
+				TemplateID: entry.BootIndexDigest,
 				SandboxID:  "sandbox-a",
 			})
 			if err == nil || !strings.Contains(err.Error(), "cached boot mode") {
@@ -180,7 +179,7 @@ func TestBootPreparerRejectsResumeVMMMismatch(t *testing.T) {
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
 	})
@@ -199,7 +198,7 @@ func TestBootPreparerRejectsStratovirtResumeWithoutMemorySize(t *testing.T) {
 	snapshots := &fakeSnapshotBackend{}
 
 	_, err := mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}).Prepare(context.Background(), PrepareBootRequest{
-		TemplateID: entry.ID,
+		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
 	})
@@ -219,13 +218,13 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
 	first, err := preparer.Prepare(ctx, PrepareBootRequest{
-		TemplateID: entry.ID, SandboxID: "sandbox-a", VMMName: "stratovirt",
+		TemplateID: entry.BootIndexDigest, SandboxID: "sandbox-a", VMMName: "stratovirt",
 	})
 	if err != nil {
 		t.Fatalf("first Prepare() error = %v", err)
 	}
 	second, err := preparer.Prepare(ctx, PrepareBootRequest{
-		TemplateID: entry.ID, SandboxID: "sandbox-b", VMMName: "stratovirt",
+		TemplateID: entry.BootIndexDigest, SandboxID: "sandbox-b", VMMName: "stratovirt",
 	})
 	if err != nil {
 		t.Fatalf("second Prepare() error = %v", err)
@@ -261,12 +260,12 @@ type fakeTemplateReader struct {
 	err   error
 }
 
-func (f *fakeTemplateReader) Get(_ context.Context, id string) (template.Entry, error) {
+func (f *fakeTemplateReader) Get(_ context.Context, bootIndexDigest string) (template.Entry, error) {
 	if f.err != nil {
 		return template.Entry{}, f.err
 	}
-	if f.entry.ID != id {
-		return template.Entry{}, fmt.Errorf("template %s not found", id)
+	if f.entry.BootIndexDigest != "" && f.entry.BootIndexDigest != bootIndexDigest {
+		return template.Entry{}, fmt.Errorf("template %s not found", bootIndexDigest)
 	}
 	return f.entry, nil
 }
@@ -353,7 +352,6 @@ func newBootTemplate(t *testing.T, origin template.Origin, mode template.BootMod
 	t.Helper()
 	bootDigest := digest.FromString(t.Name() + "/" + string(origin) + "/" + string(mode)).String()
 	entry := template.Entry{
-		ID:              "tmpl_" + digest.FromString(t.Name()).Encoded()[:24],
 		Origin:          origin,
 		BootMode:        mode,
 		BootIndexDigest: bootDigest,

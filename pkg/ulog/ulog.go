@@ -76,7 +76,7 @@ func F(key string, value interface{}) Field {
 
 // ulog implements the Logger interface
 type ulog struct {
-	mu          sync.Mutex
+	mu sync.Mutex
 
 	// log level should init once, and not change at runtime.
 	level       LogLevel

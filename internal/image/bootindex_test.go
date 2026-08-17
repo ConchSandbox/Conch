@@ -16,6 +16,44 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+func TestCanonicalTemplateRefUsesBootIndexDigest(t *testing.T) {
+	bootIndexDigest := digest.FromString("boot-index").String()
+
+	got, err := CanonicalTemplateRef("  " + bootIndexDigest + "  ")
+	if err != nil {
+		t.Fatalf("CanonicalTemplateRef() error = %v", err)
+	}
+	want := "localhost/conch/template:" + strings.Replace(bootIndexDigest, ":", "-", 1)
+	if got != want {
+		t.Fatalf("CanonicalTemplateRef() = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalTemplateRefRejectsInvalidDigest(t *testing.T) {
+	if _, err := CanonicalTemplateRef("not-a-digest"); err == nil {
+		t.Fatal("CanonicalTemplateRef() error = nil, want invalid digest")
+	}
+}
+
+func TestIsCanonicalTemplateRef(t *testing.T) {
+	canonical, err := CanonicalTemplateRef(digest.FromString("boot-index").String())
+	if err != nil {
+		t.Fatalf("CanonicalTemplateRef() error = %v", err)
+	}
+	if !IsCanonicalTemplateRef(canonical) {
+		t.Fatalf("IsCanonicalTemplateRef(%q) = false", canonical)
+	}
+	for _, ref := range []string{
+		"localhost/conch/template:latest",
+		"registry.example/conch/template:sha256-deadbeef",
+		"localhost/conch/template:sha256-not-a-digest",
+	} {
+		if IsCanonicalTemplateRef(ref) {
+			t.Fatalf("IsCanonicalTemplateRef(%q) = true", ref)
+		}
+	}
+}
+
 func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
 	requireMkfsErofs(t)
 
@@ -32,7 +70,7 @@ func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rootfs, "bin"), []byte("rootfs"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{rootfs}, KindRootfs, "localhost/conch/rootfs:test")
+	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{rootfs}, KindRootfs)
 	if err != nil {
 		t.Fatalf("BuildNativeComponentInContent rootfs: %v", err)
 	}
@@ -50,7 +88,6 @@ func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
 		RootfsDescriptor: rootfsDesc,
 		KernelPath:       kernel,
 		InitrdPath:       initrd,
-		Tag:              "localhost/conch/demo:latest",
 	})
 	if err != nil {
 		t.Fatalf("BuildBootIndexInContent: %v", err)
@@ -89,7 +126,7 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, "localhost/conch/checkpoint:"+name)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
 		if err != nil {
 			t.Fatalf("BuildNativeComponentInContent(%s): %v", kind, err)
 		}
@@ -103,7 +140,6 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 		RootfsDescriptor:  rootfsDesc,
 		MemDescriptor:     memDesc,
 		SandboxDescriptor: sandboxDesc,
-		Tag:               "localhost/conch/checkpoint:one",
 		VMMName:           "cloud-hypervisor",
 		MemorySizeMB:      512,
 	})
@@ -177,32 +213,32 @@ func TestBuildBootIndexInContentRejectsInvalidSandboxAndVMMCombinations(t *testi
 	}{
 		{
 			name: "missing sandbox source",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, Tag: "example:test"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid},
 			want: "exactly one sandbox source",
 		},
 		{
 			name: "prepared and kernel assets",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, KernelPath: "kernel", InitrdPath: "initrd", Tag: "example:test"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, KernelPath: "kernel", InitrdPath: "initrd"},
 			want: "exactly one sandbox source",
 		},
 		{
 			name: "half kernel assets",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, KernelPath: "kernel", Tag: "example:test"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, KernelPath: "kernel"},
 			want: "provided together",
 		},
 		{
 			name: "mem without VMM",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, MemDescriptor: valid, SandboxDescriptor: valid, Tag: "example:test"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, MemDescriptor: valid, SandboxDescriptor: valid},
 			want: "VMM name is required",
 		},
 		{
 			name: "mem without memory size",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, MemDescriptor: valid, SandboxDescriptor: valid, Tag: "example:test", VMMName: "stratovirt"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, MemDescriptor: valid, SandboxDescriptor: valid, VMMName: "stratovirt"},
 			want: "positive memory size",
 		},
 		{
 			name: "VMM without mem",
-			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, Tag: "example:test", VMMName: "stratovirt"},
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, VMMName: "stratovirt"},
 			want: "requires a mem-snapshot",
 		},
 	}
@@ -229,11 +265,11 @@ func TestBuildBootIndexInContentRejectsWrongPreparedComponentKind(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "rootfs-kind")}, KindRootfs, "example:rootfs")
+	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "rootfs-kind")}, KindRootfs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sandboxDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "sandbox-kind")}, KindSandbox, "example:sandbox")
+	sandboxDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "sandbox-kind")}, KindSandbox)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +278,6 @@ func TestBuildBootIndexInContentRejectsWrongPreparedComponentKind(t *testing.T) 
 	_, err = BuildBootIndexInContent(ctx, store, BootIndexContentOptions{
 		RootfsDescriptor:  rootfsDesc,
 		SandboxDescriptor: sandboxDesc,
-		Tag:               "example:boot",
 	})
 	if err == nil || !strings.Contains(err.Error(), `sandbox descriptor has component kind "mem-snapshot"`) {
 		t.Fatalf("BuildBootIndexInContent() error = %v", err)
@@ -254,7 +289,7 @@ func TestBuildNativeComponentInContentRejectsUnsafeInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = BuildNativeComponentInContent(context.Background(), store, []string{"unused"}, "unknown", "example:unknown")
+	_, err = BuildNativeComponentInContent(context.Background(), store, []string{"unused"}, "unknown")
 	if err == nil || !strings.Contains(err.Error(), "unsupported native component kind") {
 		t.Fatalf("unknown kind error = %v", err)
 	}
@@ -267,7 +302,7 @@ func TestBuildNativeComponentInContentRejectsUnsafeInputs(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	_, err = BuildNativeComponentInContent(context.Background(), store, []string{link}, KindMemSnapshot, "example:mem")
+	_, err = BuildNativeComponentInContent(context.Background(), store, []string{link}, KindMemSnapshot)
 	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
 		t.Fatalf("symlink error = %v", err)
 	}
@@ -339,7 +374,7 @@ func TestInspectBootIndexContentRejectsMismatchedVMMCapability(t *testing.T) {
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, "example:"+name)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -373,7 +408,7 @@ func TestInspectBootIndexMemorySizeCompatibilityIsVMMSpecific(t *testing.T) {
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, "example:"+name)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
 		if err != nil {
 			t.Fatal(err)
 		}

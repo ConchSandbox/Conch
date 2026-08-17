@@ -8,20 +8,33 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	digest "github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/sandbox"
 )
 
+const (
+	testTemplateIDDefault  = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTemplateIDExplicit = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testTemplateIDOther    = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+)
+
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
-	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{VMMName: "stratovirt"})
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
+		TemplateID: testTemplateIDDefault,
+		VMMName:    "stratovirt",
+		VCPUNum:    2,
+		VCPUMax:    2,
+		RamMB:      1024,
+	})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"tmpl-default","vcpu_num":2,"vcpu_max":2,"ram_mb":1024}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -34,8 +47,8 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	if response.SandboxID == "" || response.SandboxID != sandboxOps.createReq.SandboxID {
 		t.Fatalf("sandbox identity = response:%q request:%q", response.SandboxID, sandboxOps.createReq.SandboxID)
 	}
-	if sandboxOps.createReq.TemplateID != "tmpl-default" {
-		t.Fatalf("template ID = %q, want request value", sandboxOps.createReq.TemplateID)
+	if sandboxOps.createReq.TemplateID != testTemplateIDDefault {
+		t.Fatalf("Boot Index digest = %q, want daemon default", sandboxOps.createReq.TemplateID)
 	}
 }
 
@@ -49,9 +62,8 @@ func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
 	ids := []string{"sandbox-a", "sandbox-b"}
 	for _, id := range ids {
 		if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-			SandboxID:                     id,
-			CheckpointHeadTemplateID:      "tmpl-1",
-			CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			SandboxID:                id,
+			CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		}); err != nil {
 			t.Fatalf("seed sandbox %s: %v", id, err)
 		}
@@ -86,10 +98,10 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 		wantStatus      int
 		wantTemplate    string
 	}{
-		{name: "omitted uses configured default", defaultTemplate: "tmpl-default", body: `{}`, wantStatus: http.StatusOK, wantTemplate: "tmpl-default"},
+		{name: "omitted uses configured default", defaultTemplate: testTemplateIDDefault, body: `{}`, wantStatus: http.StatusOK, wantTemplate: testTemplateIDDefault},
 		{name: "whitespace default is rejected", defaultTemplate: " \t ", body: `{}`, wantStatus: http.StatusBadRequest},
 		{name: "absent default is rejected", body: `{}`, wantStatus: http.StatusBadRequest},
-		{name: "explicit template is required", body: `{"template_id":"tmpl-explicit","vcpu_num":2,"vcpu_max":2,"ram_mb":1024}`, wantStatus: http.StatusOK, wantTemplate: "tmpl-explicit"},
+		{name: "explicit template wins", defaultTemplate: testTemplateIDDefault, body: `{"template_id":"` + testTemplateIDExplicit + `"}`, wantStatus: http.StatusOK, wantTemplate: testTemplateIDExplicit},
 	}
 
 	for _, tt := range tests {
@@ -122,7 +134,7 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 				return
 			}
 			if sandboxOps.createReq.TemplateID != tt.wantTemplate {
-				t.Fatalf("template ID = %q, want %q", sandboxOps.createReq.TemplateID, tt.wantTemplate)
+				t.Fatalf("Boot Index digest = %q, want %q", sandboxOps.createReq.TemplateID, tt.wantTemplate)
 			}
 		})
 	}
@@ -135,7 +147,7 @@ func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"tmpl_123","sandbox_id":"sandbox-123"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"`+testTemplateIDExplicit+`","sandbox_id":"sandbox-123"}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
@@ -145,7 +157,7 @@ func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
-	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: "tmpl-default"})
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: testTemplateIDDefault})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
@@ -168,9 +180,8 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-		SandboxID:                     "sandbox-1",
-		CheckpointHeadTemplateID:      "tmpl-existing",
-		CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SandboxID:                "sandbox-1",
+		CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() seed error = %v", err)
 	}
@@ -179,7 +190,7 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"sandbox_id":"sandbox-1","template_id":"tmpl-new"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"sandbox_id":"sandbox-1","template_id":"`+testTemplateIDOther+`"}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusConflict, recorder.Body.String())
@@ -199,7 +210,12 @@ func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 	}
 	server.routes()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/template/inspect", bytes.NewBufferString(`{"id":"missing"}`))
+	missingDigest := digest.FromString("missing-template").String()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/template/inspect",
+		bytes.NewBufferString(`{"template_id":"`+missingDigest+`"}`),
+	)
 	server.router.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
