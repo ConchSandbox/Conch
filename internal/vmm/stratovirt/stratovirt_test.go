@@ -146,6 +146,42 @@ func TestBuildStratovirtPmemDevices(t *testing.T) {
 	if !strings.Contains(got, "-device virtio-pmem-pci,id=pmem0pci,memdev=pmem0") {
 		t.Fatalf("pmem device missing: %q", got)
 	}
+	if !strings.Contains(got, ",iothread=pmemio") {
+		t.Fatalf("pmem device missing iothread option: %q", got)
+	}
+}
+
+func TestBuildStratovirtPmemDevicesSharesSingleIothread(t *testing.T) {
+	dir := t.TempDir()
+	var pmemPaths []string
+	for _, name := range []string{"layer0.erofs", "layer1.erofs"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, make([]byte, 2*1024*1024), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		pmemPaths = append(pmemPaths, path)
+	}
+
+	got := buildStratovirtPmemDevices(pmemPaths)
+	if count := strings.Count(got, "-object iothread,id=pmemio"); count != 1 {
+		t.Fatalf("iothread object count = %d, want 1 in %q", count, got)
+	}
+	if !strings.HasPrefix(got, "-object iothread,id=pmemio \\\n") {
+		t.Fatalf("iothread object must precede the devices referencing it: %q", got)
+	}
+	if count := strings.Count(got, ",iothread=pmemio"); count != len(pmemPaths) {
+		t.Fatalf("pmem devices carrying iothread = %d, want %d in %q", count, len(pmemPaths), got)
+	}
+}
+
+func TestBuildStratovirtPmemDevicesWithoutUsablePathsIsEmpty(t *testing.T) {
+	if got := buildStratovirtPmemDevices(nil); got != "" {
+		t.Fatalf("buildStratovirtPmemDevices(nil) = %q, want empty", got)
+	}
+	// A missing file has no size, so the iothread object must not be emitted alone.
+	if got := buildStratovirtPmemDevices([]string{filepath.Join(t.TempDir(), "absent.erofs")}); got != "" {
+		t.Fatalf("buildStratovirtPmemDevices(missing) = %q, want empty", got)
+	}
 }
 
 func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
