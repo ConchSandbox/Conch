@@ -158,6 +158,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), store)
 	s.runtimeService.Snapshot = host.SnapshotServer()
 	s.runtimeService.Templates = host.TemplateStore()
+	s.runtimeService.SetVolumeManager(s.volumeManager)
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateID: cfg.Sandbox.DefaultSpec.TemplateID,
 		VMMName:    cfg.Sandbox.Backend,

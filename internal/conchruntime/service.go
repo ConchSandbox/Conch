@@ -25,6 +25,7 @@ import (
 	"github.com/openeuler/Conch/internal/sandbox"
 	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -49,6 +50,7 @@ type Service struct {
 	Snapshot        SnapshotOps
 	Store           state.Store
 	Templates       conchtemplate.Store
+	VolumeManager   *volume.Manager
 	SandboxDefaults SandboxDefaults
 	lifecycleLocks  sandboxLifecycleLocks
 }
@@ -104,6 +106,29 @@ func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
 	s.SandboxDefaults = defaults
 }
 
+// SetVolumeManager wires the volume manager used to validate create requests.
+func (s *Service) SetVolumeManager(vm *volume.Manager) {
+	if s == nil {
+		return
+	}
+	s.VolumeManager = vm
+}
+
+// validateVolumeMounts rejects invalid mounts before creating sandbox state.
+func (s *Service) validateVolumeMounts(ctx context.Context, opts SandboxCreateOptions) error {
+	if len(opts.VolumeMounts) == 0 {
+		return nil
+	}
+	if s.Templates == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	entry, err := s.Templates.Get(ctx, opts.TemplateID)
+	if err != nil {
+		return err
+	}
+	return s.VolumeManager.ValidateMounts(opts.VolumeMounts, entry.BootMode == conchtemplate.BootModeResume)
+}
+
 func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (SandboxCreateResult, error) {
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
@@ -156,6 +181,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, err
 	}
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	if err := s.validateVolumeMounts(ctx, opts); err != nil {
 		return SandboxCreateResult{}, err
 	}
 	agentToken, err := sandbox.GenerateAgentToken()

@@ -29,34 +29,54 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, error) {
+func (m *Manager) ValidateMounts(mounts []Mount, resumeBoot bool) error {
 	if len(mounts) == 0 {
-		return nil, nil
+		return nil
+	}
+	if m == nil {
+		return fmt.Errorf("volume manager is not configured")
+	}
+	if resumeBoot {
+		return ErrInvalidMount.WrapMessage(
+			fmt.Errorf("volume_mounts requested on a snapshot-resume (warm) template"),
+			"volume_mounts are not supported on snapshot-resume (warm) templates; use a cold boot template instead",
+		)
 	}
 	if len(mounts) > m.maxMounts {
-		return nil, ErrInvalidMount.Wrap(fmt.Errorf("volumeMounts exceeds limit %d: %d", m.maxMounts, len(mounts)))
+		message := fmt.Sprintf("volume_mounts length %d exceeds configured maximum %d (volume.max_mounts)", len(mounts), m.maxMounts)
+		return ErrInvalidMount.WrapMessage(fmt.Errorf("%s", message), message)
 	}
 	seenTargets := map[string]struct{}{}
 	for _, mount := range mounts {
 		target := filepath.Clean(strings.TrimSpace(mount.Path))
 		if !filepath.IsAbs(target) {
-			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount path must be absolute: %s", mount.Path))
+			return ErrInvalidMount.Wrap(fmt.Errorf("volume mount path must be absolute: %s", mount.Path))
 		}
 		if isBlockedTarget(target) {
-			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount path is not allowed: %s", target))
+			return ErrInvalidMount.Wrap(fmt.Errorf("volume mount path is not allowed: %s", target))
 		}
 		if _, ok := seenTargets[target]; ok {
-			return nil, ErrInvalidMount.Wrap(fmt.Errorf("duplicate volume mount path: %s", target))
+			return ErrInvalidMount.Wrap(fmt.Errorf("duplicate volume mount path: %s", target))
 		}
 		seenTargets[target] = struct{}{}
 
 		source := filepath.Clean(strings.TrimSpace(mount.Source))
 		if source == "" {
-			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must not be empty"))
+			return ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must not be empty"))
 		}
 		if !filepath.IsAbs(source) {
-			return nil, ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must be absolute: %s", source))
+			return ErrInvalidMount.Wrap(fmt.Errorf("volume mount source must be absolute: %s", source))
 		}
+	}
+	return nil
+}
+
+func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, error) {
+	if err := m.ValidateMounts(mounts, false); err != nil {
+		return nil, err
+	}
+	if len(mounts) == 0 {
+		return nil, nil
 	}
 	return m.backend.Prepare(PrepareRequest{
 		SandboxID: sandboxID,

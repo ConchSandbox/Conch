@@ -407,7 +407,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	}()
 
 	vmStartSpec := vmStartSpecFromBootSpec(boot.Spec)
-	volumeDevices, err := m.prepareVolumes(req, boot.Runtime.Resume)
+	volumeDevices, err := m.prepareVolumes(req)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -454,12 +454,9 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 	return buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
 }
 
-func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Device, error) {
+func (m *Manager) prepareVolumes(req CreateRequest) ([]volume.Device, error) {
 	if len(req.VolumeMounts) == 0 {
 		return nil, nil
-	}
-	if resume {
-		return nil, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox with volumeMounts does not support snapshot startup"))
 	}
 	if m.volumeManager == nil {
 		return nil, fmt.Errorf("volume manager is not configured")
