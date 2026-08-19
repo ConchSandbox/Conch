@@ -26,6 +26,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
+	client.logDir = t.TempDir()
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:    2,
 		CPUMax:     4,
@@ -49,6 +50,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 		"-device vhost-vsock-pci,id=vsock0,guest-cid=42",
 		"conch.sandbox_id=sandbox-test",
 		"-m 1024M",
+		filepath.Join(client.logDir, "sandbox-test", "vmm.log"),
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
@@ -73,6 +75,7 @@ func TestStratovirtBuildRestoreCmdUsesMappedCheckpoint(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
+	client.logDir = t.TempDir()
 	script, err := client.BuildStartCmd(&driver.ResourceArgs{
 		CPUBoot:      1,
 		CPUMax:       1,
