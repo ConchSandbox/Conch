@@ -73,12 +73,13 @@ func TestGetLogConfig(t *testing.T) {
 	}
 }
 
-func TestGetServerUnixSocket(t *testing.T) {
+func TestRuntimePathsUsesConfiguredRoots(t *testing.T) {
 	cfg := &Config{
-		Server: ServerConfig{WorkDir: "/run/conch-test"},
+		Server: ServerConfig{WorkDir: "/run/conch-test", StateDir: "/var/lib/conch-test"},
 	}
-	if got := cfg.GetServerUnixSocket(); got != "/run/conch-test/conchd.sock" {
-		t.Errorf("GetServerUnixSocket() = %q, want /run/conch-test/conchd.sock", got)
+	paths := cfg.RuntimePaths()
+	if paths.ConchdSocket != "/run/conch-test/conchd.sock" || paths.CowSocket != "/run/conch-test/cow.sock" || paths.IncrementalDir != "/var/lib/conch-test/incremental" {
+		t.Fatalf("RuntimePaths() = %#v", paths)
 	}
 }
 
@@ -175,8 +176,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Sandbox.DefaultSpec.RamMB != 2048 {
 		t.Errorf("LoadConfig().Sandbox.DefaultSpec.RamMB = %d, want %d", cfg.Sandbox.DefaultSpec.RamMB, 2048)
 	}
-	if cfg.StatePath() != "/tmp/conch-state/state.db" {
-		t.Errorf("LoadConfig().StatePath() = %q, want /tmp/conch-state/state.db", cfg.StatePath())
+	if cfg.RuntimePaths().StateDB != "/tmp/conch-state/state.db" {
+		t.Errorf("LoadConfig().RuntimePaths().StateDB = %q, want /tmp/conch-state/state.db", cfg.RuntimePaths().StateDB)
 	}
 }
 
@@ -445,6 +446,7 @@ func TestDefaultConfigNetworkSettings(t *testing.T) {
 
 func TestDefaultConfigRuntimePaths(t *testing.T) {
 	cfg := DefaultConfig()
+	paths := cfg.RuntimePaths()
 
 	if cfg.Server.WorkDir != "/var/run/conch" {
 		t.Errorf("DefaultConfig().Server.WorkDir = %q, want /var/run/conch", cfg.Server.WorkDir)
@@ -452,14 +454,14 @@ func TestDefaultConfigRuntimePaths(t *testing.T) {
 	if cfg.Server.StateDir != "/var/lib/conch" {
 		t.Errorf("DefaultConfig().Server.StateDir = %q, want /var/lib/conch", cfg.Server.StateDir)
 	}
-	if cfg.GetServerUnixSocket() != "/var/run/conch/conchd.sock" || cfg.PIDFilePath() != "/var/run/conch/conchd.pid" {
-		t.Errorf("unexpected server runtime paths: socket=%q pid=%q", cfg.GetServerUnixSocket(), cfg.PIDFilePath())
+	if paths.ConchdSocket != "/var/run/conch/conchd.sock" || paths.ConchdPIDFile != "/var/run/conch/conchd.pid" || paths.CowSocket != "/var/run/conch/cow.sock" {
+		t.Errorf("unexpected server runtime paths: %#v", paths)
 	}
-	if cfg.ContainerdRootDir() != "/var/lib/conch/containerd" || cfg.ContainerdStateDir() != "/var/run/conch/containerd" {
-		t.Errorf("unexpected containerd paths: root=%q state=%q", cfg.ContainerdRootDir(), cfg.ContainerdStateDir())
+	if paths.ContainerdRootDir != "/var/lib/conch/containerd" || paths.ContainerdStateDir != "/var/run/conch/containerd" {
+		t.Errorf("unexpected containerd paths: %#v", paths)
 	}
-	if cfg.VirtiofsRuntimeDir() != "/var/run/conch/sandboxes" || cfg.StatePath() != "/var/lib/conch/state.db" {
-		t.Errorf("unexpected state paths: virtiofs=%q store=%q", cfg.VirtiofsRuntimeDir(), cfg.StatePath())
+	if paths.SandboxRuntimeDir != "/var/run/conch/sandboxes" || paths.StateDB != "/var/lib/conch/state.db" || paths.IncrementalDir != "/var/lib/conch/incremental" || paths.NetworkNamespaceDir != "/var/run/conch/netns" || paths.CNICacheDir != "/var/lib/conch/cni" {
+		t.Errorf("unexpected derived runtime paths: %#v", paths)
 	}
 	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/usr/bin/stratovirt" {
 		t.Errorf("DefaultConfig().Sandbox.Stratovirt = %#v, want /usr/bin/stratovirt", cfg.Sandbox.Stratovirt)

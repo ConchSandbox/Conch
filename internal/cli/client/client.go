@@ -83,7 +83,7 @@ func resolveTransport(opts Options) (string, *http.Client, error) {
 	if baseURL := normalizeBaseURL(os.Getenv("CONCH_API_URL")); baseURL != "" {
 		return baseURL, &http.Client{Timeout: timeout}, nil
 	}
-	unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket())
+	unixSocket := strings.TrimSpace(cfg.RuntimePaths().ConchdSocket)
 	if unixSocket == "" {
 		return "", nil, fmt.Errorf("conchd unix socket is not configured in %s", configPath)
 	}

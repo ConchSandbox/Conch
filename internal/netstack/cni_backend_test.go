@@ -63,6 +63,7 @@ func TestNewCNIManagerUsesInternalInterface(t *testing.T) {
 	manager, err := NewCNIManager(CNIManagerConfig{
 		PluginBinDirs: []string{t.TempDir()},
 		PluginConfDir: confDir,
+		CacheDir:      t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewCNIManager(): %v", err)

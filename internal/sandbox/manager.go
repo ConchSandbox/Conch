@@ -23,6 +23,7 @@ import (
 
 type Config struct {
 	Network            netstack.PoolConfig
+	WorkDir            string
 	VMMBinaries        map[string]string
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
@@ -42,6 +43,7 @@ type Manager struct {
 	cidAllocator       *CIDAllocator
 	volumeManager      *volume.Manager
 	vmmBinaries        map[string]string
+	workDir            string
 }
 
 type sandboxLifecycleState uint8
@@ -87,7 +89,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager, cfg.VMMBinaries)
+	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager, cfg.VMMBinaries, cfg.WorkDir)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +111,7 @@ func (m *Manager) RecoverStaleResources(ctx context.Context, sandboxIDs []string
 	if m == nil || m.pool == nil {
 		return fmt.Errorf("sandbox manager is not initialized")
 	}
-	if err := vmm.CleanupStaleResources(vmmPIDs, m.vmmBinaries, hasCreatingSandbox); err != nil {
+	if err := vmm.CleanupStaleResources(m.workDir, vmmPIDs, m.vmmBinaries, hasCreatingSandbox); err != nil {
 		return fmt.Errorf("clean stale VMM resources: %w", err)
 	}
 	if err := m.volumeManager.CleanupStaleResources(); err != nil {
@@ -153,6 +155,7 @@ func NewManager(
 	requestTimeout time.Duration,
 	volumeManager *volume.Manager,
 	vmmBinaries map[string]string,
+	workDir string,
 ) (*Manager, error) {
 	if bootPreparer == nil {
 		return nil, fmt.Errorf("sandbox boot preparer is required")
@@ -167,6 +170,7 @@ func NewManager(
 		requestTimeout:     requestTimeout,
 		volumeManager:      volumeManager,
 		vmmBinaries:        cloneStringMap(vmmBinaries),
+		workDir:            workDir,
 		cidAllocator:       NewCIDAllocator(),
 	}, nil
 }
@@ -301,7 +305,7 @@ func (m *Manager) lockCurrentSandboxEntry(mapKey, sandboxID string) (*sandboxEnt
 	return entry, entry.mu.Unlock, nil
 }
 
-func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, restore bool, vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig) (*Sandbox, error) {
+func createSandboxWithVsockSend(ctx context.Context, workDir string, vmStartSpec VMStartSpec, vmmName, vmmBinary, sandboxId, agentToken string, env map[string]string, vcpuNum, vcpuMax int64, pool *netstack.Pool, vsockSignalRetry, vsockSignalTimeout time.Duration, restore bool, vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig) (*Sandbox, error) {
 	logger := ulog.GetLogger()
 	readyOpts := hostconn.ReadyOptions{
 		SandboxID:       sandboxId,
@@ -320,9 +324,9 @@ func createSandboxWithVsockSend(ctx context.Context, vmStartSpec VMStartSpec, vm
 	var sbx *Sandbox
 	var createErr error
 	if restore {
-		sbx, createErr = RestoreSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
+		sbx, createErr = RestoreSandbox(ctx, workDir, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	} else {
-		sbx, createErr = CreateSandbox(ctx, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
+		sbx, createErr = CreateSandbox(ctx, workDir, vmStartSpec, vmmName, vmmBinary, sandboxId, vcpuNum, vcpuMax, pool, vsockCID, vsockSocketPath, network, &readyOpts)
 	}
 	if createErr != nil {
 		return nil, fmt.Errorf("failed to create sandbox: %w", createErr)
@@ -497,7 +501,7 @@ func (m *Manager) prepareRuntimeLease(ctx context.Context, req CreateRequest) (c
 func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs, error) {
 	key := req.SandboxID
 
-	vsockSocketPath, err := SandboxVsockSocketPath(key)
+	vsockSocketPath, err := SandboxVsockSocketPath(m.workDir, key)
 	if err != nil {
 		return createRuntimeIDs{}, ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox id for vsock socket path: %w", err))
 	}
@@ -540,6 +544,7 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 	}
 	return createSandboxWithVsockSend(
 		ctx,
+		m.workDir,
 		vmStartSpec,
 		req.VMMName,
 		vmmBinary,

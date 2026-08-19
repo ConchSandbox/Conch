@@ -8,7 +8,8 @@ import (
 )
 
 func TestNewSlotAndCNIState(t *testing.T) {
-	cfg := newSlotConfig()
+	namespaceDir := t.TempDir()
+	cfg := newSlotConfig(namespaceDir)
 	slot, err := newSlot(firstSlotID, cfg)
 	if err != nil {
 		t.Fatalf("newSlot(): %v", err)
@@ -19,7 +20,7 @@ func TestNewSlotAndCNIState(t *testing.T) {
 	if slot.ID() != 2 {
 		t.Fatalf("ID() = %d, want 2", slot.ID())
 	}
-	if slot.NetNSPath() != filepath.Join(networkNamespaceDir, "slot-2") {
+	if slot.NetNSPath() != filepath.Join(namespaceDir, "slot-2") {
 		t.Fatalf("NetNSPath() = %q", slot.NetNSPath())
 	}
 	if slot.cniContainerID() != "conch-slot-2" {
@@ -59,7 +60,7 @@ func TestNewSlotAndCNIState(t *testing.T) {
 }
 
 func TestNewSlotRejectsOutOfRangeID(t *testing.T) {
-	cfg := newSlotConfig()
+	cfg := newSlotConfig(t.TempDir())
 	for _, id := range []int{firstSlotID - 1, firstSlotID + maxSlots} {
 		t.Run(fmt.Sprintf("id_%d", id), func(t *testing.T) {
 			if _, err := newSlot(id, cfg); err == nil {
@@ -70,7 +71,7 @@ func TestNewSlotRejectsOutOfRangeID(t *testing.T) {
 }
 
 func TestNewSlotConfigUsesInternalGuestNetwork(t *testing.T) {
-	cfg := newSlotConfig()
+	cfg := newSlotConfig(t.TempDir())
 	if got := cfg.tapIP.String(); got != guestGatewayIP {
 		t.Fatalf("tap IP = %q, want %q", got, guestGatewayIP)
 	}

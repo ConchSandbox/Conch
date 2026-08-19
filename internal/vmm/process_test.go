@@ -10,18 +10,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/openeuler/Conch/internal/config"
 )
 
 func TestSandboxSocketPathUsesShortStableName(t *testing.T) {
-	oldWorkDir := config.WorkDir
-	t.Cleanup(func() { config.WorkDir = oldWorkDir })
-	config.WorkDir = filepath.Join(os.TempDir(), "conch-socket-test-"+strings.Repeat("a", 45))
-	t.Cleanup(func() { _ = os.RemoveAll(config.WorkDir) })
+	workDir := filepath.Join(os.TempDir(), "conch-socket-test-"+strings.Repeat("a", 45))
+	t.Cleanup(func() { _ = os.RemoveAll(workDir) })
 
 	sandboxID := "sandbox-" + strings.Repeat("very-long-id-", 12)
-	got, err := SandboxSocketPath("x", sandboxID)
+	got, err := SandboxSocketPath(workDir, "x", sandboxID)
 	if err != nil {
 		t.Fatalf("SandboxSocketPath() error = %v", err)
 	}
@@ -31,7 +27,7 @@ func TestSandboxSocketPathUsesShortStableName(t *testing.T) {
 	if strings.Contains(got, sandboxID) {
 		t.Fatalf("socket path still embeds sandbox id: %s", got)
 	}
-	again, err := SandboxSocketPath("x", sandboxID)
+	again, err := SandboxSocketPath(workDir, "x", sandboxID)
 	if err != nil {
 		t.Fatalf("SandboxSocketPath() second error = %v", err)
 	}
@@ -41,12 +37,10 @@ func TestSandboxSocketPathUsesShortStableName(t *testing.T) {
 }
 
 func TestSandboxSocketPathRejectsTooLongWorkDir(t *testing.T) {
-	oldWorkDir := config.WorkDir
-	t.Cleanup(func() { config.WorkDir = oldWorkDir })
-	config.WorkDir = filepath.Join(os.TempDir(), "conch-socket-test-"+strings.Repeat("a", 110))
-	t.Cleanup(func() { _ = os.RemoveAll(config.WorkDir) })
+	workDir := filepath.Join(os.TempDir(), "conch-socket-test-"+strings.Repeat("a", 110))
+	t.Cleanup(func() { _ = os.RemoveAll(workDir) })
 
-	if _, err := SandboxSocketPath("x", "sandbox"); err == nil {
+	if _, err := SandboxSocketPath(workDir, "x", "sandbox"); err == nil {
 		t.Fatalf("SandboxSocketPath() error = nil, want path length error")
 	}
 }

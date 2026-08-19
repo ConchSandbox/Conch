@@ -23,6 +23,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	if backend != DefaultBackend {
 		return nil, fmt.Errorf("unsupported volume backend %q (only %q)", backend, DefaultBackend)
 	}
+	if !filepath.IsAbs(cfg.Virtiofs.RuntimeDir) || filepath.Clean(cfg.Virtiofs.RuntimeDir) != cfg.Virtiofs.RuntimeDir {
+		return nil, fmt.Errorf("virtiofs runtime directory must be a clean absolute path")
+	}
 	return &Manager{
 		maxMounts: cfg.MaxMounts,
 		backend:   NewVirtiofsBackend(cfg.Virtiofs),

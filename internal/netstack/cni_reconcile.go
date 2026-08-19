@@ -39,11 +39,11 @@ type cniCachedSlot struct {
 // longer have process-local Slot state. It must run during startup after stale
 // mounted namespaces are torn down and before the new warm pool is populated.
 // The returned count is the number of distinct stale Slot identities found.
-func (m *CNIManager) reconcileStaleCache(ctx context.Context) (int, error) {
+func (m *CNIManager) reconcileStaleCache(ctx context.Context, namespaceDir string) (int, error) {
 	if m == nil || m.backend == nil {
 		return 0, fmt.Errorf("cni config not initialized")
 	}
-	slots, scanErr := m.currentCachedSlots()
+	slots, scanErr := m.currentCachedSlots(namespaceDir)
 	if len(slots) == 0 {
 		return 0, scanErr
 	}
@@ -91,7 +91,7 @@ sendJobs:
 	return len(slots), errors.Join(allErrs...)
 }
 
-func (m *CNIManager) currentCachedSlots() ([]cniCachedSlot, error) {
+func (m *CNIManager) currentCachedSlots(namespaceDir string) ([]cniCachedSlot, error) {
 	if strings.TrimSpace(m.bridgeNetworkName) == "" {
 		return nil, fmt.Errorf("CNI bridge network name is not initialized")
 	}
@@ -102,7 +102,7 @@ func (m *CNIManager) currentCachedSlots() ([]cniCachedSlot, error) {
 
 	byContainerID := make(map[string]cniCachedSlot)
 	for _, attachment := range attachments {
-		if !m.isCurrentConchAttachment(attachment) {
+		if !m.isCurrentConchAttachment(attachment, namespaceDir) {
 			continue
 		}
 		byContainerID[attachment.ContainerID] = cniCachedSlot{containerID: attachment.ContainerID}
@@ -116,13 +116,13 @@ func (m *CNIManager) currentCachedSlots() ([]cniCachedSlot, error) {
 	return slots, nil
 }
 
-func (m *CNIManager) isCurrentConchAttachment(attachment cniAttachment) bool {
+func (m *CNIManager) isCurrentConchAttachment(attachment cniAttachment, namespaceDir string) bool {
 	rawID := strings.TrimPrefix(attachment.ContainerID, cniContainerIDPrefix)
 	id, err := strconv.Atoi(rawID)
 	if err != nil || validateSlotID(id) != nil || attachment.ContainerID != cniContainerIDPrefix+strconv.Itoa(id) {
 		return false
 	}
-	if attachment.NetNS != filepath.Join(networkNamespaceDir, networkNamespacePrefix+strconv.Itoa(id)) {
+	if attachment.NetNS != filepath.Join(namespaceDir, networkNamespacePrefix+strconv.Itoa(id)) {
 		return false
 	}
 

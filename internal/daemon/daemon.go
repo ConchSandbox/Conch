@@ -105,20 +105,21 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.routes()
 
 	logger := ulog.GetLogger()
+	paths := cfg.RuntimePaths()
 
-	store, err := state.OpenBolt(cfg.StatePath())
+	store, err := state.OpenBolt(paths.StateDB)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
 	s.stateStore = store
-	logger.Info("State store initialized", ulog.F("path", cfg.StatePath()))
+	logger.Info("State store initialized", ulog.F("path", paths.StateDB))
 	s.volumeManager, err = volume.NewManager(volume.Config{
 		MaxMounts: cfg.Volume.MaxMounts,
 		Backend:   cfg.Volume.Backend,
 		Virtiofs: volume.VirtiofsConfig{
 			Binary:     cfg.Volume.Virtiofs.Binary,
-			RuntimeDir: cfg.VirtiofsRuntimeDir(),
+			RuntimeDir: paths.SandboxRuntimeDir,
 		},
 	})
 	if err != nil {
@@ -127,15 +128,16 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
-		RootDir:       cfg.ContainerdRootDir(),
-		StateDir:      cfg.ContainerdStateDir(),
+		RootDir:       paths.ContainerdRootDir,
+		StateDir:      paths.ContainerdStateDir,
 		TemplateStore: store,
 		Snapshot: containerdhost.SnapshotConfig{
-			WorkDir: cfg.Server.WorkDir,
+			WorkDir: paths.WorkDir,
 		},
 		Sandbox: &conchsandbox.Config{
 			Network: netstack.PoolConfig{
 				WarmPoolSize: cfg.Network.WarmPoolSize,
+				NamespaceDir: paths.NetworkNamespaceDir,
 				CNI:          cfg.Network.CNI,
 			},
 			VMMBinaries:        cfg.Sandbox.BinaryPaths(),
@@ -143,6 +145,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
 			VolumeManager:      s.volumeManager,
+			WorkDir:            paths.WorkDir,
 		},
 	})
 	if err != nil {

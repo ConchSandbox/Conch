@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 
 	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/vishvananda/netlink"
@@ -16,8 +17,6 @@ const (
 	defaultCNIPluginConfDir = DefaultCNIPluginConfDir
 	defaultCNIPluginBinDir  = DefaultCNIPluginBinDir
 	cniOuterInterfaceName   = "eth0"
-	defaultCNICacheDir      = "/var/lib/conch/cni"
-	cniCacheDir             = defaultCNICacheDir
 )
 
 type CNIManagerConfig struct {
@@ -44,6 +43,7 @@ type CNIManager struct {
 	ifName            string
 	bridgeName        string
 	bridgeNetworkName string
+	cacheDir          string
 }
 
 type CNIResult struct {
@@ -53,6 +53,9 @@ type CNIResult struct {
 
 func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 	cfg = normalizeCNIManagerConfig(cfg)
+	if !filepath.IsAbs(cfg.CacheDir) || filepath.Clean(cfg.CacheDir) != cfg.CacheDir {
+		return nil, fmt.Errorf("CNI cache directory must be a clean absolute path")
+	}
 
 	backend, err := newLibCNIBackend(cfg)
 	if err != nil {
@@ -68,6 +71,7 @@ func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 		ifName:            cniOuterInterfaceName,
 		bridgeName:        bridgeName,
 		bridgeNetworkName: bridgeNetworkName,
+		cacheDir:          cfg.CacheDir,
 	}, nil
 }
 
@@ -77,9 +81,6 @@ func normalizeCNIManagerConfig(cfg CNIManagerConfig) CNIManagerConfig {
 	}
 	if cfg.PluginConfDir == "" {
 		cfg.PluginConfDir = defaultCNIPluginConfDir
-	}
-	if cfg.CacheDir == "" {
-		cfg.CacheDir = defaultCNICacheDir
 	}
 	return cfg
 }

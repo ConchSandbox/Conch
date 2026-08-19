@@ -32,7 +32,6 @@ const (
 	guestGatewayIP         = "192.168.100.2"
 	guestIP                = "192.168.100.21"
 	guestPrefixLength      = 24
-	networkNamespaceDir    = "/run/conch/netns"
 	networkNamespacePrefix = "slot-"
 	cniContainerIDPrefix   = "conch-slot-"
 	tapInterfaceName       = "tap0"
@@ -40,16 +39,18 @@ const (
 
 // slotConfig contains the immutable network addressing shared by Slots in a Pool.
 type slotConfig struct {
-	tapIP       net.IP
-	tapMask     net.IPMask
-	namespaceIP net.IP
+	tapIP        net.IP
+	tapMask      net.IPMask
+	namespaceIP  net.IP
+	namespaceDir string
 }
 
-func newSlotConfig() slotConfig {
+func newSlotConfig(namespaceDir string) slotConfig {
 	return slotConfig{
-		tapIP:       net.ParseIP(guestGatewayIP).To4(),
-		tapMask:     net.CIDRMask(guestPrefixLength, 32),
-		namespaceIP: net.ParseIP(guestIP).To4(),
+		tapIP:        net.ParseIP(guestGatewayIP).To4(),
+		tapMask:      net.CIDRMask(guestPrefixLength, 32),
+		namespaceIP:  net.ParseIP(guestIP).To4(),
+		namespaceDir: namespaceDir,
 	}
 }
 
@@ -65,6 +66,7 @@ type Slot struct {
 	tapIP       net.IP
 	tapMask     net.IPMask
 	namespaceIP net.IP
+	netNSPath   string
 }
 
 func newSlot(id int, cfg slotConfig) (*Slot, error) {
@@ -74,12 +76,16 @@ func newSlot(id int, cfg slotConfig) (*Slot, error) {
 	if cfg.tapIP == nil || cfg.tapMask == nil || cfg.namespaceIP == nil {
 		return nil, fmt.Errorf("slot config is not initialized")
 	}
+	if !filepath.IsAbs(cfg.namespaceDir) || filepath.Clean(cfg.namespaceDir) != cfg.namespaceDir {
+		return nil, fmt.Errorf("network namespace directory must be a clean absolute path")
+	}
 
 	return &Slot{
 		id:          id,
 		tapIP:       append(net.IP(nil), cfg.tapIP...),
 		tapMask:     append(net.IPMask(nil), cfg.tapMask...),
 		namespaceIP: append(net.IP(nil), cfg.namespaceIP...),
+		netNSPath:   filepath.Join(cfg.namespaceDir, fmt.Sprintf("%s%d", networkNamespacePrefix, id)),
 	}, nil
 }
 
@@ -99,7 +105,7 @@ func (s *Slot) namespaceID() string {
 }
 
 func (s *Slot) NetNSPath() string {
-	return filepath.Join(networkNamespaceDir, s.namespaceID())
+	return s.netNSPath
 }
 
 func (s *Slot) cniContainerID() string {

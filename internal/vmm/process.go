@@ -6,23 +6,20 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/openeuler/Conch/pkg/ulog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/openeuler/Conch/internal/config"
-	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const SocketDirPerm = 0755
 const unixSocketPathMax = 107
 
-// EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
-func EnsureWorkSubDir(subDir string) (string, error) {
-	workDir := config.WorkDir
+// EnsureWorkSubDir creates a subdirectory under workDir and returns its path.
+func EnsureWorkSubDir(workDir, subDir string) (string, error) {
 	if !filepath.IsAbs(workDir) {
 		return "", fmt.Errorf("WorkDir must be an absolute path, got: %s", workDir)
 	}
@@ -34,8 +31,8 @@ func EnsureWorkSubDir(subDir string) (string, error) {
 }
 
 // SandboxSocketPath returns a short Unix socket path for sandbox-scoped VMM resources.
-func SandboxSocketPath(subDir, sandboxId string) (string, error) {
-	socketDir, err := EnsureWorkSubDir(subDir)
+func SandboxSocketPath(workDir, subDir, sandboxId string) (string, error) {
+	socketDir, err := EnsureWorkSubDir(workDir, subDir)
 	if err != nil {
 		return "", err
 	}
@@ -60,8 +57,8 @@ type Process struct {
 	exitSignal chan error
 }
 
-func SandboxVmmSocketPath(sandboxId string) (string, error) {
-	return SandboxSocketPath("v", sandboxId)
+func SandboxVmmSocketPath(workDir, sandboxId string) (string, error) {
+	return SandboxSocketPath(workDir, "v", sandboxId)
 }
 
 func (p *Process) markAPIReady() {
@@ -77,12 +74,13 @@ func (p *Process) isAPIReady() bool {
 }
 
 func NewProcess(
+	workDir string,
 	vmmName, vmmBinary, sandboxId string,
 	vmmResourceArgs *ResourceArgs, restore bool,
 ) (*Process, error) {
 	logger := ulog.GetLogger()
 
-	vmmSocketPath, err := SandboxVmmSocketPath(sandboxId)
+	vmmSocketPath, err := SandboxVmmSocketPath(workDir, sandboxId)
 	if err != nil {
 		logger.Error("Failed to get VMM socket path", ulog.F("error", err))
 		return nil, err

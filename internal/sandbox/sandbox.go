@@ -17,8 +17,8 @@ const (
 	vsockCIDOffset = 3
 )
 
-func SandboxVsockSocketPath(sandboxId string) (string, error) {
-	return vmm.SandboxSocketPath("x", sandboxId)
+func SandboxVsockSocketPath(workDir, sandboxId string) (string, error) {
+	return vmm.SandboxSocketPath(workDir, "x", sandboxId)
 }
 
 func validateVCPUNum(vcpuNum, vcpuMax int64) error {
@@ -69,6 +69,7 @@ type Sandbox struct {
 
 func RestoreSandbox(
 	ctx context.Context,
+	workDir string,
 	vmStartSpec VMStartSpec,
 	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
@@ -120,7 +121,7 @@ func RestoreSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, vmmBinary, sandboxId, vmmResourceArgs, true,
+		workDir, vmmName, vmmBinary, sandboxId, vmmResourceArgs, true,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
@@ -158,6 +159,7 @@ func RestoreSandbox(
 
 func CreateSandbox(
 	ctx context.Context,
+	workDir string,
 	vmStartSpec VMStartSpec,
 	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
 	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
@@ -210,7 +212,7 @@ func CreateSandbox(
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, vmmBinary, sandboxId, vmmResourceArgs, false,
+		workDir, vmmName, vmmBinary, sandboxId, vmmResourceArgs, false,
 	)
 	if vmmErr != nil {
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)

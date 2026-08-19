@@ -15,8 +15,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var WorkDir = defaultWorkDir
-
 const (
 	defaultWorkDir  = "/var/run/conch"
 	defaultStateDir = "/var/lib/conch"
@@ -48,6 +46,24 @@ type LogConfig struct {
 type ServerConfig struct {
 	WorkDir  string `yaml:"work_dir"`
 	StateDir string `yaml:"state_dir"`
+}
+
+// RuntimePaths is the complete host runtime layout derived from WorkDir and
+// StateDir. Subsystems receive the paths they need instead of defining their
+// own Conch-specific absolute paths.
+type RuntimePaths struct {
+	WorkDir             string
+	StateDir            string
+	ConchdSocket        string
+	ConchdPIDFile       string
+	ContainerdRootDir   string
+	ContainerdStateDir  string
+	StateDB             string
+	CowSocket           string
+	IncrementalDir      string
+	NetworkNamespaceDir string
+	SandboxRuntimeDir   string
+	CNICacheDir         string
 }
 
 // NetworkConfig holds network pool configuration
@@ -109,7 +125,7 @@ type VolumeVirtiofsConfig struct {
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		App: AppConfig{
 			Name: "conch",
 		},
@@ -126,7 +142,6 @@ func DefaultConfig() *Config {
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
-				CacheDir:      defaultStateDir + "/cni",
 			},
 		},
 		Sandbox: SandboxConfig{
@@ -149,6 +164,8 @@ func DefaultConfig() *Config {
 			},
 		},
 	}
+	cfg.Network.CNI.CacheDir = cfg.RuntimePaths().CNICacheDir
+	return cfg
 }
 
 // LoadConfig loads configuration from the specified file path
@@ -221,7 +238,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if len(cfg.Network.CNI.PluginBinDirs) == 0 {
 		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
 	}
-	cfg.Network.CNI.CacheDir = filepath.Join(cfg.Server.StateDir, "cni")
+	cfg.Network.CNI.CacheDir = cfg.RuntimePaths().CNICacheDir
 	if cfg.Sandbox.VsockSignalRetry == 0 {
 		cfg.Sandbox.VsockSignalRetry = defaultCfg.Sandbox.VsockSignalRetry
 	}
@@ -258,10 +275,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
-	if cfg.Server.WorkDir != "" {
-		WorkDir = cfg.Server.WorkDir
-	}
-
 	return &cfg, nil
 }
 
@@ -272,6 +285,8 @@ func validateConfig(cfg *Config) error {
 	if !filepath.IsAbs(cfg.Server.StateDir) {
 		return fmt.Errorf("invalid server.state_dir=%q: must be an absolute path", cfg.Server.StateDir)
 	}
+	cfg.Server.WorkDir = filepath.Clean(cfg.Server.WorkDir)
+	cfg.Server.StateDir = filepath.Clean(cfg.Server.StateDir)
 	if cfg.Network.WarmPoolSize < 0 {
 		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
 	}
@@ -351,23 +366,29 @@ func (c *Config) GetLogConfig() (ulog.Config, error) {
 	}, nil
 }
 
-// GetServerUnixSocket returns the fixed API socket path under WorkDir.
-func (c *Config) GetServerUnixSocket() string {
+// RuntimePaths derives every mutable host path from server.work_dir and
+// server.state_dir.
+func (c *Config) RuntimePaths() RuntimePaths {
 	if c == nil {
-		return ""
+		return RuntimePaths{}
 	}
-	return filepath.Join(c.Server.WorkDir, "conchd.sock")
+	workDir := filepath.Clean(c.Server.WorkDir)
+	stateDir := filepath.Clean(c.Server.StateDir)
+	return RuntimePaths{
+		WorkDir:             workDir,
+		StateDir:            stateDir,
+		ConchdSocket:        filepath.Join(workDir, "conchd.sock"),
+		ConchdPIDFile:       filepath.Join(workDir, "conchd.pid"),
+		ContainerdRootDir:   filepath.Join(stateDir, "containerd"),
+		ContainerdStateDir:  filepath.Join(workDir, "containerd"),
+		StateDB:             filepath.Join(stateDir, "state.db"),
+		CowSocket:           filepath.Join(workDir, "cow.sock"),
+		IncrementalDir:      filepath.Join(stateDir, "incremental"),
+		NetworkNamespaceDir: filepath.Join(workDir, "netns"),
+		SandboxRuntimeDir:   filepath.Join(workDir, "sandboxes"),
+		CNICacheDir:         filepath.Join(stateDir, "cni"),
+	}
 }
-
-func (c *Config) PIDFilePath() string { return filepath.Join(c.Server.WorkDir, "conchd.pid") }
-
-func (c *Config) ContainerdRootDir() string { return filepath.Join(c.Server.StateDir, "containerd") }
-
-func (c *Config) ContainerdStateDir() string { return filepath.Join(c.Server.WorkDir, "containerd") }
-
-func (c *Config) VirtiofsRuntimeDir() string { return filepath.Join(c.Server.WorkDir, "sandboxes") }
-
-func (c *Config) StatePath() string { return filepath.Join(c.Server.StateDir, "state.db") }
 
 // parseLogLevel converts string log level to ulog.LogLevel
 func parseLogLevel(level string) (ulog.LogLevel, error) {

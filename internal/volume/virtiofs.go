@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	DefaultBackend    = "virtiofs"
-	DefaultRuntimeDir = "/run/conch/sandboxes"
-	DefaultBinary     = "virtiofsd"
+	DefaultBackend = "virtiofs"
+	DefaultBinary  = "virtiofsd"
 
 	volumeDirName  = "volume"
 	socketName     = "virtiofs.sock"
@@ -52,9 +51,6 @@ func watchVirtiofs(cmd *exec.Cmd) <-chan struct{} {
 func NewVirtiofsBackend(cfg VirtiofsConfig) Backend {
 	if strings.TrimSpace(cfg.Binary) == "" {
 		cfg.Binary = DefaultBinary
-	}
-	if strings.TrimSpace(cfg.RuntimeDir) == "" {
-		cfg.RuntimeDir = DefaultRuntimeDir
 	}
 	return &virtiofsBackend{
 		binary:     cfg.Binary,

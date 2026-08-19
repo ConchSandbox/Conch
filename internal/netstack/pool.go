@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,7 @@ type Pool struct {
 
 type PoolConfig struct {
 	WarmPoolSize int
+	NamespaceDir string
 	CNI          CNIManagerConfig
 }
 
@@ -71,12 +73,15 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	if warmPoolSize < 1 || warmPoolSize > maxSlots {
 		return nil, fmt.Errorf("invalid network.warm_pool_size=%d, must be within [1, %d]", warmPoolSize, maxSlots)
 	}
+	if !filepath.IsAbs(cfg.NamespaceDir) || filepath.Clean(cfg.NamespaceDir) != cfg.NamespaceDir {
+		return nil, fmt.Errorf("network namespace directory must be a clean absolute path")
+	}
 
-	slotConfig := newSlotConfig()
-	if err := os.MkdirAll(networkNamespaceDir, 0o700); err != nil {
+	slotConfig := newSlotConfig(cfg.NamespaceDir)
+	if err := os.MkdirAll(cfg.NamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: create Conch network namespace directory: %w", err)
 	}
-	if err := os.Chmod(networkNamespaceDir, 0o700); err != nil {
+	if err := os.Chmod(cfg.NamespaceDir, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare network namespace directory: secure Conch network namespace directory: %w", err)
 	}
 	cniManager, err := NewCNIManager(cfg.CNI)
@@ -222,7 +227,7 @@ func (p *Pool) CleanupStaleResources(ctx context.Context) error {
 		return fmt.Errorf("network pool is not initialized")
 	}
 
-	entries, err := os.ReadDir(networkNamespaceDir)
+	entries, err := os.ReadDir(p.slotConfig.namespaceDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("list stale network namespaces: %w", err)
@@ -253,7 +258,7 @@ func (p *Pool) CleanupStaleResources(ctx context.Context) error {
 	}
 	staleCacheCount := 0
 	if len(errs) == 0 {
-		staleCacheCount, err = p.cniManager.reconcileStaleCache(ctx)
+		staleCacheCount, err = p.cniManager.reconcileStaleCache(ctx, p.slotConfig.namespaceDir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reconcile stale CNI result cache: %w", err))
 		} else if staleCacheCount > 0 {

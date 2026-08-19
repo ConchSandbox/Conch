@@ -10,12 +10,14 @@ import (
 	"testing"
 )
 
+const testNetworkNamespaceDir = "/run/conch-test/netns"
+
 func testCachedAttachment(id int, networkName, ifName string) cniAttachment {
 	return cniAttachment{
 		ContainerID:   cniContainerIDPrefix + strconv.Itoa(id),
 		NetworkName:   networkName,
 		InterfaceName: ifName,
-		NetNS:         filepath.Join(networkNamespaceDir, networkNamespacePrefix+strconv.Itoa(id)),
+		NetNS:         filepath.Join(testNetworkNamespaceDir, networkNamespacePrefix+strconv.Itoa(id)),
 	}
 }
 
@@ -48,7 +50,7 @@ func TestReconcileStaleCacheRemovesOnlyCurrentConchAttachments(t *testing.T) {
 		bridgeNetworkName: bridgeNetwork,
 	}
 
-	count, err := manager.reconcileStaleCache(context.Background())
+	count, err := manager.reconcileStaleCache(context.Background(), testNetworkNamespaceDir)
 	if err != nil {
 		t.Fatalf("reconcileStaleCache(): %v", err)
 	}
@@ -82,7 +84,7 @@ func TestReconcileStaleCacheDoesNotRetryFailedCNIDel(t *testing.T) {
 		bridgeNetworkName: bridgeNetwork,
 	}
 
-	count, err := manager.reconcileStaleCache(context.Background())
+	count, err := manager.reconcileStaleCache(context.Background(), testNetworkNamespaceDir)
 	if count != 1 || !errors.Is(err, wantErr) {
 		t.Fatalf("reconcileStaleCache() = (%d, %v), want (1, %v)", count, err, wantErr)
 	}
@@ -99,7 +101,7 @@ func TestReconcileStaleCacheReportsAttachmentEnumerationFailure(t *testing.T) {
 		bridgeNetworkName: "conch-test",
 	}
 
-	count, err := manager.reconcileStaleCache(context.Background())
+	count, err := manager.reconcileStaleCache(context.Background(), testNetworkNamespaceDir)
 	if count != 0 || !errors.Is(err, wantErr) {
 		t.Fatalf("reconcileStaleCache() = (%d, %v), want (0, %v)", count, err, wantErr)
 	}

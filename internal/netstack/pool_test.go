@@ -35,6 +35,12 @@ func TestNewPoolRejectsInvalidWarmPoolSize(t *testing.T) {
 	}
 }
 
+func TestNewPoolRequiresNamespaceDirectory(t *testing.T) {
+	if _, err := NewPool(PoolConfig{WarmPoolSize: 1}); err == nil || !strings.Contains(err.Error(), "network namespace directory") {
+		t.Fatalf("NewPool() error = %v, want namespace directory error", err)
+	}
+}
+
 type fakeCNIBackend struct {
 	setup       func(context.Context, string, string) (*types100.Result, error)
 	remove      func(context.Context, string, string) error
@@ -102,7 +108,7 @@ func allocatedTestSlot(t *testing.T) (*slotstate.Allocator, *Slot) {
 	if err != nil {
 		t.Fatalf("Acquire(): %v", err)
 	}
-	cfg := newSlotConfig()
+	cfg := newSlotConfig(t.TempDir())
 	slot, err := newSlot(id, cfg)
 	if err != nil {
 		t.Fatalf("newSlot(): %v", err)
@@ -134,6 +140,7 @@ func integrationTestPoolWithIPMasq(t *testing.T, ipMasq bool) *Pool {
 		t.Skip("network slot integration test requires bridge and host-local CNI plugins")
 	}
 	confDir := t.TempDir()
+	cacheDir := t.TempDir()
 	octet := os.Getpid()%200 + 20
 	conf := fmt.Sprintf(`{
   "cniVersion": "1.0.0",
@@ -149,16 +156,18 @@ func integrationTestPoolWithIPMasq(t *testing.T, ipMasq bool) *Pool {
     "routes": [{"dst": "0.0.0.0/0"}]
   }
 }
-`, os.Getpid(), os.Getpid(), ipMasq, filepath.Join(cniCacheDir, "networks"), octet)
+`, os.Getpid(), os.Getpid(), ipMasq, filepath.Join(cacheDir, "networks"), octet)
 	if err := os.WriteFile(filepath.Join(confDir, "10-conch-integration.conf"), []byte(conf), 0o600); err != nil {
 		t.Fatalf("write integration CNI config: %v", err)
 	}
 
 	p, err := NewPool(PoolConfig{
 		WarmPoolSize: 1,
+		NamespaceDir: t.TempDir(),
 		CNI: CNIManagerConfig{
 			PluginBinDirs: []string{pluginDir},
 			PluginConfDir: confDir,
+			CacheDir:      cacheDir,
 		},
 	})
 	if err != nil {
@@ -180,7 +189,7 @@ func integrationTestPoolWithIPMasq(t *testing.T, ipMasq bool) *Pool {
 
 func removeIntegrationIPAMMetadata(t *testing.T, p *Pool) {
 	t.Helper()
-	dir := filepath.Join(cniCacheDir, "networks", p.cniManager.bridgeNetworkName)
+	dir := filepath.Join(p.cniManager.cacheDir, "networks", p.cniManager.bridgeNetworkName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -374,11 +383,11 @@ func TestNetworkSlotIntegrationDestroyReleasesID(t *testing.T) {
 func TestNetworkSlotIntegrationStartupReconcilesCacheWithoutNetNS(t *testing.T) {
 	p := integrationTestPoolWithIPMasq(t, false)
 	slot := integrationTestSlotInPool(t, p)
-	cacheFile := filepath.Join(cniCacheDir, "results", p.cniManager.bridgeNetworkName+"-"+slot.cniContainerID()+"-"+p.cniManager.ifName)
+	cacheFile := filepath.Join(p.cniManager.cacheDir, "results", p.cniManager.bridgeNetworkName+"-"+slot.cniContainerID()+"-"+p.cniManager.ifName)
 	if _, err := os.Stat(cacheFile); err != nil {
 		t.Fatalf("CNI ADD did not create result cache %s: %v", cacheFile, err)
 	}
-	ipamDir := filepath.Join(cniCacheDir, "networks", p.cniManager.bridgeNetworkName)
+	ipamDir := filepath.Join(p.cniManager.cacheDir, "networks", p.cniManager.bridgeNetworkName)
 	if allocations := integrationIPAMAllocations(t, ipamDir); len(allocations) == 0 {
 		t.Fatalf("CNI ADD created no host-local allocation in %s", ipamDir)
 	}

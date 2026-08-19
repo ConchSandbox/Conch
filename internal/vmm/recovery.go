@@ -8,15 +8,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/openeuler/Conch/internal/config"
 )
 
 var sandboxSocketNameRE = regexp.MustCompile(`^[a-f0-9]{16}\.sock(?:\.serial)?$`)
 
 // CleanupStaleResources terminates persisted VMM processes left behind by a
 // previous daemon and removes their socket files.
-func CleanupStaleResources(pids []int, binaries map[string]string, hasCreatingSandbox bool) error {
+func CleanupStaleResources(workDir string, pids []int, binaries map[string]string, hasCreatingSandbox bool) error {
 	var errs []error
 	processedPIDs := make(map[int]struct{}, len(pids))
 	for _, pid := range pids {
@@ -31,7 +29,7 @@ func CleanupStaleResources(pids []int, binaries map[string]string, hasCreatingSa
 		}
 	}
 	for _, subdir := range []string{"v", "x"} {
-		dir := filepath.Join(config.WorkDir, subdir)
+		dir := filepath.Join(workDir, subdir)
 		files, readErr := os.ReadDir(dir)
 		if readErr != nil {
 			if os.IsNotExist(readErr) {

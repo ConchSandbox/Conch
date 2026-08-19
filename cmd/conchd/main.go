@@ -52,10 +52,11 @@ func main() {
 	}
 
 	logger := ulog.GetLogger()
-	if err := util.WritePIDFile(cfg.PIDFilePath()); err != nil {
+	paths := cfg.RuntimePaths()
+	if err := util.WritePIDFile(paths.ConchdPIDFile); err != nil {
 		logger.Fatal("Failed to acquire pid file", ulog.F("error", err))
 	}
-	defer util.RemovePIDFile(cfg.PIDFilePath())
+	defer util.RemovePIDFile(paths.ConchdPIDFile)
 
 	logger.Info("Parsed cli flags",
 		ulog.F("configPath", *configPath),
@@ -66,7 +67,7 @@ func main() {
 		ulog.F("log.level", cfg.Log.Level),
 		ulog.F("log.output", cfg.Log.Output),
 		ulog.F("server.work_dir", cfg.Server.WorkDir),
-		ulog.F("server.unix_socket", cfg.GetServerUnixSocket()),
+		ulog.F("server.unix_socket", paths.ConchdSocket),
 		ulog.F("server.state_dir", cfg.Server.StateDir),
 		ulog.F("containerd.namespace", containerdclient.Namespace),
 		ulog.F("network.warm_pool_size", cfg.Network.WarmPoolSize),
@@ -78,7 +79,7 @@ func main() {
 	}
 	defer server.Cleanup()
 
-	serverUnixSocket := cfg.GetServerUnixSocket()
+	serverUnixSocket := paths.ConchdSocket
 	logger.Info("Starting conchd server", ulog.F("network", "unix"), ulog.F("socket", serverUnixSocket))
 	if err := server.Start(serverUnixSocket); err != nil {
 		logger.Error("Failed to start server", ulog.F("error", err))
