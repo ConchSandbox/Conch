@@ -75,3 +75,10 @@ func TestStartProcessFailsWhenChildExitsBeforeReady(t *testing.T) {
 		t.Fatalf("StartProcess() process=%v error=%v", process, err)
 	}
 }
+
+func TestProcessCommandTerminatesWithParent(t *testing.T) {
+	cmd := newProcessCommand("/usr/bin/conch-cow", "/run/conch/cow.sock")
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Pdeathsig != syscall.SIGTERM {
+		t.Fatalf("SysProcAttr = %#v, want Pdeathsig SIGTERM", cmd.SysProcAttr)
+	}
+}

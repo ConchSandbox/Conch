@@ -25,6 +25,12 @@ type Process struct {
 	closeErr  error
 }
 
+func newProcessCommand(binaryPath, socketPath string) *exec.Cmd {
+	cmd := exec.Command(binaryPath, "--socket", socketPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	return cmd
+}
+
 // StartProcess starts conch-cow and waits until its control protocol responds.
 func StartProcess(ctx context.Context, binaryPath, socketPath string) (*Process, error) {
 	if binaryPath == "" {
@@ -34,7 +40,7 @@ func StartProcess(ctx context.Context, binaryPath, socketPath string) (*Process,
 		return nil, fmt.Errorf("cow socket path is required")
 	}
 
-	cmd := exec.Command(binaryPath, "--socket", socketPath)
+	cmd := newProcessCommand(binaryPath, socketPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
