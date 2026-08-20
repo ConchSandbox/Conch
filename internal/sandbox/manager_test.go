@@ -262,7 +262,6 @@ func TestCheckpointUsesIncrementalCaptureAndRequiresCompletionToClearPoison(t *t
 	m, entry, sbx := checkpointTestManager(sandboxReady, fullCapture)
 	m.incrementalCapture = incrementalCapture
 	sbx.memoryMode = "incremental"
-	sbx.memoryOrigin = "restored"
 
 	if _, err := m.Checkpoint(CheckpointRequest{SandboxID: "sandbox-a"}); err != nil {
 		t.Fatalf("Checkpoint() error = %v", err)

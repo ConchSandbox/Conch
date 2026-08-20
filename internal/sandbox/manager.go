@@ -590,9 +590,7 @@ func configureSandboxMemoryCapture(sbx *Sandbox, mode memorymode.Mode, req Creat
 	if req.VMMName != vmm.StratovirtName {
 		return fmt.Errorf("incremental checkpoint requires StratoVirt")
 	}
-	sbx.memoryOrigin = "cold"
 	if boot.Runtime.Resume {
-		sbx.memoryOrigin = "restored"
 		pinned, err := memsnap.LoadAndPin(boot.Runtime.MemorySnapshotRoot)
 		if err != nil {
 			return fmt.Errorf("load restored incremental manifest: %w", err)
@@ -1012,7 +1010,7 @@ func (m *Manager) Checkpoint(req CheckpointRequest) (CheckpointResult, error) {
 }
 
 func recordIncrementalManifest(sbx *Sandbox, captured CapturedBootComponents) {
-	if sbx == nil || sbx.memoryOrigin != "restored" || captured.Manifest == nil {
+	if sbx == nil || captured.Manifest == nil {
 		return
 	}
 	sbx.SetIncrementalManifest(*captured.Manifest)

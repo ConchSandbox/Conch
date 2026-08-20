@@ -12,7 +12,7 @@ import (
 )
 
 func TestIncrementalCapturePreflightFailureIsRetryable(t *testing.T) {
-	source := newIncrementalSource("cold", nil)
+	source := newIncrementalSource(nil)
 	source.runtime.MemorySize = 0
 	capture, err := NewIncrementalCheckpointCapture(t.TempDir())
 	if err != nil {
@@ -27,7 +27,7 @@ func TestIncrementalCapturePreflightFailureIsRetryable(t *testing.T) {
 func TestIncrementalCaptureUsesFixedVMMStateDirectory(t *testing.T) {
 	captureErr := errors.New("stop after recording VMM state path")
 	adapter := &recordingIncrementalAdapter{err: captureErr}
-	source := newIncrementalSource("cold", nil)
+	source := newIncrementalSource(nil)
 	source.runtime.Adapter = adapter
 	capture, err := NewIncrementalCheckpointCapture(t.TempDir())
 	if err != nil {
@@ -48,9 +48,9 @@ type incrementalSource struct {
 	resumes  int
 }
 
-func newIncrementalSource(origin string, parent *memsnap.Manifest) *incrementalSource {
+func newIncrementalSource(parent *memsnap.Manifest) *incrementalSource {
 	return &incrementalSource{runtime: IncrementalMemoryRuntime{
-		Origin: origin, ParentManifest: parent, MemorySize: 2 * memsnap.DefaultBlockSize,
+		ParentManifest: parent, MemorySize: 2 * memsnap.DefaultBlockSize,
 		BlockSize: memsnap.DefaultBlockSize, PID: 123, Adapter: fakeIncrementalAdapter{},
 	}}
 }

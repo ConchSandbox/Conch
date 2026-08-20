@@ -19,7 +19,6 @@ const (
 )
 
 type IncrementalMemoryRuntime struct {
-	Origin         string
 	ParentManifest *memsnap.Manifest
 	MemorySize     uint64
 	BlockSize      uint64
@@ -149,20 +148,11 @@ func (capture *IncrementalCheckpointCapture) Capture(ctx context.Context, req Ru
 }
 
 func validateIncrementalRuntime(runtime IncrementalMemoryRuntime) error {
-	if runtime.Origin != "cold" && runtime.Origin != "restored" {
-		return fmt.Errorf("invalid incremental memory origin %q", runtime.Origin)
-	}
 	if runtime.MemorySize == 0 || runtime.BlockSize == 0 || runtime.MemorySize%runtime.BlockSize != 0 {
 		return fmt.Errorf("invalid incremental memory geometry")
 	}
 	if runtime.PID <= 0 || runtime.Adapter == nil {
 		return fmt.Errorf("incremental VMM capture is unavailable")
-	}
-	if runtime.Origin == "cold" && runtime.ParentManifest != nil {
-		return fmt.Errorf("cold runtime unexpectedly has a parent manifest")
-	}
-	if runtime.Origin == "restored" && runtime.ParentManifest == nil {
-		return fmt.Errorf("restored runtime is missing a parent manifest")
 	}
 	return nil
 }

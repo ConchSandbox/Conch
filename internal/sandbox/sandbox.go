@@ -77,7 +77,6 @@ type Sandbox struct {
 
 	memoryMu           sync.RWMutex
 	memoryMode         string
-	memoryOrigin       string
 	memoryManifest     *memsnap.Manifest
 	memorySizeBytes    uint64
 	memoryBlockSize    uint64
@@ -353,8 +352,8 @@ func (s *Sandbox) IncrementalMemoryRuntime() (IncrementalMemoryRuntime, error) {
 		parent = &copy
 	}
 	return IncrementalMemoryRuntime{
-		Origin: s.memoryOrigin, ParentManifest: parent,
-		MemorySize: s.memorySizeBytes, BlockSize: s.memoryBlockSize,
+		ParentManifest: parent,
+		MemorySize:     s.memorySizeBytes, BlockSize: s.memoryBlockSize,
 		PID: s.process.Pid(), Adapter: adapter,
 	}, nil
 }
