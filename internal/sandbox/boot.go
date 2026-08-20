@@ -10,6 +10,7 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/memorymode"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/template"
@@ -349,6 +350,9 @@ func validateBootCapability(resume bool, capturedVMM string, memorySizeMB int64,
 		}
 		if memorySizeMB < 0 {
 			return fmt.Errorf("resume boot index has invalid memory size %d MB", memorySizeMB)
+		}
+		if memorySizeMB > runtimeapi.SandboxMaxRAMMB {
+			return fmt.Errorf("resume boot index memory size %d MB exceeds maximum %d MB", memorySizeMB, runtimeapi.SandboxMaxRAMMB)
 		}
 		if strings.TrimSpace(capturedVMM) == vmm.StratovirtName && memorySizeMB == 0 {
 			return fmt.Errorf("StratoVirt resume boot index is missing memory size metadata")

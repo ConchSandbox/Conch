@@ -11,6 +11,7 @@ import (
 	"github.com/opencontainers/go-digest"
 
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/template"
@@ -257,6 +258,27 @@ func TestBootPreparerRejectsStratovirtResumeWithoutMemorySize(t *testing.T) {
 	}
 	if snapshots.callCount() != 0 {
 		t.Fatalf("snapshot backend called for malformed metadata: %#v", snapshots)
+	}
+}
+
+func TestBootPreflightRejectsOversizedResumeMemory(t *testing.T) {
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
+	resolved := resolvedBoot(bootDigest, true, "stratovirt")
+	resolved.MemorySizeMB = runtimeapi.SandboxMaxRAMMB + 1
+	resolver := &fakeBootResolver{result: resolved}
+	snapshots := &fakeSnapshotBackend{}
+	preparer := mustBootPreparer(t, templates, snapshots, resolver)
+
+	_, err := preparer.Preflight(context.Background(), BootPreflightRequest{
+		TemplateID:          entry.BootIndexDigest,
+		VMMName:             "stratovirt",
+		RequestedMemoryMode: "full",
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Fatalf("Preflight() error = %v, want memory maximum error", err)
+	}
+	if resolver.resolveCalls != 0 || snapshots.callCount() != 0 {
+		t.Fatalf("oversized preflight allocated boot resources: resolve=%d snapshots=%d", resolver.resolveCalls, snapshots.callCount())
 	}
 }
 
