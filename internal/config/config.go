@@ -154,7 +154,6 @@ func DefaultConfig() *Config {
 				VCPUMax: 2,
 				RamMB:   2048,
 			},
-			Stratovirt: &VMMBinaryConfig{Binary: "/usr/bin/stratovirt"},
 		},
 		Volume: VolumeConfig{
 			MaxMounts: 10,
@@ -251,9 +250,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Sandbox.Backend == "" {
 		cfg.Sandbox.Backend = defaultCfg.Sandbox.Backend
 	}
-	if cfg.Sandbox.Stratovirt == nil {
-		cfg.Sandbox.Stratovirt = defaultCfg.Sandbox.Stratovirt
-	}
 	if cfg.Sandbox.DefaultSpec.VCPUNum == 0 {
 		cfg.Sandbox.DefaultSpec.VCPUNum = defaultCfg.Sandbox.DefaultSpec.VCPUNum
 	}
@@ -314,6 +310,9 @@ func validateConfig(cfg *Config) error {
 	}
 	vmmBinaries := cfg.Sandbox.BinaryPaths()
 	if _, ok := vmmBinaries[cfg.Sandbox.Backend]; !ok {
+		if cfg.Sandbox.Backend == "stratovirt" {
+			return fmt.Errorf("vmm.stratovirt.binary is required when sandbox.backend is %q", cfg.Sandbox.Backend)
+		}
 		return fmt.Errorf("sandbox.backend %q is not configured", cfg.Sandbox.Backend)
 	}
 	return nil

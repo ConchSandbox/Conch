@@ -377,7 +377,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	if err := os.WriteFile(initrdPath, []byte("initrd-content"), 0o644); err != nil {
 		t.Fatalf("write initrd: %v", err)
 	}
-	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("sandbox:\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

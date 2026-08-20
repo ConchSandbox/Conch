@@ -301,6 +301,11 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			wantErr: "vmm.stratovirt.binary is required",
 		},
 		{
+			name:    "selected stratovirt not configured",
+			data:    "sandbox:\n  backend: stratovirt\n",
+			wantErr: "vmm.stratovirt.binary is required",
+		},
+		{
 			name:    "relative cloud hypervisor binary",
 			data:    "sandbox:\n  cloud_hypervisor:\n    binary: bin/cloud-hypervisor\n",
 			wantErr: "vmm.cloud_hypervisor.binary",
@@ -357,7 +362,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("network:\n  warm_pool_size: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
+	data := []byte("sandbox:\n  stratovirt:\n    binary: /opt/vmm/stratovirt\nnetwork:\n  warm_pool_size: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -415,7 +420,7 @@ func TestLoadConfigAllowsGroupReadOnly(t *testing.T) {
 	for _, mode := range []os.FileMode{0o600, 0o640} {
 		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
 			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(cfgPath, []byte("app:\n  name: secure-config\n"), mode); err != nil {
+			if err := os.WriteFile(cfgPath, []byte("app:\n  name: secure-config\nsandbox:\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n"), mode); err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
 
@@ -463,8 +468,8 @@ func TestDefaultConfigRuntimePaths(t *testing.T) {
 	if paths.SandboxRuntimeDir != "/var/run/conch/sandboxes" || paths.StateDB != "/var/lib/conch/state.db" || paths.IncrementalDir != "/var/lib/conch/incremental" || paths.NetworkNamespaceDir != "/var/run/conch/netns" || paths.CNICacheDir != "/var/lib/conch/cni" {
 		t.Errorf("unexpected derived runtime paths: %#v", paths)
 	}
-	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/usr/bin/stratovirt" {
-		t.Errorf("DefaultConfig().Sandbox.Stratovirt = %#v, want /usr/bin/stratovirt", cfg.Sandbox.Stratovirt)
+	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt != nil {
+		t.Errorf("DefaultConfig() unexpectedly configures VMM binaries: %#v", cfg.Sandbox)
 	}
 	if cfg.Sandbox.Backend != DefaultSandboxBackend {
 		t.Errorf("DefaultConfig().Sandbox.Backend = %q, want %q", cfg.Sandbox.Backend, DefaultSandboxBackend)
