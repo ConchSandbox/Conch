@@ -517,6 +517,14 @@ func TestSandboxMemoryConfigDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("LoadConfig(missing cow binary) error = %v, want sandbox.cow_binary is required", err)
 	}
 
+	unsupportedBackendPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(unsupportedBackendPath, []byte("sandbox:\n  backend: cloud-hypervisor\n  memory_mode: incremental\n  cow_binary: /opt/conch/conch-cow\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(unsupportedBackendPath); err == nil || !strings.Contains(err.Error(), "incremental requires sandbox.backend stratovirt") {
+		t.Fatalf("LoadConfig(incremental cloud-hypervisor) error = %v", err)
+	}
+
 	relativeBinaryPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(relativeBinaryPath, []byte("sandbox:\n  cow_binary: bin/conch-cow\n"), 0o640); err != nil {
 		t.Fatal(err)

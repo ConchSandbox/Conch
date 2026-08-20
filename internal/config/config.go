@@ -294,6 +294,9 @@ func validateConfig(cfg *Config) error {
 	default:
 		return fmt.Errorf("invalid sandbox.memory_mode=%q: must be full or incremental", cfg.Sandbox.MemoryMode)
 	}
+	if cfg.Sandbox.MemoryMode == "incremental" && cfg.Sandbox.Backend != "stratovirt" {
+		return fmt.Errorf("sandbox.memory_mode incremental requires sandbox.backend stratovirt")
+	}
 	cowBinary := strings.TrimSpace(cfg.Sandbox.CowBinary)
 	if cfg.Sandbox.MemoryMode == "incremental" && cowBinary == "" {
 		return fmt.Errorf("sandbox.cow_binary is required when sandbox.memory_mode is incremental")
