@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/memsnap"
 )
 
@@ -311,18 +312,59 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 }
 
 type recordingBootPreparer struct {
-	released   []ReleaseBootRequest
-	releaseErr error
-	prepared   PreparedBoot
+	released      []ReleaseBootRequest
+	releaseErr    error
+	preflightErr  error
+	preflightReqs []BootPreflightRequest
+	prepared      PreparedBoot
 }
 
-func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
-	return r.prepared, nil
+func (r *recordingBootPreparer) Preflight(_ context.Context, req BootPreflightRequest) (BootPlan, error) {
+	r.preflightReqs = append(r.preflightReqs, req)
+	if r.preflightErr != nil {
+		return BootPlan{}, r.preflightErr
+	}
+	return BootPlan{memoryMode: memorymode.ModeFull}, nil
+}
+
+func (r *recordingBootPreparer) Prepare(_ context.Context, req PrepareBootRequest) (PreparedBoot, error) {
+	result := r.prepared
+	if result.MemoryMode == "" {
+		result.MemoryMode = req.Plan.memoryMode
+	}
+	return result, nil
 }
 
 func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {
 	r.released = append(r.released, req)
 	return r.releaseErr
+}
+
+func TestCreatePreflightFailureDoesNotAllocateCID(t *testing.T) {
+	wantErr := errors.New("memory mode preflight failed")
+	boot := &recordingBootPreparer{preflightErr: wantErr}
+	m := &Manager{
+		boot:           boot,
+		cidAllocator:   NewCIDAllocator(),
+		vmmBinaries:    map[string]string{"stratovirt": "/unused"},
+		requestTimeout: time.Second,
+	}
+	_, err := m.Create(CreateRequest{
+		TemplateID:          "template",
+		VMMName:             "stratovirt",
+		SandboxID:           "sandbox-a",
+		AgentToken:          "token",
+		RequestedMemoryMode: "incremental",
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Create() error = %v, want %v", err, wantErr)
+	}
+	if len(boot.preflightReqs) != 1 || boot.preflightReqs[0].RequestedMemoryMode != "incremental" {
+		t.Fatalf("preflight requests = %#v", boot.preflightReqs)
+	}
+	if cid, err := m.AllocateUniqueCID("probe"); err != nil || cid != 3 {
+		t.Fatalf("CID after preflight failure = %d, %v; want first CID 3", cid, err)
+	}
 }
 
 func TestDeleteMissingSandboxReturnsNotFoundWithoutReleasingBootLayout(t *testing.T) {

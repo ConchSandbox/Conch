@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
-	got, err := preparer.Prepare(ctx, PrepareBootRequest{
+	got, err := prepareBootForTest(ctx, preparer, bootTestRequest{
 		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
@@ -31,7 +32,7 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	assertBootResolverRequest(t, resolver.requests, bootDigest)
+	assertBootResolverRequest(t, resolver, bootDigest)
 	if len(snapshots.creates) != 1 || len(snapshots.restores) != 0 {
 		t.Fatalf("snapshot calls: creates=%#v restores=%#v", snapshots.creates, snapshots.restores)
 	}
@@ -62,7 +63,7 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, false, "")}
 	snapshots := &fakeSnapshotBackend{}
 
-	got, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(ctx, PrepareBootRequest{
+	got, err := prepareBootForTest(ctx, mustBootPreparer(t, templates, snapshots, resolver), bootTestRequest{
 		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-stratovirt",
 		VMMName:    "stratovirt",
@@ -92,7 +93,7 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
-	got, err := preparer.Prepare(ctx, PrepareBootRequest{
+	got, err := prepareBootForTest(ctx, preparer, bootTestRequest{
 		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "cloud-hypervisor",
@@ -100,7 +101,7 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	assertBootResolverRequest(t, resolver.requests, bootDigest)
+	assertBootResolverRequest(t, resolver, bootDigest)
 	if len(snapshots.restores) != 1 || len(snapshots.creates) != 0 {
 		t.Fatalf("snapshot calls: creates=%#v restores=%#v", snapshots.creates, snapshots.restores)
 	}
@@ -128,10 +129,11 @@ func TestBootPreparerStratovirtResumePropagatesIncrementalMemoryFormat(t *testin
 	resolved.MemoryFormat = conchimage.MemoryFormatIncrementalV1
 	snapshots := &fakeSnapshotBackend{}
 
-	got, err := mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}).Prepare(context.Background(), PrepareBootRequest{
-		TemplateID: entry.BootIndexDigest,
-		SandboxID:  "sandbox-incremental",
-		VMMName:    "stratovirt",
+	got, err := prepareBootForTest(context.Background(), mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}), bootTestRequest{
+		TemplateID:          entry.BootIndexDigest,
+		SandboxID:           "sandbox-incremental",
+		VMMName:             "stratovirt",
+		RequestedMemoryMode: "incremental",
 	})
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
@@ -147,6 +149,27 @@ func TestBootPreparerStratovirtResumePropagatesIncrementalMemoryFormat(t *testin
 	}
 }
 
+func TestBootPreflightRejectsIncompatibleMemoryModeBeforeUnpack(t *testing.T) {
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
+	resolved := resolvedBoot(bootDigest, true, "stratovirt")
+	resolved.MemoryFormat = conchimage.MemoryFormatIncrementalV1
+	resolver := &fakeBootResolver{result: resolved}
+	snapshots := &fakeSnapshotBackend{}
+	preparer := mustBootPreparer(t, templates, snapshots, resolver)
+
+	_, err := preparer.Preflight(context.Background(), BootPreflightRequest{
+		TemplateID:          entry.BootIndexDigest,
+		VMMName:             "stratovirt",
+		RequestedMemoryMode: "full",
+	})
+	if !errors.Is(err, ErrFailedPrecondition) {
+		t.Fatalf("Preflight() error = %v, want failed precondition", err)
+	}
+	if resolver.resolveCalls != 0 || snapshots.callCount() != 0 {
+		t.Fatalf("preflight allocated boot resources: resolve=%d snapshots=%d", resolver.resolveCalls, snapshots.callCount())
+	}
+}
+
 func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	entry := template.Entry{
 		Origin:   template.OriginImage,
@@ -156,7 +179,7 @@ func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	resolver := &fakeBootResolver{}
 	snapshots := &fakeSnapshotBackend{}
 
-	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
+	_, err := prepareBootForTest(context.Background(), mustBootPreparer(t, templates, snapshots, resolver), bootTestRequest{
 		TemplateID: digest.FromString("missing").String(),
 		SandboxID:  "sandbox-a",
 	})
@@ -186,7 +209,7 @@ func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 			}
 			resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, resume, vmmName)}
 			snapshots := &fakeSnapshotBackend{}
-			_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
+			_, err := prepareBootForTest(context.Background(), mustBootPreparer(t, templates, snapshots, resolver), bootTestRequest{
 				TemplateID: entry.BootIndexDigest,
 				SandboxID:  "sandbox-a",
 			})
@@ -205,7 +228,7 @@ func TestBootPreparerRejectsResumeVMMMismatch(t *testing.T) {
 	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, true, "cloud-hypervisor")}
 	snapshots := &fakeSnapshotBackend{}
 
-	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
+	_, err := prepareBootForTest(context.Background(), mustBootPreparer(t, templates, snapshots, resolver), bootTestRequest{
 		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
@@ -224,7 +247,7 @@ func TestBootPreparerRejectsStratovirtResumeWithoutMemorySize(t *testing.T) {
 	resolved.MemorySizeMB = 0
 	snapshots := &fakeSnapshotBackend{}
 
-	_, err := mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}).Prepare(context.Background(), PrepareBootRequest{
+	_, err := prepareBootForTest(context.Background(), mustBootPreparer(t, templates, snapshots, &fakeBootResolver{result: resolved}), bootTestRequest{
 		TemplateID: entry.BootIndexDigest,
 		SandboxID:  "sandbox-a",
 		VMMName:    "stratovirt",
@@ -244,13 +267,13 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
-	first, err := preparer.Prepare(ctx, PrepareBootRequest{
+	first, err := prepareBootForTest(ctx, preparer, bootTestRequest{
 		TemplateID: entry.BootIndexDigest, SandboxID: "sandbox-a", VMMName: "stratovirt",
 	})
 	if err != nil {
 		t.Fatalf("first Prepare() error = %v", err)
 	}
-	second, err := preparer.Prepare(ctx, PrepareBootRequest{
+	second, err := prepareBootForTest(ctx, preparer, bootTestRequest{
 		TemplateID: entry.BootIndexDigest, SandboxID: "sandbox-b", VMMName: "stratovirt",
 	})
 	if err != nil {
@@ -302,16 +325,28 @@ type bootResolverCall struct {
 }
 
 type fakeBootResolver struct {
-	result   conchimage.ResolvedBoot
-	err      error
-	requests []bootResolverCall
+	result       conchimage.ResolvedBoot
+	err          error
+	requests     []bootResolverCall
+	resolveCalls int
 }
 
-func (f *fakeBootResolver) ResolveBoot(_ context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
+func (f *fakeBootResolver) InspectBoot(_ context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
 	f.requests = append(f.requests, bootResolverCall{BootIndexDigest: bootIndexDigest})
 	if f.err != nil {
-		return conchimage.ResolvedBoot{}, f.err
+		return conchimage.BootIndexInfo{}, f.err
 	}
+	return conchimage.BootIndexInfo{
+		BootIndexDigest: f.result.BootIndexDigest,
+		Resume:          f.result.Resume,
+		VMMName:         f.result.VMMName,
+		MemorySizeMB:    f.result.MemorySizeMB,
+		MemoryFormat:    f.result.MemoryFormat,
+	}, nil
+}
+
+func (f *fakeBootResolver) ResolveBootFromInfo(_ context.Context, _ conchimage.BootIndexInfo) (conchimage.ResolvedBoot, error) {
+	f.resolveCalls++
 	return f.result, nil
 }
 
@@ -374,6 +409,9 @@ func resolvedBoot(bootDigest string, resume bool, vmmName string) conchimage.Res
 	}
 	if resume {
 		result.MemKey = "mem-committed"
+		if vmmName == "stratovirt" {
+			result.MemoryFormat = conchimage.MemoryFormatFull
+		}
 	}
 	return result
 }
@@ -391,20 +429,44 @@ func newBootTemplate(t *testing.T, origin template.Origin, mode template.BootMod
 
 func mustBootPreparer(t *testing.T, templates TemplateReader, snapshots SnapshotBackend, resolver *fakeBootResolver) BootPreparer {
 	t.Helper()
-	preparer, err := newBootPreparer(templates, snapshots, resolver.ResolveBoot)
+	preparer, err := newBootPreparer(templates, snapshots, resolver.InspectBoot, resolver.ResolveBootFromInfo)
 	if err != nil {
 		t.Fatalf("NewBootPreparer() error = %v", err)
 	}
 	return preparer
 }
 
-func assertBootResolverRequest(t *testing.T, requests []bootResolverCall, bootDigest string) {
-	t.Helper()
-	if len(requests) != 1 {
-		t.Fatalf("ResolveBoot() calls = %#v, want one", requests)
+type bootTestRequest struct {
+	TemplateID          string
+	SandboxID           string
+	VMMName             string
+	RAMMB               int64
+	RequestedMemoryMode string
+}
+
+func prepareBootForTest(ctx context.Context, preparer BootPreparer, req bootTestRequest) (PreparedBoot, error) {
+	plan, err := preparer.Preflight(ctx, BootPreflightRequest{
+		TemplateID:          req.TemplateID,
+		VMMName:             req.VMMName,
+		RequestedMemoryMode: req.RequestedMemoryMode,
+	})
+	if err != nil {
+		return PreparedBoot{}, err
 	}
-	if requests[0].BootIndexDigest != bootDigest {
-		t.Fatalf("ResolveBoot() request = %#v", requests[0])
+	return preparer.Prepare(ctx, PrepareBootRequest{
+		Plan:      plan,
+		SandboxID: req.SandboxID,
+		RAMMB:     req.RAMMB,
+	})
+}
+
+func assertBootResolverRequest(t *testing.T, resolver *fakeBootResolver, bootDigest string) {
+	t.Helper()
+	if len(resolver.requests) != 1 || resolver.resolveCalls != 1 {
+		t.Fatalf("boot resolution calls: inspect=%#v unpack=%d, want one each", resolver.requests, resolver.resolveCalls)
+	}
+	if resolver.requests[0].BootIndexDigest != bootDigest {
+		t.Fatalf("InspectBootIndex() request = %#v", resolver.requests[0])
 	}
 }
 

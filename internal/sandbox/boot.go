@@ -2,12 +2,14 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/template"
@@ -48,16 +50,29 @@ type BootRuntime struct {
 	Resume             bool
 }
 
+type BootPreflightRequest struct {
+	TemplateID          string
+	VMMName             string
+	RequestedMemoryMode string
+}
+
+type BootPlan struct {
+	entry        template.Entry
+	info         conchimage.BootIndexInfo
+	requestedVMM string
+	memoryMode   memorymode.Mode
+}
+
 type PrepareBootRequest struct {
-	TemplateID string
-	SandboxID  string
-	VMMName    string
-	RAMMB      int64
+	Plan      BootPlan
+	SandboxID string
+	RAMMB     int64
 }
 
 type PreparedBoot struct {
-	Spec    BootSpec
-	Runtime BootRuntime
+	Spec       BootSpec
+	Runtime    BootRuntime
+	MemoryMode memorymode.Mode
 }
 
 type ReleaseBootRequest struct {
@@ -65,29 +80,39 @@ type ReleaseBootRequest struct {
 }
 
 type BootPreparer interface {
+	Preflight(context.Context, BootPreflightRequest) (BootPlan, error)
 	Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error)
 	Release(context.Context, ReleaseBootRequest) error
 }
 
 type bootPreparer struct {
-	templates   TemplateReader
-	snapshots   SnapshotBackend
-	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error)
+	templates           TemplateReader
+	snapshots           SnapshotBackend
+	inspectBoot         func(context.Context, string) (conchimage.BootIndexInfo, error)
+	resolveBootFromInfo func(context.Context, conchimage.BootIndexInfo) (conchimage.ResolvedBoot, error)
 }
 
 func NewBootPreparer(templates TemplateReader, snapshots SnapshotBackend, client *containerdclient.Client) (BootPreparer, error) {
 	if client == nil || client.Client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
-	return newBootPreparer(templates, snapshots, func(ctx context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
-		return conchimage.ResolveBoot(ctx, client, bootIndexDigest)
-	})
+	return newBootPreparer(
+		templates,
+		snapshots,
+		func(ctx context.Context, bootIndexDigest string) (conchimage.BootIndexInfo, error) {
+			return conchimage.InspectBootIndex(ctx, client, bootIndexDigest)
+		},
+		func(ctx context.Context, info conchimage.BootIndexInfo) (conchimage.ResolvedBoot, error) {
+			return conchimage.ResolveBootFromInfo(ctx, client, info)
+		},
+	)
 }
 
 func newBootPreparer(
 	templates TemplateReader,
 	snapshots SnapshotBackend,
-	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error),
+	inspectBoot func(context.Context, string) (conchimage.BootIndexInfo, error),
+	resolveBootFromInfo func(context.Context, conchimage.BootIndexInfo) (conchimage.ResolvedBoot, error),
 ) (BootPreparer, error) {
 	if templates == nil {
 		return nil, fmt.Errorf("template reader is required")
@@ -95,67 +120,120 @@ func newBootPreparer(
 	if snapshots == nil {
 		return nil, fmt.Errorf("snapshot backend is required")
 	}
-	if resolveBoot == nil {
+	if inspectBoot == nil {
+		return nil, fmt.Errorf("boot index inspector is required")
+	}
+	if resolveBootFromInfo == nil {
 		return nil, fmt.Errorf("boot resolver is required")
 	}
 	return &bootPreparer{
-		templates:   templates,
-		snapshots:   snapshots,
-		resolveBoot: resolveBoot,
+		templates:           templates,
+		snapshots:           snapshots,
+		inspectBoot:         inspectBoot,
+		resolveBootFromInfo: resolveBootFromInfo,
+	}, nil
+}
+
+func (p *bootPreparer) Preflight(ctx context.Context, req BootPreflightRequest) (BootPlan, error) {
+	if p == nil || p.templates == nil || p.snapshots == nil || p.inspectBoot == nil || p.resolveBootFromInfo == nil {
+		return BootPlan{}, fmt.Errorf("sandbox boot preparer is not configured")
+	}
+	entry, info, err := p.inspectTemplate(ctx, req.TemplateID)
+	if err != nil {
+		return BootPlan{}, err
+	}
+	requestedVMM := strings.TrimSpace(req.VMMName)
+	if err := validateInspectedBoot(info, entry.BootMode, requestedVMM); err != nil {
+		return BootPlan{}, fmt.Errorf("template %s: %w", entry.BootIndexDigest, err)
+	}
+	requestedMode := memorymode.Mode(strings.TrimSpace(req.RequestedMemoryMode))
+	if requestedMode == "" {
+		requestedMode = memorymode.ModeFull
+	}
+	bootVMM := requestedVMM
+	if info.Resume {
+		bootVMM = info.VMMName
+	}
+	err = memorymode.Validate(memorymode.Input{
+		Mode:           requestedMode,
+		VMMName:        bootVMM,
+		Resume:         info.Resume,
+		ArtifactFormat: info.MemoryFormat,
+	})
+	if err != nil {
+		if errors.Is(err, memorymode.ErrPrecondition) {
+			return BootPlan{}, ErrFailedPrecondition.Wrap(err)
+		}
+		return BootPlan{}, err
+	}
+	return BootPlan{
+		entry:        entry,
+		info:         info,
+		requestedVMM: requestedVMM,
+		memoryMode:   requestedMode,
 	}, nil
 }
 
 func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (PreparedBoot, error) {
-	if p == nil || p.templates == nil || p.snapshots == nil || p.resolveBoot == nil {
+	if p == nil || p.templates == nil || p.snapshots == nil || p.inspectBoot == nil || p.resolveBootFromInfo == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
 	key := strings.TrimSpace(req.SandboxID)
 	if key == "" {
 		return PreparedBoot{}, fmt.Errorf("sandbox_id is required")
 	}
-	resolved, entry, err := p.resolveTemplate(ctx, req.TemplateID)
+	plan := req.Plan
+	if plan.entry.BootIndexDigest == "" || plan.info.BootIndexDigest == "" || plan.memoryMode == "" {
+		return PreparedBoot{}, fmt.Errorf("boot plan is incomplete")
+	}
+	resolved, err := p.resolveBootFromInfo(ctx, plan.info)
 	if err != nil {
 		return PreparedBoot{}, err
 	}
-	if err := validateResolvedBoot(resolved, entry.BootMode, strings.TrimSpace(req.VMMName)); err != nil {
-		return PreparedBoot{}, fmt.Errorf("template %s: %w", entry.BootIndexDigest, err)
+	if err := validateResolvedBoot(resolved, plan.entry.BootMode, plan.requestedVMM); err != nil {
+		return PreparedBoot{}, fmt.Errorf("template %s: %w", plan.entry.BootIndexDigest, err)
 	}
-	return p.prepareResolvedBoot(ctx, key, req.VMMName, req.RAMMB, resolved)
+	prepared, err := p.prepareResolvedBoot(ctx, key, plan.requestedVMM, req.RAMMB, resolved)
+	if err != nil {
+		return PreparedBoot{}, err
+	}
+	prepared.MemoryMode = plan.memoryMode
+	return prepared, nil
 }
 
-func (p *bootPreparer) resolveTemplate(
+func (p *bootPreparer) inspectTemplate(
 	ctx context.Context,
 	id string,
-) (conchimage.ResolvedBoot, template.Entry, error) {
+) (template.Entry, conchimage.BootIndexInfo, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template_id is required")
+		return template.Entry{}, conchimage.BootIndexInfo{}, fmt.Errorf("template_id is required")
 	}
 	entry, err := p.templates.Get(ctx, id)
 	if err != nil {
-		return conchimage.ResolvedBoot{}, template.Entry{}, err
+		return template.Entry{}, conchimage.BootIndexInfo{}, err
 	}
 	bootIndexDigest := strings.TrimSpace(entry.BootIndexDigest)
 	if bootIndexDigest == "" {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template has no boot index digest")
+		return template.Entry{}, conchimage.BootIndexInfo{}, fmt.Errorf("template has no boot index digest")
 	}
-	resolved, err := p.resolveBoot(ctx, bootIndexDigest)
+	info, err := p.inspectBoot(ctx, bootIndexDigest)
 	if err != nil {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
-			"resolve template %s boot index %s: %w",
+		return template.Entry{}, conchimage.BootIndexInfo{}, fmt.Errorf(
+			"inspect template %s boot index %s: %w",
 			entry.BootIndexDigest,
 			bootIndexDigest,
 			err,
 		)
 	}
-	if resolved.BootIndexDigest != bootIndexDigest {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
-			"resolved boot index digest %s does not match template digest %s",
-			resolved.BootIndexDigest,
+	if info.BootIndexDigest != bootIndexDigest {
+		return template.Entry{}, conchimage.BootIndexInfo{}, fmt.Errorf(
+			"inspected boot index digest %s does not match template digest %s",
+			info.BootIndexDigest,
 			bootIndexDigest,
 		)
 	}
-	return resolved, entry, nil
+	return entry, info, nil
 }
 
 func (p *bootPreparer) prepareResolvedBoot(
@@ -244,27 +322,37 @@ func memoryLayoutForVMM(vmmName string, resume bool) (snapshot.MemoryLayoutMode,
 	}
 }
 
+func validateInspectedBoot(info conchimage.BootIndexInfo, expectedMode template.BootMode, requestedVMM string) error {
+	return validateBootCapability(info.Resume, info.VMMName, info.MemorySizeMB, expectedMode, requestedVMM)
+}
+
 func validateResolvedBoot(resolved conchimage.ResolvedBoot, expectedMode template.BootMode, requestedVMM string) error {
 	if strings.TrimSpace(resolved.RootfsKey) == "" || strings.TrimSpace(resolved.VMKey) == "" {
 		return fmt.Errorf("boot index unpack returned incomplete parents")
 	}
-	resolvedMode := template.BootModeCold
 	if resolved.Resume {
-		resolvedMode = template.BootModeResume
 		if strings.TrimSpace(resolved.MemKey) == "" {
 			return fmt.Errorf("resume boot index unpack returned empty mem parent")
 		}
-		if requestedVMM != "" && strings.TrimSpace(resolved.VMMName) != requestedVMM {
-			return fmt.Errorf("boot index was captured by VMM %s, not %s", resolved.VMMName, requestedVMM)
-		}
-		if resolved.MemorySizeMB < 0 {
-			return fmt.Errorf("resume boot index has invalid memory size %d MB", resolved.MemorySizeMB)
-		}
-		if strings.TrimSpace(resolved.VMMName) == vmm.StratovirtName && resolved.MemorySizeMB == 0 {
-			return fmt.Errorf("StratoVirt resume boot index is missing memory size metadata")
-		}
 	} else if strings.TrimSpace(resolved.MemKey) != "" {
 		return fmt.Errorf("cold boot index unpack returned an unexpected mem parent")
+	}
+	return validateBootCapability(resolved.Resume, resolved.VMMName, resolved.MemorySizeMB, expectedMode, requestedVMM)
+}
+
+func validateBootCapability(resume bool, capturedVMM string, memorySizeMB int64, expectedMode template.BootMode, requestedVMM string) error {
+	resolvedMode := template.BootModeCold
+	if resume {
+		resolvedMode = template.BootModeResume
+		if requestedVMM != "" && strings.TrimSpace(capturedVMM) != requestedVMM {
+			return fmt.Errorf("boot index was captured by VMM %s, not %s", capturedVMM, requestedVMM)
+		}
+		if memorySizeMB < 0 {
+			return fmt.Errorf("resume boot index has invalid memory size %d MB", memorySizeMB)
+		}
+		if strings.TrimSpace(capturedVMM) == vmm.StratovirtName && memorySizeMB == 0 {
+			return fmt.Errorf("StratoVirt resume boot index is missing memory size metadata")
+		}
 	}
 	if expectedMode != template.BootModeCold && expectedMode != template.BootModeResume {
 		return fmt.Errorf("unknown expected boot mode %q", expectedMode)

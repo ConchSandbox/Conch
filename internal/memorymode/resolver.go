@@ -1,4 +1,4 @@
-// Package memorymode resolves the global sandbox memory policy before runtime
+// Package memorymode validates the global sandbox memory policy before runtime
 // resources are allocated.
 package memorymode
 
@@ -10,60 +10,53 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 )
 
-type RequestedMode string
+type Mode string
 
 const (
-	RequestedFull        RequestedMode = "full"
-	RequestedIncremental RequestedMode = "incremental"
-)
-
-type EffectiveMode string
-
-const (
-	EffectiveFull        EffectiveMode = "full"
-	EffectiveIncremental EffectiveMode = "incremental"
+	ModeFull        Mode = "full"
+	ModeIncremental Mode = "incremental"
 )
 
 var ErrPrecondition = errors.New("memory precondition failed")
 
 type Input struct {
-	Requested      RequestedMode
+	Mode           Mode
 	VMMName        string
 	Resume         bool
 	ArtifactFormat string
 }
 
-func Resolve(input Input) (EffectiveMode, error) {
-	if strings.TrimSpace(input.VMMName) == "cloud-hypervisor" {
-		return EffectiveFull, nil
+func Validate(input Input) error {
+	if input.Mode != ModeFull && input.Mode != ModeIncremental {
+		return fmt.Errorf("unknown memory mode %q", input.Mode)
 	}
-	if input.Requested != RequestedFull && input.Requested != RequestedIncremental {
-		return "", fmt.Errorf("unknown requested memory mode %q", input.Requested)
+	switch strings.TrimSpace(input.VMMName) {
+	case "cloud-hypervisor":
+		if input.Mode == ModeIncremental {
+			return precondition("incremental mode is not supported by Cloud Hypervisor")
+		}
+		return nil
+	case "stratovirt":
+	default:
+		return fmt.Errorf("unsupported VMM %q for memory mode %q", input.VMMName, input.Mode)
 	}
 	if input.Resume {
 		switch input.ArtifactFormat {
 		case conchimage.MemoryFormatFull:
-			if input.Requested == RequestedIncremental {
-				return "", precondition("incremental mode cannot resume full artifact")
+			if input.Mode == ModeIncremental {
+				return precondition("incremental mode cannot resume full artifact")
 			}
-			return EffectiveFull, nil
+			return nil
 		case conchimage.MemoryFormatIncrementalV1:
-			if input.Requested == RequestedFull {
-				return "", precondition("full mode cannot resume incremental-v1 artifact")
+			if input.Mode == ModeFull {
+				return precondition("full mode cannot resume incremental-v1 artifact")
 			}
-			return EffectiveIncremental, nil
+			return nil
 		default:
-			return "", precondition("unsupported resume memory artifact format %q", input.ArtifactFormat)
+			return precondition("unsupported resume memory artifact format %q", input.ArtifactFormat)
 		}
 	}
-	switch input.Requested {
-	case RequestedFull:
-		return EffectiveFull, nil
-	case RequestedIncremental:
-		return EffectiveIncremental, nil
-	default:
-		panic("validated requested mode")
-	}
+	return nil
 }
 
 func precondition(format string, args ...any) error {

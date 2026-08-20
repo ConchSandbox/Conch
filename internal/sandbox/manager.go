@@ -15,6 +15,7 @@ import (
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/cow"
+	"github.com/openeuler/Conch/internal/memorymode"
 	"github.com/openeuler/Conch/internal/memsnap"
 	"github.com/openeuler/Conch/internal/netstack"
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
@@ -252,18 +253,18 @@ func (m *Manager) Close() error {
 }
 
 type CreateRequest struct {
-	TemplateID   string
-	VMMName      string
-	SandboxID    string
-	LeaseID      string
-	VCPUNum      int64
-	VCPUMax      int64
-	RAMMB        int64
-	AgentToken   string
-	Env          map[string]string
-	VolumeMounts []volume.Mount
-	Network      *netstack.SandboxNetworkConfig
-	MemoryMode   string
+	TemplateID          string
+	VMMName             string
+	SandboxID           string
+	LeaseID             string
+	VCPUNum             int64
+	VCPUMax             int64
+	RAMMB               int64
+	AgentToken          string
+	Env                 map[string]string
+	VolumeMounts        []volume.Mount
+	Network             *netstack.SandboxNetworkConfig
+	RequestedMemoryMode string
 }
 
 type DeleteRequest struct {
@@ -431,6 +432,10 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 			m.sandboxes.CompareAndDelete(mapKey, entry)
 		}
 	}()
+	bootPlan, err := m.preflightSandboxBoot(ctx, req)
+	if err != nil {
+		return CreateResult{}, err
+	}
 
 	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
 	if err != nil {
@@ -450,7 +455,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		}
 	}()
 
-	boot, err := m.prepareSandboxBoot(leaseCtx, req, runtimeIDs)
+	boot, err := m.prepareSandboxBoot(leaseCtx, req, runtimeIDs, bootPlan)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -520,7 +525,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 	sbx.leaseID = leaseID
-	if err := configureSandboxMemoryCapture(sbx, req, boot); err != nil {
+	if err := configureSandboxMemoryCapture(sbx, boot.MemoryMode, req, boot); err != nil {
 		m.cleanupCreateFailure(sbx, req.SandboxID)
 		return CreateResult{}, err
 	}
@@ -537,8 +542,11 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 }
 
 func (m *Manager) prepareIncrementalMemory(ctx context.Context, sandboxID string, boot PreparedBoot) (*incrementalMemoryAttachment, error) {
-	if !boot.Runtime.Resume || boot.Runtime.MemoryFormat != incrementalMemoryFormat {
+	if !boot.Runtime.Resume || boot.MemoryMode != memorymode.ModeIncremental {
 		return nil, nil
+	}
+	if boot.Runtime.MemoryFormat != incrementalMemoryFormat {
+		return nil, fmt.Errorf("incremental restore requires memory format %q, got %q", incrementalMemoryFormat, boot.Runtime.MemoryFormat)
 	}
 	if m.memory == nil {
 		return nil, fmt.Errorf("cow client is required for incremental restore")
@@ -571,12 +579,12 @@ func registerSandboxMemoryDetach(sbx *Sandbox, attachment *incrementalMemoryAtta
 	sbx.cleanup.Add(func(ctx context.Context) error { return attachment.detach(ctx) })
 }
 
-func configureSandboxMemoryCapture(sbx *Sandbox, req CreateRequest, boot PreparedBoot) error {
+func configureSandboxMemoryCapture(sbx *Sandbox, mode memorymode.Mode, req CreateRequest, boot PreparedBoot) error {
 	if sbx == nil {
 		return fmt.Errorf("sandbox is nil")
 	}
-	sbx.memoryMode = req.MemoryMode
-	if req.MemoryMode != "incremental" {
+	sbx.memoryMode = string(mode)
+	if mode != memorymode.ModeIncremental {
 		return nil
 	}
 	if req.VMMName != vmm.StratovirtName {
@@ -673,7 +681,18 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 	}, nil
 }
 
-func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, runtimeIDs createRuntimeIDs) (PreparedBoot, error) {
+func (m *Manager) preflightSandboxBoot(ctx context.Context, req CreateRequest) (BootPlan, error) {
+	if m.boot == nil {
+		return BootPlan{}, fmt.Errorf("sandbox boot preparer is not configured")
+	}
+	return m.boot.Preflight(ctx, BootPreflightRequest{
+		TemplateID:          req.TemplateID,
+		VMMName:             req.VMMName,
+		RequestedMemoryMode: req.RequestedMemoryMode,
+	})
+}
+
+func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, runtimeIDs createRuntimeIDs, plan BootPlan) (PreparedBoot, error) {
 	defer ulog.TraceCost(ulog.TraceStart(), req.SandboxID, "prepareSandboxBoot()")
 	if m.boot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
@@ -681,10 +700,9 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest, run
 	logger := ulog.GetLogger()
 	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
 	return m.boot.Prepare(ctx, PrepareBootRequest{
-		TemplateID: req.TemplateID,
-		SandboxID:  runtimeIDs.key,
-		VMMName:    req.VMMName,
-		RAMMB:      req.RAMMB,
+		Plan:      plan,
+		SandboxID: runtimeIDs.key,
+		RAMMB:     req.RAMMB,
 	})
 }
 

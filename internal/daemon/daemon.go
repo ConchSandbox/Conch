@@ -111,14 +111,14 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := ulog.GetLogger()
 	paths := cfg.RuntimePaths()
-	requestedMemoryMode := memorymode.RequestedMode(cfg.Sandbox.MemoryMode)
+	requestedMemoryMode := memorymode.Mode(cfg.Sandbox.MemoryMode)
 	startupComplete := false
 	defer func() {
 		if !startupComplete && s.cowProcess != nil {
 			_ = s.cowProcess.Close()
 		}
 	}()
-	if requestedMemoryMode == memorymode.RequestedIncremental {
+	if requestedMemoryMode == memorymode.ModeIncremental {
 		if err := cow.ProbeIncrementalMemory(); err != nil {
 			cancel()
 			return nil, fmt.Errorf("incremental memory preflight: %w", err)

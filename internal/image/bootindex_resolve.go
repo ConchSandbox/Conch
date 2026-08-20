@@ -21,10 +21,22 @@ type ResolvedBoot struct {
 // ResolveBoot validates a Boot Index by digest and idempotently unpacks its
 // components into the committed snapshot parents required by Sandbox.
 func ResolveBoot(ctx context.Context, client *containerdclient.Client, bootIndexDigest string) (ResolvedBoot, error) {
-	resolveCtx, info, err := inspectBootIndex(ctx, client, bootIndexDigest)
+	info, err := InspectBootIndex(ctx, client, bootIndexDigest)
 	if err != nil {
 		return ResolvedBoot{}, err
 	}
+	return ResolveBootFromInfo(ctx, client, info)
+}
+
+// ResolveBootFromInfo idempotently unpacks a previously inspected Boot Index.
+func ResolveBootFromInfo(ctx context.Context, client *containerdclient.Client, info BootIndexInfo) (ResolvedBoot, error) {
+	if client == nil || client.Client == nil {
+		return ResolvedBoot{}, fmt.Errorf("containerd client is required")
+	}
+	if info.BootIndexDigest == "" {
+		return ResolvedBoot{}, fmt.Errorf("inspected boot index digest is required")
+	}
+	resolveCtx := containerdclient.NewNamespaceContext(ctx)
 	snapshotMap, err := unpackBootIndexComponents(resolveCtx, client.Client, info)
 	if err != nil {
 		return ResolvedBoot{}, fmt.Errorf("unpack boot index %s: %w", info.BootIndexDigest, err)

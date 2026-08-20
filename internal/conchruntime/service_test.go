@@ -477,11 +477,12 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	svc := New(sandboxOps, nil, store)
 
 	result, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
-		SandboxID:  "sandbox-1",
-		TemplateID: templateID,
-		VCPUNum:    2,
-		VCPUMax:    2,
-		RamMB:      1024,
+		SandboxID:           "sandbox-1",
+		TemplateID:          templateID,
+		VCPUNum:             2,
+		VCPUMax:             2,
+		RamMB:               1024,
+		RequestedMemoryMode: "incremental",
 	})
 	if err != nil {
 		t.Fatalf("CreateSandbox() error = %v", err)
@@ -503,6 +504,9 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	}
 	if rec != want {
 		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
+	}
+	if sandboxOps.req.RequestedMemoryMode != "incremental" {
+		t.Fatalf("RequestedMemoryMode = %q, want incremental", sandboxOps.req.RequestedMemoryMode)
 	}
 }
 
