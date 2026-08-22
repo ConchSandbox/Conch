@@ -2,6 +2,11 @@ package driver
 
 import "context"
 
+type ProcessExit interface {
+	Done() <-chan struct{}
+	Err() error
+}
+
 type ResourceArgs struct {
 	// CPU
 	CPUBoot int64
@@ -46,9 +51,9 @@ type Adapter interface {
 	BuildStartCmd(args *ResourceArgs, restore bool) (string, error)
 	PrepareLaunch(args *ResourceArgs, restore bool) error
 	AfterProcessStart()
-	WaitForCreateReady(ctx context.Context, processExited <-chan error) error
-	WaitForRestoreReady(ctx context.Context, processExited <-chan error) error
-	CheckAgentAlive(ctx context.Context, processExited <-chan error) error
+	WaitForCreateReady(ctx context.Context, processExited ProcessExit) error
+	WaitForRestoreReady(ctx context.Context, processExited ProcessExit) error
+	CheckAgentAlive(ctx context.Context, processExited ProcessExit) error
 	PauseVM() error
 	ResumeVM() error
 	DeleteVM() error
