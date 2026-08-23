@@ -1,6 +1,37 @@
 package image
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/containerd/containerd/v2/core/images"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+func TestRemoveFetchedImageRecordDetachesCleanupFromRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &cleanupImageStore{}
+
+	if err := RemoveFetchedImageRecord(
+		ctx, store, "registry.example.invalid/conch/template:latest", ocispec.Descriptor{},
+	); err != nil {
+		t.Fatalf("RemoveFetchedImageRecord() error = %v", err)
+	}
+	if !store.hasDeadline {
+		t.Fatal("Delete() context has no cleanup deadline")
+	}
+}
+
+type cleanupImageStore struct {
+	images.Store
+	hasDeadline bool
+}
+
+func (s *cleanupImageStore) Delete(ctx context.Context, _ string, _ ...images.DeleteOpt) error {
+	_, s.hasDeadline = ctx.Deadline()
+	return ctx.Err()
+}
 
 func TestImageRepoDigests(t *testing.T) {
 	tests := []struct {

@@ -84,7 +84,8 @@ func (s *Store) Create(ctx context.Context, entry conchtemplate.Entry, target oc
 	if err != nil {
 		return conchtemplate.Entry{}, translateError("create Template image record", err)
 	}
-	return s.entryFromRecord(nsctx, record)
+	normalized.CreatedAt = record.CreatedAt.UnixNano()
+	return normalized, nil
 }
 
 func (s *Store) Get(ctx context.Context, rawDigest string) (conchtemplate.Entry, error) {
