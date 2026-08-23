@@ -214,9 +214,6 @@ func TestBoltStoreLeavesTemplateValidationToDomain(t *testing.T) {
 	if len(items) != 1 || items[0].BootIndexDigest != record.BootIndexDigest {
 		t.Fatalf("ListTemplates() = %#v", items)
 	}
-	if _, err := conchtemplate.NewStore(store).List(ctx, conchtemplate.Filter{}); err == nil {
-		t.Fatal("domain List() error = nil, want invalid digest rejection")
-	}
 }
 
 func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {

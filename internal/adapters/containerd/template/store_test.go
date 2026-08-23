@@ -23,6 +23,8 @@ import (
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
+var _ conchtemplate.Store = (*Store)(nil)
+
 func TestStoreCRUDUsesCanonicalImageRecord(t *testing.T) {
 	ctx := context.Background()
 	contentStore := newTestContentStore(t)

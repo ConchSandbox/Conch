@@ -202,6 +202,35 @@ func (s *BoltStore) DeleteTemplate(ctx context.Context, bootIndexDigest string) 
 	return s.delete(ctx, []byte("templates"), bootIndexDigest)
 }
 
+func (s *BoltStore) AdvanceCheckpointHead(_ context.Context, sandboxID, expectedDigest, nextDigest string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	expectedDigest = strings.TrimSpace(expectedDigest)
+	nextDigest = strings.TrimSpace(nextDigest)
+	if sandboxID == "" || expectedDigest == "" || nextDigest == "" {
+		return fmt.Errorf("sandbox id and checkpoint head digests are required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		sandboxes := tx.Bucket([]byte("sandboxes"))
+		data := sandboxes.Get([]byte(sandboxID))
+		if data == nil {
+			return fmt.Errorf("%w: %s", ErrNotFound, sandboxID)
+		}
+		var record SandboxRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			return fmt.Errorf("unmarshal sandbox record %s: %w", sandboxID, err)
+		}
+		if record.CheckpointHeadTemplateID != expectedDigest {
+			return fmt.Errorf("sandbox %s checkpoint head changed from %s to %s", sandboxID, expectedDigest, record.CheckpointHeadTemplateID)
+		}
+		record.CheckpointHeadTemplateID = nextDigest
+		data, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("marshal sandbox record: %w", err)
+		}
+		return sandboxes.Put([]byte(sandboxID), data)
+	})
+}
+
 // PublishCheckpoint atomically creates a complete checkpoint Template Entry
 // and advances the Sandbox checkpoint head. Content publication and validation
 // happen before this transaction, so a failed transaction can only leave safe

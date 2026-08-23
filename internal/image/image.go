@@ -2,9 +2,11 @@ package image
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
@@ -57,23 +59,44 @@ func PullBootIndex(ctx context.Context, client *containerdclient.Client, req Reg
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
-	fetched, kind, err := pullRegistryContent(pullCtx, client, req, true)
+	fetched, _, err := pullRegistryContent(pullCtx, client, req, true)
 	if err != nil {
 		return PullBootIndexResult{}, translateRegistryError(err)
 	}
 	info, err := InspectBootIndexContent(pullCtx, client.ContentStore(), fetched.Target)
 	if err != nil {
-		return PullBootIndexResult{}, fmt.Errorf("validate pulled Boot Index %s: %w", fetched.Name, err)
+		return PullBootIndexResult{}, errors.Join(
+			fmt.Errorf("validate pulled Boot Index %s: %w", fetched.Name, err),
+			RemoveFetchedImageRecord(ctx, client.ImageService(), fetched.Name, fetched.Target),
+		)
 	}
-	buildRef, err := EnsureCanonicalBootIndexRecord(pullCtx, client, fetched.Target, kind)
+	buildRef, err := CanonicalTemplateRef(fetched.Target.Digest.String())
 	if err != nil {
-		return PullBootIndexResult{}, err
+		return PullBootIndexResult{}, errors.Join(
+			err,
+			RemoveFetchedImageRecord(ctx, client.ImageService(), fetched.Name, fetched.Target),
+		)
 	}
-	if err := client.ImageService().Delete(pullCtx, fetched.Name, images.DeleteTarget(&fetched.Target)); err != nil && !errdefs.IsNotFound(err) {
-		_ = RemoveCanonicalBootIndexRecord(context.WithoutCancel(ctx), client, info.BootIndexDigest)
-		return PullBootIndexResult{}, fmt.Errorf("remove fetched source image record %s: %w", fetched.Name, err)
+	return PullBootIndexResult{
+		Info:            info,
+		BuildRef:        buildRef,
+		SourceImageName: fetched.Name,
+		Target:          fetched.Target,
+	}, nil
+}
+
+// RemoveFetchedImageRecord releases the temporary image root without inheriting request cancellation.
+func RemoveFetchedImageRecord(ctx context.Context, store images.Store, name string, target ocispec.Descriptor) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := store.Delete(
+		containerdclient.NewNamespaceContext(cleanupCtx),
+		name,
+		images.DeleteTarget(&target),
+	); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("remove fetched image record %s: %w", name, err)
 	}
-	return PullBootIndexResult{Info: info, BuildRef: buildRef}, nil
+	return nil
 }
 
 func pullRegistryContent(

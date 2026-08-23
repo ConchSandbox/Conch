@@ -2,8 +2,6 @@ package state
 
 import (
 	"context"
-
-	"github.com/openeuler/Conch/internal/template"
 )
 
 type Store interface {
@@ -14,9 +12,5 @@ type Store interface {
 	ListSandboxes(context.Context) ([]SandboxRecord, error)
 	DeleteSandbox(context.Context, string) error
 
-	CreateTemplate(context.Context, template.Entry) error
-	GetTemplate(context.Context, string) (template.Entry, error)
-	ListTemplates(context.Context) ([]template.Entry, error)
-	DeleteTemplate(context.Context, string) error
-	PublishCheckpoint(context.Context, template.Entry) error
+	AdvanceCheckpointHead(context.Context, string, string, string) error
 }
