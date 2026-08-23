@@ -45,7 +45,7 @@ $ conch template rm sha256:1111...
 Removed template: sha256:1111...
 ```
 
-删除时会移除 Template metadata 和对应的 canonical image record；实际 content 由 containerd GC 在不再被其他记录引用后回收。
+删除时会移除以 labels 承载 Template metadata 的 canonical image record；实际 content 由 containerd GC 在不再被其他记录引用后回收。
 
 ## 2. Template 分发
 
