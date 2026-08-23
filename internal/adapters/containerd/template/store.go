@@ -143,10 +143,11 @@ func (s *Store) Delete(ctx context.Context, rawDigest string) error {
 	if err := s.configured(); err != nil {
 		return err
 	}
-	name, err := canonicalName(rawDigest)
+	expected, err := digest.Parse(strings.TrimSpace(rawDigest))
 	if err != nil {
-		return err
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("invalid Template ID %q: %w", rawDigest, err))
 	}
+	name, _ := conchimage.CanonicalTemplateRef(expected.String())
 	nsctx := containerdclient.NewNamespaceContext(ctx)
 	record, err := s.images.Get(nsctx, name)
 	if err != nil {
@@ -158,7 +159,12 @@ func (s *Store) Delete(ctx context.Context, rawDigest string) error {
 	if record.Labels[schemaLabel] != schemaVersion {
 		return nil
 	}
-	if err := s.images.Delete(nsctx, name, images.DeleteTarget(&record.Target)); err != nil && !errdefs.IsNotFound(err) {
+	if record.Target.Digest != expected {
+		return conchtemplate.ErrFailedPrecondition.Wrap(fmt.Errorf(
+			"canonical Template record %s targets %s, want %s", name, record.Target.Digest, expected,
+		))
+	}
+	if err := s.images.Delete(nsctx, name, images.DeleteTarget(&ocispec.Descriptor{Digest: expected})); err != nil && !errdefs.IsNotFound(err) {
 		return translateError("delete Template image record", err)
 	}
 	return nil

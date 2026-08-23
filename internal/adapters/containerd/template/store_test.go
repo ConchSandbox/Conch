@@ -156,6 +156,32 @@ func TestStoreCreateRejectsBootModeMismatch(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteRejectsMovedCanonicalRecord(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, contentStore, false)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
+	if _, err := store.Create(ctx, conchtemplate.Entry{
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: target.Digest.String(),
+	}, target); err != nil {
+		t.Fatal(err)
+	}
+	name, _ := conchimage.CanonicalTemplateRef(target.Digest.String())
+	record := imageStore.records[name]
+	record.Target.Digest = digest.FromString("moved-target")
+	imageStore.records[name] = record
+
+	if err := store.Delete(ctx, target.Digest.String()); !errors.Is(err, conchtemplate.ErrFailedPrecondition) {
+		t.Fatalf("Delete() error = %v, want ErrFailedPrecondition", err)
+	}
+	if _, err := imageStore.Get(ctx, name); err != nil {
+		t.Fatalf("moved canonical record was deleted: %v", err)
+	}
+}
+
 type memoryImageStore struct {
 	records map[string]images.Image
 	filters []string
