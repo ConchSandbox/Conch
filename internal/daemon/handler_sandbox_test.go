@@ -9,9 +9,11 @@ import (
 	"testing"
 
 	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/sandbox"
+	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
 const (
@@ -204,10 +206,9 @@ func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	server := &Daemon{
-		router:         http.NewServeMux(),
-		runtimeService: conchruntime.New(nil, nil, store),
-	}
+	runtimeService := conchruntime.New(nil, nil, store)
+	runtimeService.Templates = missingTemplateStore{}
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 	recorder := httptest.NewRecorder()
 	missingDigest := digest.FromString("missing-template").String()
@@ -226,3 +227,19 @@ func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 		t.Fatalf("response = %#v, error = %v", response, err)
 	}
 }
+
+type missingTemplateStore struct{}
+
+func (missingTemplateStore) Create(context.Context, conchtemplate.Entry, ocispec.Descriptor) (conchtemplate.Entry, error) {
+	return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
+}
+
+func (missingTemplateStore) Get(context.Context, string) (conchtemplate.Entry, error) {
+	return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
+}
+
+func (missingTemplateStore) List(context.Context, conchtemplate.Filter) ([]conchtemplate.Entry, error) {
+	return nil, nil
+}
+
+func (missingTemplateStore) Delete(context.Context, string) error { return nil }
