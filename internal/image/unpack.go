@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
@@ -25,6 +26,18 @@ const (
 )
 
 var ErrMissingSandbox = errors.New("missing required sandbox component")
+
+type unpackLock struct {
+	token chan struct{}
+	refs  int
+}
+
+type unpackLockSet struct {
+	mu    sync.Mutex
+	locks map[string]*unpackLock
+}
+
+var componentUnpackLocks = unpackLockSet{locks: make(map[string]*unpackLock)}
 
 // UnpackBootIndex validates a Boot Index by its immutable digest and unpacks
 // all component manifests.
@@ -96,10 +109,57 @@ func unpackOneSubImage(ctx context.Context, client *containerd.Client, snapshott
 	if err != nil {
 		return "", fmt.Errorf("get RootFS for %s: %w", kind, err)
 	}
-	if err := subImg.Unpack(ctx, snapshotterName); err != nil {
+	snapshotID := identity.ChainID(diffIDs).String()
+	if err := serializeUnpack(ctx, snapshotterName, snapshotID, func() error {
+		return subImg.Unpack(ctx, snapshotterName)
+	}); err != nil {
 		return "", fmt.Errorf("unpack sub-image %s (kind: %s): %w", manifestDesc.Digest, kind, err)
 	}
-	return identity.ChainID(diffIDs).String(), nil
+	return snapshotID, nil
+}
+
+func serializeUnpack(ctx context.Context, snapshotter, chainID string, unpack func() error) error {
+	key := fmt.Sprintf("sn://%s/%s", snapshotter, chainID)
+	unlock, err := componentUnpackLocks.lock(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return unpack()
+}
+
+func (s *unpackLockSet) lock(ctx context.Context, key string) (func(), error) {
+	s.mu.Lock()
+	entry := s.locks[key]
+	if entry == nil {
+		entry = &unpackLock{token: make(chan struct{}, 1)}
+		s.locks[key] = entry
+	}
+	entry.refs++
+	s.mu.Unlock()
+
+	select {
+	case entry.token <- struct{}{}:
+		return func() {
+			<-entry.token
+			s.release(key, entry)
+		}, nil
+	case <-ctx.Done():
+		s.release(key, entry)
+		return nil, ctx.Err()
+	}
+}
+
+func (s *unpackLockSet) release(key string, entry *unpackLock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(s.locks, key)
+	}
 }
 
 func isNativeErofsKind(kind string) bool {

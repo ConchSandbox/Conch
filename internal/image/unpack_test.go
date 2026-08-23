@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
@@ -12,6 +13,93 @@ import (
 	ispec "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+func TestSerializeUnpack(t *testing.T) {
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	released := false
+	release := func() {
+		if !released {
+			close(releaseFirst)
+			released = true
+		}
+	}
+	defer release()
+
+	go func() {
+		firstDone <- serializeUnpack(context.Background(), "erofs", "sha256:chain", func() error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	secondCalled := false
+	go func() {
+		secondDone <- serializeUnpack(secondCtx, "erofs", "sha256:chain", func() error {
+			secondCalled = true
+			return nil
+		})
+	}()
+	waitForUnpackLockRefs(t, "sn://erofs/sha256:chain", 2)
+	cancelSecond()
+	select {
+	case err := <-secondDone:
+		if err != context.Canceled {
+			t.Fatalf("second serializeUnpack() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		release()
+		<-firstDone
+		t.Fatal("canceled duplicate unpack remained blocked")
+	}
+	if secondCalled {
+		t.Fatal("duplicate unpack entered before the first unpack completed")
+	}
+
+	for _, tc := range []struct {
+		name        string
+		snapshotter string
+		chainID     string
+	}{
+		{name: "chain ID", snapshotter: "erofs", chainID: "sha256:other"},
+		{name: "snapshotter", snapshotter: "overlayfs", chainID: "sha256:chain"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := serializeUnpack(ctx, tc.snapshotter, tc.chainID, func() error { return nil })
+		cancel()
+		if err != nil {
+			t.Fatalf("unpack with independent %s: %v", tc.name, err)
+		}
+	}
+	release()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first serializeUnpack() error = %v", err)
+	}
+}
+
+func waitForUnpackLockRefs(t *testing.T, key string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		componentUnpackLocks.mu.Lock()
+		entry := componentUnpackLocks.locks[key]
+		got := 0
+		if entry != nil {
+			got = entry.refs
+		}
+		componentUnpackLocks.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("unpack lock %q did not reach %d references", key, want)
+}
 
 func TestGetKindDefaultsToUnknown(t *testing.T) {
 	got := getKind(ocispec.Descriptor{})
