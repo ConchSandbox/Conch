@@ -124,6 +124,10 @@ func setupMergeFileLogging() {
 
 // runAsInit runs conch-init as PID 1 (init process)
 func runAsInit() {
+	// The Go runtime installs termination signal handlers. Explicitly ignore
+	// these signals so guest workloads cannot terminate PID 1 with `kill -15 1`
+	// or `kill -2 1`; sandbox lifecycle termination is host-controlled.
+	signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
 	os.Setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin")
 	ensureProcMounted()
 	sandboxID := refreshSandboxLoggerFromCmdline()
@@ -218,16 +222,11 @@ func waitForRootfsServiceReadySignal() {
 	}
 }
 
-// waitForSignal waits for SIGTERM/SIGINT or a fatal vsock server error.
+// waitForSignal keeps conch-init alive as the guest PID 1 until the
+// initialization server fails.
 func waitForSignal(vsockServerErr <-chan error) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	select {
-	case <-sigCh:
-		ulog.GetLogger().Info("Received shutdown signal")
-	case err := <-vsockServerErr:
-		ulog.GetLogger().Error("vsock server stopped", ulog.F("error", err))
-	}
+	err := <-vsockServerErr
+	ulog.GetLogger().Error("vsock server stopped", ulog.F("error", err))
 }
 
 // startAgentAPIServerAsync binds the agent API listener synchronously, then serves in
