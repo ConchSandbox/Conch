@@ -24,9 +24,10 @@ its identity and storage key are its immutable Boot Index digest.
 | `SourceSandboxID` | `string` | Identifies the Sandbox used to produce the Template. | Optional. |
 | `SourceRef` | `string` | Records the registry reference supplied to `pull`. | Optional. |
 | `Labels` | `map[string]string` | Stores caller-defined metadata as key-value pairs. | Optional. |
-| `CreatedAt` | `int64` | Records when the Template record was created. | Unix nanoseconds; assigned by `Create` when zero. |
+| `CreatedAt` | `int64` | Records when the Template record was created. | Unix nanoseconds; derived from the canonical containerd image record. |
 
-The corresponding containerd image record is also derived from the digest:
+Template metadata is stored as labels on a canonical containerd image record
+whose name is derived from the digest:
 `localhost/conch/template:<algorithm>-<encoded-digest>`.
 
 #### Origin
@@ -64,16 +65,18 @@ The corresponding containerd image record is also derived from the digest:
 ### Create
 
 ```go
-Create(ctx context.Context, entry Entry) (Entry, error)
+Create(ctx context.Context, entry Entry, target ocispec.Descriptor) (Entry, error)
 ```
 
-Creates a new Template record after validating the `Entry` constraints above.
-A zero `CreatedAt` is set to the current Unix time in nanoseconds.
+Creates a new Template record after validating the `Entry` constraints above
+and confirming that `target` is a valid Boot Index whose digest and boot mode
+match the `Entry`.
 
-The record is inserted atomically using `BootIndexDigest` as the key. An
-existing record is never overwritten; a duplicate digest returns
-`ErrAlreadyExists`. On success, `Create` returns the normalized record that was
-stored.
+The store records the Boot Index child references for containerd GC and inserts
+the digest-derived canonical image record atomically. An existing record is
+never overwritten; a duplicate digest returns `ErrAlreadyExists`. On success,
+`Create` returns the normalized record with `CreatedAt` derived from the image
+record.
 
 ### Get
 
@@ -105,10 +108,11 @@ Every returned `Entry` is normalized using the same field rules as `Create`.
 Delete(ctx context.Context, bootIndexDigest string) error
 ```
 
-Deletes the Template record identified by `bootIndexDigest`. The operation is
-idempotent: deleting an unknown digest succeeds without changing stored data.
+Deletes the digest-derived canonical image record identified by
+`bootIndexDigest`. The operation is idempotent: deleting an unknown digest
+succeeds without changing stored data. The delete is conditional on the record
+still targeting the requested digest.
 
 `Delete` returns an error when the storage operation cannot be completed.
-The runtime service additionally removes the digest-derived canonical
-containerd image record; containerd GC then decides when unreferenced content
-is reclaimed.
+Containerd GC decides when content that is no longer referenced by an image
+record or another GC root is reclaimed.

@@ -129,9 +129,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}
 
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
-		RootDir:       cfg.ContainerdRootDir(),
-		StateDir:      cfg.ContainerdStateDir(),
-		TemplateStore: store,
+		RootDir:  cfg.ContainerdRootDir(),
+		StateDir: cfg.ContainerdStateDir(),
 		Snapshot: containerdhost.SnapshotConfig{
 			WorkDir: cfg.Server.WorkDir,
 		},
