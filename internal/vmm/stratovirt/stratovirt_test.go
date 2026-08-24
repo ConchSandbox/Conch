@@ -1,8 +1,12 @@
 package stratovirt
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +15,101 @@ import (
 
 	"github.com/openeuler/Conch/internal/vmm/driver"
 )
+
+func startQMPStatusServer(t *testing.T, socketPath string, statuses []string) <-chan string {
+	t.Helper()
+	if len(statuses) == 0 {
+		t.Fatal("startQMPStatusServer requires at least one status")
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	commands := make(chan string, 8)
+	go func() {
+		statusIndex := 0
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			reader := bufio.NewReader(conn)
+			_, _ = fmt.Fprintln(conn, `{"QMP":{"version":{}}}`)
+			_, _ = reader.ReadString('\n')
+			_, _ = fmt.Fprintln(conn, `{"return":{}}`)
+
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				_ = conn.Close()
+				continue
+			}
+			var request struct {
+				Execute string `json:"execute"`
+			}
+			if err := json.Unmarshal([]byte(line), &request); err != nil {
+				_ = conn.Close()
+				continue
+			}
+			commands <- request.Execute
+			if request.Execute == "query-status" {
+				status := statuses[len(statuses)-1]
+				if statusIndex < len(statuses) {
+					status = statuses[statusIndex]
+					statusIndex++
+				}
+				_, _ = fmt.Fprintf(conn, "{\"return\":{\"status\":%q,\"running\":%t}}\n", status, status == "running")
+			} else {
+				_, _ = fmt.Fprintln(conn, `{"return":{}}`)
+			}
+			_ = conn.Close()
+		}
+	}()
+	return commands
+}
+
+func TestCheckAgentAliveDoesNotResumeRunningVM(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	commands := startQMPStatusServer(t, socketPath, []string{"running"})
+	client := NewStratovirtClient(1, socketPath, "/opt/vmm/stratovirt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.CheckAgentAlive(ctx, make(chan error)); err != nil {
+		t.Fatalf("CheckAgentAlive() error = %v", err)
+	}
+	if got := <-commands; got != "query-status" {
+		t.Fatalf("first QMP command = %q, want query-status", got)
+	}
+	select {
+	case got := <-commands:
+		t.Fatalf("unexpected QMP command %q", got)
+	default:
+	}
+}
+
+func TestCheckAgentAliveResumesPausedVMOnce(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
+	commands := startQMPStatusServer(t, socketPath, []string{"paused", "running"})
+	client := NewStratovirtClient(1, socketPath, "/opt/vmm/stratovirt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.CheckAgentAlive(ctx, make(chan error)); err != nil {
+		t.Fatalf("CheckAgentAlive() error = %v", err)
+	}
+	for i, want := range []string{"query-status", "cont", "query-status"} {
+		if got := <-commands; got != want {
+			t.Fatalf("QMP command %d = %q, want %q", i, got, want)
+		}
+	}
+	select {
+	case got := <-commands:
+		t.Fatalf("unexpected QMP command %q", got)
+	default:
+	}
+}
 
 func TestStratovirtBuildStartCmd(t *testing.T) {
 	configuredDir := t.TempDir()

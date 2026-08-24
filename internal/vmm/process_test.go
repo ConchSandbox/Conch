@@ -140,6 +140,75 @@ func (c *blockingDaemonClient) WaitForRestoreReady(context.Context, <-chan error
 }
 func (c *blockingDaemonClient) Cleanup() { c.cleanupCalls.Add(1) }
 
+type restoreTrackingAdapter struct {
+	restoreReadyCalls atomic.Int32
+	loadCalls         atomic.Int32
+	resumeCalls       atomic.Int32
+	checkCalls        atomic.Int32
+}
+
+func (a *restoreTrackingAdapter) BuildStartCmd(*ResourceArgs, bool) (string, error) { return "", nil }
+func (a *restoreTrackingAdapter) PrepareLaunch(*ResourceArgs, bool) error           { return nil }
+func (a *restoreTrackingAdapter) AfterProcessStart()                                {}
+func (a *restoreTrackingAdapter) WaitForCreateReady(context.Context, <-chan error) error {
+	return nil
+}
+func (a *restoreTrackingAdapter) WaitForRestoreReady(context.Context, <-chan error) error {
+	a.restoreReadyCalls.Add(1)
+	return nil
+}
+func (a *restoreTrackingAdapter) CheckAgentAlive(context.Context, <-chan error) error {
+	a.checkCalls.Add(1)
+	return nil
+}
+func (a *restoreTrackingAdapter) PauseVM() error              { return nil }
+func (a *restoreTrackingAdapter) ResumeVM() error             { a.resumeCalls.Add(1); return nil }
+func (a *restoreTrackingAdapter) DeleteVM() error             { return nil }
+func (a *restoreTrackingAdapter) CreateSnapshot(string) error { return nil }
+func (a *restoreTrackingAdapter) LoadSnapshot(string, bool) error {
+	a.loadCalls.Add(1)
+	return nil
+}
+func (a *restoreTrackingAdapter) Cleanup() {}
+
+func TestRestoreUsesBackendSpecificResumePolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		vmmName         string
+		wantResumeCalls int32
+	}{
+		{name: "stratovirt relies on status check", vmmName: StratovirtName, wantResumeCalls: 0},
+		{name: "cloud hypervisor resumes explicitly", vmmName: CloudHypervisorName, wantResumeCalls: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := &restoreTrackingAdapter{}
+			process := &Process{
+				cmd:        exec.Command("true"),
+				vmmName:    tt.vmmName,
+				SandboxId:  "sandbox-test",
+				adapter:    adapter,
+				exitSignal: make(chan error, 1),
+			}
+
+			if err := process.Restore(context.Background(), "/tmp/snapshot"); err != nil {
+				t.Fatalf("Restore() error = %v", err)
+			}
+			if got := adapter.resumeCalls.Load(); got != tt.wantResumeCalls {
+				t.Fatalf("ResumeVM() calls = %d, want %d", got, tt.wantResumeCalls)
+			}
+			if got := adapter.restoreReadyCalls.Load(); got != 1 {
+				t.Fatalf("WaitForRestoreReady() calls = %d, want 1", got)
+			}
+			if got := adapter.loadCalls.Load(); got != 1 {
+				t.Fatalf("LoadSnapshot() calls = %d, want 1", got)
+			}
+			if got := adapter.checkCalls.Load(); got != 1 {
+				t.Fatalf("CheckAgentAlive() calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestStopIgnoresProcessDoneWhenProcessAlreadyFinished(t *testing.T) {
 	cmd := exec.Command("true")
 	if err := cmd.Start(); err != nil {

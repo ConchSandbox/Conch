@@ -50,6 +50,7 @@ func SandboxSocketPath(subDir, sandboxId string) (string, error) {
 
 type Process struct {
 	cmd             *exec.Cmd
+	vmmName         string
 	SandboxId       string
 	VmmSocketPath   string
 	VsockSocketPath string
@@ -101,6 +102,7 @@ func NewProcess(
 	}
 
 	p := Process{
+		vmmName:         vmmName,
 		SandboxId:       sandboxId,
 		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
 		VmmSocketPath:   vmmSocketPath,
@@ -248,7 +250,9 @@ func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 	}
 	p.markAPIReady()
 
-	err = p.adapter.ResumeVM()
+	if p.vmmName != StratovirtName {
+		err = p.adapter.ResumeVM()
+	}
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
