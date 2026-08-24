@@ -15,7 +15,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 
-	"github.com/openeuler/Conch/internal/sandboxid"
+	"github.com/openeuler/Conch/internal/id"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -298,7 +298,7 @@ func (b *virtiofsBackend) CleanupStaleResources() error {
 		return errors.Join(append(errs, err)...)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || sandboxid.Validate(entry.Name()) != nil {
+		if !entry.IsDir() || id.Validate(entry.Name()) != nil {
 			continue
 		}
 		if cleanupErr := b.Cleanup(entry.Name(), nil); cleanupErr != nil {

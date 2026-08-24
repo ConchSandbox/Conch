@@ -2,8 +2,6 @@ package conchruntime
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -18,13 +16,14 @@ import (
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -44,13 +43,14 @@ type SnapshotOps interface {
 }
 
 type Service struct {
-	Sandbox         SandboxOps
-	Containerd      *containerdclient.Client
-	Snapshot        SnapshotOps
-	Store           state.Store
-	Templates       conchtemplate.Store
-	SandboxDefaults SandboxDefaults
-	lifecycleLocks  sandboxLifecycleLocks
+	Sandbox           SandboxOps
+	Containerd        *containerdclient.Client
+	Snapshot          SnapshotOps
+	Store             state.Store
+	Templates         conchtemplate.Store
+	SandboxDefaults   SandboxDefaults
+	WebhookDispatcher *webhook.Dispatcher
+	lifecycleLocks    sandboxLifecycleLocks
 }
 
 type sandboxLifecycleLock struct {
@@ -113,13 +113,13 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
-		id, err := NewID()
+		id, err := id.New()
 		if err != nil {
 			return SandboxCreateResult{}, err
 		}
 		opts.SandboxID = id
 	} else {
-		if err := sandboxid.Validate(opts.SandboxID); err != nil {
+		if err := id.Validate(opts.SandboxID); err != nil {
 			return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
 				fmt.Errorf("invalid sandbox_id: %w", err),
 			)
@@ -222,6 +222,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 			deleteErr,
 		)
 	}
+	s.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,
 		IP:         createResult.IP,
@@ -323,6 +324,14 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
+	var rec state.SandboxRecord
+	if s.Store != nil {
+		var getErr error
+		rec, getErr = s.getSandbox(ctx, sandboxID)
+		if getErr != nil && !errors.Is(getErr, state.ErrNotFound) {
+			return getErr
+		}
+	}
 	err := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
 	if err != nil && errors.Is(err, sandbox.ErrNotFound) {
 		err = nil
@@ -331,9 +340,57 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	if s.Store != nil {
-		return s.Store.DeleteSandbox(ctx, sandboxID)
+		if err := s.Store.DeleteSandbox(ctx, sandboxID); err != nil {
+			return err
+		}
+	}
+	if rec.SandboxID != "" {
+		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
+}
+
+// HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
+// It is called by sandbox.Manager after the runtime resources have been cleaned up.
+func (s *Service) HandleSandboxUnexpectedExit(sandboxID string) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	unlock := s.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	rec, err := s.getSandbox(context.Background(), sandboxID)
+	if errors.Is(err, state.ErrNotFound) {
+		return
+	}
+	if err != nil {
+		ulog.GetLogger().Error("failed to read sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		return
+	}
+	if rec.State == state.SandboxUnknown {
+		return
+	}
+	rec.State = state.SandboxUnknown
+	if err := s.upsertSandbox(context.Background(), rec); err != nil {
+		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		return
+	}
+	s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+}
+
+func (s *Service) publishLifecycleEvent(eventType string, rec state.SandboxRecord, killReason string) {
+	if s == nil || s.WebhookDispatcher == nil {
+		return
+	}
+	event, err := webhook.NewEvent(eventType, rec.SandboxID, killReason, webhook.Execution{
+		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339),
+		VCPUNum:   rec.VCPUNum,
+		RamMB:     rec.RamMB,
+	})
+	if err != nil {
+		ulog.GetLogger().Error("failed to create sandbox lifecycle event", ulog.F("sandbox_id", rec.SandboxID), ulog.F("error", err))
+		return
+	}
+	s.WebhookDispatcher.Publish(event)
 }
 
 func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
@@ -673,7 +730,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 		return templateBuildResult{}, fmt.Errorf("label rootfs source image: %w", err)
 	}
 
-	buildID, err := NewID()
+	buildID, err := id.New()
 	if err != nil {
 		return templateBuildResult{}, err
 	}
@@ -870,14 +927,6 @@ func combineOperationErrors(primary error, secondary ...error) error {
 		return appErr.WrapMessage(errors.Join(primary, additional), appErr.PublicMessage())
 	}
 	return fmt.Errorf("%w; additional operation failures: %v", primary, additional)
-}
-
-func NewID() (string, error) {
-	var data [16]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", fmt.Errorf("generate id: %w", err)
-	}
-	return hex.EncodeToString(data[:]), nil
 }
 
 func copyMap(in map[string]string) map[string]string {

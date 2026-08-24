@@ -19,6 +19,22 @@ type SandboxNetworkUpdateOptions struct {
 	Network   *SandboxNetworkConfig
 }
 
+// WebhookCreateOptions describes a Webhook registration for this conchd instance.
+type WebhookCreateOptions struct {
+	Name   string
+	URL    string
+	Events []string
+}
+
+// WebhookRecord is the runtime representation of an in-memory Webhook registration.
+type WebhookRecord struct {
+	WebhookID string
+	Name      string
+	URL       string
+	Events    []string
+	CreatedAt time.Time
+}
+
 // ImageRecord.Kind values exposed by the image API. These classify the
 // user-visible image record, not the io.conch.kind annotation stored on Boot
 // Index component descriptors.

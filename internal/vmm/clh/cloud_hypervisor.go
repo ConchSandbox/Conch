@@ -213,11 +213,11 @@ func (c *CLHClient) Cleanup() {
 	}
 }
 
-func (c *CLHClient) WaitForCreateReady(ctx context.Context, processExited <-chan error) error {
+func (c *CLHClient) WaitForCreateReady(ctx context.Context, _ driver.ProcessExit) error {
 	return c.waitForSourceEvent(ctx, "vm", EventBooted)
 }
 
-func (c *CLHClient) WaitForRestoreReady(ctx context.Context, processExited <-chan error) error {
+func (c *CLHClient) WaitForRestoreReady(ctx context.Context, _ driver.ProcessExit) error {
 	return nil
 }
 
@@ -548,7 +548,7 @@ func (c *CLHClient) requestApi(method, fullCommand, requestBody string) error {
 	return nil
 }
 
-func (c *CLHClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
+func (c *CLHClient) CheckAgentAlive(ctx context.Context, processExited driver.ProcessExit) error {
 	// TODO: call conch-init GetHealth
 	return nil
 }

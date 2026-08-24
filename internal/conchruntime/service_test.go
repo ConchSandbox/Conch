@@ -2,8 +2,11 @@ package conchruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,12 +23,13 @@ import (
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/webhook"
 )
 
 type fakeSandboxOps struct {
@@ -40,6 +44,103 @@ type fakeSandboxOps struct {
 	updateReq          sandbox.NetworkUpdateRequest
 	updateErr          error
 	createHook         func()
+}
+
+func TestSandboxLifecycleEventsPublishedAfterCreateAndDelete(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenBolt: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	events := make(chan webhook.Event, 2)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event webhook.Event
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Errorf("decode event: %v", err)
+			return
+		}
+		events <- event
+	}))
+	defer receiver.Close()
+	dispatcher := webhook.NewDispatcher()
+	if _, err := dispatcher.Create(runtimeapi.WebhookCreateOptions{Name: "receiver", URL: receiver.URL}); err != nil {
+		t.Fatalf("register webhook: %v", err)
+	}
+	templateID := digest.FromString("lifecycle-event-template").String()
+	svc := New(&fakeSandboxOps{createResult: sandbox.CreateResult{BootIndexDigest: templateID}}, nil, store)
+	svc.WebhookDispatcher = dispatcher
+	created, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{SandboxID: "sandbox-events", TemplateID: templateID, VCPUNum: 2, VCPUMax: 2, RamMB: 512})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxCreated || event.EventData.KillReason != "" || event.SandboxID != created.SandboxID || event.EventData.Execution.VCPUNum != 2 || event.EventData.Execution.RamMB != 512 {
+			t.Fatalf("created event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("created event not delivered")
+	}
+	if err := svc.RemoveSandbox(context.Background(), created.SandboxID); err != nil {
+		t.Fatalf("RemoveSandbox: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "request" || event.SandboxID != created.SandboxID {
+			t.Fatalf("killed event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("killed event not delivered")
+	}
+}
+
+func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenBolt: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	templateID := digest.FromString("orphaned-event-template").String()
+	record := state.SandboxRecord{SandboxID: "sandbox-orphaned", State: state.SandboxReady, CreatedAt: time.Now().UnixNano(), CheckpointHeadTemplateID: templateID, VCPUNum: 2, RamMB: 512}
+	if err := store.UpsertSandbox(context.Background(), record); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	events := make(chan webhook.Event, 2)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event webhook.Event
+		if err := json.NewDecoder(r.Body).Decode(&event); err == nil {
+			events <- event
+		}
+	}))
+	defer receiver.Close()
+	dispatcher := webhook.NewDispatcher()
+	if _, err := dispatcher.Create(runtimeapi.WebhookCreateOptions{Name: "receiver", URL: receiver.URL}); err != nil {
+		t.Fatalf("register webhook: %v", err)
+	}
+	svc := New(nil, nil, store)
+	svc.WebhookDispatcher = dispatcher
+	svc.HandleSandboxUnexpectedExit(record.SandboxID)
+	svc.HandleSandboxUnexpectedExit(record.SandboxID)
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" || event.SandboxID != record.SandboxID {
+			t.Fatalf("orphaned event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("orphaned event not delivered")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected duplicate orphaned event = %#v", event)
+	case <-time.After(100 * time.Millisecond):
+	}
+	updated, err := store.GetSandbox(context.Background(), record.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if updated.State != state.SandboxUnknown {
+		t.Fatalf("state = %q, want %q", updated.State, state.SandboxUnknown)
+	}
 }
 
 type serializedDeleteOps struct {
@@ -654,7 +755,7 @@ func TestCreateSandboxGeneratesIDWhenSandboxIDIsNotProvided(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateSandbox() error = %v", err)
 			}
-			if len(result.SandboxID) != 32 || sandboxid.Validate(result.SandboxID) != nil {
+			if len(result.SandboxID) != 32 || id.Validate(result.SandboxID) != nil {
 				t.Fatalf("generated sandbox ID = %q, want 32-character safe ID", result.SandboxID)
 			}
 			if ops.req.SandboxID != result.SandboxID {

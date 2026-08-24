@@ -32,6 +32,7 @@ import (
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
+	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -47,16 +48,17 @@ const (
 )
 
 type Daemon struct {
-	router         *http.ServeMux
-	containerdHost *containerdhost.Host
-	stateStore     state.Store
-	runtimeService *conchruntime.Service
-	volumeManager  *volume.Manager
-	daemonClient   *containerdclient.Client
-	httpServer     *http.Server
-	listener       net.Listener
-	unixSocketPath string
-	cleanupOnce    sync.Once
+	router            *http.ServeMux
+	containerdHost    *containerdhost.Host
+	stateStore        state.Store
+	runtimeService    *conchruntime.Service
+	webhookDispatcher *webhook.Dispatcher
+	volumeManager     *volume.Manager
+	daemonClient      *containerdclient.Client
+	httpServer        *http.Server
+	listener          net.Listener
+	unixSocketPath    string
+	cleanupOnce       sync.Once
 
 	// TODO: need ListCachedBuilds()
 }
@@ -156,6 +158,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.daemonClient = daemonClient
 
 	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), store)
+	s.webhookDispatcher = webhook.NewDispatcher()
+	s.runtimeService.WebhookDispatcher = s.webhookDispatcher
 	s.runtimeService.Snapshot = host.SnapshotServer()
 	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
@@ -168,6 +172,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	manager := host.SandboxManager()
 	if manager != nil {
+		manager.UnexpectedExitHandler = s.runtimeService.HandleSandboxUnexpectedExit
 		records, err := store.ListSandboxes(ctx)
 		if err != nil {
 			cleanupErr := host.Close()
@@ -215,6 +220,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 func (s *Daemon) routes() {
+	s.router.HandleFunc("POST /api/v1/events/webhooks", s.handleCreateWebhook)
+	s.router.HandleFunc("GET /api/v1/events/webhooks", s.handleListWebhooks)
+	s.router.HandleFunc("DELETE /api/v1/events/webhooks/{webhookID}", s.handleDeleteWebhook)
 	// sandbox
 	s.router.HandleFunc("GET /api/v1/sandboxes", s.handleListSandbox)
 	s.router.HandleFunc("POST /api/v1/sandboxes", s.handleCreateSandbox)
@@ -453,6 +461,76 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sandboxResponseFromCreate(result))
+}
+
+// Webhook management handlers configure the daemon-local in-memory dispatcher.
+func (s *Daemon) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling create webhook request")
+
+	if s.webhookDispatcher == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	var req webhookCreateRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	hook, err := s.webhookDispatcher.Create(runtimeapi.WebhookCreateOptions{
+		Name: req.Name, URL: req.URL, Events: req.Events,
+	})
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	logger.Info("Webhook created successfully", ulog.F("webhook_id", hook.WebhookID), ulog.F("webhook_name", hook.Name))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(webhookResponseFromRecord(hook))
+}
+
+func (s *Daemon) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	logger.Debug("Handling list webhooks request")
+
+	if s.webhookDispatcher == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	records := s.webhookDispatcher.List()
+	hooks := make([]webhookResponse, 0, len(records))
+	for _, record := range records {
+		hooks = append(hooks, webhookResponseFromRecord(record))
+	}
+	logger.Debug("Webhooks listed successfully", ulog.F("webhook_count", len(hooks)))
+	_ = json.NewEncoder(w).Encode(listWebhooksResponse{Webhooks: hooks})
+}
+
+func webhookResponseFromRecord(record runtimeapi.WebhookRecord) webhookResponse {
+	return webhookResponse{
+		WebhookID: record.WebhookID, Name: record.Name, URL: record.URL,
+		Events:    append([]string(nil), record.Events...),
+		CreatedAt: record.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func (s *Daemon) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
+	logger := ulog.GetLogger()
+	webhookID := strings.TrimSpace(r.PathValue("webhookID"))
+	logger.Debug("Handling delete webhook request", ulog.F("webhook_id", webhookID))
+
+	if s.webhookDispatcher == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	if webhookID == "" || !s.webhookDispatcher.Delete(webhookID) {
+		writeAPIError(w, webhook.ErrNotFound.New())
+		return
+	}
+	logger.Info("Webhook deleted successfully", ulog.F("webhook_id", webhookID))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(deleteWebhookResponse{WebhookID: webhookID, Status: "deleted"})
 }
 
 func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Request) {
