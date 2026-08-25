@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 
@@ -160,6 +163,47 @@ func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
 	}
 	if len(resolver.requests) != 0 || snapshots.callCount() != 0 {
 		t.Fatalf("backends called for missing digest: resolver=%#v snapshots=%#v", resolver.requests, snapshots)
+	}
+}
+
+func TestBootPreparerCoalescesConcurrentTemplateResolution(t *testing.T) {
+	templates, _, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
+	resolved := resolvedBoot(bootDigest, true, "stratovirt")
+	var calls atomic.Int32
+	resolverStarted := make(chan struct{})
+	releaseResolver := make(chan struct{})
+	var startedOnce sync.Once
+	preparer, err := newBootPreparer(templates, &fakeSnapshotBackend{}, func(_ context.Context, _ string) (conchimage.ResolvedBoot, error) {
+		calls.Add(1)
+		startedOnce.Do(func() { close(resolverStarted) })
+		<-releaseResolver
+		return resolved, nil
+	})
+	if err != nil {
+		t.Fatalf("newBootPreparer() error = %v", err)
+	}
+
+	const concurrency = 50
+	start := make(chan struct{})
+	errs := make(chan error, concurrency)
+	for range concurrency {
+		go func() {
+			<-start
+			_, _, resolveErr := preparer.(*bootPreparer).resolveTemplate(context.Background(), bootDigest)
+			errs <- resolveErr
+		}()
+	}
+	close(start)
+	<-resolverStarted
+	time.Sleep(50 * time.Millisecond)
+	close(releaseResolver)
+	for range concurrency {
+		if resolveErr := <-errs; resolveErr != nil {
+			t.Fatalf("resolveTemplate() error = %v", resolveErr)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("resolver calls = %d, want 1", got)
 	}
 }
 

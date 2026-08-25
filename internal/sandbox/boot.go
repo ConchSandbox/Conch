@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
@@ -85,6 +87,7 @@ type bootPreparer struct {
 	resolveBoot  func(context.Context, string) (conchimage.ResolvedBoot, error)
 	resolveLazy  func(context.Context, template.Entry) (conchimage.ResolvedBoot, error)
 	resolveCache sync.Map // boot index digest -> resolvedTemplateCache
+	resolveGroup singleflight.Group
 }
 
 type resolvedTemplateCache struct {
@@ -175,35 +178,55 @@ func (p *bootPreparer) resolveTemplate(
 	if bootIndexDigest == "" {
 		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template has no boot index digest")
 	}
-	if cached, ok := p.resolveCache.Load(bootIndexDigest); ok {
-		c := cached.(resolvedTemplateCache)
-		if !c.resolved.ExternalMemoryErofsPathOK() {
-			p.resolveCache.Delete(bootIndexDigest)
-		} else {
-			return c.resolved, c.entry, nil
+	if cached, ok := p.loadResolvedTemplate(bootIndexDigest); ok {
+		return cached.resolved, cached.entry, nil
+	}
+
+	value, err, _ := p.resolveGroup.Do(bootIndexDigest, func() (any, error) {
+		if cached, ok := p.loadResolvedTemplate(bootIndexDigest); ok {
+			return cached, nil
 		}
-	}
-	resolved, err := p.resolveBoot(ctx, bootIndexDigest)
-	if err != nil && p.resolveLazy != nil && strings.TrimSpace(entry.SourceRef) != "" {
-		resolved, err = p.resolveLazy(ctx, entry)
-	}
+		resolved, resolveErr := p.resolveBoot(ctx, bootIndexDigest)
+		if resolveErr != nil && p.resolveLazy != nil && strings.TrimSpace(entry.SourceRef) != "" {
+			resolved, resolveErr = p.resolveLazy(ctx, entry)
+		}
+		if resolveErr != nil {
+			return nil, fmt.Errorf(
+				"resolve template %s boot index %s: %w",
+				entry.BootIndexDigest,
+				bootIndexDigest,
+				resolveErr,
+			)
+		}
+		if resolved.BootIndexDigest != bootIndexDigest {
+			return nil, fmt.Errorf(
+				"resolved boot index digest %s does not match template digest %s",
+				resolved.BootIndexDigest,
+				bootIndexDigest,
+			)
+		}
+		cached := resolvedTemplateCache{resolved: resolved, entry: entry}
+		p.resolveCache.Store(bootIndexDigest, cached)
+		return cached, nil
+	})
 	if err != nil {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
-			"resolve template %s boot index %s: %w",
-			entry.BootIndexDigest,
-			bootIndexDigest,
-			err,
-		)
+		return conchimage.ResolvedBoot{}, template.Entry{}, err
 	}
-	if resolved.BootIndexDigest != bootIndexDigest {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
-			"resolved boot index digest %s does not match template digest %s",
-			resolved.BootIndexDigest,
-			bootIndexDigest,
-		)
+	cached := value.(resolvedTemplateCache)
+	return cached.resolved, cached.entry, nil
+}
+
+func (p *bootPreparer) loadResolvedTemplate(bootIndexDigest string) (resolvedTemplateCache, bool) {
+	cached, ok := p.resolveCache.Load(bootIndexDigest)
+	if !ok {
+		return resolvedTemplateCache{}, false
 	}
-	p.resolveCache.Store(bootIndexDigest, resolvedTemplateCache{resolved: resolved, entry: entry})
-	return resolved, entry, nil
+	result := cached.(resolvedTemplateCache)
+	if !result.resolved.ExternalMemoryErofsPathOK() {
+		p.resolveCache.Delete(bootIndexDigest)
+		return resolvedTemplateCache{}, false
+	}
+	return result, true
 }
 
 func (p *bootPreparer) prepareResolvedBoot(
