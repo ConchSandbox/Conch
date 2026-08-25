@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem in Conch
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping us improve Conch. Please search for existing issues
+        and remove credentials or other sensitive information before posting.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem, what you expected, and how it affected you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Provide the smallest set of steps or commands that reproduces the problem.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the Conch version or commit, VMM backend, host OS and kernel, architecture, and other relevant versions.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Logs or additional context
+      description: Add relevant logs, configuration, screenshots, or other context.
