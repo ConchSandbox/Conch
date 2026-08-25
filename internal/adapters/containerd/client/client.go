@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/errdefs"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -72,6 +73,12 @@ func (c *Client) ensureLease(ctx context.Context, leaseID string, labels map[str
 	}
 	_, err = c.LeasesService().Create(ctx, leases.WithID(leaseID), leases.WithLabels(labels))
 	if err != nil {
+		// The runtime lease is a process-wide singleton shared by every sandbox;
+		// concurrent cold starts can race to create it. Treat an already-existing
+		// lease as success (idempotent) instead of failing the sandbox.
+		if errdefs.IsAlreadyExists(err) {
+			return nil
+		}
 		return fmt.Errorf("create runtime lease %s: %w", leaseID, err)
 	}
 	return nil
