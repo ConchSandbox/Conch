@@ -86,6 +86,7 @@ type bootPreparer struct {
 	snapshots    SnapshotBackend
 	resolveBoot  func(context.Context, string) (conchimage.ResolvedBoot, error)
 	resolveLazy  func(context.Context, template.Entry) (conchimage.ResolvedBoot, error)
+	preGate      bool
 	resolveCache sync.Map // boot index digest -> resolvedTemplateCache
 	resolveGroup singleflight.Group
 }
@@ -105,6 +106,7 @@ func NewBootPreparer(templates TemplateReader, snapshots SnapshotBackend, client
 	if err != nil {
 		return nil, err
 	}
+	preparer.(*bootPreparer).preGate = preGateEnabled
 	if preGateEnabled {
 		preparer.(*bootPreparer).resolveLazy = func(ctx context.Context, entry template.Entry) (conchimage.ResolvedBoot, error) {
 			plainHTTP := strings.EqualFold(entry.Labels[conchimage.TemplateLabelRegistryPlainHTTP], "true")
@@ -178,6 +180,25 @@ func (p *bootPreparer) resolveTemplate(
 	if bootIndexDigest == "" {
 		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template has no boot index digest")
 	}
+	if !p.preGate {
+		resolved, resolveErr := p.resolveBoot(ctx, bootIndexDigest)
+		if resolveErr != nil {
+			return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
+				"resolve template %s boot index %s: %w",
+				entry.BootIndexDigest,
+				bootIndexDigest,
+				resolveErr,
+			)
+		}
+		if resolved.BootIndexDigest != bootIndexDigest {
+			return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(
+				"resolved boot index digest %s does not match template digest %s",
+				resolved.BootIndexDigest,
+				bootIndexDigest,
+			)
+		}
+		return resolved, entry, nil
+	}
 	if cached, ok := p.loadResolvedTemplate(bootIndexDigest); ok {
 		return cached.resolved, cached.entry, nil
 	}
@@ -187,7 +208,7 @@ func (p *bootPreparer) resolveTemplate(
 			return cached, nil
 		}
 		resolved, resolveErr := p.resolveBoot(ctx, bootIndexDigest)
-		if resolveErr != nil && p.resolveLazy != nil && strings.TrimSpace(entry.SourceRef) != "" {
+		if resolveErr != nil && strings.TrimSpace(entry.SourceRef) != "" {
 			resolved, resolveErr = p.resolveLazy(ctx, entry)
 		}
 		if resolveErr != nil {

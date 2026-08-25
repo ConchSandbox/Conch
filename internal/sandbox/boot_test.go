@@ -182,6 +182,11 @@ func TestBootPreparerCoalescesConcurrentTemplateResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newBootPreparer() error = %v", err)
 	}
+	preparer.(*bootPreparer).preGate = true
+	preparer.(*bootPreparer).resolveLazy = func(context.Context, template.Entry) (conchimage.ResolvedBoot, error) {
+		t.Fatal("lazy resolver called after regular resolution succeeded")
+		return conchimage.ResolvedBoot{}, nil
+	}
 
 	const concurrency = 50
 	start := make(chan struct{})
@@ -316,11 +321,10 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 		second.Spec.MemoryPath != "" || second.Spec.SnapfilePath == "" {
 		t.Fatalf("StratoVirt restore specs = %#v %#v", first.Spec, second.Spec)
 	}
-	// The boot resolver is memoized per boot index: unpack and materializer
-	// initialization are shared across sandboxes of the same template, while
-	// each sandbox still gets its own boot layout (asserted above).
-	if len(resolver.requests) != 1 {
-		t.Fatalf("Boot resolver count = %d, want 1 (cached)", len(resolver.requests))
+	// With pre-gate disabled, each sandbox follows the original resolve path
+	// while still receiving its own boot layout (asserted above).
+	if len(resolver.requests) != 2 {
+		t.Fatalf("Boot resolver count = %d, want 2", len(resolver.requests))
 	}
 }
 
