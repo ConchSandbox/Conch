@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a technical feature or improvement for Conch
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to propose a technical change to Conch.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the limitation or technical problem that should be addressed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: Background and context
+      description: Explain the relevant use cases, current behavior, constraints, and related issues or implementations.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the suggested design, including relevant API, CLI, configuration, compatibility, or testing considerations.
+    validations:
+      required: true
