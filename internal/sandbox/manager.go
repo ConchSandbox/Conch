@@ -33,19 +33,20 @@ type Config struct {
 }
 
 type Manager struct {
-	sandboxes          sync.Map // map[string]*sandboxEntry
-	pool               *netstack.Pool
-	daemonClient       *containerdclient.Client
-	boot               BootPreparer
-	checkpointCapture  CheckpointCapture
-	vsockSignalRetry   time.Duration
-	vsockSignalTimeout time.Duration
-	requestTimeout     time.Duration
-	cidAllocator       *CIDAllocator
-	volumeManager      *volume.Manager
-	vmmBinaries        map[string]string
-	preGateEnabled     bool
-	preGateStateDir    string
+	sandboxes             sync.Map // map[string]*sandboxEntry
+	pool                  *netstack.Pool
+	daemonClient          *containerdclient.Client
+	boot                  BootPreparer
+	checkpointCapture     CheckpointCapture
+	vsockSignalRetry      time.Duration
+	vsockSignalTimeout    time.Duration
+	requestTimeout        time.Duration
+	cidAllocator          *CIDAllocator
+	volumeManager         *volume.Manager
+	vmmBinaries           map[string]string
+	preGateEnabled        bool
+	preGateStateDir       string
+	UnexpectedExitHandler UnexpectedExitHandler
 }
 
 type sandboxLifecycleState uint8
@@ -71,6 +72,8 @@ type sandboxEntry struct {
 	state sandboxLifecycleState
 	sbx   *Sandbox
 }
+
+type UnexpectedExitHandler func(sandboxID string)
 
 func New(
 	ctx context.Context,
@@ -605,15 +608,18 @@ func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandbo
 func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
 	logger := ulog.GetLogger()
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
 	if !m.isCurrentSandboxEntry(mapKey, entry) || entry.sbx != sbx {
+		entry.mu.Unlock()
 		return
 	}
-
 	if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
 		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 	}
 	m.sandboxes.CompareAndDelete(mapKey, entry)
+	entry.mu.Unlock()
+	if m.UnexpectedExitHandler != nil {
+		m.UnexpectedExitHandler(sandboxID)
+	}
 }
 
 func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {

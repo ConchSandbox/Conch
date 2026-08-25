@@ -263,8 +263,7 @@ func CreateSandbox(
 }
 
 func (s *Sandbox) Wait(ctx context.Context) error {
-	s.process.Wait()
-	return nil
+	return s.process.Wait()
 }
 
 func (s *Sandbox) Stop(ctx context.Context) error {

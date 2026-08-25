@@ -543,6 +543,84 @@ func InspectBootIndexContent(ctx context.Context, store content.Store, desc ocis
 	return info, nil
 }
 
+// InspectLazyBootIndexContent validates the closure fetched for a lazy resume
+// Template. Only the memory layer blob may be absent; its manifest, config,
+// descriptor metadata, and every other component must already be present.
+func InspectLazyBootIndexContent(ctx context.Context, store content.Store, desc ocispec.Descriptor) (BootIndexInfo, error) {
+	if store == nil {
+		return BootIndexInfo{}, fmt.Errorf("content store is required")
+	}
+	if desc.MediaType != ocispec.MediaTypeImageIndex {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("boot index %s has media type %q, want %q", desc.Digest, desc.MediaType, ocispec.MediaTypeImageIndex))
+	}
+	if err := validateStoredDescriptor(ctx, store, desc); err != nil {
+		return BootIndexInfo{}, err
+	}
+	raw, err := content.ReadBlob(ctx, store, desc)
+	if err != nil {
+		return BootIndexInfo{}, fmt.Errorf("read boot index %s: %w", desc.Digest, err)
+	}
+	var index ocispec.Index
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("unmarshal boot index %s: %w", desc.Digest, err))
+	}
+	if index.MediaType != "" && index.MediaType != ocispec.MediaTypeImageIndex {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("boot index %s declares media type %q", desc.Digest, index.MediaType))
+	}
+	info, err := inspectBootIndexMetadata(desc, index)
+	if err != nil {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(err)
+	}
+	if !info.Resume {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("lazy boot index %s is not a resume Template", desc.Digest))
+	}
+	for _, component := range index.Manifests {
+		if err := validateStoredDescriptor(ctx, store, component); err != nil {
+			return BootIndexInfo{}, err
+		}
+		manifest, err := readManifest(ctx, store, component)
+		if err != nil {
+			return BootIndexInfo{}, fmt.Errorf("read component manifest %s: %w", component.Digest, err)
+		}
+		if manifest.MediaType != "" && manifest.MediaType != ocispec.MediaTypeImageManifest {
+			return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("component %s declares media type %q", component.Digest, manifest.MediaType))
+		}
+		if err := validateStoredDescriptor(ctx, store, manifest.Config); err != nil {
+			return BootIndexInfo{}, err
+		}
+		if getKind(component) == KindMemSnapshot {
+			metadata, err := parseLazyMemoryMetadata(info.PreGateProfile, manifest)
+			if err != nil {
+				return BootIndexInfo{}, ErrInvalidContent.Wrap(err)
+			}
+			if err := validateStoredDescriptor(ctx, store, metadata.Layer); err != nil && !errdefs.IsNotFound(err) {
+				return BootIndexInfo{}, err
+			}
+			continue
+		}
+		for _, layer := range manifest.Layers {
+			if err := validateStoredDescriptor(ctx, store, layer); err != nil {
+				return BootIndexInfo{}, err
+			}
+		}
+	}
+	return info, nil
+}
+
+func validateStoredDescriptor(ctx context.Context, store content.Store, desc ocispec.Descriptor) error {
+	if err := validateDescriptor(desc, "content"); err != nil {
+		return ErrInvalidContent.Wrap(err)
+	}
+	info, err := store.Info(ctx, desc.Digest)
+	if err != nil {
+		return fmt.Errorf("content %s is unavailable: %w", desc.Digest, err)
+	}
+	if desc.Size > 0 && info.Size != desc.Size {
+		return ErrInvalidContent.Wrap(fmt.Errorf("content %s size %d does not match descriptor size %d", desc.Digest, info.Size, desc.Size))
+	}
+	return nil
+}
+
 // inspectBootIndexMetadata validates the metadata carried by the top-level
 // index and its component descriptors without reading referenced content.
 func inspectBootIndexMetadata(desc ocispec.Descriptor, index ocispec.Index) (BootIndexInfo, error) {

@@ -219,12 +219,11 @@ func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
 func TestWaitForVmmSocketReturnsProcessExitError(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
 	processErr := errors.New("stratovirt exited before creating qmp socket")
-	processExited := make(chan error, 1)
+	processExited := &testProcessExit{done: make(chan struct{}), err: processErr}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	processExited <- processErr
-	close(processExited)
+	close(processExited.done)
 
 	err := waitForVmmSocket(ctx, socketPath, processExited)
 	if !errors.Is(err, processErr) {
@@ -234,3 +233,11 @@ func TestWaitForVmmSocketReturnsProcessExitError(t *testing.T) {
 		t.Fatalf("waitForVmmSocket() error = %q, want early exit context", err.Error())
 	}
 }
+
+type testProcessExit struct {
+	done chan struct{}
+	err  error
+}
+
+func (p *testProcessExit) Done() <-chan struct{} { return p.done }
+func (p *testProcessExit) Err() error            { return p.err }

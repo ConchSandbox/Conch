@@ -124,16 +124,20 @@ func (s *StratovirtClient) AfterProcessStart() {}
 
 func (s *StratovirtClient) Cleanup() {}
 
-func (s *StratovirtClient) WaitForCreateReady(ctx context.Context, processExited <-chan error) error {
+func (s *StratovirtClient) WaitForCreateReady(ctx context.Context, processExited driver.ProcessExit) error {
 	return waitForVmmSocket(ctx, s.socketPath, processExited)
 }
 
-func (s *StratovirtClient) WaitForRestoreReady(ctx context.Context, processExited <-chan error) error {
+func (s *StratovirtClient) WaitForRestoreReady(ctx context.Context, processExited driver.ProcessExit) error {
 	return waitForVmmSocket(ctx, s.socketPath, processExited)
 }
 
-func waitForVmmSocket(ctx context.Context, socketPath string, processExited <-chan error) error {
+func waitForVmmSocket(ctx context.Context, socketPath string, processExited driver.ProcessExit) error {
 	logger := ulog.GetLogger()
+	var exitDone <-chan struct{}
+	if processExited != nil {
+		exitDone = processExited.Done()
+	}
 
 	delay := 2 * time.Millisecond
 	const maxDelay = 100 * time.Millisecond
@@ -148,12 +152,13 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited <-ch
 		case <-ctx.Done():
 			timer.Stop()
 			return fmt.Errorf("cancelled waiting for vmm socket %s: %w", socketPath, ctx.Err())
-		case waitErr, ok := <-processExited:
+		case <-exitDone:
 			timer.Stop()
-			if !ok || waitErr == nil {
+			if waitErr := processExited.Err(); waitErr == nil {
 				return fmt.Errorf("vmm process exited before vmm socket %s was ready", socketPath)
+			} else {
+				return fmt.Errorf("vmm process exited before vmm socket %s was ready: %w", socketPath, waitErr)
 			}
-			return fmt.Errorf("vmm process exited before vmm socket %s was ready: %w", socketPath, waitErr)
 		case <-timer.C:
 		}
 
@@ -435,16 +440,21 @@ func (s *StratovirtClient) executeQMPCommandWithResponse(command string, argumen
 	return response, nil
 }
 
-func waitForAgentRetry(ctx context.Context, processExited <-chan error, delay time.Duration) error {
+func waitForAgentRetry(ctx context.Context, processExited driver.ProcessExit, delay time.Duration) error {
+	var exitDone <-chan struct{}
+	if processExited != nil {
+		exitDone = processExited.Done()
+	}
 	if delay <= 0 {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("cancelled waiting for conch-init ready: %w", ctx.Err())
-		case waitErr, ok := <-processExited:
-			if !ok || waitErr == nil {
+		case <-exitDone:
+			if waitErr := processExited.Err(); waitErr == nil {
 				return fmt.Errorf("vmm process exited before conch-init became ready")
+			} else {
+				return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 			}
-			return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 		default:
 			return nil
 		}
@@ -456,17 +466,18 @@ func waitForAgentRetry(ctx context.Context, processExited <-chan error, delay ti
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("cancelled waiting for conch-init ready: %w", ctx.Err())
-	case waitErr, ok := <-processExited:
-		if !ok || waitErr == nil {
+	case <-exitDone:
+		if waitErr := processExited.Err(); waitErr == nil {
 			return fmt.Errorf("vmm process exited before conch-init became ready")
+		} else {
+			return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 		}
-		return fmt.Errorf("vmm process exited before conch-init became ready: %w", waitErr)
 	case <-timer.C:
 		return nil
 	}
 }
 
-func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited <-chan error) error {
+func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited driver.ProcessExit) error {
 	logger := ulog.GetLogger()
 
 	for i := 0; i < 60; i++ {

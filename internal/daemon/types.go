@@ -5,6 +5,30 @@ import (
 	"github.com/openeuler/Conch/internal/volume"
 )
 
+// webhookCreateRequest is the daemon HTTP API payload for registering a Webhook.
+type webhookCreateRequest struct {
+	Name   string   `json:"name"`
+	URL    string   `json:"url"`
+	Events []string `json:"events"`
+}
+
+type webhookResponse struct {
+	WebhookID string   `json:"webhook_id"`
+	Name      string   `json:"name"`
+	URL       string   `json:"url"`
+	Events    []string `json:"events"`
+	CreatedAt string   `json:"createdAt"`
+}
+
+type listWebhooksResponse struct {
+	Webhooks []webhookResponse `json:"webhooks"`
+}
+
+type deleteWebhookResponse struct {
+	WebhookID string `json:"webhook_id"`
+	Status    string `json:"status"`
+}
+
 type pullImageRequest struct {
 	ImageName string `json:"image_name"`
 	PlainHTTP bool   `json:"plain_http,omitempty"`

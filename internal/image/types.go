@@ -22,13 +22,17 @@ type PublishBootIndexOptions struct {
 }
 
 type PublishBootIndexResult struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BuildRef        string `json:"build_ref"`
+	BootIndexDigest string             `json:"boot_index_digest"`
+	BuildRef        string             `json:"build_ref"`
+	Target          ocispec.Descriptor `json:"-"`
 }
 
 type PullBootIndexResult struct {
-	Info     BootIndexInfo
-	BuildRef string
+	Info            BootIndexInfo
+	BuildRef        string
+	SourceImageName string
+	Target          ocispec.Descriptor `json:"-"`
+	Lazy            bool               `json:"-"`
 }
 
 // BootIndexInfo is the validated, content-addressed view of a Conch Boot
@@ -64,8 +68,9 @@ type PublishCheckpointBootIndexOptions struct {
 // PublishCheckpointBootIndexResult deliberately contains no snapshot keys:
 // publishing checkpoint content must not create checkpoint snapshots.
 type PublishCheckpointBootIndexResult struct {
-	BootIndexDigest string `json:"boot_index_digest"`
-	BuildRef        string `json:"build_ref"`
+	BootIndexDigest string             `json:"boot_index_digest"`
+	BuildRef        string             `json:"build_ref"`
+	Target          ocispec.Descriptor `json:"-"`
 }
 
 // PushBootIndexOptions publishes the descriptor closure rooted at an

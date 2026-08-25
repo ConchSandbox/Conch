@@ -73,6 +73,27 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	}
 }
 
+func TestHandleSandboxExitCallsUnexpectedHandlerOnce(t *testing.T) {
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error { return nil })
+	called := make(chan string, 2)
+	m.UnexpectedExitHandler = func(id string) { called <- id }
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	select {
+	case id := <-called:
+		if id != "sandbox-a" {
+			t.Fatalf("handler sandbox ID = %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected-exit handler was not called")
+	}
+	select {
+	case id := <-called:
+		t.Fatalf("handler called more than once for %q", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestWaitForSandboxExitCleansSandboxOnVirtiofsExit(t *testing.T) {
 	cleanupDone := make(chan struct{})
 	m, entry, sbx := newExitTestSandbox(func(context.Context) error {

@@ -2,8 +2,11 @@ package conchruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,17 +18,19 @@ import (
 
 	containerderrdefs "github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/webhook"
 )
 
 type fakeSandboxOps struct {
@@ -42,11 +47,116 @@ type fakeSandboxOps struct {
 	createHook         func()
 }
 
+func TestSandboxLifecycleEventsPublishedAfterCreateAndDelete(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenBolt: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	events := make(chan webhook.Event, 2)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event webhook.Event
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Errorf("decode event: %v", err)
+			return
+		}
+		events <- event
+	}))
+	defer receiver.Close()
+	dispatcher := webhook.NewDispatcher()
+	if _, err := dispatcher.Create(runtimeapi.WebhookCreateOptions{Name: "receiver", URL: receiver.URL}); err != nil {
+		t.Fatalf("register webhook: %v", err)
+	}
+	templateID := digest.FromString("lifecycle-event-template").String()
+	svc := New(&fakeSandboxOps{createResult: sandbox.CreateResult{BootIndexDigest: templateID}}, nil, store)
+	svc.WebhookDispatcher = dispatcher
+	created, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{SandboxID: "sandbox-events", TemplateID: templateID, VCPUNum: 2, VCPUMax: 2, RamMB: 512})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxCreated || event.EventData.KillReason != "" || event.SandboxID != created.SandboxID || event.EventData.Execution.VCPUNum != 2 || event.EventData.Execution.RamMB != 512 {
+			t.Fatalf("created event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("created event not delivered")
+	}
+	if err := svc.RemoveSandbox(context.Background(), created.SandboxID); err != nil {
+		t.Fatalf("RemoveSandbox: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "request" || event.SandboxID != created.SandboxID {
+			t.Fatalf("killed event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("killed event not delivered")
+	}
+}
+
+func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
+	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenBolt: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	templateID := digest.FromString("orphaned-event-template").String()
+	record := state.SandboxRecord{SandboxID: "sandbox-orphaned", State: state.SandboxReady, CreatedAt: time.Now().UnixNano(), CheckpointHeadTemplateID: templateID, VCPUNum: 2, RamMB: 512}
+	if err := store.UpsertSandbox(context.Background(), record); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	events := make(chan webhook.Event, 2)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event webhook.Event
+		if err := json.NewDecoder(r.Body).Decode(&event); err == nil {
+			events <- event
+		}
+	}))
+	defer receiver.Close()
+	dispatcher := webhook.NewDispatcher()
+	if _, err := dispatcher.Create(runtimeapi.WebhookCreateOptions{Name: "receiver", URL: receiver.URL}); err != nil {
+		t.Fatalf("register webhook: %v", err)
+	}
+	svc := New(nil, nil, store)
+	svc.WebhookDispatcher = dispatcher
+	svc.HandleSandboxUnexpectedExit(record.SandboxID)
+	svc.HandleSandboxUnexpectedExit(record.SandboxID)
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" || event.SandboxID != record.SandboxID {
+			t.Fatalf("orphaned event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("orphaned event not delivered")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected duplicate orphaned event = %#v", event)
+	case <-time.After(100 * time.Millisecond):
+	}
+	updated, err := store.GetSandbox(context.Background(), record.SandboxID)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if updated.State != state.SandboxUnknown {
+		t.Fatalf("state = %q, want %q", updated.State, state.SandboxUnknown)
+	}
+}
+
 type serializedDeleteOps struct {
 	fakeSandboxOps
 	firstEntered chan struct{}
 	releaseFirst chan struct{}
 	calls        atomic.Int32
+}
+
+type failingCheckpointStore struct {
+	state.Store
+}
+
+func (failingCheckpointStore) AdvanceCheckpointHead(context.Context, string, string, string) error {
+	return errors.New("checkpoint head changed")
 }
 
 func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
@@ -156,7 +266,8 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{captured}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, t0Digest, conchtemplate.BootModeCold)
+	svc.Templates = host.TemplateStore()
+	seedTemplate(t, ctx, host, t0Digest, conchtemplate.BootModeCold)
 
 	before := state.SandboxRecord{
 		SandboxID:                "sandbox-a",
@@ -190,7 +301,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 		t.Fatalf("captured memory root still exists after publication: %v", err)
 	}
 
-	t1, err := store.GetTemplate(ctx, result.TemplateID)
+	t1, err := svc.Templates.Get(ctx, result.TemplateID)
 	if err != nil {
 		t.Fatalf("GetTemplate(t1) error = %v", err)
 	}
@@ -215,7 +326,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	ctx := context.Background()
 	host := newRuntimeImageHost(t)
-	sourceDigest := digest.FromString("checkpoint-source").String()
+	sourceDigest := buildColdBootIndex(t, host, "checkpoint-source")
 	memRoot := t.TempDir()
 	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{{
 		MemRootPath:  memRoot,
@@ -224,7 +335,13 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	}}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, sourceDigest, conchtemplate.BootModeCold)
+	svc.Templates = host.TemplateStore()
+	seedTemplate(t, ctx, host, sourceDigest, conchtemplate.BootModeCold)
+	if err := host.Client().ContentStore().Delete(
+		containerdclient.NewNamespaceContext(ctx), digest.Digest(sourceDigest),
+	); err != nil {
+		t.Fatalf("delete source Boot Index content: %v", err)
+	}
 	before := state.SandboxRecord{
 		SandboxID:                "sandbox-validation-failure",
 		CheckpointHeadTemplateID: sourceDigest,
@@ -238,12 +355,18 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	}); err == nil {
 		t.Fatal("CheckpointSandbox() error = nil, want validation failure")
 	}
-	templates, err := store.ListTemplates(ctx)
+	records, err := host.Client().ImageService().List(containerdclient.NewNamespaceContext(ctx))
 	if err != nil {
-		t.Fatalf("ListTemplates() error = %v", err)
+		t.Fatalf("List image records: %v", err)
 	}
-	if len(templates) != 1 || templates[0].BootIndexDigest != sourceDigest {
-		t.Fatalf("templates after failed validation = %#v, want only source template", templates)
+	canonicalRecords := 0
+	for _, record := range records {
+		if conchimage.IsCanonicalTemplateRef(record.Name) {
+			canonicalRecords++
+		}
+	}
+	if canonicalRecords != 1 {
+		t.Fatalf("canonical records after failed validation = %d, want source only", canonicalRecords)
 	}
 	after, err := store.GetSandbox(ctx, before.SandboxID)
 	if err != nil {
@@ -251,6 +374,43 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	}
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("sandbox changed after failed validation: got %#v, want %#v", after, before)
+	}
+}
+
+func TestCheckpointSandboxRemovesTemplateWhenHeadAdvanceFails(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	sourceDigest := buildColdBootIndex(t, host, "checkpoint-cas-source")
+	store := newTestStore(t)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID:                "sandbox-cas",
+		CheckpointHeadTemplateID: sourceDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedTemplate(t, ctx, host, sourceDigest, conchtemplate.BootModeCold)
+	svc := New(&fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{{
+		MemRootPath:  t.TempDir(),
+		VMMName:      "cloud-hypervisor",
+		MemorySizeMB: 128,
+	}}}, host.Client(), failingCheckpointStore{Store: store})
+	svc.Templates = host.TemplateStore()
+
+	if _, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{SandboxID: "sandbox-cas"}); err == nil {
+		t.Fatal("CheckpointSandbox() error = nil, want checkpoint head failure")
+	}
+	records, err := host.Client().ImageService().List(containerdclient.NewNamespaceContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := make([]string, 0, len(records))
+	for _, record := range records {
+		if conchimage.IsCanonicalTemplateRef(record.Name) {
+			canonical = append(canonical, record.Target.Digest.String())
+		}
+	}
+	if len(canonical) != 1 || canonical[0] != sourceDigest {
+		t.Fatalf("canonical Templates after CAS failure = %v, want source only", canonical)
 	}
 }
 
@@ -266,7 +426,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, t0Digest, conchtemplate.BootModeCold)
+	svc.Templates = host.TemplateStore()
+	seedTemplate(t, ctx, host, t0Digest, conchtemplate.BootModeCold)
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                "sandbox-lineage",
 		CheckpointHeadTemplateID: t0Digest,
@@ -286,11 +447,11 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 		t.Fatalf("checkpoint digests = (%q, %q)", t1Result.TemplateID, t2Result.TemplateID)
 	}
 
-	t1, err := store.GetTemplate(ctx, t1Result.TemplateID)
+	t1, err := svc.Templates.Get(ctx, t1Result.TemplateID)
 	if err != nil {
 		t.Fatalf("GetTemplate(t1) error = %v", err)
 	}
-	t2, err := store.GetTemplate(ctx, t2Result.TemplateID)
+	t2, err := svc.Templates.Get(ctx, t2Result.TemplateID)
 	if err != nil {
 		t.Fatalf("GetTemplate(t2) error = %v", err)
 	}
@@ -654,7 +815,7 @@ func TestCreateSandboxGeneratesIDWhenSandboxIDIsNotProvided(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateSandbox() error = %v", err)
 			}
-			if len(result.SandboxID) != 32 || sandboxid.Validate(result.SandboxID) != nil {
+			if len(result.SandboxID) != 32 || id.Validate(result.SandboxID) != nil {
 				t.Fatalf("generated sandbox ID = %q, want 32-character safe ID", result.SandboxID)
 			}
 			if ops.req.SandboxID != result.SandboxID {
@@ -941,19 +1102,53 @@ func TestCreateTemplateRequiresContainerdClient(t *testing.T) {
 	}
 }
 
+func TestCreateTemplateRejectsCanonicalTemplateSource(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	bootIndexDigest := buildColdBootIndex(t, host, "canonical-rootfs-source")
+	seedTemplate(t, ctx, host, bootIndexDigest, conchtemplate.BootModeCold)
+	buildRef, err := conchimage.CanonicalTemplateRef(bootIndexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(nil, host.Client(), newTestStore(t))
+	svc.Templates = host.TemplateStore()
+	_, err = svc.CreateTemplate(ctx, TemplateCreateOptions{
+		Source:     buildRef,
+		KernelPath: "unused-kernel",
+		InitrdPath: "unused-initrd",
+	})
+	if !errors.Is(err, conchtemplate.ErrInvalidArgument) {
+		t.Fatalf("CreateTemplate() error = %v, want ErrInvalidArgument", err)
+	}
+
+	record, err := host.Client().ImageService().Get(containerdclient.NewNamespaceContext(ctx), buildRef)
+	if err != nil {
+		t.Fatalf("get canonical Template image: %v", err)
+	}
+	if got := record.Labels[conchimage.ImageKindLabel]; got != conchimage.ImageKindBootIndexCold {
+		t.Fatalf("canonical Template image kind = %q, want %q", got, conchimage.ImageKindBootIndexCold)
+	}
+	if _, err := svc.Templates.Get(ctx, bootIndexDigest); err != nil {
+		t.Fatalf("Get() original Template after rejected create: %v", err)
+	}
+}
+
 func TestUnpackTemplateResolvesBootIndexByDigest(t *testing.T) {
 	ctx := context.Background()
 	host := newRuntimeImageHost(t)
 	bootIndexDigest := buildColdBootIndex(t, host, "explicit-unpack")
 	store := newTestStore(t)
 	svc := New(nil, host.Client(), store)
+	svc.Templates = host.TemplateStore()
 
 	if _, err := svc.Templates.Create(ctx, conchtemplate.Entry{
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
 		BootIndexDigest: bootIndexDigest,
 		SourceRef:       "not-the-boot-index:latest",
-	}); err != nil {
+	}, bootIndexTarget(t, host, bootIndexDigest)); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
 
@@ -1030,17 +1225,32 @@ func buildColdBootIndex(t *testing.T, host *containerdhost.Host, name string) st
 func seedTemplate(
 	t *testing.T,
 	ctx context.Context,
-	templates conchtemplate.Store,
+	host *containerdhost.Host,
 	bootIndexDigest string,
 	bootMode conchtemplate.BootMode,
 ) {
 	t.Helper()
-	if _, err := templates.Create(ctx, conchtemplate.Entry{
+	if _, err := host.TemplateStore().Create(ctx, conchtemplate.Entry{
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        bootMode,
 		BootIndexDigest: bootIndexDigest,
-	}); err != nil {
+	}, bootIndexTarget(t, host, bootIndexDigest)); err != nil {
 		t.Fatalf("CreateTemplate(%s) error = %v", bootIndexDigest, err)
+	}
+}
+
+func bootIndexTarget(t *testing.T, host *containerdhost.Host, bootIndexDigest string) ocispec.Descriptor {
+	t.Helper()
+	info, err := host.Client().ContentStore().Info(
+		containerdclient.NewNamespaceContext(context.Background()), digest.Digest(bootIndexDigest),
+	)
+	if err != nil {
+		t.Fatalf("resolve Boot Index %s: %v", bootIndexDigest, err)
+	}
+	return ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageIndex,
+		Digest:    digest.Digest(bootIndexDigest),
+		Size:      info.Size,
 	}
 }
 

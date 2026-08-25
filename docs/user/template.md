@@ -23,6 +23,21 @@ conch template create \
   --initrd /var/lib/conch/conch.initrd
 ```
 
+### CLI API 请求超时
+
+所有通过 `conch` CLI 调用 conchd API 的请求共用 `CONCH_API_TIMEOUT` 环境变量。未设置时默认超时为 2 分钟；设置为正的 Go duration（例如 `30m`）后，当前命令中的所有 CLI 到 conchd API 请求都会使用该值。这个设置适用于 `template create`、`template pull`、`template push` 及其他使用 conchd API 的 CLI 命令。
+
+例如，首次拉取或转换较大镜像时可执行：
+
+```bash
+CONCH_API_TIMEOUT=30m conch template create \
+  --source hub.oepkgs.net/openeuler/python:latest \
+  --kernel /var/lib/conch/kernel \
+  --initrd /var/lib/conch/conch.initrd
+```
+
+`conch template push --timeout <duration>` 是 push 命令的局部覆盖，优先于 `CONCH_API_TIMEOUT`；它仅影响该次 push 请求。
+
 创建、拉取和 checkpoint 都会建立由 digest 唯一派生的内部 canonical image record，例如
 `localhost/conch/template:sha256-1111...`。这个 record 是 containerd GC 的引用根，不需要用户命名。
 该本地命名空间由 Template 生命周期独占，pull 操作不允许把它作为远端输入，普通 `conch image rm` 也不能删除 canonical record。
@@ -45,7 +60,7 @@ $ conch template rm sha256:1111...
 Removed template: sha256:1111...
 ```
 
-删除时会移除 Template metadata 和对应的 canonical image record；实际 content 由 containerd GC 在不再被其他记录引用后回收。
+删除时会移除以 labels 承载 Template metadata 的 canonical image record；实际 content 由 containerd GC 在不再被其他记录引用后回收。
 
 ## 2. Template 分发
 

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/errdefs"
@@ -88,14 +87,11 @@ func pullLazyBootIndex(ctx context.Context, client *containerdclient.Client, req
 	}); err != nil {
 		return PullBootIndexResult{}, false, err
 	}
-	if err := retainLazyBootIndex(ctx, client, root, index); err != nil {
-		return PullBootIndexResult{}, false, err
-	}
 	buildRef, err := CanonicalTemplateRef(root.Digest.String())
 	if err != nil {
 		return PullBootIndexResult{}, false, err
 	}
-	return PullBootIndexResult{Info: info, BuildRef: buildRef}, true, nil
+	return PullBootIndexResult{Info: info, BuildRef: buildRef, Target: root, Lazy: true}, true, nil
 }
 
 func fetchDescriptor(ctx context.Context, store content.Store, fetcher remotes.Fetcher, desc ocispec.Descriptor) error {
@@ -181,34 +177,6 @@ func parseLazyMemoryMetadata(encodedProfile string, manifest ocispec.Manifest) (
 	}
 	metadata.Profile = profile
 	return metadata, nil
-}
-
-func retainLazyBootIndex(ctx context.Context, client *containerdclient.Client, root ocispec.Descriptor, index ocispec.Index) error {
-	store := client.ContentStore()
-	labeler := images.SetChildrenLabels(store, images.ChildrenHandler(store))
-	if _, err := labeler.Handle(ctx, root); err != nil {
-		return fmt.Errorf("label lazy boot index: %w", err)
-	}
-	for _, component := range index.Manifests {
-		if _, err := labeler.Handle(ctx, component); err != nil {
-			return fmt.Errorf("label lazy component %s: %w", component.Digest, err)
-		}
-	}
-	name, err := CanonicalTemplateRef(root.Digest.String())
-	if err != nil {
-		return err
-	}
-	kind := ImageKindBootIndexResume
-	record := images.Image{Name: name, Target: root, Labels: map[string]string{ImageKindLabel: kind}}
-	if _, err := client.ImageService().Create(ctx, record); err != nil {
-		if !errdefs.IsAlreadyExists(err) {
-			return err
-		}
-		if _, err := client.ImageService().Update(ctx, record, "target", "labels."+ImageKindLabel); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func lazyMemoryMetadata(ctx context.Context, store content.Store, info BootIndexInfo) (LazyMemoryMetadata, error) {

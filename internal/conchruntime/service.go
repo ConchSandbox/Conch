@@ -2,8 +2,6 @@ package conchruntime
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -18,13 +16,14 @@ import (
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/daemon/state"
+	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
-	"github.com/openeuler/Conch/internal/sandboxid"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -44,15 +43,16 @@ type SnapshotOps interface {
 }
 
 type Service struct {
-	Sandbox         SandboxOps
-	Containerd      *containerdclient.Client
-	Snapshot        SnapshotOps
-	Store           state.Store
-	Templates       conchtemplate.Store
-	SandboxDefaults SandboxDefaults
-	lifecycleLocks  sandboxLifecycleLocks
-	PreGateEnabled  bool
-	PreGateStateDir string
+	Sandbox           SandboxOps
+	Containerd        *containerdclient.Client
+	Snapshot          SnapshotOps
+	Store             state.Store
+	Templates         conchtemplate.Store
+	SandboxDefaults   SandboxDefaults
+	WebhookDispatcher *webhook.Dispatcher
+	lifecycleLocks    sandboxLifecycleLocks
+	PreGateEnabled    bool
+	PreGateStateDir   string
 }
 
 func (s *Service) SetPreGate(enabled bool, stateDir string) {
@@ -103,7 +103,6 @@ func New(sandboxOps SandboxOps, client *containerdclient.Client, store state.Sto
 		Sandbox:    sandboxOps,
 		Containerd: client,
 		Store:      store,
-		Templates:  conchtemplate.NewStore(store),
 	}
 }
 
@@ -123,13 +122,13 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
 	if opts.SandboxID == "" {
-		id, err := NewID()
+		id, err := id.New()
 		if err != nil {
 			return SandboxCreateResult{}, err
 		}
 		opts.SandboxID = id
 	} else {
-		if err := sandboxid.Validate(opts.SandboxID); err != nil {
+		if err := id.Validate(opts.SandboxID); err != nil {
 			return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
 				fmt.Errorf("invalid sandbox_id: %w", err),
 			)
@@ -232,6 +231,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 			deleteErr,
 		)
 	}
+	s.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
 	return SandboxCreateResult{
 		SandboxID:  opts.SandboxID,
 		IP:         createResult.IP,
@@ -333,6 +333,14 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
+	var rec state.SandboxRecord
+	if s.Store != nil {
+		var getErr error
+		rec, getErr = s.getSandbox(ctx, sandboxID)
+		if getErr != nil && !errors.Is(getErr, state.ErrNotFound) {
+			return getErr
+		}
+	}
 	err := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
 	if err != nil && errors.Is(err, sandbox.ErrNotFound) {
 		err = nil
@@ -341,9 +349,57 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	if s.Store != nil {
-		return s.Store.DeleteSandbox(ctx, sandboxID)
+		if err := s.Store.DeleteSandbox(ctx, sandboxID); err != nil {
+			return err
+		}
+	}
+	if rec.SandboxID != "" {
+		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
+}
+
+// HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
+// It is called by sandbox.Manager after the runtime resources have been cleaned up.
+func (s *Service) HandleSandboxUnexpectedExit(sandboxID string) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	unlock := s.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	rec, err := s.getSandbox(context.Background(), sandboxID)
+	if errors.Is(err, state.ErrNotFound) {
+		return
+	}
+	if err != nil {
+		ulog.GetLogger().Error("failed to read sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		return
+	}
+	if rec.State == state.SandboxUnknown {
+		return
+	}
+	rec.State = state.SandboxUnknown
+	if err := s.upsertSandbox(context.Background(), rec); err != nil {
+		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		return
+	}
+	s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+}
+
+func (s *Service) publishLifecycleEvent(eventType string, rec state.SandboxRecord, killReason string) {
+	if s == nil || s.WebhookDispatcher == nil {
+		return
+	}
+	event, err := webhook.NewEvent(eventType, rec.SandboxID, killReason, webhook.Execution{
+		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339),
+		VCPUNum:   rec.VCPUNum,
+		RamMB:     rec.RamMB,
+	})
+	if err != nil {
+		ulog.GetLogger().Error("failed to create sandbox lifecycle event", ulog.F("sandbox_id", rec.SandboxID), ulog.F("error", err))
+		return
+	}
+	s.WebhookDispatcher.Publish(event)
 }
 
 func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
@@ -416,6 +472,9 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if s.Store == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint publisher is not configured")
 	}
+	if s.Templates == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
+	}
 	sandboxID := rec.SandboxID
 	parentID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if parentID == "" {
@@ -435,7 +494,12 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	}
 	defer os.RemoveAll(captured.MemRootPath)
 
-	published, err := conchimage.PublishCheckpointBootIndex(ctx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
+	publishCtx, done, err := s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
+	if err != nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("create checkpoint content lease: %w", err)
+	}
+	defer done(publishCtx)
+	published, err := conchimage.PublishCheckpointBootIndex(publishCtx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
 		SourceBootIndexDigest: parentID,
 		MemRoot:               captured.MemRootPath,
 		VMMName:               captured.VMMName,
@@ -445,13 +509,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	keepCanonicalRecord := false
-	defer func() {
-		if !keepCanonicalRecord {
-			s.cleanupCanonicalTemplateRecord(ctx, published.BootIndexDigest)
-		}
-	}()
-	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, published.BootIndexDigest)
+	info, err := conchimage.InspectBootIndexContent(publishCtx, s.Containerd.ContentStore(), published.Target)
 	if err != nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("validate published checkpoint boot index: %w", err)
 	}
@@ -479,20 +537,23 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	if err := s.Store.PublishCheckpoint(ctx, conchtemplate.Entry{
+	entry, err := s.Templates.Create(publishCtx, conchtemplate.Entry{
 		Origin:                conchtemplate.OriginCheckpoint,
 		BootMode:              conchtemplate.BootModeResume,
 		BootIndexDigest:       info.BootIndexDigest,
 		ParentBootIndexDigest: parentID,
 		SourceSandboxID:       sandboxID,
 		Labels:                copyMap(opts.Labels),
-		CreatedAt:             time.Now().UnixNano(),
-	}); err != nil {
+	}, published.Target)
+	if err != nil {
 		return SandboxCheckpointResult{}, err
 	}
-	keepCanonicalRecord = true
+	if err := s.Store.AdvanceCheckpointHead(ctx, sandboxID, parentID, entry.BootIndexDigest); err != nil {
+		s.cleanupTemplateRecord(ctx, entry.BootIndexDigest)
+		return SandboxCheckpointResult{}, err
+	}
 	return SandboxCheckpointResult{
-		TemplateID: info.BootIndexDigest,
+		TemplateID: entry.BootIndexDigest,
 	}, nil
 }
 
@@ -510,7 +571,12 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template reference is required"))
 	}
-	pulled, err := conchimage.PullBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
+	pullCtx, done, err := s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
+	if err != nil {
+		return TemplatePullResult{}, fmt.Errorf("create pull content lease: %w", err)
+	}
+	defer done(pullCtx)
+	pulled, err := conchimage.PullBootIndex(pullCtx, s.Containerd, conchimage.RegistryPullOptions{
 		Reference:  reference,
 		PlainHTTP:  opts.PlainHTTP,
 		Username:   opts.Username,
@@ -534,18 +600,28 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if opts.PlainHTTP {
 		labels[conchimage.TemplateLabelRegistryPlainHTTP] = "true"
 	}
-	entry, err := s.Templates.Create(ctx, conchtemplate.Entry{
+	entry, createErr := s.Templates.Create(pullCtx, conchtemplate.Entry{
 		Origin:          origin,
 		BootMode:        bootMode,
 		BootIndexDigest: info.BootIndexDigest,
 		SourceRef:       reference,
 		Labels:          labels,
-	})
-	if err != nil {
-		if !errors.Is(err, conchtemplate.ErrAlreadyExists) {
-			s.cleanupCanonicalTemplateRecord(ctx, info.BootIndexDigest)
+	}, pulled.Target, conchtemplate.CreateOptions{AllowMissingMemory: pulled.Lazy})
+	var cleanupErr error
+	if pulled.SourceImageName != "" {
+		cleanupErr = conchimage.RemoveFetchedImageRecord(
+			ctx, s.Containerd.ImageService(), pulled.SourceImageName, pulled.Target,
+		)
+	}
+	if createErr != nil {
+		if !errors.Is(createErr, conchtemplate.ErrAlreadyExists) {
+			s.cleanupTemplateRecord(ctx, info.BootIndexDigest)
 		}
-		return TemplatePullResult{}, err
+		return TemplatePullResult{}, errors.Join(createErr, cleanupErr)
+	}
+	if cleanupErr != nil {
+		s.cleanupTemplateRecord(ctx, entry.BootIndexDigest)
+		return TemplatePullResult{}, fmt.Errorf("remove fetched source image record %s: %w", pulled.SourceImageName, cleanupErr)
 	}
 	return TemplatePullResult{
 		TemplateID: entry.BootIndexDigest,
@@ -646,47 +722,15 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	if err != nil {
 		return TemplateCreateResult{}, err
 	}
-	keepCanonicalRecord := false
-	defer func() {
-		if !keepCanonicalRecord {
-			s.cleanupCanonicalTemplateRecord(ctx, result.bootIndexDigest)
-		}
-	}()
-	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, result.bootIndexDigest)
-	if err != nil {
-		return TemplateCreateResult{}, fmt.Errorf("validate published boot index: %w", err)
-	}
-	if info.BootIndexDigest != result.bootIndexDigest {
-		return TemplateCreateResult{}, fmt.Errorf(
-			"validated boot index digest %s does not match published digest %s",
-			info.BootIndexDigest,
-			result.bootIndexDigest,
-		)
-	}
-	bootMode := conchtemplate.BootModeCold
-	if info.Resume {
-		bootMode = conchtemplate.BootModeResume
-	}
-	entry, err := s.Templates.Create(ctx, conchtemplate.Entry{
-		Origin:          conchtemplate.OriginImage,
-		BootMode:        bootMode,
-		BootIndexDigest: info.BootIndexDigest,
-		SourceRef:       source,
-		Labels:          opts.Labels,
-	})
-	if err != nil {
-		return TemplateCreateResult{}, err
-	}
-	keepCanonicalRecord = true
 	return TemplateCreateResult{
-		TemplateID: entry.BootIndexDigest,
+		TemplateID: result.entry.BootIndexDigest,
 		BuildRef:   result.buildRef,
 	}, nil
 }
 
 type templateBuildResult struct {
-	bootIndexDigest string
-	buildRef        string
+	entry    conchtemplate.Entry
+	buildRef string
 }
 
 func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCreateOptions) (templateBuildResult, error) {
@@ -712,11 +756,16 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 			return templateBuildResult{}, fmt.Errorf("resolve pulled rootfs source image %s: %w", opts.Source, err)
 		}
 	}
+	if conchimage.IsCanonicalTemplateRef(sourceImage.Name()) {
+		return templateBuildResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf(
+			"canonical Template image %s cannot be used as a rootfs source", sourceImage.Name(),
+		))
+	}
 	if err := conchimage.SetImageKindLabel(sourceCtx, s.Containerd.ImageService(), sourceImage.Name(), conchimage.ImageKindOCIImage); err != nil {
 		return templateBuildResult{}, fmt.Errorf("label rootfs source image: %w", err)
 	}
 
-	buildID, err := NewID()
+	buildID, err := id.New()
 	if err != nil {
 		return templateBuildResult{}, err
 	}
@@ -730,8 +779,24 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	if err != nil {
 		return templateBuildResult{}, conchimage.ErrConversionFailed.Wrap(fmt.Errorf("convert rootfs to EROFS: %w", err))
 	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := conchimage.Remove(cleanupCtx, s.Containerd, runtimeapi.RemoveImageOptions{
+			ImageName: converted.ImageName,
+		}); err != nil {
+			ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",
+				ulog.F("image", converted.ImageName),
+				ulog.F("error", err))
+		}
+	}()
 
-	published, err := conchimage.PublishBootIndex(ctx, s.Containerd, conchimage.PublishBootIndexOptions{
+	publishCtx, done, err := s.Containerd.WithLease(sourceCtx)
+	if err != nil {
+		return templateBuildResult{}, fmt.Errorf("create Template content lease: %w", err)
+	}
+	defer done(publishCtx)
+	published, err := conchimage.PublishBootIndex(publishCtx, s.Containerd, conchimage.PublishBootIndexOptions{
 		RootfsImageName: converted.ImageName,
 		KernelPath:      opts.KernelPath,
 		InitrdPath:      opts.InitrdPath,
@@ -739,23 +804,20 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	if err != nil {
 		return templateBuildResult{}, fmt.Errorf("publish boot image: %w", err)
 	}
-
-	// The converted image name is only a build-time handle. Once the Boot Index
-	// has been published, its digest-derived canonical image record is the GC
-	// root for the complete descriptor closure.
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if err := conchimage.Remove(cleanupCtx, s.Containerd, runtimeapi.RemoveImageOptions{
-		ImageName: converted.ImageName,
-	}); err != nil {
-		ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",
-			ulog.F("image", converted.ImageName),
-			ulog.F("error", err))
+	entry, err := s.Templates.Create(publishCtx, conchtemplate.Entry{
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: published.BootIndexDigest,
+		SourceRef:       opts.Source,
+		Labels:          opts.Labels,
+	}, published.Target)
+	if err != nil {
+		return templateBuildResult{}, err
 	}
 
 	return templateBuildResult{
-		bootIndexDigest: published.BootIndexDigest,
-		buildRef:        published.BuildRef,
+		entry:    entry,
+		buildRef: published.BuildRef,
 	}, nil
 }
 
@@ -792,19 +854,7 @@ func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
 	if s == nil || s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	if s.Containerd == nil {
-		return fmt.Errorf("containerd client is required")
-	}
-	if _, err := s.Templates.Get(ctx, id); err != nil {
-		if !errors.Is(err, conchtemplate.ErrNotFound) {
-			return err
-		}
-	} else if err := s.Templates.Delete(ctx, id); err != nil {
-		return err
-	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	return conchimage.RemoveCanonicalBootIndexRecord(cleanupCtx, s.Containerd, id)
+	return s.Templates.Delete(ctx, id)
 }
 
 func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
@@ -822,10 +872,10 @@ func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
 	}
 }
 
-func (s *Service) cleanupCanonicalTemplateRecord(ctx context.Context, bootIndexDigest string) {
+func (s *Service) cleanupTemplateRecord(ctx context.Context, bootIndexDigest string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := conchimage.RemoveCanonicalBootIndexRecord(cleanupCtx, s.Containerd, bootIndexDigest); err != nil {
+	if err := s.Templates.Delete(cleanupCtx, bootIndexDigest); err != nil {
 		ulog.GetLogger().Warn("failed to roll back canonical template image record",
 			ulog.F("boot_index_digest", bootIndexDigest),
 			ulog.F("error", err))
@@ -913,14 +963,6 @@ func combineOperationErrors(primary error, secondary ...error) error {
 		return appErr.WrapMessage(errors.Join(primary, additional), appErr.PublicMessage())
 	}
 	return fmt.Errorf("%w; additional operation failures: %v", primary, additional)
-}
-
-func NewID() (string, error) {
-	var data [16]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", fmt.Errorf("generate id: %w", err)
-	}
-	return hex.EncodeToString(data[:]), nil
 }
 
 func copyMap(in map[string]string) map[string]string {
