@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sync/errgroup"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
@@ -61,28 +62,31 @@ func pullLazyBootIndex(ctx context.Context, client *containerdclient.Client, req
 		return PullBootIndexResult{}, false, nil
 	}
 
+	if err := fetchDescriptors(ctx, index.Manifests, func(ctx context.Context, desc ocispec.Descriptor) error {
+		return fetchDescriptor(ctx, store, fetcher, desc)
+	}); err != nil {
+		return PullBootIndexResult{}, false, err
+	}
+
+	var contentDescriptors []ocispec.Descriptor
 	for _, component := range index.Manifests {
-		if err := fetchDescriptor(ctx, store, fetcher, component); err != nil {
-			return PullBootIndexResult{}, false, err
-		}
 		manifest, err := readManifest(ctx, store, component)
 		if err != nil {
 			return PullBootIndexResult{}, false, err
 		}
-		if err := fetchDescriptor(ctx, store, fetcher, manifest.Config); err != nil {
-			return PullBootIndexResult{}, false, err
-		}
+		contentDescriptors = append(contentDescriptors, manifest.Config)
 		if getKind(component) == KindMemSnapshot {
 			if _, err := parseLazyMemoryMetadata(info.PreGateProfile, manifest); err != nil {
 				return PullBootIndexResult{}, false, nil
 			}
 			continue
 		}
-		for _, layer := range manifest.Layers {
-			if err := fetchDescriptor(ctx, store, fetcher, layer); err != nil {
-				return PullBootIndexResult{}, false, err
-			}
-		}
+		contentDescriptors = append(contentDescriptors, manifest.Layers...)
+	}
+	if err := fetchDescriptors(ctx, contentDescriptors, func(ctx context.Context, desc ocispec.Descriptor) error {
+		return fetchDescriptor(ctx, store, fetcher, desc)
+	}); err != nil {
+		return PullBootIndexResult{}, false, err
 	}
 	if err := retainLazyBootIndex(ctx, client, root, index); err != nil {
 		return PullBootIndexResult{}, false, err
@@ -104,6 +108,23 @@ func fetchDescriptor(ctx context.Context, store content.Store, fetcher remotes.F
 		return fmt.Errorf("fetch descriptor %s: %w", desc.Digest, err)
 	}
 	return nil
+}
+
+func fetchDescriptors(ctx context.Context, descriptors []ocispec.Descriptor, fetch func(context.Context, ocispec.Descriptor) error) error {
+	group, groupCtx := errgroup.WithContext(ctx)
+	seen := make(map[string]struct{}, len(descriptors))
+	for _, descriptor := range descriptors {
+		key := descriptor.Digest.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		descriptor := descriptor
+		group.Go(func() error {
+			return fetch(groupCtx, descriptor)
+		})
+	}
+	return group.Wait()
 }
 
 func readManifest(ctx context.Context, store content.Store, desc ocispec.Descriptor) (ocispec.Manifest, error) {
