@@ -13,8 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -25,10 +28,20 @@ type LazyMemoryMaterializer struct {
 	path            string
 	marker          string
 	bootstrapMarker string
-	lock            *sync.Mutex
+	state           *lazyMemoryState
 }
 
-var lazyMemoryLocks sync.Map
+type byteRange struct {
+	start uint64
+	end   uint64
+}
+
+type lazyMemoryState struct {
+	sync.Mutex
+	criticalRanges []byteRange
+}
+
+var lazyMemoryStates sync.Map
 
 func NewLazyMemoryMaterializer(
 	ctx context.Context,
@@ -60,20 +73,63 @@ func newLazyMemoryMaterializer(ctx context.Context, fetcher remotes.Fetcher, sta
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	namePart := metadata.Layer.Digest.Algorithm().String() + "-" + metadata.Layer.Digest.Encoded()
-	lockValue, _ := lazyMemoryLocks.LoadOrStore(namePart, &sync.Mutex{})
+	path, marker, bootstrapMarker := lazyMemoryPaths(stateDir, metadata.Layer)
+	stateValue, _ := lazyMemoryStates.LoadOrStore(path, &lazyMemoryState{})
 	materializer := &LazyMemoryMaterializer{
 		metadata:        metadata,
 		fetcher:         fetcher,
-		path:            filepath.Join(dir, namePart+".erofs"),
-		marker:          filepath.Join(dir, namePart+".complete"),
-		bootstrapMarker: filepath.Join(dir, namePart+".bootstrap"),
-		lock:            lockValue.(*sync.Mutex),
+		path:            path,
+		marker:          marker,
+		bootstrapMarker: bootstrapMarker,
+		state:           stateValue.(*lazyMemoryState),
 	}
 	if err := materializer.prepareBootstrap(ctx); err != nil {
 		return nil, err
 	}
 	return materializer, nil
+}
+
+func lazyMemoryPaths(stateDir string, layer ocispec.Descriptor) (path, marker, bootstrapMarker string) {
+	namePart := layer.Digest.Algorithm().String() + "-" + layer.Digest.Encoded()
+	dir := filepath.Join(stateDir, "lazy-memory")
+	return filepath.Join(dir, namePart+".erofs"),
+		filepath.Join(dir, namePart+".complete"),
+		filepath.Join(dir, namePart+".bootstrap")
+}
+
+func commitLazyMemoryLayer(ctx context.Context, store content.Store, stateDir string, metadata LazyMemoryMetadata) error {
+	if store == nil {
+		return fmt.Errorf("content store is required")
+	}
+	if _, err := store.Info(ctx, metadata.Layer.Digest); err == nil {
+		return nil
+	} else if !errdefs.IsNotFound(err) {
+		return err
+	}
+	path, marker, _ := lazyMemoryPaths(stateDir, metadata.Layer)
+	markerData, err := os.ReadFile(marker)
+	if err != nil {
+		return fmt.Errorf("lazy memory layer is not fully materialized: %w", err)
+	}
+	if strings.TrimSpace(string(markerData)) != metadata.Layer.Digest.String() {
+		return fmt.Errorf("lazy memory completion marker does not match %s", metadata.Layer.Digest)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open materialized lazy memory layer: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat materialized lazy memory layer: %w", err)
+	}
+	if info.Size() != metadata.Layer.Size {
+		return fmt.Errorf("materialized lazy memory layer size %d, want %d", info.Size(), metadata.Layer.Size)
+	}
+	if err := content.WriteBlob(ctx, store, contentRef("lazy-memory", metadata.Layer.Digest), file, metadata.Layer); err != nil {
+		return fmt.Errorf("commit lazy memory layer %s to content store: %w", metadata.Layer.Digest, err)
+	}
+	return nil
 }
 
 func (m *LazyMemoryMaterializer) Path() string {
@@ -110,11 +166,12 @@ func (m *LazyMemoryMaterializer) prepareBootstrap(ctx context.Context) error {
 	if m.bootstrapDone() || m.Complete() {
 		return nil
 	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
+	m.state.Lock()
+	defer m.state.Unlock()
 	if m.bootstrapDone() || m.Complete() {
 		return nil
 	}
+	m.state.criticalRanges = nil
 	file, err := os.OpenFile(m.path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
@@ -197,41 +254,43 @@ func (m *LazyMemoryMaterializer) MaterializeOffsets(ctx context.Context, pageSiz
 	if pageSize <= 0 {
 		return fmt.Errorf("invalid pre-gate page size %d", pageSize)
 	}
-	ordered := append([]uint64(nil), offsets...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	requested := normalizeByteRanges(uint64(pageSize), uint64(m.metadata.FileSize), offsets)
+	if len(requested) == 0 {
+		return nil
+	}
+	m.state.Lock()
+	defer m.state.Unlock()
+	if m.Complete() {
+		return nil
+	}
+	missing := subtractByteRanges(requested, m.state.criticalRanges)
+	if len(missing) == 0 {
+		return nil
+	}
 	file, err := os.OpenFile(m.path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	for index := 0; index < len(ordered); {
-		start := ordered[index]
-		end := start + uint64(pageSize)
-		index++
-		for index < len(ordered) && ordered[index] <= end {
-			candidateEnd := ordered[index] + uint64(pageSize)
-			if candidateEnd > end {
-				end = candidateEnd
-			}
-			index++
-		}
-		if end > uint64(m.metadata.FileSize) {
-			end = uint64(m.metadata.FileSize)
-		}
-		physical := m.metadata.FileOffset + int64(start)
-		if err := m.copyRange(ctx, file, physical, int64(end-start)); err != nil {
-			return fmt.Errorf("fetch restore-critical memory range at %d: %w", start, err)
+	for _, current := range missing {
+		physical := m.metadata.FileOffset + int64(current.start)
+		if err := m.copyRange(ctx, file, physical, int64(current.end-current.start)); err != nil {
+			return fmt.Errorf("fetch restore-critical memory range at %d: %w", current.start, err)
 		}
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	m.state.criticalRanges = mergeByteRanges(append(m.state.criticalRanges, missing...))
+	return nil
 }
 
 func (m *LazyMemoryMaterializer) MaterializeAll(ctx context.Context) error {
 	if m == nil {
 		return fmt.Errorf("lazy memory materializer is nil")
 	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
+	m.state.Lock()
+	defer m.state.Unlock()
 	if m.Complete() {
 		return nil
 	}
@@ -283,6 +342,61 @@ func (m *LazyMemoryMaterializer) MaterializeAll(ctx context.Context) error {
 		return err
 	}
 	return os.Rename(tempMarker, m.marker)
+}
+
+func normalizeByteRanges(pageSize, fileSize uint64, offsets []uint64) []byteRange {
+	ranges := make([]byteRange, 0, len(offsets))
+	for _, start := range offsets {
+		if start >= fileSize {
+			continue
+		}
+		end := start + pageSize
+		if end < start || end > fileSize {
+			end = fileSize
+		}
+		ranges = append(ranges, byteRange{start: start, end: end})
+	}
+	return mergeByteRanges(ranges)
+}
+
+func mergeByteRanges(ranges []byteRange) []byteRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
+	merged := ranges[:1]
+	for _, current := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if current.start <= last.end {
+			if current.end > last.end {
+				last.end = current.end
+			}
+			continue
+		}
+		merged = append(merged, current)
+	}
+	return merged
+}
+
+func subtractByteRanges(requested, covered []byteRange) []byteRange {
+	missing := append([]byteRange(nil), requested...)
+	for _, existing := range covered {
+		next := make([]byteRange, 0, len(missing)+1)
+		for _, current := range missing {
+			if existing.end <= current.start || existing.start >= current.end {
+				next = append(next, current)
+				continue
+			}
+			if existing.start > current.start {
+				next = append(next, byteRange{start: current.start, end: existing.start})
+			}
+			if existing.end < current.end {
+				next = append(next, byteRange{start: existing.end, end: current.end})
+			}
+		}
+		missing = next
+	}
+	return missing
 }
 
 // Commit persists the materialized layer to stable storage. It runs after the

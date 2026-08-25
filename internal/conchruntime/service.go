@@ -421,6 +421,11 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if parentID == "" {
 		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head Template ID", sandboxID))
 	}
+	if s.PreGateEnabled {
+		if err := conchimage.EnsureLazyMemoryContent(ctx, s.Containerd, parentID, s.PreGateStateDir); err != nil {
+			return SandboxCheckpointResult{}, fmt.Errorf("prepare parent template for checkpoint: %w", err)
+		}
+	}
 
 	captured, err := s.Sandbox.Checkpoint(sandbox.CheckpointRequest{
 		SandboxID: sandboxID,
@@ -573,6 +578,11 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if bootIndexDigest == "" {
 		return conchtemplate.ErrFailedPrecondition.Wrap(fmt.Errorf("template has no boot index digest"))
 	}
+	if s.PreGateEnabled {
+		if err := conchimage.EnsureLazyMemoryContent(ctx, s.Containerd, bootIndexDigest, s.PreGateStateDir); err != nil {
+			return fmt.Errorf("prepare template for push: %w", err)
+		}
+	}
 	var profile []byte
 	if s.PreGateEnabled && s.PreGateStateDir != "" {
 		profilePath := sandbox.PreGateProfilePath(s.PreGateStateDir, bootIndexDigest)
@@ -605,6 +615,11 @@ func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions
 	rec, err := s.Templates.Get(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get template %s: %w", id, err)
+	}
+	if s.PreGateEnabled {
+		if err := conchimage.EnsureLazyMemoryContent(ctx, s.Containerd, rec.BootIndexDigest, s.PreGateStateDir); err != nil {
+			return fmt.Errorf("prepare template %s for unpack: %w", id, err)
+		}
 	}
 	if err := conchimage.UnpackBootIndex(ctx, s.Containerd, rec.BootIndexDigest); err != nil {
 		return fmt.Errorf("unpack template %s: %w", id, translateTemplateArtifactError(err))

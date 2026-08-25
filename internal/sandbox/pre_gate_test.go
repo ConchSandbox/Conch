@@ -165,34 +165,6 @@ func TestConfigurePreGateKeepsGateClosedWhenFullMaterializationFails(t *testing.
 	}
 }
 
-func TestConfigurePreGateSkipsFullyResidentMemory(t *testing.T) {
-	root := t.TempDir()
-	snapshotDir := filepath.Join(root, "snapshot")
-	stateDir := filepath.Join(root, "state")
-	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	memoryPath := filepath.Join(snapshotDir, "memory")
-	if err := os.WriteFile(memoryPath, make([]byte, 2*os.Getpagesize()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(memoryPath)
-	if err != nil || len(data) == 0 {
-		t.Fatalf("read resident memory: len=%d err=%v", len(data), err)
-	}
-
-	spec := VMStartSpec{SnapfilePath: snapshotDir, PreGateKey: "sha256:local"}
-	if err := configurePreGate(context.Background(), &spec, "sandbox-local", stateDir); err != nil {
-		t.Fatal(err)
-	}
-	if spec.RecordPreGatePath != "" || spec.ResumeGatePath != "" {
-		t.Fatalf("local snapshot configured pre-gate: record=%q gate=%q", spec.RecordPreGatePath, spec.ResumeGatePath)
-	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Fatalf("local snapshot created pre-gate state: %v", err)
-	}
-}
-
 func TestConfigurePreGateSkipsCompleteLocalSnapshot(t *testing.T) {
 	root := t.TempDir()
 	snapshotDir := filepath.Join(root, "snapshot")

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/containerd/errdefs"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type ResolvedBoot struct {
@@ -25,7 +28,7 @@ type ResolvedBoot struct {
 	PreGateProfile          []byte
 	MaterializeCritical     func(context.Context, int64, []uint64) error
 	MaterializeAll          func(context.Context) error
-	MaterializeCommit func() error
+	MaterializeCommit       func() error
 }
 
 func (r ResolvedBoot) ExternalMemoryErofsPathOK() bool {
@@ -112,4 +115,38 @@ func ResolveBootLazy(ctx context.Context, client *containerdclient.Client, bootI
 		MaterializeCritical: materializer.MaterializeOffsets,
 	}
 	return result, nil
+}
+
+// EnsureLazyMemoryContent promotes a fully materialized lazy backing file into
+// containerd only when an operation needs the complete OCI descriptor closure.
+func EnsureLazyMemoryContent(ctx context.Context, client *containerdclient.Client, bootIndexDigest, stateDir string) error {
+	if client == nil || client.Client == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	resolveCtx := containerdclient.NewNamespaceContext(ctx)
+	_, info, err := inspectBootIndexMetadataByDigest(resolveCtx, client.ContentStore(), bootIndexDigest)
+	if err != nil {
+		return fmt.Errorf("inspect lazy boot index metadata: %w", err)
+	}
+	if !info.Resume {
+		return nil
+	}
+	metadata, err := lazyMemoryMetadata(resolveCtx, client.ContentStore(), info)
+	if err != nil {
+		return fmt.Errorf("resolve lazy memory metadata: %w", err)
+	}
+	if _, err := client.ContentStore().Info(resolveCtx, metadata.Layer.Digest); err == nil {
+		return nil
+	} else if !errdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect lazy memory content %s: %w", metadata.Layer.Digest, err)
+	}
+	started := time.Now()
+	if err := commitLazyMemoryLayer(resolveCtx, client.ContentStore(), stateDir, metadata); err != nil {
+		return err
+	}
+	ulog.GetLogger().Info("Promoted lazy memory layer to content store",
+		ulog.F("digest", metadata.Layer.Digest),
+		ulog.F("bytes", metadata.Layer.Size),
+		ulog.F("elapsed", time.Since(started)))
+	return nil
 }

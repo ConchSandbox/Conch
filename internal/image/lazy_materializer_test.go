@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -45,11 +47,6 @@ func TestLazyMemoryMaterializerBootstrapsCriticalRangesAndCommitsFullLayer(t *te
 	if err := os.WriteFile(sourcePath, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	profile, err := os.ReadFile("/dev/null")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = profile
 	metadata := LazyMemoryMetadata{
 		Layer: ocispec.Descriptor{
 			Digest: digest.FromBytes(source),
@@ -58,7 +55,8 @@ func TestLazyMemoryMaterializerBootstrapsCriticalRangesAndCommitsFullLayer(t *te
 		FileOffset: fileOffset,
 		FileSize:   fileSize,
 	}
-	materializer, err := newLazyMemoryMaterializer(context.Background(), fileFetcher{path: sourcePath}, t.TempDir(), metadata)
+	stateDir := t.TempDir()
+	materializer, err := newLazyMemoryMaterializer(context.Background(), fileFetcher{path: sourcePath}, stateDir, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +109,23 @@ func TestLazyMemoryMaterializerBootstrapsCriticalRangesAndCommitsFullLayer(t *te
 	}
 	if !materializer.Complete() {
 		t.Fatal("verified full materialization was not committed")
+	}
+	store, err := localcontent.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Info(context.Background(), metadata.Layer.Digest); !errdefs.IsNotFound(err) {
+		t.Fatalf("memory layer exists before on-demand commit: %v", err)
+	}
+	if err := commitLazyMemoryLayer(context.Background(), store, stateDir, metadata); err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.Info(context.Background(), metadata.Layer.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size != metadata.Layer.Size {
+		t.Fatalf("committed memory layer size = %d, want %d", info.Size, metadata.Layer.Size)
 	}
 }
 
