@@ -43,6 +43,14 @@ func UnpackBootIndex(ctx context.Context, client *containerdclient.Client, bootI
 }
 
 func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, info BootIndexInfo) (map[string]string, error) {
+	return unpackBootIndexComponentSet(ctx, client, info, true)
+}
+
+func unpackBootIndexComponentsWithoutMemory(ctx context.Context, client *containerd.Client, info BootIndexInfo) (map[string]string, error) {
+	return unpackBootIndexComponentSet(ctx, client, info, false)
+}
+
+func unpackBootIndexComponentSet(ctx context.Context, client *containerd.Client, info BootIndexInfo, includeMemory bool) (map[string]string, error) {
 	if client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
@@ -50,7 +58,7 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 	snapshotMap := make(map[string]string)
 
 	components := []ocispec.Descriptor{info.RootfsDescriptor}
-	if info.MemDescriptor.Digest != "" {
+	if includeMemory && info.MemDescriptor.Digest != "" {
 		components = append(components, info.MemDescriptor)
 	}
 	components = append(components, info.SandboxDescriptor)

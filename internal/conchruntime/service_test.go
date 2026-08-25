@@ -1006,13 +1006,13 @@ func buildColdBootIndex(t *testing.T, host *containerdhost.Host, name string) st
 		}
 	}
 	rootfsDesc, err := conchimage.BuildNativeComponentInContent(
-		ctx, store, []string{rootfsDir}, conchimage.KindRootfs,
+		ctx, store, []string{rootfsDir}, conchimage.KindRootfs, false,
 	)
 	if err != nil {
 		t.Fatalf("build rootfs component: %v", err)
 	}
 	sandboxDesc, err := conchimage.BuildNativeComponentInContent(
-		ctx, store, []string{sandboxDir}, conchimage.KindSandbox,
+		ctx, store, []string{sandboxDir}, conchimage.KindSandbox, false,
 	)
 	if err != nil {
 		t.Fatalf("build sandbox component: %v", err)

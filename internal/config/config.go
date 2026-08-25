@@ -60,7 +60,8 @@ type NetworkConfig struct {
 type CNIConfig = netstack.CNIManagerConfig
 
 type VMMBinaryConfig struct {
-	Binary string `yaml:"binary"`
+	Binary  string `yaml:"binary"`
+	PreGate bool   `yaml:"pre_gate,omitempty"`
 }
 
 const (

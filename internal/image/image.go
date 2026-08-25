@@ -55,6 +55,15 @@ func PullBootIndex(ctx context.Context, client *containerdclient.Client, req Reg
 	if IsCanonicalTemplateRef(req.Reference) {
 		return PullBootIndexResult{}, fmt.Errorf("%w: registry reference %s is reserved for local Template lifecycle management", ErrInvalidArgument, req.Reference)
 	}
+	if req.PreferLazy {
+		result, supported, err := pullLazyBootIndex(containerdclient.NewNamespaceContext(ctx), client, req)
+		if err != nil {
+			return PullBootIndexResult{}, translateRegistryError(err)
+		}
+		if supported {
+			return result, nil
+		}
+	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
 	fetched, kind, err := pullRegistryContent(pullCtx, client, req, true)

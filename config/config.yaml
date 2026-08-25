@@ -26,6 +26,9 @@ sandbox:
     ram_mb: 2048
   stratovirt:
     binary: /usr/bin/stratovirt
+    # Optional adaptive restore prefetch for memory that is still being
+    # materialized. Fully local snapshots always bypass this path.
+    pre_gate: false
   cloud_hypervisor:
     binary: /usr/local/bin/cloud-hypervisor
 

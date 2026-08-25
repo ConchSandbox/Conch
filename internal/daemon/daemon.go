@@ -143,6 +143,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
 			VolumeManager:      s.volumeManager,
+			PreGateEnabled:     cfg.Sandbox.Stratovirt != nil && cfg.Sandbox.Stratovirt.PreGate,
+			PreGateStateDir:    filepath.Join(cfg.Server.StateDir, "pre-gate"),
 		},
 	})
 	if err != nil {
@@ -165,6 +167,10 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultSpec.VCPUMax,
 		RamMB:      cfg.Sandbox.DefaultSpec.RamMB,
 	})
+	s.runtimeService.SetPreGate(
+		cfg.Sandbox.Stratovirt != nil && cfg.Sandbox.Stratovirt.PreGate,
+		filepath.Join(cfg.Server.StateDir, "pre-gate"),
+	)
 
 	manager := host.SandboxManager()
 	if manager != nil {

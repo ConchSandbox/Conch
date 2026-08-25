@@ -51,6 +51,16 @@ type Service struct {
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
 	lifecycleLocks  sandboxLifecycleLocks
+	PreGateEnabled  bool
+	PreGateStateDir string
+}
+
+func (s *Service) SetPreGate(enabled bool, stateDir string) {
+	if s == nil {
+		return
+	}
+	s.PreGateEnabled = enabled
+	s.PreGateStateDir = strings.TrimSpace(stateDir)
 }
 
 type sandboxLifecycleLock struct {
@@ -425,6 +435,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		MemRoot:               captured.MemRootPath,
 		VMMName:               captured.VMMName,
 		MemorySizeMB:          captured.MemorySizeMB,
+		AnnotateMemExtent:     s.PreGateEnabled,
 	})
 	if err != nil {
 		return SandboxCheckpointResult{}, err
@@ -495,10 +506,11 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template reference is required"))
 	}
 	pulled, err := conchimage.PullBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
-		Reference: reference,
-		PlainHTTP: opts.PlainHTTP,
-		Username:  opts.Username,
-		Password:  opts.Password,
+		Reference:  reference,
+		PlainHTTP:  opts.PlainHTTP,
+		Username:   opts.Username,
+		Password:   opts.Password,
+		PreferLazy: s.PreGateEnabled,
 	})
 	if err != nil {
 		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, translateTemplateArtifactError(err))
@@ -510,12 +522,19 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		origin = conchtemplate.OriginCheckpoint
 		bootMode = conchtemplate.BootModeResume
 	}
+	labels := copyMap(opts.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	if opts.PlainHTTP {
+		labels[conchimage.TemplateLabelRegistryPlainHTTP] = "true"
+	}
 	entry, err := s.Templates.Create(ctx, conchtemplate.Entry{
 		Origin:          origin,
 		BootMode:        bootMode,
 		BootIndexDigest: info.BootIndexDigest,
 		SourceRef:       reference,
-		Labels:          opts.Labels,
+		Labels:          labels,
 	})
 	if err != nil {
 		if !errors.Is(err, conchtemplate.ErrAlreadyExists) {
@@ -554,12 +573,21 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if bootIndexDigest == "" {
 		return conchtemplate.ErrFailedPrecondition.Wrap(fmt.Errorf("template has no boot index digest"))
 	}
+	var profile []byte
+	if s.PreGateEnabled && s.PreGateStateDir != "" {
+		profilePath := sandbox.PreGateProfilePath(s.PreGateStateDir, bootIndexDigest)
+		profile, err = os.ReadFile(profilePath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read pre-gate profile: %w", err)
+		}
+	}
 	return conchimage.PushBootIndex(ctx, s.Containerd, conchimage.PushBootIndexOptions{
 		BootIndexDigest: bootIndexDigest,
 		RemoteReference: remoteReference,
 		PlainHTTP:       opts.PlainHTTP,
 		Username:        opts.Username,
 		Password:        opts.Password,
+		PreGateProfile:  profile,
 	})
 }
 

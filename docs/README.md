@@ -14,4 +14,5 @@
 - [Network 模块设计](developer/network.md)：Network Slot、CNI、guest tap 和网络生命周期。
 - [Volume 设计](developer/volume.md)：virtiofs、VMM 与 guest agent 的卷架构。
 - [conch-init Agent API](developer/conch-init-api.md)：sandbox 内 Agent 的 Connect RPC 接口。
+- [StratoVirt pre-gate E2E benchmark](developer/pre-gate-e2e-benchmark.md)：本地 OCI registry 下的单实例与 50 并发 pull + start 对比。
 - [架构图源文件](developer/arch.drawio)：可编辑的 draw.io 架构图。

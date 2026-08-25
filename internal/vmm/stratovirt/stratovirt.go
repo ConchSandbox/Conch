@@ -73,7 +73,7 @@ const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp \
--incoming file:{{ .SnapfilePath }},mapped=true`
+-incoming file:{{ .SnapfilePath }},mapped=true{{ .PreGateOptions }}`
 
 type StartScriptStratovirtArgs struct {
 	NSenterPath     string
@@ -98,7 +98,8 @@ type StartScriptStratovirtArgs struct {
 	// MachineOpts is appended to -machine (e.g. ",mem-share=on" when virtiofs
 	// mounts are present, since vhost-user-fs needs guest memory shared with
 	// the userspace virtiofsd backend).
-	MachineOpts string
+	MachineOpts    string
+	PreGateOptions string
 }
 
 type StratovirtClient struct {
@@ -204,6 +205,7 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 		VirtioFSDevices: buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths)),
 		SharefsCmdline:  buildSharefsCmdline(args.VirtioFS),
 		MachineOpts:     stratovirtMachineOpts(args.VirtioFS),
+		PreGateOptions:  buildPreGateOptions(args),
 	}
 
 	if _, err = os.Stat(stArgs.VmmBinaryPath); err != nil {
@@ -231,6 +233,20 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 	script := scriptBuffer.String()
 	logger.Debug("Build start command (Stratovirt)", ulog.F("script", script))
 	return script, nil
+}
+
+func buildPreGateOptions(args *driver.ResourceArgs) string {
+	var options []string
+	if strings.TrimSpace(args.RecordPreGatePath) != "" {
+		options = append(options, "record_pre_gate="+args.RecordPreGatePath)
+	}
+	if strings.TrimSpace(args.ResumeGatePath) != "" {
+		options = append(options, "resume_gate="+args.ResumeGatePath)
+	}
+	if len(options) == 0 {
+		return ""
+	}
+	return "," + strings.Join(options, ",")
 }
 
 // buildStratovirtVirtioFSDevices renders the -chardev/-device pair for each

@@ -38,22 +38,36 @@ type Execution struct {
 type VMStartSpec struct {
 	MemorySizeMB int64
 
-	MemoryPath   string
-	KernelPath   string
-	InitrdPath   string
-	SnapfilePath string
-	PmemPaths    []string
-	VirtioFS     []driver.VirtioFSDevice
+	MemoryPath          string
+	KernelPath          string
+	InitrdPath          string
+	SnapfilePath        string
+	PmemPaths           []string
+	VirtioFS            []driver.VirtioFSDevice
+	PreGateKey          string
+	PreGateRequired     bool
+	ResumeGatePath      string
+	RecordPreGatePath   string
+	PreGateProfile      []byte
+	MaterializeCritical func(context.Context, int64, []uint64) error
+	MaterializeAll      func(context.Context) error
+	MaterializeCommit   func() error
 }
 
 func vmStartSpecFromBootSpec(spec BootSpec) VMStartSpec {
 	return VMStartSpec{
-		MemorySizeMB: spec.MemorySizeMB,
-		MemoryPath:   spec.MemoryPath,
-		KernelPath:   spec.KernelPath,
-		InitrdPath:   spec.InitrdPath,
-		SnapfilePath: spec.SnapfilePath,
-		PmemPaths:    append([]string(nil), spec.PmemPaths...),
+		MemorySizeMB:        spec.MemorySizeMB,
+		MemoryPath:          spec.MemoryPath,
+		KernelPath:          spec.KernelPath,
+		InitrdPath:          spec.InitrdPath,
+		SnapfilePath:        spec.SnapfilePath,
+		PmemPaths:           append([]string(nil), spec.PmemPaths...),
+		PreGateKey:          spec.PreGateKey,
+		PreGateRequired:     spec.PreGateRequired,
+		PreGateProfile:      append([]byte(nil), spec.PreGateProfile...),
+		MaterializeCritical: spec.MaterializeCritical,
+		MaterializeAll:      spec.MaterializeAll,
+		MaterializeCommit:   spec.MaterializeCommit,
 	}
 }
 
@@ -104,19 +118,21 @@ func RestoreSandbox(
 	}
 
 	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         vcpuNum,
-		CPUMax:          vcpuMax,
-		MemorySize:      vmStartSpec.MemorySizeMB,
-		MemoryPath:      vmStartSpec.MemoryPath,
-		NetNSPath:       slot.NetNSPath(),
-		TapName:         slot.TapName(),
-		KernelPath:      vmStartSpec.KernelPath,
-		SnapfilePath:    vmStartSpec.SnapfilePath,
-		InitrdPath:      vmStartSpec.InitrdPath,
-		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
-		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
-		VsockCID:        vsockCID,
-		VsockSocketPath: vsockSocketPath,
+		CPUBoot:           vcpuNum,
+		CPUMax:            vcpuMax,
+		MemorySize:        vmStartSpec.MemorySizeMB,
+		MemoryPath:        vmStartSpec.MemoryPath,
+		NetNSPath:         slot.NetNSPath(),
+		TapName:           slot.TapName(),
+		KernelPath:        vmStartSpec.KernelPath,
+		SnapfilePath:      vmStartSpec.SnapfilePath,
+		InitrdPath:        vmStartSpec.InitrdPath,
+		PmemPaths:         append([]string(nil), vmStartSpec.PmemPaths...),
+		VirtioFS:          append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
+		VsockCID:          vsockCID,
+		VsockSocketPath:   vsockSocketPath,
+		ResumeGatePath:    vmStartSpec.ResumeGatePath,
+		RecordPreGatePath: vmStartSpec.RecordPreGatePath,
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(

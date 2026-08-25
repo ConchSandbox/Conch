@@ -22,12 +22,13 @@ import (
 
 // Server manages snapshot lifecycle and per-sandbox boot layouts.
 type Server struct {
-	snt              snapshotter.Snapshotter
-	mountMgr         mount.Manager
-	activeSnapshots  map[runtimeSnapshotKey]*snapshots.Info
-	activeRootfsPmem map[runtimeSnapshotKey][]string
-	lock             sync.RWMutex
-	workDir          string
+	snt               snapshotter.Snapshotter
+	mountMgr          mount.Manager
+	activeSnapshots   map[runtimeSnapshotKey]*snapshots.Info
+	activeRootfsPmem  map[runtimeSnapshotKey][]string
+	externalMemMounts map[runtimeSnapshotKey]struct{}
+	lock              sync.RWMutex
+	workDir           string
 }
 
 type runtimeSnapshotKey struct {
@@ -60,9 +61,10 @@ const (
 // BootLayoutRequest is the neutral storage request used for cold and restore
 // layouts.
 type BootLayoutRequest struct {
-	Parents      ParentSnapshotIDs
-	MemoryLayout MemoryLayoutMode
-	MemorySizeMB int64
+	Parents             ParentSnapshotIDs
+	MemoryLayout        MemoryLayoutMode
+	MemorySizeMB        int64
+	CheckpointErofsPath string
 }
 
 func normalizeMemoryLayout(mode MemoryLayoutMode) (MemoryLayoutMode, error) {
@@ -177,11 +179,12 @@ func NewServer(workDir string, daemonClient *containerdclient.Client) (*Server, 
 		return nil, err
 	}
 	srv := &Server{
-		snt:              erofsSn,
-		mountMgr:         daemonClient.MountManager(),
-		workDir:          workDir,
-		activeSnapshots:  make(map[runtimeSnapshotKey]*snapshots.Info),
-		activeRootfsPmem: make(map[runtimeSnapshotKey][]string),
+		snt:               erofsSn,
+		mountMgr:          daemonClient.MountManager(),
+		workDir:           workDir,
+		activeSnapshots:   make(map[runtimeSnapshotKey]*snapshots.Info),
+		activeRootfsPmem:  make(map[runtimeSnapshotKey][]string),
+		externalMemMounts: make(map[runtimeSnapshotKey]struct{}),
 	}
 	if srv.snt == nil {
 		return nil, fmt.Errorf("snapshot server snapshotter is nil")
@@ -445,6 +448,32 @@ func (s *Server) RestoreBootLayout(
 
 	memMountPoint := layout.MemMount
 	if memoryLayout == MemoryLayoutCheckpointView {
+		if externalPath := strings.TrimSpace(req.CheckpointErofsPath); externalPath != "" {
+			if !filepath.IsAbs(externalPath) {
+				return nil, fmt.Errorf("external checkpoint EROFS path must be absolute")
+			}
+			if err := os.MkdirAll(memMountPoint, common.DirMode); err != nil {
+				return nil, err
+			}
+			externalMount := mount.Mount{Type: "erofs", Source: externalPath, Options: []string{"ro", "loop"}}
+			if err := externalMount.Mount(memMountPoint); err != nil {
+				_ = os.RemoveAll(memMountPoint)
+				return nil, fmt.Errorf("mount external checkpoint EROFS: %w", err)
+			}
+			s.lock.Lock()
+			s.externalMemMounts[runtimeSnapshotKey{namespace: namespace, key: key}] = struct{}{}
+			s.lock.Unlock()
+			defer func() {
+				if err == nil {
+					return
+				}
+				_ = s.unmountPath(memMountPoint)
+				s.lock.Lock()
+				delete(s.externalMemMounts, runtimeSnapshotKey{namespace: namespace, key: key})
+				s.lock.Unlock()
+			}()
+			return layout, nil
+		}
 		memViewSnapshotKey := getMemViewSnapshotKey(key)
 		if _, err := s.viewSnapshotMount(ctx, namespace, parents.Mem, memViewSnapshotKey, memMountPoint); err != nil {
 			return nil, fmt.Errorf("view checkpoint memory failed: %w", err)
@@ -523,6 +552,17 @@ func (s *Server) ReleaseBootLayout(ctx context.Context, key string) error {
 	}
 
 	memMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem)
+	s.lock.Lock()
+	_, externalMem := s.externalMemMounts[runtimeSnapshotKey{namespace: namespace, key: key}]
+	if externalMem {
+		delete(s.externalMemMounts, runtimeSnapshotKey{namespace: namespace, key: key})
+	}
+	s.lock.Unlock()
+	if externalMem {
+		if err := s.unmountPath(memMount); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if s.activeSnapshotExists(ctx, namespace, memKey) {
 		if err := s.releaseActiveSnapshot(ctx, namespace, memKey, memMount); err != nil {
 			errs = append(errs, err)

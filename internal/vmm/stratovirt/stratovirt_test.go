@@ -93,11 +93,28 @@ func TestStratovirtBuildRestoreCmdUsesMappedCheckpoint(t *testing.T) {
 	if want := "-incoming file:/tmp/snapshot,mapped=true"; !strings.Contains(script, want) {
 		t.Fatalf("restore script missing %q:\n%s", want, script)
 	}
+	if strings.Contains(script, "record_pre_gate=") || strings.Contains(script, "resume_gate=") {
+		t.Fatalf("default restore unexpectedly enabled pre-gate:\n%s", script)
+	}
 	if !strings.Contains(script, "-m 256M") {
 		t.Fatalf("restore script is missing captured memory size:\n%s", script)
 	}
 	if strings.Contains(script, "/must/not/be/used/mem.img") {
 		t.Fatalf("restore script consumed MemoryPath:\n%s", script)
+	}
+}
+
+func TestBuildPreGateOptions(t *testing.T) {
+	if got := buildPreGateOptions(&driver.ResourceArgs{}); got != "" {
+		t.Fatalf("disabled options = %q", got)
+	}
+	got := buildPreGateOptions(&driver.ResourceArgs{
+		RecordPreGatePath: "/state/profile.json",
+		ResumeGatePath:    "/run/gate",
+	})
+	want := ",record_pre_gate=/state/profile.json,resume_gate=/run/gate"
+	if got != want {
+		t.Fatalf("options = %q, want %q", got, want)
 	}
 }
 

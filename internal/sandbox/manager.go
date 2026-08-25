@@ -28,6 +28,8 @@ type Config struct {
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
 	VolumeManager      *volume.Manager
+	PreGateEnabled     bool
+	PreGateStateDir    string
 }
 
 type Manager struct {
@@ -42,6 +44,8 @@ type Manager struct {
 	cidAllocator       *CIDAllocator
 	volumeManager      *volume.Manager
 	vmmBinaries        map[string]string
+	preGateEnabled     bool
+	preGateStateDir    string
 }
 
 type sandboxLifecycleState uint8
@@ -75,7 +79,7 @@ func New(
 	snapshots SnapshotBackend,
 	cfg Config,
 ) (*Manager, error) {
-	boot, err := NewBootPreparer(templates, snapshots, client)
+	boot, err := NewBootPreparer(templates, snapshots, client, cfg.PreGateEnabled, cfg.PreGateStateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +95,8 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	manager.preGateEnabled = cfg.PreGateEnabled
+	manager.preGateStateDir = cfg.PreGateStateDir
 	return manager, nil
 }
 
@@ -537,6 +543,12 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 	vmmBinary, ok := m.vmmBinaries[req.VMMName]
 	if !ok {
 		return nil, fmt.Errorf("vmm %q is not configured", req.VMMName)
+	}
+	if restore && req.VMMName == vmm.StratovirtName && m.preGateEnabled {
+		if err := configurePreGate(ctx, &vmStartSpec, req.SandboxID, m.preGateStateDir); err != nil {
+			return nil, fmt.Errorf("configure pre-gate restore: %w", err)
+		}
+		defer cleanupResumeGate(vmStartSpec.ResumeGatePath)
 	}
 	return createSandboxWithVsockSend(
 		ctx,

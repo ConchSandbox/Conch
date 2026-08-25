@@ -2,14 +2,17 @@ package image
 
 import ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+const TemplateLabelRegistryPlainHTTP = "io.conch.internal.registry.plain-http"
+
 // RegistryPullOptions contains the registry inputs shared by OCI image and
 // Boot Index pull workflows. Command-specific kind policy is applied by the
 // caller before child manifests and layers are fetched.
 type RegistryPullOptions struct {
-	Reference string
-	PlainHTTP bool
-	Username  string
-	Password  string
+	Reference  string
+	PlainHTTP  bool
+	Username   string
+	Password   string
+	PreferLazy bool
 }
 
 type PublishBootIndexOptions struct {
@@ -39,6 +42,7 @@ type BootIndexInfo struct {
 	Resume            bool               `json:"resume"`
 	VMMName           string             `json:"vmm_name,omitempty"`
 	MemorySizeMB      int64              `json:"memory_size_mb,omitempty"`
+	PreGateProfile    string             `json:"pre_gate_profile,omitempty"`
 }
 
 // PublishCheckpointBootIndexOptions publishes captured memory and VMM state as
@@ -50,6 +54,11 @@ type PublishCheckpointBootIndexOptions struct {
 	MemRoot               string `json:"mem_root"`
 	VMMName               string `json:"vmm_name"`
 	MemorySizeMB          int64  `json:"memory_size_mb"`
+	// AnnotateMemExtent enables dump.erofs inspection of the checkpoint memory
+	// EROFS extent so the mem layer carries the file offset/size annotations
+	// consumed by pre-gate lazy pull. It mirrors the pre-gate feature toggle;
+	// the main publish path leaves it false and never invokes dump.erofs.
+	AnnotateMemExtent bool `json:"annotate_mem_extent,omitempty"`
 }
 
 // PublishCheckpointBootIndexResult deliberately contains no snapshot keys:
@@ -68,4 +77,5 @@ type PushBootIndexOptions struct {
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
+	PreGateProfile  []byte `json:"-"`
 }

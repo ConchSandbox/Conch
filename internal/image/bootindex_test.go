@@ -70,7 +70,7 @@ func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rootfs, "bin"), []byte("rootfs"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{rootfs}, KindRootfs)
+	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{rootfs}, KindRootfs, false)
 	if err != nil {
 		t.Fatalf("BuildNativeComponentInContent rootfs: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, false)
 		if err != nil {
 			t.Fatalf("BuildNativeComponentInContent(%s): %v", kind, err)
 		}
@@ -265,11 +265,11 @@ func TestBuildBootIndexInContentRejectsWrongPreparedComponentKind(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "rootfs-kind")}, KindRootfs)
+	rootfsDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "rootfs-kind")}, KindRootfs, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sandboxDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "sandbox-kind")}, KindSandbox)
+	sandboxDesc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, "sandbox-kind")}, KindSandbox, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestBuildNativeComponentInContentRejectsUnsafeInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = BuildNativeComponentInContent(context.Background(), store, []string{"unused"}, "unknown")
+	_, err = BuildNativeComponentInContent(context.Background(), store, []string{"unused"}, "unknown", false)
 	if err == nil || !strings.Contains(err.Error(), "unsupported native component kind") {
 		t.Fatalf("unknown kind error = %v", err)
 	}
@@ -302,7 +302,7 @@ func TestBuildNativeComponentInContentRejectsUnsafeInputs(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	_, err = BuildNativeComponentInContent(context.Background(), store, []string{link}, KindMemSnapshot)
+	_, err = BuildNativeComponentInContent(context.Background(), store, []string{link}, KindMemSnapshot, false)
 	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
 		t.Fatalf("symlink error = %v", err)
 	}
@@ -374,7 +374,7 @@ func TestInspectBootIndexContentRejectsMismatchedVMMCapability(t *testing.T) {
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -408,7 +408,7 @@ func TestInspectBootIndexMemorySizeCompatibilityIsVMMSpecific(t *testing.T) {
 	}
 	build := func(kind, name string) ocispec.Descriptor {
 		t.Helper()
-		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind)
+		desc, err := BuildNativeComponentInContent(ctx, store, []string{writeComponentRoot(t, dir, name)}, kind, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -467,5 +467,85 @@ func requireMkfsErofs(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
 		t.Skip("mkfs.erofs not available")
+	}
+}
+
+func TestInspectErofsMemoryExtentParsesContiguousExtent(t *testing.T) {
+	output := `Path : /conch/snapshot/memory
+Size: 536883200  On-disk size: 536883200  regular file
+NID: 45   Links: 1   Layout: 0   Compression ratio: 100.00%
+
+ Ext:   logical offset   |  length :     physical offset    |  length
+   0:        0..536883200 | 536883200 :       4096.. 536887296 | 536883200
+/conch/snapshot/memory: 1 extents found
+`
+	offset, size, err := parseErofsMemoryExtentOutput(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset != 4096 || size != 536883200 {
+		t.Fatalf("extent = %d..+%d, want 4096..+536883200", offset, size)
+	}
+}
+
+func TestInspectErofsMemoryExtentRejectsFragmentedExtent(t *testing.T) {
+	output := ` Ext:   logical offset   |  length :     physical offset    |  length
+   0:        0..1048576    | 1048576  :       4096.. 1052672   | 1048576
+   1:        1048576..536883200 | 535834624 : 1052672.. 536936448 | 535834624
+`
+	if _, _, err := parseErofsMemoryExtentOutput(output); err == nil {
+		t.Fatal("fragmented memory extent was accepted")
+	}
+}
+
+func TestBuildMemComponentAnnotatesExtentOnlyWhenRequested(t *testing.T) {
+	requireMkfsErofs(t)
+	if _, err := exec.LookPath("dump.erofs"); err != nil {
+		t.Skip("dump.erofs not available")
+	}
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := localcontent.NewStore(filepath.Join(dir, "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	memRoot := filepath.Join(dir, "mem-root")
+	if err := os.MkdirAll(filepath.Join(memRoot, "conch", "snapshot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memRoot, "conch", "snapshot", "memory"), make([]byte, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Main capture/publish path: no extent inspection, no dump.erofs dependency.
+	plain, err := BuildNativeComponentInContent(ctx, store, []string{memRoot}, KindMemSnapshot, false)
+	if err != nil {
+		t.Fatalf("BuildNativeComponentInContent(annotate=false): %v", err)
+	}
+	plainManifest, err := readManifest(ctx, store, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plainManifest.Layers) != 1 {
+		t.Fatalf("mem component layer count = %d, want 1", len(plainManifest.Layers))
+	}
+	if got := plainManifest.Layers[0].Annotations[AnnotationMemoryFileOffset]; got != "" {
+		t.Fatalf("main path unexpectedly annotated mem extent: offset=%q", got)
+	}
+
+	// Pre-gate path: extent annotations are recorded on the layer descriptor.
+	annotated, err := BuildNativeComponentInContent(ctx, store, []string{memRoot}, KindMemSnapshot, true)
+	if err != nil {
+		t.Fatalf("BuildNativeComponentInContent(annotate=true): %v", err)
+	}
+	annotatedManifest, err := readManifest(ctx, store, annotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := annotatedManifest.Layers[0].Annotations[AnnotationMemoryFileOffset]
+	size := annotatedManifest.Layers[0].Annotations[AnnotationMemoryFileSize]
+	if offset == "" || size != "4096" {
+		t.Fatalf("pre-gate mem layer extent = offset %q size %q, want offset set size 4096", offset, size)
 	}
 }

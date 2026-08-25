@@ -83,10 +83,29 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	}
 }
 
+func TestBootPreparerRejectsPreGateForColdBoot(t *testing.T) {
+	templates, entry, bootDigest := newBootTemplate(t, template.OriginImage, template.BootModeCold)
+	resolved := resolvedBoot(bootDigest, false, "")
+	resolved.PreGateRequired = true
+	resolver := &fakeBootResolver{result: resolved}
+
+	_, err := mustBootPreparer(t, templates, &fakeSnapshotBackend{}, resolver).Prepare(context.Background(), PrepareBootRequest{
+		TemplateID: entry.BootIndexDigest,
+		SandboxID:  "sandbox-cold-pre-gate",
+		VMMName:    "stratovirt",
+		RAMMB:      512,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cold boot cannot require") {
+		t.Fatalf("Prepare() error = %v, want cold pre-gate rejection", err)
+	}
+}
+
 func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	ctx := context.Background()
 	templates, entry, bootDigest := newBootTemplate(t, template.OriginCheckpoint, template.BootModeResume)
-	resolver := &fakeBootResolver{result: resolvedBoot(bootDigest, true, "cloud-hypervisor")}
+	resolved := resolvedBoot(bootDigest, true, "cloud-hypervisor")
+	resolved.PreGateRequired = true
+	resolver := &fakeBootResolver{result: resolved}
 	snapshots := &fakeSnapshotBackend{}
 	preparer := mustBootPreparer(t, templates, snapshots, resolver)
 
@@ -117,6 +136,9 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	}
 	if got.Spec.SnapfilePath == "" {
 		t.Fatalf("resume boot = %#v", got)
+	}
+	if !got.Spec.PreGateRequired {
+		t.Fatal("resume boot dropped pending memory materialization state")
 	}
 }
 
@@ -250,8 +272,11 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 		second.Spec.MemoryPath != "" || second.Spec.SnapfilePath == "" {
 		t.Fatalf("StratoVirt restore specs = %#v %#v", first.Spec, second.Spec)
 	}
-	if len(resolver.requests) != 2 {
-		t.Fatalf("Boot resolver count = %d, want 2", len(resolver.requests))
+	// The boot resolver is memoized per boot index: unpack and materializer
+	// initialization are shared across sandboxes of the same template, while
+	// each sandbox still gets its own boot layout (asserted above).
+	if len(resolver.requests) != 1 {
+		t.Fatalf("Boot resolver count = %d, want 1 (cached)", len(resolver.requests))
 	}
 }
 

@@ -479,4 +479,7 @@ func TestDefaultSandboxBackendStaysStratovirt(t *testing.T) {
 	if got := DefaultConfig().Sandbox.Backend; got != "stratovirt" {
 		t.Fatalf("DefaultConfig().Sandbox.Backend = %q, want stratovirt", got)
 	}
+	if DefaultConfig().Sandbox.Stratovirt.PreGate {
+		t.Fatal("StratoVirt pre-gate must be disabled by default")
+	}
 }
