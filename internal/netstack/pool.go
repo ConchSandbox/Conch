@@ -494,6 +494,7 @@ func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, err
 	}
 	if errors.Is(err, errWarmPoolEmpty) {
+		p.signalRefillNeeded()
 		available, capacity := p.warmSlots.Usage()
 		ulog.GetLogger().Warn(
 			"no available network slot in the pool",
