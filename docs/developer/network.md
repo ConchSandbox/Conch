@@ -2,6 +2,8 @@
 
 Network 模块位于 `internal/netstack`，负责为 Sandbox 创建并复用隔离的网络环境。CNI 管理 Sandbox 对外网络，Conch 管理 network namespace、guest tap 和两层网络之间的地址转换。
 
+当前 Sandbox 数据面和网络策略仅支持 IPv4。VMM cold boot 会禁用 guest IPv6；CNI 返回 IPv6 地址、路由、网关或 DNS 时，Slot 创建失败并回滚。
+
 ## 1. 模块组成
 
 | 组件 | 职责 |

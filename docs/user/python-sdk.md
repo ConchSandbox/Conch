@@ -265,7 +265,7 @@ sandbox.update_network(
 - 只有拒绝列表时，拒绝匹配地址并允许未匹配流量。
 - 允许和拒绝列表都为空时，该方向不受列表限制。
 - `allow_internet_access: false` 会额外拒绝未匹配的出站流量，不影响入站规则。
-- 当前仅接受 IPv4 地址和 IPv4 CIDR；四个列表合计最多 1024 项。
+- 当前 Sandbox 网络和策略仅支持 IPv4；IPv6 策略输入会被拒绝，四个列表合计最多 1024 项。
 
 出站规则挂载在 Linux network namespace 内从 guest tap 发出的转发路径，入站规则挂载在转发到 guest tap 的路径。入站规则只过滤平台已经路由到该沙箱的 IP 流量；它不会创建主机监听端口、公开服务、执行 hostname 路由或修改 HTTP 请求。
 

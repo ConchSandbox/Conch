@@ -50,6 +50,7 @@ func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
 		binPath,
 		`--net "tap=tap0"`,
 		"conch.sandbox_id=sandbox-test",
+		"ipv6.disable=1",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)

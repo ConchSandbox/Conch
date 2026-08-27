@@ -46,7 +46,7 @@ const startScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 -machine {{ .MachineType }}{{ .MachineOpts }} \
 -kernel {{ .KernelPath }} \
 -initrd {{ .RootfsPath }} \
--append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
+-append "console={{ .ConsoleDevice }} reboot=k quiet panic=1 root=/dev/ram0 rw ipv6.disable=1 conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
 -m {{ .MemorySize }}M \
 -smp {{ .CPUBoot }} \
 -qmp unix:{{ .VmmSocket }},server,nowait \

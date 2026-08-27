@@ -51,6 +51,38 @@ func TestExtractCNIDNSRejectsInvalidExplicitServer(t *testing.T) {
 	}
 }
 
+func TestValidateCNIIPv4OnlyRejectsIPv6(t *testing.T) {
+	_, ipv6Route, _ := net.ParseCIDR("fd00::/64")
+	_, ipv4Route, _ := net.ParseCIDR("0.0.0.0/0")
+	tests := []struct {
+		name   string
+		result *types100.Result
+		want   string
+	}{
+		{name: "address", result: &types100.Result{IPs: []*types100.IPConfig{{Address: net.IPNet{IP: net.ParseIP("fd00::2")}}}}, want: "IPv6 address"},
+		{name: "gateway", result: &types100.Result{IPs: []*types100.IPConfig{{Gateway: net.ParseIP("fd00::1")}}}, want: "IPv6 gateway"},
+		{name: "route", result: &types100.Result{Routes: []*cnitypes.Route{{Dst: *ipv6Route}}}, want: "IPv6 route"},
+		{name: "route gateway", result: &types100.Result{Routes: []*cnitypes.Route{{Dst: *ipv4Route, GW: net.ParseIP("fd00::1")}}}, want: "IPv6 route gateway"},
+		{name: "DNS", result: &types100.Result{DNS: cnitypes.DNS{Nameservers: []string{"2001:4860:4860::8888"}}}, want: "IPv6 DNS"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateCNIIPv4Only(tt.result); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateCNIIPv4Only() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+
+	if err := validateCNIIPv4Only(&types100.Result{
+		IPs:    []*types100.IPConfig{{Address: net.IPNet{IP: net.ParseIP("10.12.0.2")}, Gateway: net.ParseIP("10.12.0.1")}},
+		Routes: []*cnitypes.Route{{Dst: *ipv4Route, GW: net.ParseIP("10.12.0.1")}},
+		DNS:    cnitypes.DNS{Nameservers: []string{"8.8.8.8"}},
+	}); err != nil {
+		t.Fatalf("validateCNIIPv4Only() rejected IPv4 result: %v", err)
+	}
+}
+
 func TestNormalizeCNIManagerConfigPreservesExplicitValues(t *testing.T) {
 	in := CNIManagerConfig{
 		PluginBinDirs: []string{"/custom/bin"},
@@ -133,7 +165,6 @@ func TestExtractCNIIP(t *testing.T) {
 	result := &types100.Result{
 		Interfaces: []*types100.Interface{{Name: "eth0"}, {Name: "host"}},
 		IPs: []*types100.IPConfig{
-			{Interface: types100.Int(0), Address: net.IPNet{IP: net.ParseIP("fd00::2")}},
 			{Interface: types100.Int(0), Address: net.IPNet{IP: net.ParseIP("10.12.0.2")}},
 		},
 	}
