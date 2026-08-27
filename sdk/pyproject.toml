@@ -23,6 +23,7 @@ dependencies = [
     "requests>=2.25.0",
     "requests-unixsocket>=0.3.0",
     "connectrpc==0.11.0",
+    "pyqwest>=0.5.1",
     "protoc-gen-connect-python==0.9.0",
     "protobuf>=4.21.0",
 ]
