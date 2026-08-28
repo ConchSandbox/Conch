@@ -383,8 +383,6 @@ func (c *Config) ContainerdStateDir() string { return filepath.Join(c.Server.Wor
 
 func (c *Config) VirtiofsRuntimeDir() string { return filepath.Join(c.Server.WorkDir, "sandboxes") }
 
-func (c *Config) StatePath() string { return filepath.Join(c.Server.StateDir, "state.db") }
-
 // parseLogLevel converts string log level to ulog.LogLevel
 func parseLogLevel(level string) (ulog.LogLevel, error) {
 	switch level {
