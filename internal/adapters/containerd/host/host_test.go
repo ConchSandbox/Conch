@@ -31,6 +31,9 @@ func TestStartAndClose(t *testing.T) {
 	if host.SnapshotServer() == nil {
 		t.Fatal("snapshot server is nil")
 	}
+	if host.SandboxStore() == nil {
+		t.Fatal("sandbox store is nil")
+	}
 	if _, err := host.Client().NamespaceService().List(context.Background()); err != nil {
 		t.Fatalf("list namespaces: %v", err)
 	}

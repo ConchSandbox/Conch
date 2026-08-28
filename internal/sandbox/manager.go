@@ -33,7 +33,6 @@ type Config struct {
 type Manager struct {
 	sandboxes             sync.Map // map[string]*sandboxEntry
 	pool                  *netstack.Pool
-	daemonClient          *containerdclient.Client
 	boot                  BootPreparer
 	checkpointCapture     CheckpointCapture
 	vsockSignalRetry      time.Duration
@@ -91,7 +90,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
-	manager, err := NewManager(pool, client, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager, cfg.VMMBinaries)
+	manager, err := NewManager(pool, boot, vsockSignalRetry, vsockSignalTimeout, requestTimeout, cfg.VolumeManager, cfg.VMMBinaries)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +149,6 @@ func durationOrDefault(value, fallback time.Duration) time.Duration {
 
 func NewManager(
 	p *netstack.Pool,
-	daemonClient *containerdclient.Client,
 	bootPreparer BootPreparer,
 	vsockSignalRetry time.Duration,
 	vsockSignalTimeout time.Duration,
@@ -163,7 +161,6 @@ func NewManager(
 	}
 	return &Manager{
 		pool:               p,
-		daemonClient:       daemonClient,
 		boot:               bootPreparer,
 		checkpointCapture:  NewFullCheckpointCapture(),
 		vsockSignalRetry:   vsockSignalRetry,
@@ -197,7 +194,6 @@ type CreateRequest struct {
 	TemplateID   string
 	VMMName      string
 	SandboxID    string
-	LeaseID      string
 	VCPUNum      int64
 	VCPUMax      int64
 	RAMMB        int64
@@ -230,7 +226,6 @@ type CreateResult struct {
 	IP               string
 	AgentToken       string
 	SandboxID        string
-	LeaseID          string
 	VMMPID           int
 	VMMSocketPath    string
 	VsockCID         uint32
@@ -375,11 +370,6 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 		}
 	}()
 
-	leaseCtx, leaseID, err := m.prepareRuntimeLease(ctx, req)
-	if err != nil {
-		return CreateResult{}, err
-	}
-
 	runtimeIDs, err := m.allocateCreateRuntimeIDs(req)
 	if err != nil {
 		return CreateResult{}, err
@@ -393,7 +383,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 		}
 	}()
 
-	boot, err := m.prepareSandboxBoot(leaseCtx, req, runtimeIDs)
+	boot, err := m.prepareSandboxBoot(ctx, req, runtimeIDs)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -401,7 +391,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 		if err == nil {
 			return
 		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(leaseCtx), createCleanupTimeout)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 		defer cleanupCancel()
 		rmErr := m.boot.Release(cleanupCtx, ReleaseBootRequest{
 			SandboxID: runtimeIDs.key,
@@ -449,7 +439,6 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 		}
 		return CreateResult{}, fmt.Errorf("failed to create sandbox: %w", err)
 	}
-	sbx.leaseID = leaseID
 	registerSandboxVolumeCleanup(sbx, m.volumeManager, req.SandboxID, volumeDevices)
 
 	entry.sbx = sbx
@@ -458,7 +447,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 	cidAllocated = false
 
 	logger.Debug("created sandbox in manager")
-	return buildSandboxCreateResult(leaseID, req, sbx, boot, runtimeIDs, volumeDevices), nil
+	return buildSandboxCreateResult(req, sbx, boot, runtimeIDs, volumeDevices), nil
 }
 
 func (m *Manager) prepareVolumes(req CreateRequest, resume bool) ([]volume.Device, error) {
@@ -486,19 +475,6 @@ func volumeDevicesToDriver(devices []volume.Device) []driver.VirtioFSDevice {
 		})
 	}
 	return out
-}
-
-func (m *Manager) prepareRuntimeLease(ctx context.Context, req CreateRequest) (context.Context, string, error) {
-	leaseCtx := ctx
-	leaseID := req.LeaseID
-	if m.daemonClient == nil {
-		return leaseCtx, leaseID, nil
-	}
-	leaseCtx, leaseID, err := m.daemonClient.WithRuntimeLease(ctx, leaseID)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to ensure runtime lease: %w", err)
-	}
-	return leaseCtx, leaseID, nil
 }
 
 func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs, error) {
@@ -615,13 +591,12 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 	}
 }
 
-func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
+func buildSandboxCreateResult(req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
 		IP:               sbx.slot.CNIIP(),
 		AgentToken:       req.AgentToken,
 		SandboxID:        req.SandboxID,
-		LeaseID:          leaseID,
 		VMMPID:           sbx.process.Pid(),
 		VMMSocketPath:    sbx.process.VmmSocketPath,
 		VsockCID:         runtimeIDs.vsockCID,
@@ -657,7 +632,6 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	var errs []error
 	fields := []ulog.Field{
 		ulog.F("sandbox_id", sandboxID),
-		ulog.F("lease_id", sbx.leaseID),
 	}
 
 	finishClose := cleanupdiag.Start("sandbox.close", fields...)
@@ -671,23 +645,8 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 		errs = append(errs, err)
 	}
 
-	bootCtx := ctx
-	if sbx.leaseID != "" && m.daemonClient != nil {
-		var leaseErr error
-		finishLease := cleanupdiag.Start("sandbox.cleanup.restore_runtime_lease", fields...)
-		bootCtx, _, leaseErr = m.daemonClient.WithRuntimeLease(ctx, sbx.leaseID)
-		finishLease(leaseErr)
-		if leaseErr != nil {
-			logger.Warn("failed to restore runtime lease context for cleanup",
-				ulog.F("sandbox_id", sandboxID),
-				ulog.F("lease_id", sbx.leaseID),
-				ulog.F("error", leaseErr),
-			)
-			errs = append(errs, leaseErr)
-		}
-	}
 	finishBootRelease := cleanupdiag.Start("sandbox.boot.release", fields...)
-	err = m.boot.Release(bootCtx, ReleaseBootRequest{
+	err = m.boot.Release(ctx, ReleaseBootRequest{
 		SandboxID: sandboxID,
 	})
 	finishBootRelease(err)

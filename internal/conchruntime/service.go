@@ -15,7 +15,6 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -46,7 +45,7 @@ type Service struct {
 	Sandbox           SandboxOps
 	Containerd        *containerdclient.Client
 	Snapshot          SnapshotOps
-	Store             state.Store
+	Store             sandbox.Store
 	Templates         conchtemplate.Store
 	SandboxDefaults   SandboxDefaults
 	WebhookDispatcher *webhook.Dispatcher
@@ -88,7 +87,7 @@ func (l *sandboxLifecycleLocks) lock(id string) func() {
 	}
 }
 
-func New(sandboxOps SandboxOps, client *containerdclient.Client, store state.Store) *Service {
+func New(sandboxOps SandboxOps, client *containerdclient.Client, store sandbox.Store) *Service {
 	return &Service{
 		Sandbox:    sandboxOps,
 		Containerd: client,
@@ -129,14 +128,11 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	unlock := s.lifecycleLocks.lock(opts.SandboxID)
 	defer unlock()
 	if s.Store != nil {
-		if _, err := s.Store.GetSandbox(ctx, opts.SandboxID); err == nil {
+		if _, err := s.Store.Get(ctx, opts.SandboxID); err == nil {
 			return SandboxCreateResult{}, sandbox.ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already exists", opts.SandboxID))
-		} else if !errors.Is(err, state.ErrNotFound) {
+		} else if !errors.Is(err, sandbox.ErrNotFound) {
 			return SandboxCreateResult{}, fmt.Errorf("get sandbox state: %w", err)
 		}
-	}
-	if opts.LeaseID == "" {
-		opts.LeaseID = containerdclient.RuntimeLeaseID()
 	}
 	s.applySandboxDefaults(&opts)
 	templateSelection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
@@ -165,7 +161,6 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		TemplateID:   templateID,
 		VMMName:      opts.VMMName,
 		SandboxID:    opts.SandboxID,
-		LeaseID:      opts.LeaseID,
 		VCPUNum:      opts.VCPUNum,
 		VCPUMax:      opts.VCPUMax,
 		RAMMB:        opts.RamMB,
@@ -176,9 +171,9 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	createdAt := time.Now().UnixNano()
-	creatingRecord := state.SandboxRecord{
-		SandboxID:          opts.SandboxID,
-		State:              state.SandboxCreating,
+	creatingRecord := sandbox.Record{
+		ID:                 opts.SandboxID,
+		State:              sandbox.StateCreating,
 		CreatedAt:          createdAt,
 		SourceTemplateName: templateSelection.Name,
 		SourceTemplateID:   templateID,
@@ -186,24 +181,49 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:              opts.RamMB,
 		Network:            opts.Network,
 	}
-	if err := s.upsertSandbox(ctx, creatingRecord); err != nil {
-		return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
+	if s.Store != nil {
+		creatingRecord, err = s.Store.Create(ctx, creatingRecord)
+		if err != nil {
+			return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
+		}
+		createdAt = creatingRecord.CreatedAt
 	}
 	deleteCreatingRecord := func() error {
 		if s.Store == nil {
 			return nil
 		}
-		return s.Store.DeleteSandbox(context.Background(), opts.SandboxID)
+		return s.Store.Delete(context.Background(), opts.SandboxID)
+	}
+	createCtx := ctx
+	releaseOperationLease := func() error { return nil }
+	if s.Containerd != nil && s.Store != nil {
+		var done func(context.Context) error
+		createCtx, done, err = s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
+		if err != nil {
+			return SandboxCreateResult{}, combineOperationErrors(
+				fmt.Errorf("create sandbox operation lease: %w", err),
+				deleteCreatingRecord(),
+			)
+		}
+		releaseOperationLease = func() error {
+			return done(context.WithoutCancel(createCtx))
+		}
 	}
 
-	createResult, err := s.Sandbox.Create(ctx, req)
+	createResult, err := s.Sandbox.Create(createCtx, req)
 	if err != nil {
-		return SandboxCreateResult{}, combineOperationErrors(translateSandboxError(err), deleteCreatingRecord())
+		if cleanupErr := errors.Join(releaseOperationLease(), deleteCreatingRecord()); cleanupErr != nil {
+			ulog.GetLogger().Warn("failed to clean up sandbox create operation",
+				ulog.F("sandbox_id", opts.SandboxID),
+				ulog.F("error", cleanupErr),
+			)
+		}
+		return SandboxCreateResult{}, translateSandboxError(err)
 	}
-	rec := state.SandboxRecord{
-		SandboxID:                opts.SandboxID,
+	rec := sandbox.Record{
+		ID:                       opts.SandboxID,
 		VMMPID:                   createResult.VMMPID,
-		State:                    state.SandboxReady,
+		State:                    sandbox.StateReady,
 		CreatedAt:                createdAt,
 		SourceTemplateName:       templateSelection.Name,
 		SourceTemplateID:         templateID,
@@ -212,14 +232,29 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUNum:                  opts.VCPUNum,
 		RamMB:                    opts.RamMB,
 		Network:                  opts.Network,
+		RuntimeSnapshots:         append([]sandbox.SnapshotRef(nil), createResult.RuntimeSnapshots...),
 	}
-	if err := s.upsertSandbox(ctx, rec); err != nil {
+	if s.Store != nil {
+		_, err = s.Store.Update(ctx, rec)
+	}
+	if err != nil {
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
-		deleteErr := deleteCreatingRecord()
-		return SandboxCreateResult{}, combineOperationErrors(
-			fmt.Errorf("persist sandbox state: %w", err),
-			cleanupErr,
-			deleteErr,
+		if errors.Is(cleanupErr, sandbox.ErrNotFound) {
+			cleanupErr = nil
+		}
+		cleanupErr = errors.Join(cleanupErr, releaseOperationLease(), deleteCreatingRecord())
+		if cleanupErr != nil {
+			ulog.GetLogger().Warn("failed to clean up sandbox after state persistence failure",
+				ulog.F("sandbox_id", opts.SandboxID),
+				ulog.F("error", cleanupErr),
+			)
+		}
+		return SandboxCreateResult{}, fmt.Errorf("persist sandbox state: %w", err)
+	}
+	if err := releaseOperationLease(); err != nil {
+		ulog.GetLogger().Warn("failed to release sandbox operation lease",
+			ulog.F("sandbox_id", opts.SandboxID),
+			ulog.F("error", err),
 		)
 	}
 	s.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
@@ -267,13 +302,13 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 	if err != nil {
 		return err
 	}
-	if rec.State != state.SandboxReady && rec.State != state.SandboxSuspended {
+	if rec.State != sandbox.StateReady && rec.State != sandbox.StateSuspended {
 		return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State))
 	}
 	oldNetwork := rec.Network
 	rec.Network = opts.Network
 	rec.LastError = ""
-	if err := s.upsertSandbox(ctx, rec); err != nil {
+	if _, err := s.Store.Update(ctx, rec); err != nil {
 		return err
 	}
 	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network}); err != nil {
@@ -282,11 +317,11 @@ func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNe
 		rec.Network = oldNetwork
 		applyErr := combineOperationErrors(err, rollbackErr)
 		if rollbackErr != nil {
-			rec.State = state.SandboxUnknown
+			rec.State = sandbox.StateUnknown
 			applyErr = combineOperationErrors(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
 		}
 		rec.LastError = applyErr.Error()
-		rollbackStoreErr := s.upsertSandbox(rollbackCtx, rec)
+		_, rollbackStoreErr := s.Store.Update(rollbackCtx, rec)
 		return combineOperationErrors(applyErr, rollbackStoreErr)
 	}
 	return nil
@@ -371,30 +406,29 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	}
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
-	var rec state.SandboxRecord
+	var rec sandbox.Record
 	if s.Store != nil {
 		var getErr error
 		rec, getErr = s.getSandbox(ctx, sandboxID)
-		if getErr != nil && !errors.Is(getErr, state.ErrNotFound) {
+		if getErr != nil && !errors.Is(getErr, sandbox.ErrNotFound) {
 			return getErr
 		}
 	}
-	err := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
-	if err != nil && errors.Is(err, sandbox.ErrNotFound) {
-		err = nil
+	cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
+	if errors.Is(cleanupErr, sandbox.ErrNotFound) {
+		cleanupErr = nil
 	}
-	if err != nil {
-		return err
+	if errors.Is(cleanupErr, sandbox.ErrFailedPrecondition) {
+		return cleanupErr
 	}
+	var deleteErr error
 	if s.Store != nil {
-		if err := s.Store.DeleteSandbox(ctx, sandboxID); err != nil {
-			return err
-		}
+		deleteErr = s.Store.Delete(ctx, sandboxID)
 	}
-	if rec.SandboxID != "" {
+	if deleteErr == nil && rec.ID != "" {
 		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
-	return nil
+	return combineOperationErrors(cleanupErr, deleteErr)
 }
 
 // HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
@@ -406,38 +440,38 @@ func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error
 	unlock := s.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	rec, err := s.getSandbox(context.Background(), sandboxID)
-	if errors.Is(err, state.ErrNotFound) {
+	if errors.Is(err, sandbox.ErrNotFound) {
 		return
 	}
 	if err != nil {
 		ulog.GetLogger().Error("failed to read sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
-	if rec.State == state.SandboxUnknown {
+	if rec.State == sandbox.StateUnknown {
 		return
 	}
-	rec.State = state.SandboxUnknown
+	rec.State = sandbox.StateUnknown
 	if cleanupErr != nil {
 		rec.LastError = cleanupErr.Error()
 	}
-	if err := s.upsertSandbox(context.Background(), rec); err != nil {
+	if _, err := s.Store.Update(context.Background(), rec); err != nil {
 		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
 	s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
 }
 
-func (s *Service) publishLifecycleEvent(eventType string, rec state.SandboxRecord, killReason string) {
+func (s *Service) publishLifecycleEvent(eventType string, rec sandbox.Record, killReason string) {
 	if s == nil || s.WebhookDispatcher == nil {
 		return
 	}
-	event, err := webhook.NewEvent(eventType, rec.SandboxID, killReason, webhook.Execution{
+	event, err := webhook.NewEvent(eventType, rec.ID, killReason, webhook.Execution{
 		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339),
 		VCPUNum:   rec.VCPUNum,
 		RamMB:     rec.RamMB,
 	})
 	if err != nil {
-		ulog.GetLogger().Error("failed to create sandbox lifecycle event", ulog.F("sandbox_id", rec.SandboxID), ulog.F("error", err))
+		ulog.GetLogger().Error("failed to create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
 		return
 	}
 	s.WebhookDispatcher.Publish(event)
@@ -455,15 +489,15 @@ func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
 	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: sandboxID})
-	if rec.SandboxID != "" {
-		rec.State = state.SandboxSuspended
+	if rec.ID != "" {
+		rec.State = sandbox.StateSuspended
 		if err != nil {
-			rec.State = state.SandboxUnknown
+			rec.State = sandbox.StateUnknown
 			rec.LastError = err.Error()
 		} else {
 			rec.LastError = ""
 		}
-		_ = s.upsertSandbox(ctx, rec)
+		_, _ = s.Store.Update(ctx, rec)
 	}
 	return err
 }
@@ -480,15 +514,15 @@ func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 	defer unlock()
 	rec, _ := s.getSandbox(ctx, sandboxID)
 	err := s.Sandbox.Resume(sandbox.LifecycleRequest{SandboxID: sandboxID})
-	if rec.SandboxID != "" {
-		rec.State = state.SandboxReady
+	if rec.ID != "" {
+		rec.State = sandbox.StateReady
 		if err != nil {
-			rec.State = state.SandboxUnknown
+			rec.State = sandbox.StateUnknown
 			rec.LastError = err.Error()
 		} else {
 			rec.LastError = ""
 		}
-		_ = s.upsertSandbox(ctx, rec)
+		_, _ = s.Store.Update(ctx, rec)
 	}
 	return err
 }
@@ -516,7 +550,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if s.Templates == nil {
 		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
 	}
-	sandboxID := rec.SandboxID
+	sandboxID := rec.ID
 	parentID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if parentID == "" {
 		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head Template ID", sandboxID))
@@ -581,7 +615,8 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	if err := s.Store.AdvanceCheckpointHead(ctx, sandboxID, parentID, info.BootIndexDigest); err != nil {
+	rec.CheckpointHeadTemplateID = info.BootIndexDigest
+	if _, err := s.Store.Update(ctx, rec); err != nil {
 		return SandboxCheckpointResult{}, err
 	}
 	entry, err := s.Templates.Put(publishCtx, conchtemplate.Entry{
@@ -594,7 +629,8 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		Labels:                copyMap(opts.Labels),
 	}, published.Target)
 	if err != nil {
-		rollbackErr := s.Store.AdvanceCheckpointHead(context.WithoutCancel(ctx), sandboxID, info.BootIndexDigest, parentID)
+		rec.CheckpointHeadTemplateID = parentID
+		_, rollbackErr := s.Store.Update(context.WithoutCancel(ctx), rec)
 		return SandboxCheckpointResult{}, combineOperationErrors(err, rollbackErr)
 	}
 	return SandboxCheckpointResult{
@@ -903,22 +939,11 @@ func (s *Service) SnapshotInfo(ctx context.Context, opts runtimeapi.SnapshotInfo
 	return s.Snapshot.Info(ctx, opts)
 }
 
-func (s *Service) upsertSandbox(ctx context.Context, rec state.SandboxRecord) error {
+func (s *Service) getSandbox(ctx context.Context, id string) (sandbox.Record, error) {
 	if s == nil || s.Store == nil {
-		return nil
+		return sandbox.Record{}, fmt.Errorf("sandbox state store is not configured")
 	}
-	return s.Store.UpsertSandbox(ctx, rec)
-}
-
-func (s *Service) getSandbox(ctx context.Context, id string) (state.SandboxRecord, error) {
-	if s == nil || s.Store == nil {
-		return state.SandboxRecord{}, fmt.Errorf("sandbox state store is not configured")
-	}
-	rec, err := s.Store.GetSandbox(ctx, id)
-	if errors.Is(err, state.ErrNotFound) {
-		return state.SandboxRecord{}, sandbox.ErrNotFound.Wrap(err)
-	}
-	return rec, err
+	return s.Store.Get(ctx, id)
 }
 
 func translateSandboxError(err error) error {

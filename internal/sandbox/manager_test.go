@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/leases"
+
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/volume"
 )
 
 func TestDurationOrDefault(t *testing.T) {
@@ -119,7 +122,8 @@ func TestCreatePropagatesCallerCancellationToBootPreparation(t *testing.T) {
 		requestTimeout: time.Hour,
 		vmmBinaries:    map[string]string{"cloud-hypervisor": "/unused"},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := leases.WithLease(baseCtx, "operation-lease")
 	done := make(chan error, 1)
 	go func() {
 		_, err := m.Create(ctx, CreateRequest{
@@ -135,6 +139,9 @@ func TestCreatePropagatesCallerCancellationToBootPreparation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Create() did not reach boot preparation")
 	}
+	if boot.leaseID != "operation-lease" {
+		t.Fatalf("boot preparation lease = %q, want operation-lease", boot.leaseID)
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -143,6 +150,36 @@ func TestCreatePropagatesCallerCancellationToBootPreparation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Create() did not observe caller cancellation")
+	}
+}
+
+func TestCreateTreatsBootCleanupFailureAsBestEffort(t *testing.T) {
+	oldWorkDir := config.WorkDir
+	config.WorkDir = t.TempDir()
+	t.Cleanup(func() { config.WorkDir = oldWorkDir })
+	wantErr := errors.New("release boot failed")
+	boot := &recordingBootPreparer{
+		prepared:   PreparedBoot{Runtime: BootRuntime{Resume: true}},
+		releaseErr: wantErr,
+	}
+	m := &Manager{
+		boot:           boot,
+		cidAllocator:   NewCIDAllocator(),
+		requestTimeout: time.Second,
+		vmmBinaries:    map[string]string{"cloud-hypervisor": "/unused"},
+	}
+	_, err := m.Create(context.Background(), CreateRequest{
+		TemplateID: "sha256:template", VMMName: "cloud-hypervisor", SandboxID: "sandbox-a",
+		VCPUNum: 1, VCPUMax: 1, RAMMB: 128, AgentToken: "token", VolumeMounts: []volume.Mount{{}},
+	})
+	if err == nil {
+		t.Fatal("Create() error = nil")
+	}
+	if errors.Is(err, wantErr) {
+		t.Fatalf("Create() error = %v, want primary create error only", err)
+	}
+	if len(boot.released) != 1 || boot.released[0].SandboxID != "sandbox-a" {
+		t.Fatalf("released boot layouts = %#v", boot.released)
 	}
 }
 
@@ -443,9 +480,11 @@ func (r *recordingBootPreparer) Release(ctx context.Context, req ReleaseBootRequ
 
 type blockingBootPreparer struct {
 	entered chan struct{}
+	leaseID string
 }
 
 func (b *blockingBootPreparer) Prepare(ctx context.Context, _ PrepareBootRequest) (PreparedBoot, error) {
+	b.leaseID, _ = leases.FromContext(ctx)
 	close(b.entered)
 	<-ctx.Done()
 	return PreparedBoot{}, ctx.Err()

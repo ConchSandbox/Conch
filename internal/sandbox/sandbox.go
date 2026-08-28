@@ -63,7 +63,6 @@ type Sandbox struct {
 	vmStartSpec VMStartSpec
 	vmmName     string
 	sandboxID   string
-	leaseID     string
 	slot        *netstack.Slot
 }
 

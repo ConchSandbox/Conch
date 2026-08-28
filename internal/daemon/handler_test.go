@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,7 +16,6 @@ import (
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/conchruntime"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 )
@@ -140,13 +138,9 @@ func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.Chec
 }
 
 func TestHandleHealth(t *testing.T) {
-	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open state store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := newMemorySandboxStore()
 	ready := &Daemon{
-		stateStore:     store,
+		sandboxStore:   store,
 		containerdHost: &containerdhost.Host{},
 		daemonClient:   &containerdclient.Client{},
 		runtimeService: &conchruntime.Service{Sandbox: &fakeSandboxOps{}, Store: store},
@@ -187,19 +181,19 @@ func TestHandleHealth(t *testing.T) {
 
 func TestMatchesSandboxState(t *testing.T) {
 	for _, test := range []struct {
-		state  string
+		state  sandbox.State
 		states map[string]bool
 		want   bool
 	}{
-		{state: state.SandboxReady, want: true},
-		{state: state.SandboxSuspended, want: true},
-		{state: state.SandboxUnknown, want: false},
-		{state: state.SandboxSuspended, states: map[string]bool{"paused": true}, want: true},
-		{state: state.SandboxSuspended, states: map[string]bool{"running": true}, want: false},
-		{state: state.SandboxReady, states: map[string]bool{"running": true}, want: true},
-		{state: state.SandboxReady, states: map[string]bool{"paused": true}, want: false},
+		{state: sandbox.StateReady, want: true},
+		{state: sandbox.StateSuspended, want: true},
+		{state: sandbox.StateUnknown, want: false},
+		{state: sandbox.StateSuspended, states: map[string]bool{"paused": true}, want: true},
+		{state: sandbox.StateSuspended, states: map[string]bool{"running": true}, want: false},
+		{state: sandbox.StateReady, states: map[string]bool{"running": true}, want: true},
+		{state: sandbox.StateReady, states: map[string]bool{"paused": true}, want: false},
 	} {
-		if got := matchesSandboxState(state.SandboxRecord{State: test.state}, test.states); got != test.want {
+		if got := matchesSandboxState(sandbox.Record{State: test.state}, test.states); got != test.want {
 			t.Fatalf("matchesSandboxState(%q, %v) = %v, want %v", test.state, test.states, got, test.want)
 		}
 	}
@@ -242,11 +236,7 @@ func TestParseSandboxListLimit(t *testing.T) {
 }
 
 func TestSandboxV1Handlers(t *testing.T) {
-	store, err := state.OpenBolt(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open state store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := newMemorySandboxStore()
 
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, store)
@@ -259,14 +249,14 @@ func TestSandboxV1Handlers(t *testing.T) {
 	runtimeService.Templates = testTemplateStore()
 	server := &Daemon{
 		router:         http.NewServeMux(),
-		stateStore:     store,
+		sandboxStore:   store,
 		runtimeService: runtimeService,
 	}
 	server.routes()
 
-	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-		SandboxID:                "sandbox-1",
-		State:                    state.SandboxReady,
+	if _, err := store.Create(context.Background(), sandbox.Record{
+		ID:                       "sandbox-1",
+		State:                    sandbox.StateReady,
 		SourceTemplateName:       testTemplateNameExplicit,
 		SourceTemplateID:         testTemplateIDExplicit,
 		CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -428,7 +418,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0].SandboxID != "sandbox-1" {
 			t.Fatalf("delete requests = %#v", sandboxOps.deleteReqs)
 		}
-		if _, err := store.GetSandbox(context.Background(), "sandbox-1"); !errors.Is(err, state.ErrNotFound) {
+		if _, err := store.Get(context.Background(), "sandbox-1"); !errors.Is(err, sandbox.ErrNotFound) {
 			t.Fatalf("deleted sandbox lookup error = %v", err)
 		}
 	})

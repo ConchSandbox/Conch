@@ -24,7 +24,6 @@ import (
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -50,7 +49,7 @@ const (
 type Daemon struct {
 	router            *http.ServeMux
 	containerdHost    *containerdhost.Host
-	stateStore        state.Store
+	sandboxStore      conchsandbox.Store
 	runtimeService    *conchruntime.Service
 	webhookDispatcher *webhook.Dispatcher
 	volumeManager     *volume.Manager
@@ -108,13 +107,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := ulog.GetLogger()
 
-	store, err := state.OpenBolt(cfg.StatePath())
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("open state store: %w", err)
-	}
-	s.stateStore = store
-	logger.Info("State store initialized", ulog.F("path", cfg.StatePath()))
+	var err error
 	s.volumeManager, err = volume.NewManager(volume.Config{
 		MaxMounts: cfg.Volume.MaxMounts,
 		Backend:   cfg.Volume.Backend,
@@ -148,15 +141,15 @@ func New(cfg *config.Config) (*Daemon, error) {
 	})
 	if err != nil {
 		cancel()
-		_ = store.Close()
 		logger.Error("Failed to init embedded containerd host", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to init embedded containerd host: %w", err)
 	}
 	s.containerdHost = host
+	s.sandboxStore = host.SandboxStore()
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 
-	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), store)
+	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), s.sandboxStore)
 	s.webhookDispatcher = webhook.NewDispatcher()
 	s.runtimeService.WebhookDispatcher = s.webhookDispatcher
 	s.runtimeService.Snapshot = host.SnapshotServer()
@@ -173,10 +166,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 	manager := host.SandboxManager()
 	if manager != nil {
 		manager.UnexpectedExitHandler = s.runtimeService.HandleSandboxUnexpectedExit
-		records, err := store.ListSandboxes(ctx)
+		records, err := s.sandboxStore.List(ctx, conchsandbox.Filter{})
 		if err != nil {
 			cleanupErr := host.Close()
-			_ = store.Close()
 			cancel()
 			return nil, errors.Join(fmt.Errorf("list stale sandboxes during startup: %w", err), cleanupErr)
 		}
@@ -184,8 +176,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 		vmmPIDs := make([]int, 0, len(records))
 		hasCreatingSandbox := false
 		for _, record := range records {
-			sandboxIDs = append(sandboxIDs, record.SandboxID)
-			if record.State == state.SandboxCreating {
+			sandboxIDs = append(sandboxIDs, record.ID)
+			if record.State == conchsandbox.StateCreating {
 				hasCreatingSandbox = true
 			}
 			if record.VMMPID > 0 {
@@ -195,19 +187,16 @@ func New(cfg *config.Config) (*Daemon, error) {
 		logger.Info("cleaning up resources from abnormal sandbox exits")
 		if err := manager.RecoverStaleResources(ctx, sandboxIDs, vmmPIDs, hasCreatingSandbox); err != nil {
 			cleanupErr := host.Close()
-			_ = store.Close()
 			cancel()
 			return nil, errors.Join(fmt.Errorf("recover stale sandbox resources during startup: %w", err), cleanupErr)
 		}
 		if err := s.removeAllSandboxes(); err != nil {
 			cleanupErr := host.Close()
-			_ = store.Close()
 			cancel()
 			return nil, errors.Join(fmt.Errorf("clean up stale sandboxes during startup: %w", err), cleanupErr)
 		}
 		if err := manager.Start(ctx); err != nil {
 			cleanupErr := host.Close()
-			_ = store.Close()
 			cancel()
 			return nil, errors.Join(fmt.Errorf("start network pool during startup: %w", err), cleanupErr)
 		}
@@ -339,7 +328,7 @@ func (s *Daemon) Shutdown() {
 			}
 		}
 
-		if s.runtimeService != nil && s.stateStore != nil {
+		if s.runtimeService != nil && s.sandboxStore != nil {
 			finish := cleanupdiag.Start("daemon.sandboxes.remove_all")
 			err := s.removeAllSandboxes()
 			finish(err)
@@ -364,29 +353,21 @@ func (s *Daemon) Shutdown() {
 			}
 		}
 
-		if s.stateStore != nil {
-			finish := cleanupdiag.Start("daemon.state_store.close")
-			err := s.stateStore.Close()
-			finish(err)
-			if err != nil {
-				logger.Error("State store cleanup error", ulog.F("error", err))
-			}
-		}
 		logger.Info("Cleanup completed")
 	})
 }
 
 // removeAllSandboxes removes runtime resources and persistent records.
 func (s *Daemon) removeAllSandboxes() error {
-	records, err := s.stateStore.ListSandboxes(context.Background())
+	records, err := s.sandboxStore.List(context.Background(), conchsandbox.Filter{})
 	if err != nil {
 		return fmt.Errorf("list sandboxes for shutdown: %w", err)
 	}
 
 	var errs []error
 	for _, record := range records {
-		if err := s.runtimeService.RemoveSandbox(context.Background(), record.SandboxID); err != nil {
-			errs = append(errs, fmt.Errorf("remove sandbox %s: %w", record.SandboxID, err))
+		if err := s.runtimeService.RemoveSandbox(context.Background(), record.ID); err != nil {
+			errs = append(errs, fmt.Errorf("remove sandbox %s: %w", record.ID, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -406,7 +387,7 @@ func (s *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) controlPlaneReady() bool {
 	return s != nil &&
-		s.stateStore != nil &&
+		s.sandboxStore != nil &&
 		s.containerdHost != nil &&
 		s.daemonClient != nil &&
 		s.runtimeService != nil &&
@@ -439,7 +420,6 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		SandboxID:    req.SandboxID,
-		LeaseID:      req.LeaseID,
 		TemplateName: req.TemplateName,
 		TemplateID:   req.TemplateID,
 		VMMName:      req.VMMName,
@@ -544,7 +524,7 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	if s.stateStore == nil || s.runtimeService == nil {
+	if s.sandboxStore == nil || s.runtimeService == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -558,7 +538,7 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.runtimeService.UpdateSandboxNetworkConfig(r.Context(), runtimeapi.SandboxNetworkUpdateOptions{
-		SandboxID: record.SandboxID,
+		SandboxID: record.ID,
 		Network:   &req,
 	}); err != nil {
 		writeAPIError(w, err)
@@ -580,7 +560,7 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox id is required")))
 		return
 	}
-	if s.stateStore == nil || s.runtimeService == nil {
+	if s.sandboxStore == nil || s.runtimeService == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -594,7 +574,7 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
-	if err := s.runtimeService.RemoveSandbox(r.Context(), record.SandboxID); err != nil {
+	if err := s.runtimeService.RemoveSandbox(r.Context(), record.ID); err != nil {
 		writeAPIError(w, err, ulog.F("operation", "sandbox.delete"), ulog.F("sandbox_id", sandboxID))
 		return
 	}
@@ -604,7 +584,7 @@ func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
-	if s.stateStore == nil {
+	if s.sandboxStore == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -618,7 +598,7 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(err, "invalid sandbox list limit"))
 		return
 	}
-	records, err := s.stateStore.ListSandboxes(r.Context())
+	records, err := s.sandboxStore.List(r.Context(), conchsandbox.Filter{})
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -637,7 +617,7 @@ func (s *Daemon) handleListSandbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	sandboxID := r.PathValue("sandboxID")
-	if s.stateStore == nil {
+	if s.sandboxStore == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -653,18 +633,15 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sandboxResponseFromRecord(*record, true))
 }
 
-func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID string) (*state.SandboxRecord, error) {
-	records, err := s.stateStore.ListSandboxes(ctx)
+func (s *Daemon) findSandboxRecord(ctx context.Context, sandboxID string) (*conchsandbox.Record, error) {
+	record, err := s.sandboxStore.Get(ctx, sandboxID)
+	if errors.Is(err, conchsandbox.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	for i := range records {
-		if records[i].SandboxID != sandboxID {
-			continue
-		}
-		return &records[i], nil
-	}
-	return nil, nil
+	return &record, nil
 }
 
 func parseSandboxStates(values []string) (map[string]bool, error) {
@@ -692,22 +669,22 @@ func parseSandboxListLimit(raw string) (int, error) {
 	return limit, nil
 }
 
-func matchesSandboxState(record state.SandboxRecord, states map[string]bool) bool {
-	running := record.State == state.SandboxReady
-	paused := record.State == state.SandboxSuspended
+func matchesSandboxState(record conchsandbox.Record, states map[string]bool) bool {
+	running := record.State == conchsandbox.StateReady
+	paused := record.State == conchsandbox.StateSuspended
 	if len(states) == 0 {
 		return running || paused
 	}
 	return states["running"] && running || states["paused"] && paused
 }
 
-func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandboxInspectResponse {
+func sandboxResponseFromRecord(record conchsandbox.Record, detailed bool) sandboxInspectResponse {
 	response := sandboxInspectResponse{
 		TemplateName: record.SourceTemplateName,
 		TemplateID:   record.SourceTemplateID,
 		ImageName:    "",
 		SnapshotID:   "",
-		SandboxID:    record.SandboxID,
+		SandboxID:    record.ID,
 		StartedAt:    formatUnixNanoRFC3339(record.CreatedAt),
 		CPUCount:     record.VCPUNum,
 		MemoryMB:     record.RamMB,
@@ -762,7 +739,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox_id is required")))
 		return
 	}
-	if s.stateStore == nil || s.runtimeService == nil {
+	if s.sandboxStore == nil || s.runtimeService == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -776,7 +753,7 @@ func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
-	err = s.runtimeService.SuspendSandbox(r.Context(), record.SandboxID)
+	err = s.runtimeService.SuspendSandbox(r.Context(), record.ID)
 	if err != nil {
 		writeAPIError(w, err, ulog.F("operation", "sandbox.suspend"), ulog.F("sandbox_id", req.SandboxID))
 		return
@@ -801,7 +778,7 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.Wrap(errors.New("sandbox_id is required")))
 		return
 	}
-	if s.stateStore == nil || s.runtimeService == nil {
+	if s.sandboxStore == nil || s.runtimeService == nil {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
@@ -814,7 +791,7 @@ func (s *Daemon) handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}
-	if err := s.runtimeService.ResumeSandbox(r.Context(), record.SandboxID); err != nil {
+	if err := s.runtimeService.ResumeSandbox(r.Context(), record.ID); err != nil {
 		writeAPIError(w, err)
 		return
 	}
