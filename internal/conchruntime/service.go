@@ -28,7 +28,7 @@ import (
 )
 
 type SandboxOps interface {
-	Create(sandbox.CreateRequest) (sandbox.CreateResult, error)
+	Create(context.Context, sandbox.CreateRequest) (sandbox.CreateResult, error)
 	Delete(sandbox.DeleteRequest) error
 	Suspend(sandbox.LifecycleRequest) error
 	Resume(sandbox.LifecycleRequest) error
@@ -196,7 +196,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return s.Store.DeleteSandbox(context.Background(), opts.SandboxID)
 	}
 
-	createResult, err := s.Sandbox.Create(req)
+	createResult, err := s.Sandbox.Create(ctx, req)
 	if err != nil {
 		return SandboxCreateResult{}, combineOperationErrors(translateSandboxError(err), deleteCreatingRecord())
 	}
@@ -399,7 +399,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 
 // HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
 // It is called by sandbox.Manager after the runtime resources have been cleaned up.
-func (s *Service) HandleSandboxUnexpectedExit(sandboxID string) {
+func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -417,6 +417,9 @@ func (s *Service) HandleSandboxUnexpectedExit(sandboxID string) {
 		return
 	}
 	rec.State = state.SandboxUnknown
+	if cleanupErr != nil {
+		rec.LastError = cleanupErr.Error()
+	}
 	if err := s.upsertSandbox(context.Background(), rec); err != nil {
 		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return

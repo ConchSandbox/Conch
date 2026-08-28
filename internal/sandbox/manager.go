@@ -52,6 +52,8 @@ const (
 	sandboxSuspended
 )
 
+const createCleanupTimeout = 10 * time.Second
+
 func (s sandboxLifecycleState) String() string {
 	switch s {
 	case sandboxReady:
@@ -69,7 +71,7 @@ type sandboxEntry struct {
 	sbx   *Sandbox
 }
 
-type UnexpectedExitHandler func(sandboxID string)
+type UnexpectedExitHandler func(sandboxID string, cleanupErr error)
 
 func New(
 	ctx context.Context,
@@ -225,26 +227,27 @@ type CheckpointRequest struct {
 type CheckpointResult = CapturedBootComponents
 
 type CreateResult struct {
-	IP              string
-	AgentToken      string
-	SandboxID       string
-	LeaseID         string
-	VMMPID          int
-	VMMSocketPath   string
-	VsockCID        uint32
-	VsockSocketPath string
-	NetworkSlotID   int
-	RootfsKey       string
-	MemKey          string
-	RootfsMount     string
-	MemMount        string
-	VMMount         string
-	RootDir         string
-	MemSize         int64
-	Resume          bool
-	BootIndexDigest string
-	RootfsPmemPaths []string
-	VolumeDevices   []volume.Device
+	IP               string
+	AgentToken       string
+	SandboxID        string
+	LeaseID          string
+	VMMPID           int
+	VMMSocketPath    string
+	VsockCID         uint32
+	VsockSocketPath  string
+	NetworkSlotID    int
+	RootfsKey        string
+	MemKey           string
+	RootfsMount      string
+	MemMount         string
+	VMMount          string
+	RootDir          string
+	MemSize          int64
+	Resume           bool
+	BootIndexDigest  string
+	RootfsPmemPaths  []string
+	VolumeDevices    []volume.Device
+	RuntimeSnapshots []SnapshotRef
 }
 
 func GenerateAgentToken() (string, error) {
@@ -344,7 +347,7 @@ type createRuntimeIDs struct {
 	vcpuMax         int64
 }
 
-func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
+func (m *Manager) Create(parent context.Context, req CreateRequest) (result CreateResult, err error) {
 	logger := ulog.GetLogger()
 	logger.Debug("creating sandbox in manager")
 
@@ -358,7 +361,7 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		return CreateResult{}, fmt.Errorf("agent token is required")
 	}
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), m.requestTimeout, fmt.Errorf("request timed out"))
+	ctx, cancel := context.WithTimeoutCause(parent, m.requestTimeout, fmt.Errorf("request timed out"))
 	defer cancel()
 
 	mapKey, entry, err := m.reserveSandboxEntry(req.SandboxID)
@@ -398,7 +401,9 @@ func (m *Manager) Create(req CreateRequest) (result CreateResult, err error) {
 		if err == nil {
 			return
 		}
-		rmErr := m.boot.Release(leaseCtx, ReleaseBootRequest{
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(leaseCtx), createCleanupTimeout)
+		defer cleanupCancel()
+		rmErr := m.boot.Release(cleanupCtx, ReleaseBootRequest{
 			SandboxID: runtimeIDs.key,
 		})
 		if rmErr != nil {
@@ -599,39 +604,41 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 		entry.mu.Unlock()
 		return
 	}
-	if err := m.cleanupSandbox(context.Background(), sbx, sandboxID); err != nil {
-		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+	cleanupErr := m.cleanupSandbox(context.Background(), sbx, sandboxID)
+	if cleanupErr != nil {
+		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
 	}
 	m.sandboxes.CompareAndDelete(mapKey, entry)
 	entry.mu.Unlock()
 	if m.UnexpectedExitHandler != nil {
-		m.UnexpectedExitHandler(sandboxID)
+		m.UnexpectedExitHandler(sandboxID, cleanupErr)
 	}
 }
 
 func buildSandboxCreateResult(leaseID string, req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
 	runtime := boot.Runtime
 	return CreateResult{
-		IP:              sbx.slot.CNIIP(),
-		AgentToken:      req.AgentToken,
-		SandboxID:       req.SandboxID,
-		LeaseID:         leaseID,
-		VMMPID:          sbx.process.Pid(),
-		VMMSocketPath:   sbx.process.VmmSocketPath,
-		VsockCID:        runtimeIDs.vsockCID,
-		VsockSocketPath: runtimeIDs.vsockSocketPath,
-		NetworkSlotID:   sbx.slot.ID(),
-		RootfsKey:       runtime.RootfsKey,
-		MemKey:          runtime.MemKey,
-		RootfsMount:     runtime.RootfsMount,
-		MemMount:        runtime.MemMount,
-		VMMount:         runtime.VMMount,
-		RootDir:         runtime.RootDir,
-		MemSize:         runtime.MemSize,
-		Resume:          runtime.Resume,
-		BootIndexDigest: runtime.BootIndexDigest,
-		RootfsPmemPaths: append([]string(nil), boot.Spec.PmemPaths...),
-		VolumeDevices:   append([]volume.Device(nil), volumeDevices...),
+		IP:               sbx.slot.CNIIP(),
+		AgentToken:       req.AgentToken,
+		SandboxID:        req.SandboxID,
+		LeaseID:          leaseID,
+		VMMPID:           sbx.process.Pid(),
+		VMMSocketPath:    sbx.process.VmmSocketPath,
+		VsockCID:         runtimeIDs.vsockCID,
+		VsockSocketPath:  runtimeIDs.vsockSocketPath,
+		NetworkSlotID:    sbx.slot.ID(),
+		RootfsKey:        runtime.RootfsKey,
+		MemKey:           runtime.MemKey,
+		RootfsMount:      runtime.RootfsMount,
+		MemMount:         runtime.MemMount,
+		VMMount:          runtime.VMMount,
+		RootDir:          runtime.RootDir,
+		MemSize:          runtime.MemSize,
+		Resume:           runtime.Resume,
+		BootIndexDigest:  runtime.BootIndexDigest,
+		RootfsPmemPaths:  append([]string(nil), boot.Spec.PmemPaths...),
+		VolumeDevices:    append([]volume.Device(nil), volumeDevices...),
+		RuntimeSnapshots: append([]SnapshotRef(nil), boot.RuntimeSnapshots...),
 	}
 }
 
@@ -657,7 +664,7 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID st
 	err := sbx.Close(ctx)
 	finishClose(err)
 	if err != nil {
-		logger.Warn("failed to cleanup sandbox, will remove from cache",
+		logger.Warn("sandbox runtime cleanup is incomplete",
 			ulog.F("sandbox_id", sandboxID),
 			ulog.F("error", err),
 		)

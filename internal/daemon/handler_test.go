@@ -87,7 +87,7 @@ func (f *fakeSnapshotService) Info(_ context.Context, req runtimeapi.SnapshotInf
 	}, nil
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
+func (f *fakeSandboxOps) Create(_ context.Context, req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.createCalls++
 	f.createReq = req
 	if f.createErr != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -49,6 +50,11 @@ func TestCreateBootLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create namespace session: %v", err)
 	}
+	parentCtx, done, err := host.Client().WithLease(parentCtx)
+	if err != nil {
+		t.Fatalf("create parent snapshot lease: %v", err)
+	}
+	defer done(parentCtx)
 	if err := createCommittedParent(parentCtx, host.Client().SnapshotService("erofs"), ns, rootfsParent, populateRootfsParent); err != nil {
 		if isMountPermissionError(err) {
 			t.Skipf("erofs snapshot integration test requires mount privileges: %v", err)
@@ -74,7 +80,8 @@ func TestCreateBootLayout(t *testing.T) {
 		Mem:    memParent,
 		VM:     vmParent,
 	}
-	layout, err := server.CreateBootLayout(context.Background(), key, snapshot.BootLayoutRequest{
+	runtimeCtx := containerdclient.NewNamespaceContext(context.Background())
+	layout, err := server.CreateBootLayout(runtimeCtx, key, snapshot.BootLayoutRequest{
 		Parents:      parents,
 		MemoryLayout: snapshot.MemoryLayoutWritableFile,
 	})
@@ -84,16 +91,24 @@ func TestCreateBootLayout(t *testing.T) {
 		}
 		t.Fatalf("get error: %v\n", err)
 	}
+	wantRefs := []snapshot.RuntimeSnapshotRef{
+		{Snapshotter: "erofs", Role: "rootfs", Key: key},
+		{Snapshotter: "erofs", Role: "vm", Key: "view-vm-" + key},
+		{Snapshotter: "erofs", Role: "memory", Key: key + "-mem"},
+	}
+	if !reflect.DeepEqual(layout.RuntimeSnapshots, wantRefs) {
+		t.Fatalf("runtime snapshot refs = %#v, want %#v", layout.RuntimeSnapshots, wantRefs)
+	}
 	activePrepared := true
 	defer func() {
 		if activePrepared {
-			_ = server.ReleaseBootLayout(context.Background(), key)
+			_ = server.ReleaseBootLayout(runtimeCtx, key)
 		}
 	}()
 	t.Logf("create layout result: %v\n", layout)
 
 	t.Logf("run release active layout: %s\n", key)
-	if err := server.ReleaseBootLayout(context.Background(), key); err != nil {
+	if err := server.ReleaseBootLayout(runtimeCtx, key); err != nil {
 		t.Fatalf("release layout failed: %v\n", err)
 	}
 	activePrepared = false

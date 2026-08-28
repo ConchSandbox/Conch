@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/internal/snapshot"
 )
 
 type State string
@@ -15,11 +16,7 @@ const (
 	StateUnknown   State = "UNKNOWN"
 )
 
-type SnapshotRef struct {
-	Snapshotter string `json:"snapshotter"`
-	Role        string `json:"role"`
-	Key         string `json:"key"`
-}
+type SnapshotRef = snapshot.RuntimeSnapshotRef
 
 type Record struct {
 	ID                       string

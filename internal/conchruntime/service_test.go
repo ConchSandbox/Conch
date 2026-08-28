@@ -168,8 +168,8 @@ func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
 	}
 	svc := New(nil, nil, store)
 	svc.WebhookDispatcher = dispatcher
-	svc.HandleSandboxUnexpectedExit(record.SandboxID)
-	svc.HandleSandboxUnexpectedExit(record.SandboxID)
+	svc.HandleSandboxUnexpectedExit(record.SandboxID, nil)
+	svc.HandleSandboxUnexpectedExit(record.SandboxID, nil)
 	select {
 	case event := <-events:
 		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" || event.SandboxID != record.SandboxID {
@@ -216,7 +216,7 @@ func (f *serializedDeleteOps) Delete(sandbox.DeleteRequest) error {
 	return sandbox.ErrNotFound.New()
 }
 
-func (f *fakeSandboxOps) Create(req sandbox.CreateRequest) (sandbox.CreateResult, error) {
+func (f *fakeSandboxOps) Create(_ context.Context, req sandbox.CreateRequest) (sandbox.CreateResult, error) {
 	f.createCalls++
 	f.req = req
 	if f.createHook != nil {

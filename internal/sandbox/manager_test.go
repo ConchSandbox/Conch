@@ -3,10 +3,13 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/internal/config"
 )
 
 func TestDurationOrDefault(t *testing.T) {
@@ -75,22 +78,145 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 
 func TestHandleSandboxExitCallsUnexpectedHandlerOnce(t *testing.T) {
 	m, entry, sbx := newExitTestSandbox(func(context.Context) error { return nil })
-	called := make(chan string, 2)
-	m.UnexpectedExitHandler = func(id string) { called <- id }
+	type exitResult struct {
+		id  string
+		err error
+	}
+	called := make(chan exitResult, 2)
+	m.UnexpectedExitHandler = func(id string, err error) { called <- exitResult{id: id, err: err} }
 	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
 	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
 	select {
-	case id := <-called:
-		if id != "sandbox-a" {
-			t.Fatalf("handler sandbox ID = %q", id)
+	case result := <-called:
+		if result.id != "sandbox-a" || result.err != nil {
+			t.Fatalf("handler result = %#v", result)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("unexpected-exit handler was not called")
 	}
 	select {
-	case id := <-called:
-		t.Fatalf("handler called more than once for %q", id)
+	case result := <-called:
+		t.Fatalf("handler called more than once for %#v", result)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestCreatePropagatesCallerCancellationToBootPreparation(t *testing.T) {
+	oldWorkDir := config.WorkDir
+	workDir, err := os.MkdirTemp("/tmp", "csb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.WorkDir = workDir
+	t.Cleanup(func() {
+		config.WorkDir = oldWorkDir
+		_ = os.RemoveAll(workDir)
+	})
+	boot := &blockingBootPreparer{entered: make(chan struct{})}
+	m := &Manager{
+		boot:           boot,
+		cidAllocator:   NewCIDAllocator(),
+		requestTimeout: time.Hour,
+		vmmBinaries:    map[string]string{"cloud-hypervisor": "/unused"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Create(ctx, CreateRequest{
+			TemplateID: "sha256:template", VMMName: "cloud-hypervisor", SandboxID: "sandbox-a",
+			VCPUNum: 1, VCPUMax: 1, RAMMB: 128, AgentToken: "token",
+		})
+		done <- err
+	}()
+	select {
+	case <-boot.entered:
+	case err := <-done:
+		t.Fatalf("Create() returned before boot preparation: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("Create() did not reach boot preparation")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Create() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Create() did not observe caller cancellation")
+	}
+}
+
+func TestCreateUsesLiveBoundedContextForBootCleanupAfterCancellation(t *testing.T) {
+	oldWorkDir := config.WorkDir
+	config.WorkDir = t.TempDir()
+	t.Cleanup(func() { config.WorkDir = oldWorkDir })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	boot := &recordingBootPreparer{
+		prepared:    PreparedBoot{Runtime: BootRuntime{Resume: true}},
+		prepareHook: cancel,
+	}
+	m := &Manager{
+		boot:           boot,
+		cidAllocator:   NewCIDAllocator(),
+		requestTimeout: time.Second,
+		vmmBinaries:    map[string]string{"cloud-hypervisor": "/unused"},
+	}
+
+	_, err := m.Create(ctx, CreateRequest{
+		TemplateID: "sha256:template", VMMName: "cloud-hypervisor", SandboxID: "sandbox-a",
+		VCPUNum: 1, VCPUMax: 1, RAMMB: 128, AgentToken: "token",
+	})
+	if err == nil {
+		t.Fatal("Create() error = nil")
+	}
+	if boot.releaseContextErr != nil {
+		t.Fatalf("boot cleanup context error = %v, want nil", boot.releaseContextErr)
+	}
+	if !boot.releaseHasDeadline {
+		t.Fatal("boot cleanup context has no deadline")
+	}
+}
+
+func TestDeleteRemovesEntryAfterCleanupFailure(t *testing.T) {
+	wantErr := errors.New("runtime cleanup failed")
+	boot := &recordingBootPreparer{}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	cleanup := NewCleanup()
+	cleanup.Add(func(context.Context) error { return wantErr })
+	sbx := &Sandbox{cleanup: cleanup, sandboxID: "sandbox-a"}
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
+	m.sandboxes.Store("sandbox-a", entry)
+
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); !errors.Is(err, wantErr) {
+		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
+	}
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("sandbox entry remains after one-shot cleanup failure")
+	}
+}
+
+func TestUnexpectedExitRemovesEntryAndReportsCleanupError(t *testing.T) {
+	wantErr := errors.New("release boot failed")
+	boot := &recordingBootPreparer{releaseErrors: []error{wantErr}}
+	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
+	m.sandboxes.Store("sandbox-a", entry)
+	called := make(chan error, 1)
+	m.UnexpectedExitHandler = func(_ string, err error) { called <- err }
+
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("sandbox entry remains after one-shot unexpected-exit cleanup")
+	}
+	select {
+	case err := <-called:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("unexpected-exit cleanup error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected-exit handler was not called")
 	}
 }
 
@@ -287,18 +413,45 @@ func checkpointTestManager(initialState sandboxLifecycleState, capture Checkpoin
 }
 
 type recordingBootPreparer struct {
-	released   []ReleaseBootRequest
-	releaseErr error
+	released           []ReleaseBootRequest
+	releaseErr         error
+	releaseErrors      []error
+	prepared           PreparedBoot
+	prepareHook        func()
+	releaseContextErr  error
+	releaseHasDeadline bool
 }
 
 func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (PreparedBoot, error) {
-	return PreparedBoot{}, nil
+	if r.prepareHook != nil {
+		r.prepareHook()
+	}
+	return r.prepared, nil
 }
 
-func (r *recordingBootPreparer) Release(_ context.Context, req ReleaseBootRequest) error {
+func (r *recordingBootPreparer) Release(ctx context.Context, req ReleaseBootRequest) error {
 	r.released = append(r.released, req)
+	r.releaseContextErr = ctx.Err()
+	_, r.releaseHasDeadline = ctx.Deadline()
+	if len(r.releaseErrors) > 0 {
+		err := r.releaseErrors[0]
+		r.releaseErrors = r.releaseErrors[1:]
+		return err
+	}
 	return r.releaseErr
 }
+
+type blockingBootPreparer struct {
+	entered chan struct{}
+}
+
+func (b *blockingBootPreparer) Prepare(ctx context.Context, _ PrepareBootRequest) (PreparedBoot, error) {
+	close(b.entered)
+	<-ctx.Done()
+	return PreparedBoot{}, ctx.Err()
+}
+
+func (b *blockingBootPreparer) Release(context.Context, ReleaseBootRequest) error { return nil }
 
 func TestDeleteMissingSandboxReturnsNotFoundWithoutReleasingBootLayout(t *testing.T) {
 	boot := &recordingBootPreparer{}
