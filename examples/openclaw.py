@@ -159,8 +159,8 @@ def setup_sandbox_configs(sandbox):
     sandbox.files.upload(files_to_upload)
 
 def main():
-    template_id = get_config("CONCH_TEMPLATE_ID", "Enter Conch Template ID")
-    sandbox = Sandbox.create(template_id=template_id)
+    template_name = get_config("CONCH_TEMPLATE_NAME", "Enter Conch Template Name")
+    sandbox = Sandbox.create(template_name=template_name)
     print(f"Sandbox created: {sandbox.sandbox_id} (IP: {sandbox.ip})")
 
     try:

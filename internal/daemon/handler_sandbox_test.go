@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/daemon/state"
@@ -17,21 +16,63 @@ import (
 )
 
 const (
-	testTemplateIDDefault  = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	testTemplateIDExplicit = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	testTemplateIDOther    = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	testTemplateNameDefault  = "registry.example/conch/default:latest"
+	testTemplateNameExplicit = "registry.example/conch/explicit:latest"
+	testTemplateNameOther    = "registry.example/conch/other:latest"
+	testTemplateIDDefault    = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTemplateIDExplicit   = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testTemplateIDOther      = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
+
+type templateStoreStub map[string]conchtemplate.Entry
+
+func (s templateStoreStub) Put(_ context.Context, entry conchtemplate.Entry, _ ocispec.Descriptor) (conchtemplate.Entry, error) {
+	s[entry.Name] = entry
+	return entry, nil
+}
+
+func (s templateStoreStub) Get(_ context.Context, name string) (conchtemplate.Entry, error) {
+	entry, ok := s[name]
+	if !ok {
+		return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
+	}
+	return entry, nil
+}
+
+func (s templateStoreStub) List(context.Context, conchtemplate.Filter) ([]conchtemplate.Entry, error) {
+	return nil, nil
+}
+
+func (s templateStoreStub) Delete(_ context.Context, name string) error {
+	delete(s, name)
+	return nil
+}
+
+func testTemplateStore() templateStoreStub {
+	return templateStoreStub{
+		testTemplateNameDefault: {
+			Name: testTemplateNameDefault, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: testTemplateIDDefault,
+		},
+		testTemplateNameExplicit: {
+			Name: testTemplateNameExplicit, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: testTemplateIDExplicit,
+		},
+		testTemplateNameOther: {
+			Name: testTemplateNameOther, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: testTemplateIDOther,
+		},
+	}
+}
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
 	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
-		TemplateID: testTemplateIDDefault,
-		VMMName:    "stratovirt",
-		VCPUNum:    2,
-		VCPUMax:    2,
-		RamMB:      1024,
+		TemplateName: testTemplateNameDefault,
+		VMMName:      "stratovirt",
+		VCPUNum:      2,
+		VCPUMax:      2,
+		RamMB:        1024,
 	})
+	runtimeService.Templates = testTemplateStore()
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
@@ -94,16 +135,18 @@ func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
 
 func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 	tests := []struct {
-		name            string
-		defaultTemplate string
-		body            string
-		wantStatus      int
-		wantTemplate    string
+		name                string
+		defaultTemplateName string
+		body                string
+		wantStatus          int
+		wantTemplateID      string
 	}{
-		{name: "omitted uses configured default", defaultTemplate: testTemplateIDDefault, body: `{}`, wantStatus: http.StatusOK, wantTemplate: testTemplateIDDefault},
-		{name: "whitespace default is rejected", defaultTemplate: " \t ", body: `{}`, wantStatus: http.StatusBadRequest},
+		{name: "omitted uses configured default", defaultTemplateName: testTemplateNameDefault, body: `{}`, wantStatus: http.StatusOK, wantTemplateID: testTemplateIDDefault},
+		{name: "whitespace default is rejected", defaultTemplateName: " \t ", body: `{}`, wantStatus: http.StatusBadRequest},
 		{name: "absent default is rejected", body: `{}`, wantStatus: http.StatusBadRequest},
-		{name: "explicit template wins", defaultTemplate: testTemplateIDDefault, body: `{"template_id":"` + testTemplateIDExplicit + `"}`, wantStatus: http.StatusOK, wantTemplate: testTemplateIDExplicit},
+		{name: "explicit template wins", defaultTemplateName: testTemplateNameDefault, body: `{"template_name":"` + testTemplateNameExplicit + `"}`, wantStatus: http.StatusOK, wantTemplateID: testTemplateIDExplicit},
+		{name: "name and ID are rejected", body: `{"template_name":"` + testTemplateNameExplicit + `","template_id":"` + testTemplateIDExplicit + `"}`, wantStatus: http.StatusBadRequest},
+		{name: "invalid ID is rejected", defaultTemplateName: testTemplateNameDefault, body: `{"template_id":"not-a-digest"}`, wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -111,11 +154,12 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
 			runtimeService := conchruntime.New(sandboxOps, nil, nil)
 			runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
-				TemplateID: tt.defaultTemplate,
-				VCPUNum:    2,
-				VCPUMax:    2,
-				RamMB:      1024,
+				TemplateName: tt.defaultTemplateName,
+				VCPUNum:      2,
+				VCPUMax:      2,
+				RamMB:        1024,
 			})
+			runtimeService.Templates = testTemplateStore()
 			server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 			server.routes()
 
@@ -135,8 +179,8 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 				}
 				return
 			}
-			if sandboxOps.createReq.TemplateID != tt.wantTemplate {
-				t.Fatalf("Boot Index digest = %q, want %q", sandboxOps.createReq.TemplateID, tt.wantTemplate)
+			if sandboxOps.createReq.TemplateID != tt.wantTemplateID {
+				t.Fatalf("Boot Index digest = %q, want %q", sandboxOps.createReq.TemplateID, tt.wantTemplateID)
 			}
 		})
 	}
@@ -145,11 +189,12 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService.Templates = testTemplateStore()
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_id":"`+testTemplateIDExplicit+`","sandbox_id":"sandbox-123"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"template_name":"`+testTemplateNameExplicit+`","sandbox_id":"sandbox-123"}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
@@ -159,7 +204,7 @@ func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, nil)
-	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateID: testTemplateIDDefault})
+	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateName: testTemplateNameDefault})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
@@ -192,7 +237,7 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"sandbox_id":"sandbox-1","template_id":"`+testTemplateIDOther+`"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"sandbox_id":"sandbox-1","template_name":"`+testTemplateNameOther+`"}`))
 	server.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusConflict, recorder.Body.String())
@@ -211,11 +256,10 @@ func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 	recorder := httptest.NewRecorder()
-	missingDigest := digest.FromString("missing-template").String()
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/template/inspect",
-		bytes.NewBufferString(`{"template_id":"`+missingDigest+`"}`),
+		bytes.NewBufferString(`{"name":"registry.example/conch/missing:latest"}`),
 	)
 	server.router.ServeHTTP(recorder, request)
 
@@ -230,7 +274,7 @@ func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 
 type missingTemplateStore struct{}
 
-func (missingTemplateStore) Create(context.Context, conchtemplate.Entry, ocispec.Descriptor) (conchtemplate.Entry, error) {
+func (missingTemplateStore) Put(context.Context, conchtemplate.Entry, ocispec.Descriptor) (conchtemplate.Entry, error) {
 	return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
 }
 

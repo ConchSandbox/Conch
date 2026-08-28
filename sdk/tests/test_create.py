@@ -12,8 +12,22 @@ def test_create_default(sandbox):
     assert sandbox.ip is not None
 
 
-def test_create_with_template_id():
+def test_create_with_template_name():
     """Create sandbox with specified source."""
+    template_name = os.getenv("CONCH_TEST_TEMPLATE_NAME")
+    if not template_name:
+        pytest.skip("set CONCH_TEST_TEMPLATE_NAME to run this test")
+    sbx = Sandbox.create(template_name=template_name)
+    try:
+        assert sbx.sandbox_id is not None
+        result = sbx.commands.run(cmd="ls", args=["/"])
+        assert result.exit_code == 0
+    finally:
+        sbx.delete()
+
+
+def test_create_with_template_id():
+    """Create sandbox with an immutable Template ID."""
     template_id = os.getenv("CONCH_TEST_TEMPLATE_ID")
     if not template_id:
         pytest.skip("set CONCH_TEST_TEMPLATE_ID to run this test")
@@ -29,11 +43,12 @@ def test_create_with_template_id():
 def test_create_with_checkpoint():
     """Create sandbox from checkpoint: create -> checkpoint -> restore."""
     sbx = Sandbox.create()
-    template = sbx.checkpoint()
+    # The checkpoint name is a mutable record that owns the returned Template ID.
+    template = sbx.checkpoint(f"localhost/conch/checkpoint-{sbx.sandbox_id}:latest")
     assert template.template_id is not None
     assert template.sandbox_id == sbx.sandbox_id
 
-    sbx2 = Sandbox.create(template_id=template.template_id)
+    sbx2 = Sandbox.create(template_name=template.template_name)
     try:
         assert sbx2.sandbox_id is not None
         result = sbx2.commands.run(cmd="ls", args=["/"])
@@ -51,16 +66,17 @@ def test_context_manager():
 
 
 def test_build_create_payload_without_vmm_name_uses_server_default():
-    sbx = Sandbox(sandbox_id="sandbox-test", template_id="template-test")
+    sbx = Sandbox(sandbox_id="sandbox-test", template_name="template-test")
 
     payload = sbx._build_create_payload()
     assert "vmm_name" not in payload
     assert "namespace" not in payload
 
 
-def test_build_create_payload_omits_template_id_for_daemon_default():
+def test_build_create_payload_omits_template_selector_for_daemon_default():
     payload = Sandbox(sandbox_id="sandbox-test")._build_create_payload()
 
+    assert "template_name" not in payload
     assert "template_id" not in payload
 
 
@@ -109,16 +125,37 @@ def test_build_create_payload_keeps_explicit_resources():
     assert payload["ram_mb"] == 8192
 
 
+def test_build_create_payload_omits_whitespace_template_name():
+    payload = Sandbox(sandbox_id="sandbox-test", template_name=" \t ")._build_create_payload()
+
+    assert "template_name" not in payload
+
+
+def test_build_create_payload_keeps_explicit_template_name():
+    payload = Sandbox(sandbox_id="sandbox-test", template_name="template-explicit")._build_create_payload()
+
+    assert payload["template_name"] == "template-explicit"
+
+
+def test_build_create_payload_keeps_explicit_template_id():
+    payload = Sandbox(sandbox_id="sandbox-test", template_id="sha256:explicit")._build_create_payload()
+
+    assert payload["template_id"] == "sha256:explicit"
+
+
 def test_build_create_payload_omits_whitespace_template_id():
     payload = Sandbox(sandbox_id="sandbox-test", template_id=" \t ")._build_create_payload()
 
     assert "template_id" not in payload
 
 
-def test_build_create_payload_keeps_explicit_template_id():
-    payload = Sandbox(sandbox_id="sandbox-test", template_id="template-explicit")._build_create_payload()
-
-    assert payload["template_id"] == "template-explicit"
+def test_build_create_payload_rejects_template_name_and_id():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Sandbox(
+            sandbox_id="sandbox-test",
+            template_name="template-explicit",
+            template_id="sha256:explicit",
+        )
 
 
 def test_build_create_payload_preserves_environment():
@@ -129,7 +166,7 @@ def test_build_create_payload_preserves_environment():
 
     payload = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="template-explicit",
+        template_name="template-explicit",
         env=environment,
     )._build_create_payload()
 
@@ -139,11 +176,11 @@ def test_build_create_payload_preserves_environment():
 def test_build_create_payload_distinguishes_absent_and_empty_environment():
     without_environment = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="template-explicit",
+        template_name="template-explicit",
     )._build_create_payload()
     with_empty_environment = Sandbox(
         sandbox_id="sandbox-test",
-        template_id="template-explicit",
+        template_name="template-explicit",
         env={},
     )._build_create_payload()
 

@@ -7,40 +7,9 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
-	"github.com/opencontainers/go-digest"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
-
-const canonicalTemplateRepository = "localhost/conch/template"
-
-// CanonicalTemplateRef returns the sole local image-record name owned by a
-// Template. Template identity is the immutable Boot Index digest, so this
-// mapping must remain deterministic and injective.
-func CanonicalTemplateRef(rawDigest string) (string, error) {
-	parsed, err := digest.Parse(strings.TrimSpace(rawDigest))
-	if err != nil {
-		return "", fmt.Errorf("%w: invalid boot index digest %q: %v", ErrInvalidArgument, rawDigest, err)
-	}
-	return canonicalTemplateRepository + ":" + parsed.Algorithm().String() + "-" + parsed.Encoded(), nil
-}
-
-// IsCanonicalTemplateRef reports whether ref belongs to the digest-derived
-// image-record namespace reserved for Template lifecycle management.
-func IsCanonicalTemplateRef(ref string) bool {
-	ref = strings.TrimSpace(ref)
-	prefix := canonicalTemplateRepository + ":"
-	if !strings.HasPrefix(ref, prefix) {
-		return false
-	}
-	suffix := strings.TrimPrefix(ref, prefix)
-	separator := strings.IndexByte(suffix, '-')
-	if separator <= 0 || separator == len(suffix)-1 {
-		return false
-	}
-	canonical, err := CanonicalTemplateRef(suffix[:separator] + ":" + suffix[separator+1:])
-	return err == nil && canonical == ref
-}
 
 func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req PublishBootIndexOptions) (PublishBootIndexResult, error) {
 	if client == nil || client.Client == nil {
@@ -68,14 +37,8 @@ func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req 
 		return PublishBootIndexResult{}, fmt.Errorf("build boot index content: %w", err)
 	}
 
-	buildRef, err := CanonicalTemplateRef(indexDesc.Digest.String())
-	if err != nil {
-		return PublishBootIndexResult{}, err
-	}
-
 	return PublishBootIndexResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		BuildRef:        buildRef,
 		Target:          indexDesc,
 	}, nil
 }
@@ -166,13 +129,8 @@ func PublishCheckpointBootIndex(
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)
 	}
-	buildRef, err := CanonicalTemplateRef(indexDesc.Digest.String())
-	if err != nil {
-		return PublishCheckpointBootIndexResult{}, err
-	}
 	return PublishCheckpointBootIndexResult{
 		BootIndexDigest: indexDesc.Digest.String(),
-		BuildRef:        buildRef,
 		Target:          indexDesc,
 	}, nil
 }

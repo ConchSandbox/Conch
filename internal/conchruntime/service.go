@@ -111,6 +111,8 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
 	}
 	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
+	opts.TemplateName = strings.TrimSpace(opts.TemplateName)
+	opts.TemplateID = strings.TrimSpace(opts.TemplateID)
 	if opts.SandboxID == "" {
 		id, err := id.New()
 		if err != nil {
@@ -137,14 +139,11 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		opts.LeaseID = containerdclient.RuntimeLeaseID()
 	}
 	s.applySandboxDefaults(&opts)
-	if opts.TemplateID == "" {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required and no default_spec.template_id is configured"))
-	}
-	parsedTemplateID, err := digest.Parse(opts.TemplateID)
+	templateSelection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
 	if err != nil {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid template_id %q: %w", opts.TemplateID, err))
+		return SandboxCreateResult{}, err
 	}
-	opts.TemplateID = parsedTemplateID.String()
+	templateID := templateSelection.ID
 	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
 		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
 	}
@@ -163,7 +162,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 
 	req := sandbox.CreateRequest{
-		TemplateID:   opts.TemplateID,
+		TemplateID:   templateID,
 		VMMName:      opts.VMMName,
 		SandboxID:    opts.SandboxID,
 		LeaseID:      opts.LeaseID,
@@ -178,13 +177,14 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 
 	createdAt := time.Now().UnixNano()
 	creatingRecord := state.SandboxRecord{
-		SandboxID:        opts.SandboxID,
-		State:            state.SandboxCreating,
-		CreatedAt:        createdAt,
-		SourceTemplateID: opts.TemplateID,
-		VCPUNum:          opts.VCPUNum,
-		RamMB:            opts.RamMB,
-		Network:          opts.Network,
+		SandboxID:          opts.SandboxID,
+		State:              state.SandboxCreating,
+		CreatedAt:          createdAt,
+		SourceTemplateName: templateSelection.Name,
+		SourceTemplateID:   templateID,
+		VCPUNum:            opts.VCPUNum,
+		RamMB:              opts.RamMB,
+		Network:            opts.Network,
 	}
 	if err := s.upsertSandbox(ctx, creatingRecord); err != nil {
 		return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
@@ -205,7 +205,8 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VMMPID:                   createResult.VMMPID,
 		State:                    state.SandboxReady,
 		CreatedAt:                createdAt,
-		SourceTemplateID:         opts.TemplateID,
+		SourceTemplateName:       templateSelection.Name,
+		SourceTemplateID:         templateID,
 		CheckpointHeadTemplateID: createResult.BootIndexDigest,
 		IP:                       createResult.IP,
 		VCPUNum:                  opts.VCPUNum,
@@ -223,13 +224,14 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	}
 	s.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
 	return SandboxCreateResult{
-		SandboxID:  opts.SandboxID,
-		IP:         createResult.IP,
-		AgentToken: createResult.AgentToken,
-		TemplateID: opts.TemplateID,
-		VCPUNum:    opts.VCPUNum,
-		RamMB:      opts.RamMB,
-		CreatedAt:  createdAt,
+		SandboxID:    opts.SandboxID,
+		IP:           createResult.IP,
+		AgentToken:   createResult.AgentToken,
+		TemplateName: templateSelection.Name,
+		TemplateID:   templateID,
+		VCPUNum:      opts.VCPUNum,
+		RamMB:        opts.RamMB,
+		CreatedAt:    createdAt,
 	}, nil
 }
 
@@ -295,8 +297,10 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 		return
 	}
 	defaults := s.SandboxDefaults
+	opts.TemplateName = strings.TrimSpace(opts.TemplateName)
 	opts.TemplateID = strings.TrimSpace(opts.TemplateID)
-	if opts.TemplateID == "" {
+	if opts.TemplateName == "" && opts.TemplateID == "" {
+		opts.TemplateName = strings.TrimSpace(defaults.TemplateName)
 		opts.TemplateID = strings.TrimSpace(defaults.TemplateID)
 	}
 	if opts.VMMName == "" {
@@ -311,6 +315,50 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 	if opts.RamMB == 0 {
 		opts.RamMB = defaults.RamMB
 	}
+}
+
+type sandboxTemplateSelection struct {
+	Name string
+	ID   string
+}
+
+func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string) (sandboxTemplateSelection, error) {
+	name = strings.TrimSpace(name)
+	rawID = strings.TrimSpace(rawID)
+	if (name == "") == (rawID == "") {
+		return sandboxTemplateSelection{}, sandbox.ErrInvalidArgument.Wrap(
+			fmt.Errorf("exactly one of template_name or template_id is required"),
+		)
+	}
+	if name != "" {
+		if s.Templates == nil {
+			return sandboxTemplateSelection{}, fmt.Errorf("template store is not configured")
+		}
+		entry, err := s.Templates.Get(ctx, name)
+		if err != nil {
+			return sandboxTemplateSelection{}, err
+		}
+		return sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}, nil
+	}
+	parsedID, err := digest.Parse(rawID)
+	if err != nil {
+		return sandboxTemplateSelection{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid template_id %q: %w", rawID, err))
+	}
+	if s.Containerd == nil {
+		return sandboxTemplateSelection{}, fmt.Errorf("containerd client is not configured")
+	}
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, parsedID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, conchimage.ErrNotFound):
+			return sandboxTemplateSelection{}, conchtemplate.ErrNotFound.Wrap(err)
+		case errors.Is(err, conchimage.ErrInvalidArgument), errors.Is(err, conchimage.ErrInvalidContent):
+			return sandboxTemplateSelection{}, conchtemplate.ErrInvalidArtifact.Wrap(err)
+		default:
+			return sandboxTemplateSelection{}, err
+		}
+	}
+	return sandboxTemplateSelection{ID: info.BootIndexDigest}, nil
 }
 
 func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
@@ -470,6 +518,15 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 	if parentID == "" {
 		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head Template ID", sandboxID))
 	}
+	templateName := strings.TrimSpace(opts.TemplateName)
+	if templateName == "" {
+		return SandboxCheckpointResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_name is required"))
+	}
+	if _, err := conchimage.InspectBootIndex(ctx, s.Containerd, parentID); err != nil {
+		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf(
+			"sandbox %s checkpoint head Template %s is unavailable: %w", sandboxID, parentID, err,
+		))
+	}
 
 	captured, err := s.Sandbox.Checkpoint(sandbox.CheckpointRequest{
 		SandboxID: sandboxID,
@@ -521,7 +578,11 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 			captured.MemorySizeMB,
 		)
 	}
-	entry, err := s.Templates.Create(publishCtx, conchtemplate.Entry{
+	if err := s.Store.AdvanceCheckpointHead(ctx, sandboxID, parentID, info.BootIndexDigest); err != nil {
+		return SandboxCheckpointResult{}, err
+	}
+	entry, err := s.Templates.Put(publishCtx, conchtemplate.Entry{
+		Name:                  templateName,
 		Origin:                conchtemplate.OriginCheckpoint,
 		BootMode:              conchtemplate.BootModeResume,
 		BootIndexDigest:       info.BootIndexDigest,
@@ -530,11 +591,8 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		Labels:                copyMap(opts.Labels),
 	}, published.Target)
 	if err != nil {
-		return SandboxCheckpointResult{}, err
-	}
-	if err := s.Store.AdvanceCheckpointHead(ctx, sandboxID, parentID, entry.BootIndexDigest); err != nil {
-		s.cleanupTemplateRecord(ctx, entry.BootIndexDigest)
-		return SandboxCheckpointResult{}, err
+		rollbackErr := s.Store.AdvanceCheckpointHead(context.WithoutCancel(ctx), sandboxID, info.BootIndexDigest, parentID)
+		return SandboxCheckpointResult{}, combineOperationErrors(err, rollbackErr)
 	}
 	return SandboxCheckpointResult{
 		TemplateID: entry.BootIndexDigest,
@@ -555,47 +613,42 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template reference is required"))
 	}
-	pullCtx, done, err := s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
-	if err != nil {
-		return TemplatePullResult{}, fmt.Errorf("create pull content lease: %w", err)
-	}
-	defer done(pullCtx)
-	pulled, err := conchimage.PullBootIndex(pullCtx, s.Containerd, conchimage.RegistryPullOptions{
+	var entry conchtemplate.Entry
+	consumed := false
+	err := conchimage.WithPulledBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
 		Reference: reference,
 		PlainHTTP: opts.PlainHTTP,
 		Username:  opts.Username,
 		Password:  opts.Password,
+	}, func(pullCtx context.Context, pulled conchimage.PulledBootIndex) error {
+		consumed = true
+		info := pulled.Info
+		origin := conchtemplate.OriginImage
+		bootMode := conchtemplate.BootModeCold
+		if info.Resume {
+			origin = conchtemplate.OriginCheckpoint
+			bootMode = conchtemplate.BootModeResume
+		}
+		var err error
+		entry, err = s.Templates.Put(pullCtx, conchtemplate.Entry{
+			Name:            pulled.SourceImageName,
+			Origin:          origin,
+			BootMode:        bootMode,
+			BootIndexDigest: info.BootIndexDigest,
+			SourceRef:       reference,
+			Labels:          opts.Labels,
+		}, pulled.Target)
+		return err
 	})
 	if err != nil {
+		if consumed {
+			return TemplatePullResult{}, err
+		}
 		return TemplatePullResult{}, fmt.Errorf("pull template boot index %s: %w", reference, translateTemplateArtifactError(err))
 	}
-	info := pulled.Info
-	origin := conchtemplate.OriginImage
-	bootMode := conchtemplate.BootModeCold
-	if info.Resume {
-		origin = conchtemplate.OriginCheckpoint
-		bootMode = conchtemplate.BootModeResume
-	}
-	entry, createErr := s.Templates.Create(pullCtx, conchtemplate.Entry{
-		Origin:          origin,
-		BootMode:        bootMode,
-		BootIndexDigest: info.BootIndexDigest,
-		SourceRef:       reference,
-		Labels:          opts.Labels,
-	}, pulled.Target)
-	cleanupErr := conchimage.RemoveFetchedImageRecord(
-		ctx, s.Containerd.ImageService(), pulled.SourceImageName, pulled.Target,
-	)
-	if createErr != nil {
-		return TemplatePullResult{}, errors.Join(createErr, cleanupErr)
-	}
-	if cleanupErr != nil {
-		s.cleanupTemplateRecord(ctx, entry.BootIndexDigest)
-		return TemplatePullResult{}, fmt.Errorf("remove fetched source image record %s: %w", pulled.SourceImageName, cleanupErr)
-	}
 	return TemplatePullResult{
+		Name:       entry.Name,
 		TemplateID: entry.BootIndexDigest,
-		BuildRef:   pulled.BuildRef,
 	}, nil
 }
 
@@ -608,15 +661,15 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	id := strings.TrimSpace(opts.TemplateID)
-	if id == "" {
-		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required"))
+	name := strings.TrimSpace(opts.Name)
+	if name == "" {
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template name is required"))
 	}
 	remoteReference := strings.TrimSpace(opts.RemoteReference)
 	if remoteReference == "" {
 		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("remote template reference is required"))
 	}
-	rec, err := s.Templates.Get(ctx, id)
+	rec, err := s.Templates.Get(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -640,16 +693,16 @@ func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions
 	if s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	id := strings.TrimSpace(opts.TemplateID)
-	if id == "" {
-		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template_id is required"))
+	name := strings.TrimSpace(opts.Name)
+	if name == "" {
+		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template name is required"))
 	}
-	rec, err := s.Templates.Get(ctx, id)
+	rec, err := s.Templates.Get(ctx, name)
 	if err != nil {
-		return fmt.Errorf("get template %s: %w", id, err)
+		return fmt.Errorf("get template %s: %w", name, err)
 	}
 	if err := conchimage.UnpackBootIndex(ctx, s.Containerd, rec.BootIndexDigest); err != nil {
-		return fmt.Errorf("unpack template %s: %w", id, translateTemplateArtifactError(err))
+		return fmt.Errorf("unpack template %s: %w", name, translateTemplateArtifactError(err))
 	}
 	return nil
 }
@@ -660,6 +713,10 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	}
 	if s.Templates == nil {
 		return TemplateCreateResult{}, fmt.Errorf("template store is not configured")
+	}
+	opts.Name = strings.TrimSpace(opts.Name)
+	if opts.Name == "" {
+		return TemplateCreateResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template name is required"))
 	}
 	source := strings.TrimSpace(opts.Source)
 	if source == "" {
@@ -674,14 +731,13 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 		return TemplateCreateResult{}, err
 	}
 	return TemplateCreateResult{
+		Name:       result.entry.Name,
 		TemplateID: result.entry.BootIndexDigest,
-		BuildRef:   result.buildRef,
 	}, nil
 }
 
 type templateBuildResult struct {
-	entry    conchtemplate.Entry
-	buildRef string
+	entry conchtemplate.Entry
 }
 
 func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCreateOptions) (templateBuildResult, error) {
@@ -707,13 +763,14 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 			return templateBuildResult{}, fmt.Errorf("resolve pulled rootfs source image %s: %w", opts.Source, err)
 		}
 	}
-	if conchimage.IsCanonicalTemplateRef(sourceImage.Name()) {
-		return templateBuildResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf(
-			"canonical Template image %s cannot be used as a rootfs source", sourceImage.Name(),
-		))
+	sourceKind, err := conchimage.DetectImageKind(sourceCtx, s.Containerd.ContentStore(), sourceImage.Target())
+	if err != nil {
+		return templateBuildResult{}, fmt.Errorf("classify rootfs source image %s: %w", sourceImage.Name(), err)
 	}
-	if err := conchimage.SetImageKindLabel(sourceCtx, s.Containerd.ImageService(), sourceImage.Name(), conchimage.ImageKindOCIImage); err != nil {
-		return templateBuildResult{}, fmt.Errorf("label rootfs source image: %w", err)
+	if sourceKind != conchimage.ImageKindOCIImage {
+		return templateBuildResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf(
+			"Template image %s cannot be used as a rootfs source", sourceImage.Name(),
+		))
 	}
 
 	buildID, err := id.New()
@@ -755,7 +812,8 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	if err != nil {
 		return templateBuildResult{}, fmt.Errorf("publish boot image: %w", err)
 	}
-	entry, err := s.Templates.Create(publishCtx, conchtemplate.Entry{
+	entry, err := s.Templates.Put(publishCtx, conchtemplate.Entry{
+		Name:            opts.Name,
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
 		BootIndexDigest: published.BootIndexDigest,
@@ -767,8 +825,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	}
 
 	return templateBuildResult{
-		entry:    entry,
-		buildRef: published.BuildRef,
+		entry: entry,
 	}, nil
 }
 
@@ -790,46 +847,35 @@ func (s *Service) ListTemplates(ctx context.Context, opts runtimeapi.TemplateLis
 	return out, nil
 }
 
-func (s *Service) GetTemplate(ctx context.Context, id string) (runtimeapi.TemplateRecord, error) {
+func (s *Service) GetTemplate(ctx context.Context, name string) (runtimeapi.TemplateRecord, error) {
 	if s == nil || s.Templates == nil {
 		return runtimeapi.TemplateRecord{}, fmt.Errorf("template store is not configured")
 	}
-	rec, err := s.Templates.Get(ctx, id)
+	rec, err := s.Templates.Get(ctx, name)
 	if err != nil {
 		return runtimeapi.TemplateRecord{}, err
 	}
 	return publicTemplateRecord(rec), nil
 }
 
-func (s *Service) RemoveTemplate(ctx context.Context, id string) error {
+func (s *Service) RemoveTemplate(ctx context.Context, name string) error {
 	if s == nil || s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	return s.Templates.Delete(ctx, id)
+	return s.Templates.Delete(ctx, name)
 }
 
 func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
-	buildRef, _ := conchimage.CanonicalTemplateRef(entry.BootIndexDigest)
 	return runtimeapi.TemplateRecord{
+		Name:             entry.Name,
 		TemplateID:       entry.BootIndexDigest,
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),
 		ParentTemplateID: entry.ParentBootIndexDigest,
 		SourceSandboxID:  entry.SourceSandboxID,
 		SourceRef:        entry.SourceRef,
-		BuildRef:         buildRef,
 		Labels:           copyMap(entry.Labels),
 		CreatedAt:        entry.CreatedAt,
-	}
-}
-
-func (s *Service) cleanupTemplateRecord(ctx context.Context, bootIndexDigest string) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if err := s.Templates.Delete(cleanupCtx, bootIndexDigest); err != nil {
-		ulog.GetLogger().Warn("failed to roll back canonical template image record",
-			ulog.F("boot_index_digest", bootIndexDigest),
-			ulog.F("error", err))
 	}
 }
 

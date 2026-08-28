@@ -63,6 +63,7 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 	const id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var buf bytes.Buffer
 	printTemplates(&buf, []client.TemplateRecord{{
+		Name:       "registry.example/conch/test:latest",
 		Origin:     "image",
 		BootMode:   "cold",
 		TemplateID: id,
@@ -79,6 +80,7 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 	}{
 		{header: "ORIGIN", value: "image"},
 		{header: "BOOT_MODE", value: "cold"},
+		{header: "NAME", value: "registry.example/conch/test:latest"},
 		{header: "TEMPLATE_ID", value: id},
 	} {
 		if got, want := strings.Index(row, column.value), strings.Index(header, column.header); got != want {

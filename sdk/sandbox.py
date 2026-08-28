@@ -18,6 +18,7 @@ from .errors import InvalidArgumentError, NotFoundError, SandboxError
 
 # API keys
 SANDBOX_ID_KEY = "sandbox_id"
+TEMPLATE_NAME_KEY = "template_name"
 TEMPLATE_ID_KEY = "template_id"
 STATUS_KEY = "status"
 MESSAGE_KEY = "message"
@@ -75,6 +76,7 @@ def _request_exception_message(exc: requests.exceptions.RequestException) -> str
 
 @dataclass
 class TemplateInfo:
+    template_name: str
     template_id: str
     sandbox_id: str
 
@@ -84,6 +86,7 @@ class SandboxInfo:
     # TODO: Extend this with more sandbox metadata once the SDK surface is finalized.
     sandbox_id: str
     ip: str
+    template_name: Optional[str]
     template_id: Optional[str]
 
 
@@ -642,6 +645,7 @@ class Sandbox:
     def __init__(
             self,
             sandbox_id: Optional[str] = None,
+            template_name: Optional[str] = None,
             template_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
             vcpu_max: Optional[int] = None,
@@ -658,6 +662,9 @@ class Sandbox:
 
         self.sandbox_id = sandbox_id or generate_random_id()
         # Unset template and resource fields are filled from sandbox.default_spec.
+        if (template_name and template_name.strip()) and (template_id and template_id.strip()):
+            raise ValueError("template_name and template_id are mutually exclusive")
+        self.template_name = template_name
         self.template_id = template_id
 
         self.ip = None
@@ -746,7 +753,13 @@ class Sandbox:
             payload["vcpu_max"] = self.vcpu_max
         if self.ram_mb:
             payload["ram_mb"] = self.ram_mb
-        if self.template_id and self.template_id.strip():
+        has_template_name = bool(self.template_name and self.template_name.strip())
+        has_template_id = bool(self.template_id and self.template_id.strip())
+        if has_template_name and has_template_id:
+            raise ValueError("template_name and template_id are mutually exclusive")
+        if has_template_name:
+            payload[TEMPLATE_NAME_KEY] = self.template_name
+        if has_template_id:
             payload[TEMPLATE_ID_KEY] = self.template_id
         # conchd matches the VMM name verbatim, so trim before sending.
         if self.vmm_name and self.vmm_name.strip():
@@ -763,6 +776,7 @@ class Sandbox:
         if not isinstance(record, dict):
             return
         self.sandbox_id = record.get("sandboxID") or self.sandbox_id
+        self.template_name = record.get("templateName") or self.template_name
         self.template_id = record.get("templateID") or self.template_id
         self.ip = record.get("domain") or self.ip
         if record.get("conchInitAccessToken"):
@@ -875,9 +889,13 @@ class Sandbox:
         sbx = Sandbox(sandbox_id=sandbox_id)
         return sbx.delete(sandbox_id=sandbox_id)
 
-    def checkpoint(self):
+    def checkpoint(self, template_name: str):
+        if not template_name or not template_name.strip():
+            raise ValueError("template_name is required")
+        template_name = template_name.strip()
         payload = {
             SANDBOX_ID_KEY: self.sandbox_id,
+            TEMPLATE_NAME_KEY: template_name,
         }
 
         try:
@@ -885,6 +903,7 @@ class Sandbox:
             result[SANDBOX_ID_KEY] = self.sandbox_id
             template_id = result.get(TEMPLATE_ID_RESP_KEY)
             return TemplateInfo(
+                template_name=template_name,
                 template_id=template_id,
                 sandbox_id=self.sandbox_id
             )
@@ -941,6 +960,7 @@ class Sandbox:
     @classmethod
     def create(
             cls,
+            template_name: Optional[str] = None,
             template_id: Optional[str] = None,
             sandbox_id: Optional[str] = None,
             vcpu_num: Optional[int] = None,
@@ -953,6 +973,7 @@ class Sandbox:
     ) -> "Sandbox":
         sbx = cls(
             sandbox_id=sandbox_id,
+            template_name=template_name,
             template_id=template_id,
             vcpu_num=vcpu_num,
             vcpu_max=vcpu_max,
@@ -968,6 +989,7 @@ class Sandbox:
         return SandboxInfo(
             sandbox_id=self.sandbox_id,
             ip=self.ip if self.ip else "",
+            template_name=self.template_name,
             template_id=self.template_id,
         )
 

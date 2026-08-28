@@ -12,7 +12,7 @@ type Filter struct {
 }
 
 type Store interface {
-	Create(context.Context, Entry, ocispec.Descriptor) (Entry, error)
+	Put(context.Context, Entry, ocispec.Descriptor) (Entry, error)
 	Get(context.Context, string) (Entry, error)
 	List(context.Context, Filter) ([]Entry, error)
 	Delete(context.Context, string) error

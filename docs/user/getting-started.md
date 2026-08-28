@@ -36,20 +36,23 @@ conchd 会在前台运行并输出日志。保持该终端运行，在另一个�
 ```bash
 sudo ./bin/conch template create \
   --config config/config.local.yaml \
+  --name localhost/conch/nginx:latest \
   --source docker.io/library/nginx:latest \
   --kernel /path/to/guest/kernel \
   --initrd build-artifacts/conch-init-initramfs.cpio.gz
 ```
 
-命令会返回 Template ID。使用该 ID 创建并控制 Sandbox：
+命令会返回 Template Name 和当前 Template ID。使用 Name 创建并控制 Sandbox：
 
 ```bash
 sudo ./bin/conch template ls --config config/config.local.yaml
 
 sudo ./bin/conch sandbox create \
   --config config/config.local.yaml \
-  --template-id <template-id> \
+  --template-name localhost/conch/nginx:latest \
   --sandbox-id sandbox_demo
+
+# 也可用 --template-id <sha256:digest> 代替 --template-name；二者互斥
 
 sudo ./bin/conch sandbox suspend --config config/config.local.yaml sandbox_demo
 

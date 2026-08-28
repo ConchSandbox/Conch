@@ -6,11 +6,11 @@ import time
 from conch import CommandExitException, Sandbox
 
 
-def perf_print_hello_by_template(template_id):
+def perf_print_hello_by_template(template_name):
     box = None
     t0 = time.perf_counter()
     try:
-        box = Sandbox.create(template_id=template_id)
+        box = Sandbox.create(template_name=template_name)
         t1 = time.perf_counter()
 
         try:
@@ -29,9 +29,10 @@ def perf_print_hello_by_template(template_id):
         print(f"Execution Only: {exec_s:.3f}s ({exec_s*1000:.2f}ms)")
         print(f"Total Workflow: {total_s:.3f}s ({total_s*1000:.2f}ms)")
 
-        template = box.checkpoint()
-        print(f"Checkpoint template {template.template_id} created\n")
-        return template.template_id
+        checkpoint_name = f"localhost/conch/perf-checkpoint-{box.sandbox_id}:latest"
+        template = box.checkpoint(checkpoint_name)
+        print(f"Checkpoint template {template.template_name} -> {template.template_id} created\n")
+        return template.template_name
 
     except Exception as e:
         print(f"Template Error: {e}")
@@ -45,14 +46,14 @@ def perf_print_hello_by_template(template_id):
             except Exception as e:
                 print(f"Warning: Failed to delete sandbox: {e}")
 
-def perf_print_hello_by_checkpoint(template_id):
-    if not template_id:
+def perf_print_hello_by_checkpoint(template_name):
+    if not template_name:
         return
 
     box = None
     t0 = time.perf_counter()
     try:
-        box = Sandbox.create(template_id=template_id)
+        box = Sandbox.create(template_name=template_name)
         t1 = time.perf_counter()
 
         try:
@@ -83,14 +84,14 @@ def perf_print_hello_by_checkpoint(template_id):
                 print(f"Warning: Failed to delete sandbox: {e}")
 
 def main():
-    source_template_id = os.environ.get("CONCH_TEMPLATE_ID")
-    if not source_template_id:
-        print("CONCH_TEMPLATE_ID is required")
+    source_template_name = os.environ.get("CONCH_TEMPLATE_NAME")
+    if not source_template_name:
+        print("CONCH_TEMPLATE_NAME is required")
         return
 
-    checkpoint_template_id = perf_print_hello_by_template(source_template_id)
-    if checkpoint_template_id:
-        perf_print_hello_by_checkpoint(checkpoint_template_id)
+    checkpoint_template_name = perf_print_hello_by_template(source_template_name)
+    if checkpoint_template_name:
+        perf_print_hello_by_checkpoint(checkpoint_template_name)
     else:
         print("Test terminated due to template flow error.")
 

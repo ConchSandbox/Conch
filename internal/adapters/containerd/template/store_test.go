@@ -25,14 +25,17 @@ import (
 
 var _ conchtemplate.Store = (*Store)(nil)
 
-func TestStoreCRUDUsesCanonicalImageRecord(t *testing.T) {
+func TestStoreCRUDUsesNamedImageRecord(t *testing.T) {
 	ctx := context.Background()
 	contentStore := newTestContentStore(t)
 	target := buildTestBootIndex(t, ctx, contentStore, false)
 	imageStore := newMemoryImageStore()
 	store := &Store{images: imageStore, content: contentStore}
+	const name = "registry.example:5000/team/busybox:latest"
+	recordName := conchimage.TemplateRecordName(name)
 
-	entry, err := store.Create(ctx, conchtemplate.Entry{
+	entry, err := store.Put(ctx, conchtemplate.Entry{
+		Name:            name,
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
 		BootIndexDigest: target.Digest.String(),
@@ -40,19 +43,18 @@ func TestStoreCRUDUsesCanonicalImageRecord(t *testing.T) {
 		Labels:          map[string]string{"owner": "team-a"},
 	}, target)
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("Put() error = %v", err)
 	}
 
-	name, err := conchimage.CanonicalTemplateRef(target.Digest.String())
+	record, err := imageStore.Get(ctx, recordName)
 	if err != nil {
-		t.Fatal(err)
-	}
-	record, err := imageStore.Get(ctx, name)
-	if err != nil {
-		t.Fatalf("Get canonical image record: %v", err)
+		t.Fatalf("Get named image record: %v", err)
 	}
 	if !reflect.DeepEqual(record.Target, target) {
 		t.Fatalf("record target = %#v, want %#v", record.Target, target)
+	}
+	if record.Name != "io.conch.template/registry.example:5000/team/busybox:latest" {
+		t.Fatalf("internal record name = %q", record.Name)
 	}
 	if got := record.Labels[schemaLabel]; got != schemaVersion {
 		t.Fatalf("schema label = %q, want %q", got, schemaVersion)
@@ -80,10 +82,9 @@ func TestStoreCRUDUsesCanonicalImageRecord(t *testing.T) {
 		Target: target,
 		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindOCIImage},
 	}
-	markerless, _ := conchimage.CanonicalTemplateRef(digest.FromString("markerless").String())
-	imageStore.records[markerless] = images.Image{Name: markerless, Target: target}
+	imageStore.records["registry.example/markerless:latest"] = images.Image{Name: "registry.example/markerless:latest", Target: target}
 
-	got, err := store.Get(ctx, target.Digest.String())
+	got, err := store.Get(ctx, name)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -97,88 +98,165 @@ func TestStoreCRUDUsesCanonicalImageRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(items) != 1 || items[0].BootIndexDigest != target.Digest.String() {
-		t.Fatalf("List() = %#v, want only canonical Template", items)
+	if len(items) != 1 || items[0].Name != name || items[0].BootIndexDigest != target.Digest.String() {
+		t.Fatalf("List() = %#v, want only named Template", items)
 	}
 
-	if err := store.Delete(ctx, target.Digest.String()); err != nil {
+	if err := store.Delete(ctx, name); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	if err := store.Delete(ctx, target.Digest.String()); err != nil {
+	if err := store.Delete(ctx, name); err != nil {
 		t.Fatalf("idempotent Delete() error = %v", err)
 	}
-	if _, err := store.Get(ctx, target.Digest.String()); !errors.Is(err, conchtemplate.ErrNotFound) {
+	if _, err := store.Get(ctx, name); !errors.Is(err, conchtemplate.ErrNotFound) {
 		t.Fatalf("Get() after Delete error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestStoreCreateDoesNotOverwriteExistingTemplate(t *testing.T) {
+func TestStorePutRetargetsExistingName(t *testing.T) {
 	ctx := context.Background()
 	contentStore := newTestContentStore(t)
-	target := buildTestBootIndex(t, ctx, contentStore, false)
-	store := &Store{images: newMemoryImageStore(), content: contentStore}
+	coldTarget := buildTestBootIndex(t, ctx, contentStore, false)
+	resumeTarget := buildTestBootIndex(t, ctx, contentStore, true)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
 
 	first := conchtemplate.Entry{
+		Name:            "registry.example/conch/demo:latest",
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
-		BootIndexDigest: target.Digest.String(),
+		BootIndexDigest: coldTarget.Digest.String(),
 		Labels:          map[string]string{"owner": "first"},
 	}
-	if _, err := store.Create(ctx, first, target); err != nil {
-		t.Fatalf("first Create() error = %v", err)
+	if _, err := store.Put(ctx, first, coldTarget); err != nil {
+		t.Fatalf("first Put() error = %v", err)
 	}
-	first.Labels["owner"] = "second"
-	if _, err := store.Create(ctx, first, target); !errors.Is(err, conchtemplate.ErrAlreadyExists) {
-		t.Fatalf("second Create() error = %v, want ErrAlreadyExists", err)
+	second := first
+	second.Origin = conchtemplate.OriginCheckpoint
+	second.BootMode = conchtemplate.BootModeResume
+	second.BootIndexDigest = resumeTarget.Digest.String()
+	second.Labels = map[string]string{"owner": "second"}
+	if _, err := store.Put(ctx, second, resumeTarget); err != nil {
+		t.Fatalf("second Put() error = %v", err)
 	}
-	got, err := store.Get(ctx, target.Digest.String())
+	got, err := store.Get(ctx, first.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Labels["owner"] != "first" {
-		t.Fatalf("existing Template was overwritten: %#v", got.Labels)
+	if got.BootIndexDigest != resumeTarget.Digest.String() || got.BootMode != conchtemplate.BootModeResume || got.Labels["owner"] != "second" {
+		t.Fatalf("retargeted Template = %#v", got)
+	}
+	if len(imageStore.records) != 1 {
+		t.Fatalf("image records = %#v, want one mutable Name", imageStore.records)
+	}
+	if _, ok := imageStore.records[conchimage.TemplateRecordName(first.Name)]; !ok {
+		t.Fatalf("internal Template record is missing: %#v", imageStore.records)
 	}
 }
 
-func TestStoreCreateRejectsBootModeMismatch(t *testing.T) {
+func TestStorePutRejectsBootModeMismatch(t *testing.T) {
 	ctx := context.Background()
 	contentStore := newTestContentStore(t)
 	target := buildTestBootIndex(t, ctx, contentStore, false)
 	store := &Store{images: newMemoryImageStore(), content: contentStore}
 
-	_, err := store.Create(ctx, conchtemplate.Entry{
+	_, err := store.Put(ctx, conchtemplate.Entry{
+		Name:            "registry.example/conch/demo:latest",
 		Origin:          conchtemplate.OriginCheckpoint,
 		BootMode:        conchtemplate.BootModeResume,
 		BootIndexDigest: target.Digest.String(),
 	}, target)
 	if !errors.Is(err, conchtemplate.ErrInvalidArtifact) {
-		t.Fatalf("Create() error = %v, want ErrInvalidArtifact", err)
+		t.Fatalf("Put() error = %v, want ErrInvalidArtifact", err)
 	}
 }
 
-func TestStoreDeleteRejectsMovedCanonicalRecord(t *testing.T) {
+func TestStorePutDoesNotCollideWithOrdinaryImageLogicalName(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, contentStore, false)
+	ordinaryTarget := writeTestComponent(t, ctx, contentStore, conchimage.KindRootfs)
+	imageStore := newMemoryImageStore()
+	const name = "registry.example:5000/team/busybox:latest"
+	ordinary := images.Image{
+		Name:   name,
+		Target: ordinaryTarget,
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindOCIImage},
+	}
+	if _, err := imageStore.Create(ctx, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{images: imageStore, content: contentStore}
+
+	if _, err := store.Put(ctx, conchtemplate.Entry{
+		Name:            name,
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: target.Digest.String(),
+	}, target); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	if len(imageStore.records) != 2 {
+		t.Fatalf("image records = %#v, want ordinary and internal Template records", imageStore.records)
+	}
+	if got := imageStore.records[name]; got.Labels[conchimage.ImageKindLabel] != conchimage.ImageKindOCIImage || got.Labels[schemaLabel] != "" {
+		t.Fatalf("ordinary image record was changed: %#v", got)
+	}
+	if got := imageStore.records[conchimage.TemplateRecordName(name)]; got.Labels[schemaLabel] != schemaVersion {
+		t.Fatalf("internal Template record = %#v", got)
+	}
+}
+
+func TestStorePutRejectsNonTemplateRecordInReservedKeyspace(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, contentStore, false)
+	imageStore := newMemoryImageStore()
+	const name = "registry.example/ordinary:latest"
+	recordName := conchimage.TemplateRecordName(name)
+	original := images.Image{
+		Name:   recordName,
+		Target: target,
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindOCIImage},
+	}
+	if _, err := imageStore.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{images: imageStore, content: contentStore}
+
+	_, err := store.Put(ctx, conchtemplate.Entry{
+		Name:            name,
+		Origin:          conchtemplate.OriginImage,
+		BootMode:        conchtemplate.BootModeCold,
+		BootIndexDigest: target.Digest.String(),
+	}, target)
+	if !errors.Is(err, conchtemplate.ErrAlreadyExists) {
+		t.Fatalf("Put() error = %v, want ErrAlreadyExists", err)
+	}
+	got, err := imageStore.Get(ctx, recordName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels[conchimage.ImageKindLabel] != conchimage.ImageKindOCIImage || got.Labels[schemaLabel] != "" {
+		t.Fatalf("ordinary image record was overwritten: %#v", got)
+	}
+}
+
+func TestStoreDeleteRejectsNonTemplateRecordInReservedKeyspace(t *testing.T) {
 	ctx := context.Background()
 	contentStore := newTestContentStore(t)
 	target := buildTestBootIndex(t, ctx, contentStore, false)
 	imageStore := newMemoryImageStore()
 	store := &Store{images: imageStore, content: contentStore}
-	if _, err := store.Create(ctx, conchtemplate.Entry{
-		Origin:          conchtemplate.OriginImage,
-		BootMode:        conchtemplate.BootModeCold,
-		BootIndexDigest: target.Digest.String(),
-	}, target); err != nil {
-		t.Fatal(err)
-	}
-	name, _ := conchimage.CanonicalTemplateRef(target.Digest.String())
-	record := imageStore.records[name]
-	record.Target.Digest = digest.FromString("moved-target")
-	imageStore.records[name] = record
+	const name = "registry.example/ordinary:latest"
+	recordName := conchimage.TemplateRecordName(name)
+	imageStore.records[recordName] = images.Image{Name: recordName, Target: target}
 
-	if err := store.Delete(ctx, target.Digest.String()); !errors.Is(err, conchtemplate.ErrFailedPrecondition) {
-		t.Fatalf("Delete() error = %v, want ErrFailedPrecondition", err)
+	if err := store.Delete(ctx, name); !errors.Is(err, conchtemplate.ErrNotFound) {
+		t.Fatalf("Delete() error = %v, want ErrNotFound", err)
 	}
-	if _, err := imageStore.Get(ctx, name); err != nil {
-		t.Fatalf("moved canonical record was deleted: %v", err)
+	if _, err := imageStore.Get(ctx, recordName); err != nil {
+		t.Fatalf("ordinary image was deleted: %v", err)
 	}
 }
 
@@ -219,8 +297,15 @@ func (s *memoryImageStore) Create(_ context.Context, record images.Image) (image
 	return record, nil
 }
 
-func (s *memoryImageStore) Update(context.Context, images.Image, ...string) (images.Image, error) {
-	return images.Image{}, errors.New("unexpected image update")
+func (s *memoryImageStore) Update(_ context.Context, record images.Image, _ ...string) (images.Image, error) {
+	existing, ok := s.records[record.Name]
+	if !ok {
+		return images.Image{}, errdefs.ErrNotFound
+	}
+	record.CreatedAt = existing.CreatedAt
+	record.UpdatedAt = existing.UpdatedAt.Add(time.Second)
+	s.records[record.Name] = record
+	return record, nil
 }
 
 func (s *memoryImageStore) Delete(ctx context.Context, name string, opts ...images.DeleteOpt) error {

@@ -187,7 +187,6 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		host.sandboxManager, err = conchsandbox.New(
 			hostCtx,
 			inst.client,
-			host.templateStore,
 			host.snapshotServer,
 			*cfg.Sandbox,
 		)

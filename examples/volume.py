@@ -15,7 +15,7 @@ lifecycles when the same host path is reused:
 Host dirs are created under PWD and left in place for inspection (no tempfile
 auto-cleanup), so the persisted last.txt is visible after the run.
 
-Run: python3 tests/volume.py <template_id>
+Run: python3 tests/volume.py <template_name>
 """
 
 import os
@@ -59,7 +59,7 @@ def run_sandbox_write(tid):
     t0 = time.perf_counter()
 
     box = Sandbox.create(
-        template_id=tid,
+        template_name=tid,
         vcpu_num=VCPU_NUM,
         vcpu_max=VCPU_MAX,
         ram_mb=RAM_MB,
@@ -82,7 +82,7 @@ def run_sandbox_write(tid):
 
 def run_sandbox_read(tid):
     box = Sandbox.create(
-        template_id=tid,
+        template_name=tid,
         vcpu_num=VCPU_NUM,
         vcpu_max=VCPU_MAX,
         ram_mb=RAM_MB,
@@ -105,10 +105,10 @@ def main():
     print(f"Host volume base: {HOST_BASE}")
 
     if len(sys.argv) < 2:
-        print('missing template_id')
+        print('missing template_name')
         return
     tid = sys.argv[1]
-    print(f'using template_id: {tid}')
+    print(f'using template_name: {tid}')
 
     print("\n=== First sandbox: write to volume ===")
     run_sandbox_write(tid)

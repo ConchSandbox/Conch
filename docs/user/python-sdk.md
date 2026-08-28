@@ -8,7 +8,7 @@
 
 ```pycon
 >>> from conch import Sandbox
->>> sandbox = Sandbox.create(template_id="<template-id>")
+>>> sandbox = Sandbox.create(template_name="<template-name>")
 >>> sandbox.sandbox_id
 'sandbox_a1b2c3d4e5f6789012345678'
 >>> result = sandbox.commands.run(cmd="printf", args=["hello Conch\n"])
@@ -19,11 +19,11 @@ True
 ```
 
 **说明：**
-- `Sandbox.create(template_id=...)` - 创建沙箱
+- `Sandbox.create(template_name=...)` - 按当前 Name 指向的 Template ID 创建沙箱
 - `commands.run()` - 执行命令
 - `delete()` - 清理资源
 
-也可使用 `with Sandbox.create(template_id="<template-id>") as sandbox:` 上下文管理器，自动调用 `delete()`。
+也可使用 `with Sandbox.create(template_name="<template-name>") as sandbox:` 上下文管理器，自动调用 `delete()`。
 
 ---
 
@@ -36,7 +36,7 @@ Sandbox 支持 Python 上下文管理器协议，提供更简洁的资源管理�
 ```python
 from conch import Sandbox
 
-with Sandbox.create(template_id="<template-id>") as sbx:
+with Sandbox.create(template_name="<template-name>") as sbx:
     result = sbx.commands.run(cmd='python3', content='print("Hello")')
     print(result)
 # 自动调用 delete()
@@ -47,17 +47,19 @@ with Sandbox.create(template_id="<template-id>") as sbx:
 ### 创建沙箱
 
 ```text
-Sandbox.create(template_id=None, sandbox_id=None,
+Sandbox.create(template_name=None, template_id=None, sandbox_id=None,
                vcpu_num=None, vcpu_max=None, ram_mb=None,
                volume_mounts=None, env=None, network=None,
                vmm_name=None) -> Sandbox
 ```
 
 基于 Template 创建沙箱。省略字段时，由 conchd 使用
-`sandbox.default_spec`；`template_id` 和默认 Template 都为空时，conchd 返回 HTTP 400。
+`sandbox.default_spec`。`template_name` 和 `template_id` 只能指定一个；请求未指定时使用
+daemon default，最终仍没有 selector 或同时得到两个 selector 时，conchd 返回 HTTP 400。
 
 **参数：**
-- `template_id` (str, 可选): 要启动的 Template ID
+- `template_name` (str, 可选): 要解析并启动的可变 Template Name
+- `template_id` (str, 可选): 要直接启动的不可变 Boot Index digest；与 `template_name` 互斥
 - `sandbox_id` (str, 可选): 指定沙箱 ID，默认自动生成
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
 - `volume_mounts` (list, 可选): 卷挂载配置
@@ -74,21 +76,25 @@ Sandbox.create(template_id=None, sandbox_id=None,
 **示例：**
 ```python
 # 从指定 Template 创建
-sbx = Sandbox.create(template_id="<template-id>")
+sbx = Sandbox.create(template_name="<template-name>")
 sbx.commands.run(cmd='python3', content='print("Hello")')
 sbx.delete()
 
+# 也可以绕过 Name，直接使用不可变 Template ID
+sbx = Sandbox.create(template_id="sha256:<digest>")
+sbx.delete()
+
 # 省略资源时，使用 sandbox.default_spec
-sbx = Sandbox.create(template_id="<template-id>")
+sbx = Sandbox.create(template_name="<template-name>")
 sbx.delete()
 
 # 从 checkpoint 产生的可恢复 Template 创建
-sbx = Sandbox.create(template_id="<template-id>")
+sbx = Sandbox.create(template_name="<template-name>")
 sbx.commands.run(cmd='python3', content='print("Restored")')
 sbx.delete()
 
 # 使用上下文管理器
-with Sandbox.create(template_id="<template-id>") as sbx:
+with Sandbox.create(template_name="<template-name>") as sbx:
     sbx.commands.run(cmd='python3', content='print("Hello")')
 ```
 
@@ -97,26 +103,27 @@ with Sandbox.create(template_id="<template-id>") as sbx:
 ### Checkpoint Sandbox
 
 ```text
-sandbox.checkpoint() -> TemplateInfo
+sandbox.checkpoint(template_name) -> TemplateInfo
 ```
 
 捕获沙箱当前状态并返回一个可恢复 Template。Checkpoint 是作用于 Sandbox 的动作，不是独立资源；该动作不会停止或删除原沙箱。
 
-**返回：** `TemplateInfo` 对象（包含 `template_id` 和 `sandbox_id`）
+**返回：** `TemplateInfo` 对象（包含 `template_name`、`template_id` 和 `sandbox_id`）
 
 **完整示例：快照生命周期**
 
 ```python
 # 步骤 1: 从 Template 创建沙箱
-sbx = Sandbox.create(template_id="<template-id>")
+sbx = Sandbox.create(template_name="<template-name>")
 print(f"Created sandbox: {sbx.sandbox_id}")
 
 # 步骤 2: checkpoint Sandbox，得到可恢复 Template
-template = sbx.checkpoint()
+template = sbx.checkpoint("localhost/conch/checkpoint:latest")
+print(f"Template Name: {template.template_name}")
 print(f"Template ID: {template.template_id}")
 
 # 步骤 3: 从可恢复 Template 创建新沙箱
-sbx2 = Sandbox.create(template_id=template.template_id)
+sbx2 = Sandbox.create(template_name=template.template_name)
 print(f"Restored sandbox: {sbx2.sandbox_id}")
 sbx2.delete()
 
@@ -125,8 +132,8 @@ sbx.delete()
 
 **说明：**
 - checkpoint 动作产生的 Template 保存沙箱的完整可恢复状态
-- `checkpoint()` 不改变沙箱运行态
-- 使用返回的 `template_id` 创建恢复后的沙箱
+- `checkpoint(template_name)` 不改变沙箱运行态，并创建或更新指定 Name
+- 使用返回的 `template_name` 创建恢复后的沙箱；`template_id` 用于记录实际内容版本
 - 可通过 `origin=checkpoint` 和 `boot_mode=resume` 识别 Template 的来源与启动能力
 
 ---
@@ -168,12 +175,12 @@ Sandbox.delete_sandbox(sandbox_id) -> bool
 **示例：**
 ```python
 # 删除当前实例
-with Sandbox.create(template_id="<template-id>") as sbx:
+with Sandbox.create(template_name="<template-name>") as sbx:
     pass
 # 自动删除（上下文管理器）
 
 # 手动删除
-sbx = Sandbox.create(template_id="<template-id>")
+sbx = Sandbox.create(template_name="<template-name>")
 sbx.delete()
 
 # 直接删除指定沙箱
@@ -214,10 +221,11 @@ Sandbox.get(sandbox_id) -> Sandbox
 
 `Sandbox.get()` 会填充资源、domain、metadata 和 lifecycle 等可用的控制面字段。由于 daemon 当前不会恢复创建时的 conch-init 访问令牌，GET 响应会省略 `conchInitAccessToken`，该方法返回的对象仅用于控制面操作，例如读取元数据或删除沙箱。命令、文件和沙箱内 Agent 健康检查会抛出 `Agent credentials unavailable for retrieved sandbox`。`Sandbox.create()` 返回的对象不受此限制。
 
-下表使用 REST API 的 JSON 字段名。Python SDK 会将其映射为 Python 属性，例如 `sandboxID` 对应 `sandbox_id`、`templateID` 对应 `template_id`、`startedAt` 对应 `started_at`，`domain` 对应 `ip`。
+下表使用 REST API 的 JSON 字段名。Python SDK 会将其映射为 Python 属性，例如 `sandboxID` 对应 `sandbox_id`、`templateName` 对应 `template_name`、`templateID` 对应 `template_id`、`startedAt` 对应 `started_at`，`domain` 对应 `ip`。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `templateName` | str | 创建时使用的 Template Name；直接使用 ID 创建时为空 |
 | `templateID` | str | 创建沙箱所使用的 Template ID |
 | `imageName` | str | 关联镜像名称；后端无法提供时为空字符串 |
 | `snapshotID` | str | 关联快照 ID；后端无法提供时为空字符串 |
@@ -277,12 +285,12 @@ sandbox.update_network(
 sandbox.get_info() -> SandboxInfo
 ```
 
-获取当前实例保存的沙箱 ID、IP 和源 Template ID。
+获取当前实例保存的沙箱 ID、IP、源 Template Name 和实际 Template ID。
 
 **示例：**
 ```python
 info = sbx.get_info()
-print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_id}")
+print(f"ID: {info.sandbox_id}, IP: {info.ip}, Source: {info.template_name} -> {info.template_id}")
 ```
 
 **返回值：** `SandboxInfo` 对象，参见 [数据类型](#sandboxinfo)。
@@ -574,7 +582,7 @@ print(result)
 ## Sandbox 构造函数
 
 ```python
-Sandbox(sandbox_id=None, template_id=None,
+Sandbox(sandbox_id=None, template_name=None, template_id=None,
         vcpu_num=None, vcpu_max=None, ram_mb=None,
         volume_mounts=None, env=None, network=None,
         vmm_name=None)
@@ -585,7 +593,8 @@ Sandbox(sandbox_id=None, template_id=None,
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `sandbox_id` | str | 沙箱 ID，默认自动生成 |
-| `template_id` | str | Template ID |
+| `template_name` | str | 可变 Template Name |
+| `template_id` | str | 不可变 Template ID；与 `template_name` 互斥 |
 | `vcpu_num` | int | 虚拟 CPU 数量 |
 | `vcpu_max` | int | 虚拟 CPU 数量上限 |
 | `ram_mb` | int | 内存大小（MB） |
@@ -607,6 +616,7 @@ Sandbox(sandbox_id=None, template_id=None,
 class SandboxInfo:
     sandbox_id: str
     ip: str
+    template_name: Optional[str]
     template_id: Optional[str]
 ```
 
@@ -615,6 +625,7 @@ class SandboxInfo:
 ```python
 @dataclass
 class TemplateInfo:
+    template_name: str
     template_id: str
     sandbox_id: str
 ```
@@ -725,7 +736,7 @@ from conch import Sandbox
 
 sbx = None
 try:
-    sbx = Sandbox.create(template_id="<template-id>")
+    sbx = Sandbox.create(template_name="<template-name>")
     info = sbx.get_info()
     print(f"Created sandbox: {info.sandbox_id}, IP: {info.ip}")
 
@@ -754,7 +765,7 @@ finally:
 ```python
 from conch import Sandbox
 
-with Sandbox.create(template_id="<template-id>") as sbx:
+with Sandbox.create(template_name="<template-name>") as sbx:
     info = sbx.get_info()
     print(f"Created sandbox: {info.sandbox_id}, IP: {info.ip}")
 
@@ -779,12 +790,12 @@ with Sandbox.create(template_id="<template-id>") as sbx:
 from conch import Sandbox
 
 # 创建 checkpoint Template
-sbx = Sandbox.create(template_id="<template-id>")
-template = sbx.checkpoint()
-print(f"Created resumable template: {template.template_id}")
+sbx = Sandbox.create(template_name="<template-name>")
+template = sbx.checkpoint("localhost/conch/checkpoint:latest")
+print(f"Created resumable template: {template.template_name} -> {template.template_id}")
 
 # 从可恢复 Template 启动
-sbx2 = Sandbox.create(template_id=template.template_id)
+sbx2 = Sandbox.create(template_name=template.template_name)
 sbx2.commands.run(cmd='python3', content='print("Restored!")')
 sbx2.delete()
 sbx.delete()
@@ -797,7 +808,7 @@ from conch import Sandbox
 
 sbx = None
 try:
-    sbx = Sandbox.create(template_id="<template-id>")
+    sbx = Sandbox.create(template_name="<template-name>")
     result = sbx.commands.run(cmd='invalid_command')
 except RuntimeError as e:
     print(f"Error: {e}")

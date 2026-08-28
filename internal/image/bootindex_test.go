@@ -16,44 +16,6 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-func TestCanonicalTemplateRefUsesBootIndexDigest(t *testing.T) {
-	bootIndexDigest := digest.FromString("boot-index").String()
-
-	got, err := CanonicalTemplateRef("  " + bootIndexDigest + "  ")
-	if err != nil {
-		t.Fatalf("CanonicalTemplateRef() error = %v", err)
-	}
-	want := "localhost/conch/template:" + strings.Replace(bootIndexDigest, ":", "-", 1)
-	if got != want {
-		t.Fatalf("CanonicalTemplateRef() = %q, want %q", got, want)
-	}
-}
-
-func TestCanonicalTemplateRefRejectsInvalidDigest(t *testing.T) {
-	if _, err := CanonicalTemplateRef("not-a-digest"); err == nil {
-		t.Fatal("CanonicalTemplateRef() error = nil, want invalid digest")
-	}
-}
-
-func TestIsCanonicalTemplateRef(t *testing.T) {
-	canonical, err := CanonicalTemplateRef(digest.FromString("boot-index").String())
-	if err != nil {
-		t.Fatalf("CanonicalTemplateRef() error = %v", err)
-	}
-	if !IsCanonicalTemplateRef(canonical) {
-		t.Fatalf("IsCanonicalTemplateRef(%q) = false", canonical)
-	}
-	for _, ref := range []string{
-		"localhost/conch/template:latest",
-		"registry.example/conch/template:sha256-deadbeef",
-		"localhost/conch/template:sha256-not-a-digest",
-	} {
-		if IsCanonicalTemplateRef(ref) {
-			t.Fatalf("IsCanonicalTemplateRef(%q) = true", ref)
-		}
-	}
-}
-
 func TestBuildBootIndexInContentWritesBootIndexBlobs(t *testing.T) {
 	requireMkfsErofs(t)
 

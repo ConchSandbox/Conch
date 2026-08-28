@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/openeuler/Conch/internal/cli/client"
+	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
@@ -111,8 +112,8 @@ func isInternalImageRecord(image client.ImageRecord) bool {
 		return true
 	}
 	name := strings.TrimSpace(image.Name)
-	return strings.HasPrefix(name, "conch-erofs-rootfs:") ||
-		strings.HasPrefix(name, "conch-kernel:")
+	return strings.HasPrefix(name, conchimage.TemplateRecordNamePrefix) ||
+		strings.HasPrefix(name, "conch-erofs-rootfs:")
 }
 
 func displayImageKind(kind string) string {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -79,10 +80,11 @@ type SandboxConfig struct {
 }
 
 type SandboxSpec struct {
-	TemplateID string `yaml:"template_id"`
-	VCPUNum    int64  `yaml:"vcpu_num"`
-	VCPUMax    int64  `yaml:"vcpu_max"`
-	RamMB      int64  `yaml:"ram_mb"`
+	TemplateName string `yaml:"template_name"`
+	TemplateID   string `yaml:"template_id"`
+	VCPUNum      int64  `yaml:"vcpu_num"`
+	VCPUMax      int64  `yaml:"vcpu_max"`
+	RamMB        int64  `yaml:"ram_mb"`
 }
 
 // BinaryPaths returns the explicitly configured binary for each available VMM.
@@ -278,6 +280,20 @@ func validateConfig(cfg *Config) error {
 	if cfg.Volume.MaxMounts < 0 {
 		return fmt.Errorf("invalid volume.max_mounts=%d: must be greater than or equal to 0", cfg.Volume.MaxMounts)
 	}
+	templateName := strings.TrimSpace(cfg.Sandbox.DefaultSpec.TemplateName)
+	templateID := strings.TrimSpace(cfg.Sandbox.DefaultSpec.TemplateID)
+	if templateName != "" && templateID != "" {
+		return fmt.Errorf("sandbox.default_spec.template_name and sandbox.default_spec.template_id are mutually exclusive")
+	}
+	if templateID != "" {
+		parsed, err := digest.Parse(templateID)
+		if err != nil {
+			return fmt.Errorf("invalid sandbox.default_spec.template_id %q: %w", templateID, err)
+		}
+		templateID = parsed.String()
+	}
+	cfg.Sandbox.DefaultSpec.TemplateName = templateName
+	cfg.Sandbox.DefaultSpec.TemplateID = templateID
 	backend := strings.TrimSpace(cfg.Volume.Backend)
 	if backend != "" && backend != defaultVolumeBackend {
 		return fmt.Errorf("invalid volume.backend=%q: only %q is supported", cfg.Volume.Backend, defaultVolumeBackend)

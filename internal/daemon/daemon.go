@@ -162,11 +162,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 	s.runtimeService.Snapshot = host.SnapshotServer()
 	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
-		TemplateID: cfg.Sandbox.DefaultSpec.TemplateID,
-		VMMName:    cfg.Sandbox.Backend,
-		VCPUNum:    cfg.Sandbox.DefaultSpec.VCPUNum,
-		VCPUMax:    cfg.Sandbox.DefaultSpec.VCPUMax,
-		RamMB:      cfg.Sandbox.DefaultSpec.RamMB,
+		TemplateName: cfg.Sandbox.DefaultSpec.TemplateName,
+		TemplateID:   cfg.Sandbox.DefaultSpec.TemplateID,
+		VMMName:      cfg.Sandbox.Backend,
+		VCPUNum:      cfg.Sandbox.DefaultSpec.VCPUNum,
+		VCPUMax:      cfg.Sandbox.DefaultSpec.VCPUMax,
+		RamMB:        cfg.Sandbox.DefaultSpec.RamMB,
 	})
 
 	manager := host.SandboxManager()
@@ -439,6 +440,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		SandboxID:    req.SandboxID,
 		LeaseID:      req.LeaseID,
+		TemplateName: req.TemplateName,
 		TemplateID:   req.TemplateID,
 		VMMName:      req.VMMName,
 		VCPUNum:      req.VCPUNum,
@@ -701,6 +703,7 @@ func matchesSandboxState(record state.SandboxRecord, states map[string]bool) boo
 
 func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandboxInspectResponse {
 	response := sandboxInspectResponse{
+		TemplateName: record.SourceTemplateName,
 		TemplateID:   record.SourceTemplateID,
 		ImageName:    "",
 		SnapshotID:   "",
@@ -727,6 +730,7 @@ func sandboxResponseFromRecord(record state.SandboxRecord, detailed bool) sandbo
 func sandboxResponseFromCreate(result runtimeapi.SandboxCreateResult) createSandboxResponse {
 	// TODO: populate conchInitVersion and alias when runtime support is available.
 	return createSandboxResponse{
+		TemplateName:         result.TemplateName,
 		TemplateID:           result.TemplateID,
 		SandboxID:            result.SandboxID,
 		ConchInitAccessToken: result.AgentToken,
@@ -836,8 +840,9 @@ func (s *Daemon) handleCheckpointSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result, err := s.runtimeService.CheckpointSandbox(r.Context(), runtimeapi.SandboxCheckpointOptions{
-		SandboxID: req.SandboxID,
-		Labels:    req.Labels,
+		SandboxID:    req.SandboxID,
+		TemplateName: req.TemplateName,
+		Labels:       req.Labels,
 	})
 	if err != nil {
 		writeAPIError(w, err)
@@ -897,14 +902,15 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":      "ok",
-		"template_id": result.TemplateID,
-		"build_ref":   result.BuildRef,
+		"status":        "ok",
+		"template_name": result.Name,
+		"template_id":   result.TemplateID,
 	})
 }
 
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
+		Name:       req.Name,
 		Source:     req.Source,
 		KernelPath: kernelPath,
 		InitrdPath: initrdPath,
@@ -936,9 +942,9 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{
-		"status":      "ok",
-		"template_id": result.TemplateID,
-		"build_ref":   result.BuildRef,
+		"status":        "ok",
+		"template_name": result.Name,
+		"template_id":   result.TemplateID,
 	})
 }
 
@@ -952,7 +958,7 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtimeService.PushTemplate(r.Context(), runtimeapi.TemplatePushOptions{
-		TemplateID:      req.TemplateID,
+		Name:            req.Name,
 		RemoteReference: req.RemoteReference,
 		PlainHTTP:       req.PlainHTTP,
 		Username:        req.Username,
@@ -974,7 +980,7 @@ func (s *Daemon) handleUnpackTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtimeService.UnpackTemplate(r.Context(), runtimeapi.TemplateUnpackOptions{
-		TemplateID: req.TemplateID,
+		Name: req.Name,
 	}); err != nil {
 		writeAPIError(w, err)
 		return
@@ -1003,7 +1009,7 @@ func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
-	var req templateIDRequest
+	var req templateNameRequest
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
@@ -1011,7 +1017,7 @@ func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
-	item, err := s.runtimeService.GetTemplate(r.Context(), req.ID)
+	item, err := s.runtimeService.GetTemplate(r.Context(), req.Name)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -1020,7 +1026,7 @@ func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
-	var req templateIDRequest
+	var req templateNameRequest
 	if !decodePostJSON(w, r, &req) {
 		return
 	}
@@ -1028,7 +1034,7 @@ func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
-	if err := s.runtimeService.RemoveTemplate(r.Context(), req.ID); err != nil {
+	if err := s.runtimeService.RemoveTemplate(r.Context(), req.Name); err != nil {
 		writeAPIError(w, err)
 		return
 	}

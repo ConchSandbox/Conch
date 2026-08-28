@@ -17,12 +17,13 @@ const (
 )
 
 type SandboxCreateRequest struct {
-	TemplateID string `json:"template_id,omitempty"`
-	VMMName    string `json:"vmm_name,omitempty"`
-	SandboxID  string `json:"sandbox_id"`
-	VCPUNum    int64  `json:"vcpu_num,omitempty"`
-	VCPUMax    int64  `json:"vcpu_max,omitempty"`
-	RAMMB      int64  `json:"ram_mb,omitempty"`
+	TemplateName string `json:"template_name,omitempty"`
+	TemplateID   string `json:"template_id,omitempty"`
+	VMMName      string `json:"vmm_name,omitempty"`
+	SandboxID    string `json:"sandbox_id"`
+	VCPUNum      int64  `json:"vcpu_num,omitempty"`
+	VCPUMax      int64  `json:"vcpu_max,omitempty"`
+	RAMMB        int64  `json:"ram_mb,omitempty"`
 }
 
 type SandboxCreateResponse struct {
@@ -32,11 +33,12 @@ type SandboxCreateResponse struct {
 
 // SandboxRecord is the public summary returned by GET /api/v1/sandboxes.
 type SandboxRecord struct {
-	TemplateID string `json:"templateID"`
-	SandboxID  string `json:"sandboxID"`
-	StartedAt  string `json:"startedAt"`
-	CPUCount   int64  `json:"cpuCount"`
-	MemoryMB   int64  `json:"memoryMB"`
+	TemplateName string `json:"templateName"`
+	TemplateID   string `json:"templateID"`
+	SandboxID    string `json:"sandboxID"`
+	StartedAt    string `json:"startedAt"`
+	CPUCount     int64  `json:"cpuCount"`
+	MemoryMB     int64  `json:"memoryMB"`
 }
 
 type SandboxLifecycleRequest struct {
@@ -44,8 +46,9 @@ type SandboxLifecycleRequest struct {
 }
 
 type SandboxCheckpointRequest struct {
-	SandboxID string            `json:"sandbox_id"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	SandboxID    string            `json:"sandbox_id"`
+	TemplateName string            `json:"template_name"`
+	Labels       map[string]string `json:"labels,omitempty"`
 }
 
 type SandboxCheckpointResponse struct {

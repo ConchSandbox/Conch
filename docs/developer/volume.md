@@ -218,12 +218,13 @@ virtiofsd 的每个 sandbox runtime 目录固定在
 #### Sandbox.create
 
 SDK 对外参数使用 Python 风格 `volume_mounts`，请求到 conchd 时转换为 `volumeMounts`。
+示例使用 `template_name`；也可改用互斥的 `template_id`。
 
 ```python
 from conch import Sandbox
 
 sandbox = Sandbox.create(
-    template_id="<template-id>",
+    template_name="<template-name>",
     volume_mounts=[
         {"source": "/host/path/cache",   "path": "/mnt/cache"},
         {"source": "/host/path/dataset", "path": "/data", "readonly": True},
@@ -254,7 +255,7 @@ SDK 发送 payload：
 
 ```json
 {
-  "template_id": "<template-id>",
+  "template_name": "<template-name>",
   "volumeMounts": [
     {"source": "/host/path/cache",   "path": "/mnt/cache", "readonly": false},
     {"source": "/host/path/dataset", "path": "/data",      "readonly": true}
