@@ -51,11 +51,19 @@ type fakeSandboxOps struct {
 
 type fakeTemplateStore struct {
 	entries map[string]conchtemplate.Entry
+	putHook func(context.Context)
+	putErr  error
 }
 
 const testTemplateName = "registry.example/conch/test:latest"
 
-func (f *fakeTemplateStore) Put(_ context.Context, entry conchtemplate.Entry, _ ocispec.Descriptor) (conchtemplate.Entry, error) {
+func (f *fakeTemplateStore) Put(ctx context.Context, entry conchtemplate.Entry, _ ocispec.Descriptor) (conchtemplate.Entry, error) {
+	if f.putHook != nil {
+		f.putHook(ctx)
+	}
+	if f.putErr != nil {
+		return conchtemplate.Entry{}, f.putErr
+	}
 	if f.entries == nil {
 		f.entries = make(map[string]conchtemplate.Entry)
 	}
@@ -466,6 +474,66 @@ func TestCheckpointSandboxDoesNotPublishTemplateWhenSandboxUpdateFails(t *testin
 		if record.Name == conchimage.TemplateRecordName(checkpointName) {
 			t.Fatalf("checkpoint name exists after Sandbox update failure: %#v", record)
 		}
+	}
+}
+
+func TestCheckpointSandboxKeepsPreviousHeadLeasedUntilTemplatePutCompletes(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	sourceDigest := buildColdBootIndex(t, host, "checkpoint-rollback-source")
+	store := host.SandboxStore()
+	record := sandbox.Record{
+		ID:                       "sandbox-rollback",
+		State:                    sandbox.StateReady,
+		CheckpointHeadTemplateID: sourceDigest,
+	}
+	if _, err := store.Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+
+	wantErr := errors.New("put template failed")
+	parentLeased := false
+	templates := &fakeTemplateStore{putErr: wantErr}
+	templates.putHook = func(putCtx context.Context) {
+		leaseID, ok := leases.FromContext(putCtx)
+		if !ok {
+			return
+		}
+		resources, err := host.Client().LeasesService().ListResources(putCtx, leases.Lease{ID: leaseID})
+		if err != nil {
+			t.Errorf("list checkpoint lease resources: %v", err)
+			return
+		}
+		for _, resource := range resources {
+			if resource.Type == "content" && resource.ID == sourceDigest {
+				parentLeased = true
+				return
+			}
+		}
+	}
+	svc := New(&fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{{
+		MemRootPath:  t.TempDir(),
+		VMMName:      "cloud-hypervisor",
+		MemorySizeMB: 128,
+	}}}, host.Client(), store)
+	svc.Templates = templates
+
+	_, err := svc.CheckpointSandbox(ctx, SandboxCheckpointOptions{
+		SandboxID:    record.ID,
+		TemplateName: "registry.example/conch/checkpoint-rollback:latest",
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("CheckpointSandbox() error = %v, want %v", err, wantErr)
+	}
+	if !parentLeased {
+		t.Fatal("previous checkpoint head was not retained by the checkpoint lease")
+	}
+	after, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.CheckpointHeadTemplateID != sourceDigest {
+		t.Fatalf("checkpoint head after rollback = %q, want %q", after.CheckpointHeadTemplateID, sourceDigest)
 	}
 }
 

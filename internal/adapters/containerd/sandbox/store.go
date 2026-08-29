@@ -18,6 +18,7 @@ import (
 const (
 	sandboxerName         = "conch"
 	extensionName         = "io.conch.sandbox.metadata.v1"
+	gcBootIndexLabel      = "containerd.io/gc.ref.content.boot-index"
 	gcSnapshotLabelPrefix = "containerd.io/gc.ref.snapshot."
 )
 
@@ -58,6 +59,7 @@ func (s *Store) Create(ctx context.Context, record conchsandbox.Record) (conchsa
 	if err != nil {
 		return conchsandbox.Record{}, err
 	}
+	labels[gcBootIndexLabel] = currentBootIndexID(record)
 	native, err := s.store.Create(containerdclient.NewNamespaceContext(ctx), cdsandbox.Sandbox{
 		ID:         record.ID,
 		Labels:     labels,
@@ -90,6 +92,7 @@ func (s *Store) Update(ctx context.Context, record conchsandbox.Record) (conchsa
 	if err != nil {
 		return conchsandbox.Record{}, err
 	}
+	labels[gcBootIndexLabel] = currentBootIndexID(record)
 	if native.Extensions == nil {
 		native.Extensions = make(map[string]typeurl.Any)
 	}
@@ -190,6 +193,13 @@ func validState(state conchsandbox.State) bool {
 	default:
 		return false
 	}
+}
+
+func currentBootIndexID(record conchsandbox.Record) string {
+	if record.State == conchsandbox.StateCreating {
+		return strings.TrimSpace(record.SourceTemplateID)
+	}
+	return strings.TrimSpace(record.CheckpointHeadTemplateID)
 }
 
 func metadataFromRecord(record conchsandbox.Record) *metadataV1 {

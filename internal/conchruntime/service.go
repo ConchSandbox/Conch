@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 
@@ -578,6 +579,16 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		return SandboxCheckpointResult{}, fmt.Errorf("create checkpoint content lease: %w", err)
 	}
 	defer done(publishCtx)
+	leaseID, ok := leases.FromContext(publishCtx)
+	if !ok {
+		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint content lease is missing from context")
+	}
+	if err := s.Containerd.LeasesService().AddResource(publishCtx, leases.Lease{ID: leaseID}, leases.Resource{
+		Type: "content",
+		ID:   parentID,
+	}); err != nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("retain checkpoint parent Boot Index %s: %w", parentID, err)
+	}
 	published, err := conchimage.PublishCheckpointBootIndex(publishCtx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
 		SourceBootIndexDigest: parentID,
 		MemRoot:               captured.MemRootPath,

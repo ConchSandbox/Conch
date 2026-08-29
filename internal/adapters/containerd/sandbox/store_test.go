@@ -1,17 +1,23 @@
 package containerdsandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/metadata"
 	cdsandbox "github.com/containerd/containerd/v2/core/sandbox"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/protobuf/types"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	bolt "go.etcd.io/bbolt"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -23,7 +29,7 @@ var _ conchsandbox.Store = (*Store)(nil)
 
 func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 	ctx := context.Background()
-	store, native := newTestStore(t)
+	store, native, _, _ := newTestStore(t)
 	internet := true
 	want := conchsandbox.Record{
 		ID:                       "sandbox-a",
@@ -125,7 +131,7 @@ func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 
 func TestStoreOwnershipErrorsAndIdempotentDelete(t *testing.T) {
 	ctx := context.Background()
-	store, native := newTestStore(t)
+	store, native, _, _ := newTestStore(t)
 	record := conchsandbox.Record{
 		ID:               "sandbox-a",
 		State:            conchsandbox.StateCreating,
@@ -185,7 +191,7 @@ func TestStoreOwnershipErrorsAndIdempotentDelete(t *testing.T) {
 }
 
 func TestStoreAlwaysUsesConchNamespace(t *testing.T) {
-	store, native := newTestStore(t)
+	store, native, _, _ := newTestStore(t)
 	callerCtx := namespaces.WithNamespace(context.Background(), "caller")
 	if _, err := store.Create(callerCtx, conchsandbox.Record{
 		ID:               "sandbox-a",
@@ -202,7 +208,57 @@ func TestStoreAlwaysUsesConchNamespace(t *testing.T) {
 	}
 }
 
-func newTestStore(t *testing.T) (*Store, cdsandbox.Store) {
+func TestStoreBootIndexGCReferenceFollowsCurrentTemplateID(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	store, _, db, contentStore := newTestStore(t)
+	sourceChild := writeTestContent(t, ctx, contentStore, "source-child")
+	source := writeTestContent(t, ctx, contentStore, "source")
+	info, err := contentStore.Info(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.Labels = map[string]string{"containerd.io/gc.ref.content.child": sourceChild.String()}
+	if _, err := contentStore.Update(ctx, info, "labels"); err != nil {
+		t.Fatalf("label source content: %v", err)
+	}
+
+	record := conchsandbox.Record{
+		ID:               "sandbox-a",
+		State:            conchsandbox.StateCreating,
+		SourceTemplateID: source.String(),
+	}
+	if _, err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := db.GarbageCollect(ctx); err != nil {
+		t.Fatalf("GarbageCollect() error = %v", err)
+	}
+	assertContentExists(t, ctx, contentStore, source)
+	assertContentExists(t, ctx, contentStore, sourceChild)
+
+	head := writeTestContent(t, ctx, contentStore, "head")
+	record.State = conchsandbox.StateReady
+	record.CheckpointHeadTemplateID = head.String()
+	if _, err := store.Update(ctx, record); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if _, err := db.GarbageCollect(ctx); err != nil {
+		t.Fatalf("GarbageCollect() after update error = %v", err)
+	}
+	assertContentNotFound(t, ctx, contentStore, source)
+	assertContentNotFound(t, ctx, contentStore, sourceChild)
+	assertContentExists(t, ctx, contentStore, head)
+
+	if err := store.Delete(ctx, record.ID); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := db.GarbageCollect(ctx); err != nil {
+		t.Fatalf("GarbageCollect() after delete error = %v", err)
+	}
+	assertContentNotFound(t, ctx, contentStore, head)
+}
+
+func newTestStore(t *testing.T) (*Store, cdsandbox.Store, *metadata.DB, content.Store) {
 	t.Helper()
 	bdb, err := bolt.Open(filepath.Join(t.TempDir(), "metadata.db"), 0o600, nil)
 	if err != nil {
@@ -213,10 +269,39 @@ func newTestStore(t *testing.T) (*Store, cdsandbox.Store) {
 			t.Errorf("close metadata DB: %v", err)
 		}
 	})
-	db := metadata.NewDB(bdb, nil, nil)
+	localStore, err := local.NewStore(filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := metadata.NewDB(bdb, localStore, nil)
 	if err := db.Init(containerdclient.NewNamespaceContext(context.Background())); err != nil {
 		t.Fatal(err)
 	}
 	native := metadata.NewSandboxStore(db)
-	return NewStore(native), native
+	return NewStore(native), native, db, db.ContentStore()
+}
+
+func writeTestContent(t *testing.T, ctx context.Context, store content.Store, value string) digest.Digest {
+	t.Helper()
+	payload := []byte(value)
+	dgst := digest.FromBytes(payload)
+	desc := ocispec.Descriptor{Digest: dgst, Size: int64(len(payload))}
+	if err := content.WriteBlob(ctx, store, "test-"+dgst.Encoded(), bytes.NewReader(payload), desc); err != nil {
+		t.Fatalf("write content %s: %v", dgst, err)
+	}
+	return dgst
+}
+
+func assertContentExists(t *testing.T, ctx context.Context, store content.Store, dgst digest.Digest) {
+	t.Helper()
+	if _, err := store.Info(ctx, dgst); err != nil {
+		t.Fatalf("content %s does not exist: %v", dgst, err)
+	}
+}
+
+func assertContentNotFound(t *testing.T, ctx context.Context, store content.Store, dgst digest.Digest) {
+	t.Helper()
+	if _, err := store.Info(ctx, dgst); !errdefs.IsNotFound(err) {
+		t.Fatalf("content %s error = %v, want not found", dgst, err)
+	}
 }
