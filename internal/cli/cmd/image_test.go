@@ -91,6 +91,7 @@ func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 	images := []client.ImageRecord{
 		{Name: "localhost:5000/busybox:latest", TargetDigest: "sha256:source"},
 		{Name: "localhost/conch/busybox:latest", TargetDigest: "sha256:index", Kind: "boot-index-cold"},
+		{Name: "io.conch.template/localhost/conch/busybox:latest", TargetDigest: "sha256:index", Kind: "boot-index-cold"},
 		{Name: "conch-erofs-rootfs:build-1", TargetDigest: "sha256:rootfs"},
 		{Name: "localhost/conch/rootfs-component:rootfs", TargetDigest: "sha256:rootfs", Kind: "boot-component-rootfs"},
 		{Name: "localhost/conch/sandbox-component:sandbox", TargetDigest: "sha256:sandbox", Kind: "boot-component-sandbox"},
@@ -106,7 +107,7 @@ func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 			t.Fatalf("default output missing %q:\n%s", want, visible.String())
 		}
 	}
-	for _, hidden := range []string{"conch-erofs-rootfs:", "rootfs-component", "sandbox-component", "mem-snapshot-component"} {
+	for _, hidden := range []string{"io.conch.template/", "conch-erofs-rootfs:", "rootfs-component", "sandbox-component", "mem-snapshot-component"} {
 		if strings.Contains(visible.String(), hidden) {
 			t.Fatalf("default output unexpectedly contains %q:\n%s", hidden, visible.String())
 		}
@@ -116,7 +117,7 @@ func TestPrintImageListHidesInternalRecordsByDefault(t *testing.T) {
 	if err := printImageList(&all, images, true); err != nil {
 		t.Fatalf("printImageList(all) error = %v", err)
 	}
-	for _, want := range []string{"conch-erofs-rootfs:", "rootfs-component", "sandbox-component", "mem-snapshot-component"} {
+	for _, want := range []string{"io.conch.template/", "conch-erofs-rootfs:", "rootfs-component", "sandbox-component", "mem-snapshot-component"} {
 		if !strings.Contains(all.String(), want) {
 			t.Fatalf("--all output missing %q:\n%s", want, all.String())
 		}

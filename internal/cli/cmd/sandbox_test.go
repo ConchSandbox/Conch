@@ -21,7 +21,7 @@ func TestPrintSandboxHelpListsSandboxCommands(t *testing.T) {
   conch sandbox <command> [options]
 
 Commands:
-  create      Create a sandbox from a Template ID or the daemon default.
+  create      Create a sandbox from a Template Name or the daemon default.
   checkpoint  Checkpoint a sandbox into a resumable template.
   suspend     Suspend a running sandbox.
   resume      Resume a suspended sandbox.
@@ -37,10 +37,17 @@ Run 'conch sandbox <command> --help' for command-specific usage.
 
 func TestRunSandboxCreateOmitsResourceOverridesByDefault(t *testing.T) {
 	got := captureSandboxCreateRequest(t)
-	for _, key := range []string{"template_id", "vmm_name", "vcpu_num", "vcpu_max", "ram_mb"} {
+	for _, key := range []string{"template_name", "template_id", "vmm_name", "vcpu_num", "vcpu_max", "ram_mb"} {
 		if value, ok := got[key]; ok {
 			t.Fatalf("create request unexpectedly overrides daemon defaults with %s=%v; request = %#v", key, value, got)
 		}
+	}
+}
+
+func TestRunSandboxCreateKeepsExplicitTemplateName(t *testing.T) {
+	got := captureSandboxCreateRequest(t, "--template-name", "registry.example/conch/test:latest")
+	if got["template_name"] != "registry.example/conch/test:latest" {
+		t.Fatalf("template_name = %v; request = %#v", got["template_name"], got)
 	}
 }
 
@@ -48,6 +55,26 @@ func TestRunSandboxCreateKeepsExplicitTemplateID(t *testing.T) {
 	got := captureSandboxCreateRequest(t, "--template-id", "sha256:explicit")
 	if got["template_id"] != "sha256:explicit" {
 		t.Fatalf("template_id = %v; request = %#v", got["template_id"], got)
+	}
+}
+
+func TestRunSandboxCreateRejectsNameAndIDTogether(t *testing.T) {
+	var requestReceived atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestReceived.Store(true)
+		_ = json.NewEncoder(w).Encode(map[string]string{"sandboxID": "sandbox-123"})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CONCH_API_URL", server.URL)
+
+	err := RunSandbox(context.Background(), []string{
+		"create", "--template-name", "template:latest", "--template-id", "sha256:explicit", "--sandbox-id", "sandbox-123",
+	})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("RunSandbox() error = %v", err)
+	}
+	if requestReceived.Load() {
+		t.Fatal("mutually exclusive request reached conchd")
 	}
 }
 
@@ -73,7 +100,7 @@ func TestRunSandboxCreateRejectsNegativeRAM(t *testing.T) {
 	t.Setenv("CONCH_API_URL", server.URL)
 
 	err := RunSandbox(context.Background(), []string{
-		"create", "--template-id", "sha256:test", "--sandbox-id", "sandbox-123", "--ram-mb", "-1",
+		"create", "--template-name", "registry.example/conch/test:latest", "--sandbox-id", "sandbox-123", "--ram-mb", "-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "--ram-mb must not be negative") {
 		t.Fatalf("RunSandbox() error = %v, want negative RAM validation", err)
@@ -109,15 +136,15 @@ func captureSandboxCreateRequest(t *testing.T, resourceArgs ...string) map[strin
 func TestPrintSandboxList(t *testing.T) {
 	var out bytes.Buffer
 	records := []client.SandboxRecord{
-		{SandboxID: "sandbox-b", TemplateID: "sha256:b", CPUCount: 2, MemoryMB: 512, StartedAt: "2026-01-02T03:04:05Z"},
-		{SandboxID: "sandbox-a", TemplateID: "sha256:a", CPUCount: 1, MemoryMB: 256, StartedAt: "2026-01-01T03:04:05Z"},
+		{SandboxID: "sandbox-b", TemplateName: "template-b", TemplateID: "sha256:b", CPUCount: 2, MemoryMB: 512, StartedAt: "2026-01-02T03:04:05Z"},
+		{SandboxID: "sandbox-a", TemplateName: "template-a", TemplateID: "sha256:a", CPUCount: 1, MemoryMB: 256, StartedAt: "2026-01-01T03:04:05Z"},
 	}
 	if err := printSandboxList(&out, records); err != nil {
 		t.Fatalf("printSandboxList() error = %v", err)
 	}
-	want := "ID         TEMPLATE_ID  CPU  MEMORY_MB  STARTED_AT\n" +
-		"sandbox-a  sha256:a     1    256        2026-01-01T03:04:05Z\n" +
-		"sandbox-b  sha256:b     2    512        2026-01-02T03:04:05Z\n"
+	want := "ID         TEMPLATE_NAME  TEMPLATE_ID  CPU  MEMORY_MB  STARTED_AT\n" +
+		"sandbox-a  template-a     sha256:a     1    256        2026-01-01T03:04:05Z\n" +
+		"sandbox-b  template-b     sha256:b     2    512        2026-01-02T03:04:05Z\n"
 	if got := out.String(); got != want {
 		t.Fatalf("sandbox list output = %q, want %q", got, want)
 	}

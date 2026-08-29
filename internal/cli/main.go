@@ -22,7 +22,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, "Commands:")
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "  image\tPull, push, unpack, list, or remove images.")
-	fmt.Fprintln(tw, "  sandbox\tCreate, checkpoint, or control sandboxes from Template IDs.")
+	fmt.Fprintln(tw, "  sandbox\tCreate, checkpoint, or control sandboxes from Template Names.")
 	fmt.Fprintln(tw, "  template\tBuild, list, inspect, or remove templates.")
 	fmt.Fprintln(tw, "  debug\tLow-level inspection and repair commands.")
 	_ = tw.Flush()

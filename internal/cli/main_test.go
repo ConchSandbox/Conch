@@ -67,7 +67,7 @@ func TestPrintHelpAlignsCommandDescriptions(t *testing.T) {
 
 	for _, want := range []string{
 		"  image     Pull, push, unpack, list, or remove images.",
-		"  sandbox   Create, checkpoint, or control sandboxes from Template IDs.",
+		"  sandbox   Create, checkpoint, or control sandboxes from Template Names.",
 		"  template  Build, list, inspect, or remove templates.",
 		"  debug     Low-level inspection and repair commands.",
 	} {
@@ -128,8 +128,9 @@ func TestPrintSandboxCreateHelpExplainsDefaultSpec(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch sandbox create [--template-id <template-id>] [options]",
+		"conch sandbox create [--template-name <template-name> | --template-id <template-id>] [options]",
 		"sandbox.default_spec",
+		"sandbox.default_spec.template_name",
 		"sandbox.default_spec.template_id",
 		"sandbox.default_spec.ram_mb",
 	} {
@@ -326,11 +327,11 @@ func TestPrintTemplateUnpackHelpIncludesExample(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch template unpack [options] <template-id>",
+		"conch template unpack [options] <template-name>",
 		"conchd API base URL",
 		"config file path",
 		"every component",
-		"conch template unpack sha256:<digest>",
+		"conch template unpack registry.example.com/conch/template:latest",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unpack help output missing %q:\n%s", want, got)
@@ -353,7 +354,8 @@ func TestPrintTemplateCreateHelpIncludesUsageAndInputs(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"conch template create --source <image> --kernel <path> --initrd <path> [options]",
+		"conch template create --name <name> --source <image> --kernel <path> --initrd <path> [options]",
+		"--name string",
 		"--source string",
 		"--kernel string",
 		"--initrd string",
@@ -415,9 +417,9 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 		}
 		initrdBody = string(raw)
 		_ = json.NewEncoder(w).Encode(client.TemplateCreateResponse{
-			Status:     "ok",
-			TemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			BuildRef:   "localhost/conch/template:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Status:       "ok",
+			TemplateName: "registry.example/conch/test:latest",
+			TemplateID:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		})
 	}))
 	defer server.Close()
@@ -425,6 +427,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	err := cmd.RunTemplateCreate(context.Background(), []string{
 		"--config", cfgPath,
 		"--api-url", server.URL,
+		"--name", "registry.example/conch/test:latest",
 		"--source", "public.ecr.aws/docker/library/busybox:latest",
 		"--kernel", kernelPath,
 		"--initrd", initrdPath,
@@ -432,7 +435,7 @@ func TestRunTemplateCreateUsesTemplateCreateAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runTemplateCreate: %v", err)
 	}
-	if metadata.Source != "public.ecr.aws/docker/library/busybox:latest" {
+	if metadata.Name != "registry.example/conch/test:latest" || metadata.Source != "public.ecr.aws/docker/library/busybox:latest" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 	if kernelBody != "kernel-content" || initrdBody != "initrd-content" {

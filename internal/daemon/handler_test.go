@@ -251,11 +251,12 @@ func TestSandboxV1Handlers(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	runtimeService := conchruntime.New(sandboxOps, nil, store)
 	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
-		TemplateID: testTemplateIDDefault,
-		VCPUNum:    4,
-		VCPUMax:    4,
-		RamMB:      256,
+		TemplateName: testTemplateNameDefault,
+		VCPUNum:      4,
+		VCPUMax:      4,
+		RamMB:        256,
 	})
+	runtimeService.Templates = testTemplateStore()
 	server := &Daemon{
 		router:         http.NewServeMux(),
 		stateStore:     store,
@@ -266,6 +267,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
 		SandboxID:                "sandbox-1",
 		State:                    state.SandboxReady,
+		SourceTemplateName:       testTemplateNameExplicit,
 		SourceTemplateID:         testTemplateIDExplicit,
 		CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		VCPUNum:                  2,
@@ -283,7 +285,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if err := json.NewDecoder(response.Body).Decode(&records); err != nil {
 			t.Fatalf("decode list response: %v", err)
 		}
-		if len(records) != 1 || records[0].SandboxID != "sandbox-1" || records[0].TemplateID != testTemplateIDExplicit {
+		if len(records) != 1 || records[0].SandboxID != "sandbox-1" || records[0].TemplateName != testTemplateNameExplicit || records[0].TemplateID != testTemplateIDExplicit {
 			t.Fatalf("list response = %#v", records)
 		}
 	})
@@ -310,14 +312,14 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if err := json.NewDecoder(response.Body).Decode(&record); err != nil {
 			t.Fatalf("decode get response: %v", err)
 		}
-		if record.SandboxID != "sandbox-1" || record.TemplateID != testTemplateIDExplicit || record.Domain == nil {
+		if record.SandboxID != "sandbox-1" || record.TemplateName != testTemplateNameExplicit || record.TemplateID != testTemplateIDExplicit || record.Domain == nil {
 			t.Fatalf("get response = %#v", record)
 		}
 	})
 
 	t.Run("create", func(t *testing.T) {
 		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
-			"sandbox_id":"sandbox-2","template_id":"`+testTemplateIDOther+`","env":{"SOME_RANDOM_KEY":"key123"},
+			"sandbox_id":"sandbox-2","template_name":"`+testTemplateNameOther+`","env":{"SOME_RANDOM_KEY":"key123"},
 			"network":{"denyOut":["192.0.2.10"],"allowIn":["198.51.100.0/24"]}
 		}`))
 		if response.Code != http.StatusOK {
@@ -327,7 +329,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if err := json.NewDecoder(response.Body).Decode(&record); err != nil {
 			t.Fatalf("decode create response: %v", err)
 		}
-		if record.SandboxID != "sandbox-2" || record.TemplateID != testTemplateIDOther ||
+		if record.SandboxID != "sandbox-2" || record.TemplateName != testTemplateNameOther || record.TemplateID != testTemplateIDOther ||
 			record.Domain != "192.0.2.2" || record.ConchInitAccessToken == "" {
 			t.Fatalf("create response = %#v", record)
 		}
@@ -344,8 +346,8 @@ func TestSandboxV1Handlers(t *testing.T) {
 			body     string
 			wantCode string
 		}{
-			{body: `{"sandbox_id":"invalid-env-key","template_id":"` + testTemplateIDOther + `","env":{"BAD=KEY":"value"}}`, wantCode: "sandbox.invalid_environment"},
-			{body: `{"sandbox_id":"invalid-env-value","template_id":"` + testTemplateIDOther + `","env":{"KEY":123}}`, wantCode: "request.invalid_body"},
+			{body: `{"sandbox_id":"invalid-env-key","template_name":"` + testTemplateNameOther + `","env":{"BAD=KEY":"value"}}`, wantCode: "sandbox.invalid_environment"},
+			{body: `{"sandbox_id":"invalid-env-value","template_name":"` + testTemplateNameOther + `","env":{"KEY":123}}`, wantCode: "request.invalid_body"},
 		} {
 			createCalls := sandboxOps.createCalls
 			response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(test.body))
@@ -366,7 +368,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		sandboxOps.createErr = fmt.Errorf("marshal initialization: %w", agentprotocol.ErrPayloadTooLarge)
 		t.Cleanup(func() { sandboxOps.createErr = nil })
 		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
-			"sandbox_id":"oversized-env","template_id":"`+testTemplateIDOther+`"
+			"sandbox_id":"oversized-env","template_name":"`+testTemplateNameOther+`"
 		}`))
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -404,7 +406,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
 		response = serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
-			"sandbox_id":"invalid-network","template_id":"`+testTemplateIDOther+`","network":{"denyIn":["example.com"]}
+			"sandbox_id":"invalid-network","template_name":"`+testTemplateNameOther+`","network":{"denyIn":["example.com"]}
 		}`))
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())

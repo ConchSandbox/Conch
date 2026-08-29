@@ -2,36 +2,14 @@ package image
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/containerd/containerd/v2/core/images"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	containerd "github.com/containerd/containerd/v2/client"
+
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 )
-
-func TestRemoveFetchedImageRecordDetachesCleanupFromRequestCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	store := &cleanupImageStore{}
-
-	if err := RemoveFetchedImageRecord(
-		ctx, store, "registry.example.invalid/conch/template:latest", ocispec.Descriptor{},
-	); err != nil {
-		t.Fatalf("RemoveFetchedImageRecord() error = %v", err)
-	}
-	if !store.hasDeadline {
-		t.Fatal("Delete() context has no cleanup deadline")
-	}
-}
-
-type cleanupImageStore struct {
-	images.Store
-	hasDeadline bool
-}
-
-func (s *cleanupImageStore) Delete(ctx context.Context, _ string, _ ...images.DeleteOpt) error {
-	_, s.hasDeadline = ctx.Deadline()
-	return ctx.Err()
-}
 
 func TestImageRepoDigests(t *testing.T) {
 	tests := []struct {
@@ -57,6 +35,11 @@ func TestImageRepoDigests(t *testing.T) {
 			ref:    "sha256:demo",
 			digest: "sha256:demo",
 		},
+		{
+			name:   "internal Template record",
+			ref:    TemplateRecordName("registry.example:5000/team/busybox:latest"),
+			digest: "sha256:demo",
+		},
 	}
 
 	for _, tt := range tests {
@@ -69,6 +52,57 @@ func TestImageRepoDigests(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Fatalf("imageRepoDigests()[%d] = %q, want %q", i, got[i], tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+func TestTemplateRecordNameRoundTrip(t *testing.T) {
+	const logicalName = "registry.example:5000/team/busybox:latest"
+	recordName := TemplateRecordName(logicalName)
+	if recordName != "io.conch.template/registry.example:5000/team/busybox:latest" {
+		t.Fatalf("TemplateRecordName() = %q", recordName)
+	}
+	got, ok := TemplateNameFromRecordName(recordName)
+	if !ok || got != logicalName {
+		t.Fatalf("TemplateNameFromRecordName() = %q, %v", got, ok)
+	}
+	for _, invalid := range []string{"", TemplateRecordNamePrefix, logicalName} {
+		if _, ok := TemplateNameFromRecordName(invalid); ok {
+			t.Fatalf("TemplateNameFromRecordName(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}
+
+func TestImageMutationsRejectInternalTemplateRecordName(t *testing.T) {
+	client := &containerdclient.Client{Client: &containerd.Client{}}
+	name := TemplateRecordName("registry.example:5000/team/busybox:latest")
+	for _, test := range []struct {
+		operation string
+		run       func() error
+	}{
+		{
+			operation: "pull",
+			run: func() error {
+				return Pull(context.Background(), client, runtimeapi.PullImageOptions{ImageName: name})
+			},
+		},
+		{
+			operation: "push",
+			run: func() error {
+				return Push(context.Background(), client, runtimeapi.PushImageOptions{LocalImage: name, RemoteImage: "registry.example/out:latest"})
+			},
+		},
+		{
+			operation: "remove",
+			run: func() error {
+				return Remove(context.Background(), client, runtimeapi.RemoveImageOptions{ImageName: name})
+			},
+		},
+	} {
+		t.Run(test.operation, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("error = %v, want ErrInvalidArgument", err)
 			}
 		})
 	}

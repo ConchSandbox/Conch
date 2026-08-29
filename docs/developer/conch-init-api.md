@@ -93,7 +93,7 @@ stream ProcessEvent
 ```python
 from conch import Sandbox
 
-sandbox = Sandbox.create(template_id="<template_id>")
+sandbox = Sandbox.create(template_name="<template_name>")
 
 result = sandbox.commands.run(
     cmd="python3",
@@ -107,6 +107,9 @@ result = sandbox.commands.run(
 print(result.stdout, end="")
 print(result.exit_code)
 ```
+
+也可以改用 `Sandbox.create(template_id="sha256:<digest>")` 直接按 Template ID
+创建；`template_name` 和 `template_id` 不能同时指定。
 
 输出：
 

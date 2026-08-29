@@ -23,8 +23,8 @@ const (
 	removeTemplate  = "/api/template/remove"
 )
 
-type TemplateIDRequest struct {
-	ID string `json:"template_id"`
+type TemplateNameRequest struct {
+	Name string `json:"name"`
 }
 
 type TemplateListRequest struct {
@@ -47,13 +47,13 @@ type TemplatePullRequest struct {
 }
 
 type TemplatePullResponse struct {
-	Status     string `json:"status"`
-	TemplateID string `json:"template_id"`
-	BuildRef   string `json:"build_ref"`
+	Status       string `json:"status"`
+	TemplateName string `json:"template_name"`
+	TemplateID   string `json:"template_id"`
 }
 
 type TemplatePushRequest struct {
-	TemplateID      string `json:"template_id"`
+	Name            string `json:"name"`
 	RemoteReference string `json:"remote_reference"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
@@ -61,10 +61,11 @@ type TemplatePushRequest struct {
 }
 
 type TemplateUnpackRequest struct {
-	TemplateID string `json:"template_id"`
+	Name string `json:"name"`
 }
 
 type TemplateCreateRequest struct {
+	Name       string
 	Source     string
 	KernelPath string
 	InitrdPath string
@@ -75,6 +76,7 @@ type TemplateCreateRequest struct {
 }
 
 type TemplateCreateMetadata struct {
+	Name      string            `json:"name"`
 	Source    string            `json:"source"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
@@ -83,9 +85,9 @@ type TemplateCreateMetadata struct {
 }
 
 type TemplateCreateResponse struct {
-	Status     string `json:"status,omitempty"`
-	TemplateID string `json:"template_id"`
-	BuildRef   string `json:"build_ref"`
+	Status       string `json:"status,omitempty"`
+	TemplateName string `json:"template_name"`
+	TemplateID   string `json:"template_id"`
 }
 
 func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]TemplateRecord, error) {
@@ -96,16 +98,16 @@ func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]
 	return resp.Items, nil
 }
 
-func (c *Client) InspectTemplate(ctx context.Context, id string) (TemplateRecord, error) {
+func (c *Client) InspectTemplate(ctx context.Context, name string) (TemplateRecord, error) {
 	var resp TemplateRecord
-	if err := c.postJSON(ctx, inspectTemplate, TemplateIDRequest{ID: id}, &resp); err != nil {
+	if err := c.postJSON(ctx, inspectTemplate, TemplateNameRequest{Name: name}, &resp); err != nil {
 		return TemplateRecord{}, err
 	}
 	return resp, nil
 }
 
-func (c *Client) RemoveTemplate(ctx context.Context, id string) error {
-	return c.postJSON(ctx, removeTemplate, TemplateIDRequest{ID: id}, nil)
+func (c *Client) RemoveTemplate(ctx context.Context, name string) error {
+	return c.postJSON(ctx, removeTemplate, TemplateNameRequest{Name: name}, nil)
 }
 
 func (c *Client) PullTemplate(ctx context.Context, req TemplatePullRequest) (TemplatePullResponse, error) {
@@ -126,6 +128,7 @@ func (c *Client) UnpackTemplate(ctx context.Context, req TemplateUnpackRequest) 
 
 func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {
 	metadata, err := json.Marshal(TemplateCreateMetadata{
+		Name:      req.Name,
 		Source:    req.Source,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,

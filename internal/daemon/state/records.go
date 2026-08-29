@@ -14,6 +14,7 @@ type SandboxRecord struct {
 	VMMPID                   int                              `json:"vmm_pid,omitempty"`
 	State                    string                           `json:"state"`
 	CreatedAt                int64                            `json:"created_at"`
+	SourceTemplateName       string                           `json:"source_template_name,omitempty"`
 	SourceTemplateID         string                           `json:"source_template_id,omitempty"`
 	CheckpointHeadTemplateID string                           `json:"checkpoint_head_template_id"`
 	IP                       string                           `json:"ip,omitempty"`

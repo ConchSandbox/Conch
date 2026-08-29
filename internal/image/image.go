@@ -2,11 +2,9 @@ package image
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
@@ -19,6 +17,30 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 )
 
+// TemplateRecordNamePrefix reserves a local containerd image-record keyspace
+// for Template lifecycle management. These names are opaque local keys, not
+// registry references.
+const TemplateRecordNamePrefix = "io.conch.template/"
+
+// TemplateRecordName deterministically maps a user-visible logical Template
+// Name to its internal containerd image-record name.
+func TemplateRecordName(logicalName string) string {
+	return TemplateRecordNamePrefix + strings.TrimSpace(logicalName)
+}
+
+// TemplateNameFromRecordName reverses TemplateRecordName for a well-formed
+// internal Template record name.
+func TemplateNameFromRecordName(recordName string) (string, bool) {
+	if !strings.HasPrefix(recordName, TemplateRecordNamePrefix) {
+		return "", false
+	}
+	name := strings.TrimPrefix(recordName, TemplateRecordNamePrefix)
+	if name == "" || strings.TrimSpace(name) != name {
+		return "", false
+	}
+	return name, true
+}
+
 func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.PullImageOptions) error {
 	if client == nil || client.Client == nil {
 		return fmt.Errorf("containerd client is required")
@@ -26,11 +48,15 @@ func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 	if req.ImageName == "" {
 		return fmt.Errorf("%w: image_name is required", ErrInvalidArgument)
 	}
-	if IsCanonicalTemplateRef(req.ImageName) {
-		return fmt.Errorf("%w: image name %s is reserved for Template lifecycle management", ErrInvalidArgument, req.ImageName)
+	if _, ok := TemplateNameFromRecordName(strings.TrimSpace(req.ImageName)); ok {
+		return fmt.Errorf("%w: image name %s is reserved for internal Template records", ErrInvalidArgument, req.ImageName)
 	}
-
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
+	if existing, err := client.ImageService().Get(pullCtx, req.ImageName); err == nil && isBootIndexImageKind(existing.Labels[ImageKindLabel]) {
+		return fmt.Errorf("%w: image name %s belongs to a Template; update it with `conch template pull`", ErrInvalidArgument, req.ImageName)
+	} else if err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("lookup image %s before pull: %w", req.ImageName, err)
+	}
 	_, _, err := pullRegistryContent(pullCtx, client, RegistryPullOptions{
 		Reference: req.ImageName,
 		PlainHTTP: req.PlainHTTP,
@@ -39,62 +65,6 @@ func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 	}, false)
 	if err != nil {
 		return translateRegistryError(err)
-	}
-	return nil
-}
-
-// PullBootIndex fetches a registry Boot Index and validates its complete
-// descriptor closure without unpacking component snapshots. The top-level
-// index is classified before child descriptors are fetched, so ordinary OCI
-// images are rejected without downloading their configs or layers.
-func PullBootIndex(ctx context.Context, client *containerdclient.Client, req RegistryPullOptions) (PullBootIndexResult, error) {
-	if client == nil || client.Client == nil {
-		return PullBootIndexResult{}, fmt.Errorf("containerd client is required")
-	}
-	if strings.TrimSpace(req.Reference) == "" {
-		return PullBootIndexResult{}, fmt.Errorf("%w: reference is required", ErrInvalidArgument)
-	}
-	if IsCanonicalTemplateRef(req.Reference) {
-		return PullBootIndexResult{}, fmt.Errorf("%w: registry reference %s is reserved for local Template lifecycle management", ErrInvalidArgument, req.Reference)
-	}
-
-	pullCtx := containerdclient.NewNamespaceContext(ctx)
-	fetched, _, err := pullRegistryContent(pullCtx, client, req, true)
-	if err != nil {
-		return PullBootIndexResult{}, translateRegistryError(err)
-	}
-	info, err := InspectBootIndexContent(pullCtx, client.ContentStore(), fetched.Target)
-	if err != nil {
-		return PullBootIndexResult{}, errors.Join(
-			fmt.Errorf("validate pulled Boot Index %s: %w", fetched.Name, err),
-			RemoveFetchedImageRecord(ctx, client.ImageService(), fetched.Name, fetched.Target),
-		)
-	}
-	buildRef, err := CanonicalTemplateRef(fetched.Target.Digest.String())
-	if err != nil {
-		return PullBootIndexResult{}, errors.Join(
-			err,
-			RemoveFetchedImageRecord(ctx, client.ImageService(), fetched.Name, fetched.Target),
-		)
-	}
-	return PullBootIndexResult{
-		Info:            info,
-		BuildRef:        buildRef,
-		SourceImageName: fetched.Name,
-		Target:          fetched.Target,
-	}, nil
-}
-
-// RemoveFetchedImageRecord releases the temporary image root without inheriting request cancellation.
-func RemoveFetchedImageRecord(ctx context.Context, store images.Store, name string, target ocispec.Descriptor) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if err := store.Delete(
-		containerdclient.NewNamespaceContext(cleanupCtx),
-		name,
-		images.DeleteTarget(&target),
-	); err != nil && !errdefs.IsNotFound(err) {
-		return fmt.Errorf("remove fetched image record %s: %w", name, err)
 	}
 	return nil
 }
@@ -188,6 +158,9 @@ func Push(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 	if req.RemoteImage == "" {
 		return fmt.Errorf("%w: remote_image is required", ErrInvalidArgument)
 	}
+	if _, ok := TemplateNameFromRecordName(strings.TrimSpace(req.LocalImage)); ok {
+		return fmt.Errorf("%w: image name %s is reserved for internal Template records; use `conch template push`", ErrInvalidArgument, req.LocalImage)
+	}
 
 	pushCtx := containerdclient.NewNamespaceContext(ctx)
 	img, err := client.GetImage(pushCtx, req.LocalImage)
@@ -248,7 +221,8 @@ func List(ctx context.Context, client *containerdclient.Client, req runtimeapi.L
 func imageRepoDigests(name, digest string) []string {
 	name = strings.TrimSpace(name)
 	digest = strings.TrimSpace(digest)
-	if name == "" || digest == "" || isDigestOnlyRef(name) {
+	_, isTemplateRecord := TemplateNameFromRecordName(name)
+	if name == "" || digest == "" || isDigestOnlyRef(name) || isTemplateRecord {
 		return nil
 	}
 	base := name
@@ -291,10 +265,20 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 	if req.ImageName == "" {
 		return fmt.Errorf("%w: image_name is required", ErrInvalidArgument)
 	}
-	if IsCanonicalTemplateRef(req.ImageName) {
-		return fmt.Errorf("%w: canonical Template image %s must be removed with `conch template rm`", ErrInvalidArgument, req.ImageName)
+	if _, ok := TemplateNameFromRecordName(strings.TrimSpace(req.ImageName)); ok {
+		return fmt.Errorf("%w: image name %s is reserved for internal Template records; use `conch template rm`", ErrInvalidArgument, req.ImageName)
 	}
 	removeCtx := containerdclient.NewNamespaceContext(ctx)
+	record, err := client.ImageService().Get(removeCtx, req.ImageName)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return ErrNotFound.Wrap(err)
+		}
+		return fmt.Errorf("lookup image %s: %w", req.ImageName, err)
+	}
+	if isBootIndexImageKind(record.Labels[ImageKindLabel]) {
+		return fmt.Errorf("%w: image name %s belongs to a Template; remove it with `conch template rm`", ErrInvalidArgument, req.ImageName)
+	}
 	opts := []images.DeleteOpt{}
 	if req.Synchronous {
 		opts = append(opts, images.SynchronousDelete())
@@ -306,4 +290,8 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
 	}
 	return nil
+}
+
+func isBootIndexImageKind(kind string) bool {
+	return kind == ImageKindBootIndexCold || kind == ImageKindBootIndexResume
 }

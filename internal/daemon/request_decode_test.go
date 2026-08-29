@@ -23,12 +23,13 @@ func TestDecodeStrictJSON(t *testing.T) {
 		body    string
 		wantErr bool
 	}{
-		{name: "known fields", body: `{"template_id":"` + testTemplateIDExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","readonly":true}]}`},
-		{name: "trailing whitespace", body: "{\"template_id\":\"" + testTemplateIDExplicit + "\"}\n\t"},
-		{name: "unknown top-level field", body: `{"template_id":"` + testTemplateIDExplicit + `","volume_mounts":[]}`, wantErr: true},
-		{name: "unknown nested field", body: `{"template_id":"` + testTemplateIDExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`, wantErr: true},
-		{name: "multiple values", body: `{"template_id":"` + testTemplateIDExplicit + `"}{"sandbox_id":"sandbox-2"}`, wantErr: true},
-		{name: "trailing garbage", body: `{"template_id":"` + testTemplateIDExplicit + `"} trailing`, wantErr: true},
+		{name: "known fields", body: `{"template_name":"` + testTemplateNameExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","readonly":true}]}`},
+		{name: "known Template ID", body: `{"template_id":"` + testTemplateIDExplicit + `"}`},
+		{name: "trailing whitespace", body: "{\"template_name\":\"" + testTemplateNameExplicit + "\"}\n\t"},
+		{name: "unknown top-level field", body: `{"template_name":"` + testTemplateNameExplicit + `","volume_mounts":[]}`, wantErr: true},
+		{name: "unknown nested field", body: `{"template_name":"` + testTemplateNameExplicit + `","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`, wantErr: true},
+		{name: "multiple values", body: `{"template_name":"` + testTemplateNameExplicit + `"}{"sandbox_id":"sandbox-2"}`, wantErr: true},
+		{name: "trailing garbage", body: `{"template_name":"` + testTemplateNameExplicit + `"} trailing`, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -187,12 +188,12 @@ func TestSandboxCreateRejectsUnknownFieldsWithoutSideEffects(t *testing.T) {
 	}{
 		{
 			name:         "top-level field",
-			body:         `{"template_id":"` + testTemplateIDExplicit + `","sandbox_id":"must-not-exist","volume_mounts":[]}`,
+			body:         `{"template_name":"` + testTemplateNameExplicit + `","sandbox_id":"must-not-exist","volume_mounts":[]}`,
 			unknownField: "volume_mounts",
 		},
 		{
 			name:         "nested field",
-			body:         `{"template_id":"` + testTemplateIDExplicit + `","sandbox_id":"must-not-exist","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`,
+			body:         `{"template_name":"` + testTemplateNameExplicit + `","sandbox_id":"must-not-exist","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`,
 			unknownField: "read_only",
 		},
 	}

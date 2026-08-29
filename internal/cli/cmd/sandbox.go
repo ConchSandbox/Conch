@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,7 +19,7 @@ func printSandboxHelp(out io.Writer) {
 	fmt.Fprintln(out, "  conch sandbox <command> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
-	fmt.Fprintln(out, "  create      Create a sandbox from a Template ID or the daemon default.")
+	fmt.Fprintln(out, "  create      Create a sandbox from a Template Name or the daemon default.")
 	fmt.Fprintln(out, "  checkpoint  Checkpoint a sandbox into a resumable template.")
 	fmt.Fprintln(out, "  suspend     Suspend a running sandbox.")
 	fmt.Fprintln(out, "  resume      Resume a suspended sandbox.")
@@ -30,13 +31,15 @@ func printSandboxHelp(out io.Writer) {
 
 func PrintSandboxCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch sandbox create [--template-id <template-id>] [options]")
+	fmt.Fprintln(out, "  conch sandbox create [--template-name <template-name> | --template-id <template-id>] [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
-	fmt.Fprintln(out, "  Create a sandbox from a Template ID. A Template ID is its Boot Index digest.")
+	fmt.Fprintln(out, "  Create a sandbox from either a mutable Template Name or an immutable Template ID.")
 	fmt.Fprintln(out, "  Unset template and resource fields use conchd sandbox.default_spec.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --template-name string")
+	fmt.Fprintln(out, "        Template Name (default: conchd sandbox.default_spec.template_name)")
 	fmt.Fprintln(out, "  --template-id string")
 	fmt.Fprintln(out, "        Template ID (default: conchd sandbox.default_spec.template_id)")
 	fmt.Fprintln(out, "  --sandbox-id string")
@@ -123,10 +126,10 @@ func printSandboxList(out io.Writer, records []client.SandboxRecord) error {
 		return records[i].SandboxID < records[j].SandboxID
 	})
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTEMPLATE_ID\tCPU\tMEMORY_MB\tSTARTED_AT")
+	fmt.Fprintln(tw, "ID\tTEMPLATE_NAME\tTEMPLATE_ID\tCPU\tMEMORY_MB\tSTARTED_AT")
 	for _, record := range records {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
-			record.SandboxID, record.TemplateID,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
+			record.SandboxID, record.TemplateName, record.TemplateID,
 			record.CPUCount, record.MemoryMB, record.StartedAt)
 	}
 	return tw.Flush()
@@ -135,6 +138,7 @@ func printSandboxList(out io.Writer, records []client.SandboxRecord) error {
 func runSandboxCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sandbox create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	templateName := fs.String("template-name", "", "Template Name (uses daemon default if omitted)")
 	templateID := fs.String("template-id", "", "Template ID (uses daemon default if omitted)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox ID")
 	configPath := fs.String("config", "", "config file path")
@@ -149,6 +153,9 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 	if *ramMB < 0 {
 		return fmt.Errorf("conch sandbox create: --ram-mb must not be negative")
 	}
+	if strings.TrimSpace(*templateName) != "" && strings.TrimSpace(*templateID) != "" {
+		return fmt.Errorf("conch sandbox create: --template-name and --template-id are mutually exclusive")
+	}
 	id := *sandboxID
 	if id == "" {
 		id = fmt.Sprintf("sandbox-%d", time.Now().UnixNano())
@@ -158,9 +165,10 @@ func runSandboxCreate(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch sandbox create: create API client: %w", err)
 	}
 	if _, err := conchClient.CreateSandbox(ctx, client.SandboxCreateRequest{
-		TemplateID: *templateID,
-		SandboxID:  id,
-		RAMMB:      *ramMB,
+		TemplateName: *templateName,
+		TemplateID:   *templateID,
+		SandboxID:    id,
+		RAMMB:        *ramMB,
 	}); err != nil {
 		return fmt.Errorf("conch sandbox create: %w", err)
 	}
@@ -172,18 +180,23 @@ func runSandboxCheckpoint(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sandbox checkpoint", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
+	templateName := fs.String("template-name", "", "name to create or update with the checkpoint Template")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("conch sandbox checkpoint: exactly one sandbox ID is required")
 	}
+	if *templateName == "" {
+		return fmt.Errorf("conch sandbox checkpoint: --template-name is required")
+	}
 	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
 		return fmt.Errorf("conch sandbox checkpoint: create API client: %w", err)
 	}
 	checkpoint, err := conchClient.CheckpointSandbox(ctx, client.SandboxCheckpointRequest{
-		SandboxID: fs.Arg(0),
+		SandboxID:    fs.Arg(0),
+		TemplateName: *templateName,
 	})
 	if err != nil {
 		return fmt.Errorf("conch sandbox checkpoint: %w", err)
@@ -191,6 +204,7 @@ func runSandboxCheckpoint(ctx context.Context, args []string) error {
 	if checkpoint.Status != "ok" {
 		return fmt.Errorf("conch sandbox checkpoint: unexpected status %q", checkpoint.Status)
 	}
+	fmt.Fprintf(os.Stdout, "Template Name: %s\n", strings.TrimSpace(*templateName))
 	fmt.Fprintf(os.Stdout, "Template ID: %s\n", checkpoint.TemplateID)
 	return nil
 }

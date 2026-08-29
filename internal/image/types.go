@@ -20,13 +20,11 @@ type PublishBootIndexOptions struct {
 
 type PublishBootIndexResult struct {
 	BootIndexDigest string             `json:"boot_index_digest"`
-	BuildRef        string             `json:"build_ref"`
 	Target          ocispec.Descriptor `json:"-"`
 }
 
-type PullBootIndexResult struct {
+type PulledBootIndex struct {
 	Info            BootIndexInfo
-	BuildRef        string
 	SourceImageName string
 	Target          ocispec.Descriptor `json:"-"`
 }
@@ -59,7 +57,6 @@ type PublishCheckpointBootIndexOptions struct {
 // publishing checkpoint content must not create checkpoint snapshots.
 type PublishCheckpointBootIndexResult struct {
 	BootIndexDigest string             `json:"boot_index_digest"`
-	BuildRef        string             `json:"build_ref"`
 	Target          ocispec.Descriptor `json:"-"`
 }
 

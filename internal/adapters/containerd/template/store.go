@@ -9,7 +9,6 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/errdefs"
-	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -39,7 +38,7 @@ func NewStore(client *containerdclient.Client) *Store {
 	return &Store{images: client.ImageService(), content: client.ContentStore()}
 }
 
-func (s *Store) Create(ctx context.Context, entry conchtemplate.Entry, target ocispec.Descriptor) (conchtemplate.Entry, error) {
+func (s *Store) Put(ctx context.Context, entry conchtemplate.Entry, target ocispec.Descriptor) (conchtemplate.Entry, error) {
 	if err := s.configured(); err != nil {
 		return conchtemplate.Entry{}, err
 	}
@@ -66,10 +65,6 @@ func (s *Store) Create(ctx context.Context, entry conchtemplate.Entry, target oc
 			"Template boot mode %q does not match Boot Index mode %q", normalized.BootMode, bootMode,
 		))
 	}
-	name, err := canonicalName(normalized.BootIndexDigest)
-	if err != nil {
-		return conchtemplate.Entry{}, err
-	}
 	recordLabels, err := encodeLabels(normalized, kind)
 	if err != nil {
 		return conchtemplate.Entry{}, err
@@ -78,26 +73,26 @@ func (s *Store) Create(ctx context.Context, entry conchtemplate.Entry, target oc
 	if err := images.WalkNotEmpty(nsctx, labelChildren, target); err != nil {
 		return conchtemplate.Entry{}, fmt.Errorf("label Template content: %w", err)
 	}
-	record, err := s.images.Create(nsctx, images.Image{
-		Name: name, Target: target, Labels: recordLabels,
+	record, err := s.putRecord(nsctx, images.Image{
+		Name: conchimage.TemplateRecordName(normalized.Name), Target: target, Labels: recordLabels,
 	})
 	if err != nil {
-		return conchtemplate.Entry{}, translateError("create Template image record", err)
+		return conchtemplate.Entry{}, translateError("put Template image record", err)
 	}
 	normalized.CreatedAt = record.CreatedAt.UnixNano()
 	return normalized, nil
 }
 
-func (s *Store) Get(ctx context.Context, rawDigest string) (conchtemplate.Entry, error) {
+func (s *Store) Get(ctx context.Context, rawName string) (conchtemplate.Entry, error) {
 	if err := s.configured(); err != nil {
 		return conchtemplate.Entry{}, err
 	}
-	name, err := canonicalName(rawDigest)
+	name, err := normalizeTemplateName(rawName)
 	if err != nil {
 		return conchtemplate.Entry{}, err
 	}
 	nsctx := containerdclient.NewNamespaceContext(ctx)
-	record, err := s.images.Get(nsctx, name)
+	record, err := s.images.Get(nsctx, conchimage.TemplateRecordName(name))
 	if err != nil {
 		return conchtemplate.Entry{}, translateError("get Template image record", err)
 	}
@@ -124,6 +119,9 @@ func (s *Store) List(ctx context.Context, filter conchtemplate.Filter) ([]concht
 		if record.Labels[schemaLabel] != schemaVersion {
 			continue
 		}
+		if _, ok := conchimage.TemplateNameFromRecordName(record.Name); !ok {
+			continue
+		}
 		entry, err := s.entryFromRecord(nsctx, record)
 		if err != nil {
 			return nil, err
@@ -139,17 +137,17 @@ func (s *Store) List(ctx context.Context, filter conchtemplate.Filter) ([]concht
 	return out, nil
 }
 
-func (s *Store) Delete(ctx context.Context, rawDigest string) error {
+func (s *Store) Delete(ctx context.Context, rawName string) error {
 	if err := s.configured(); err != nil {
 		return err
 	}
-	expected, err := digest.Parse(strings.TrimSpace(rawDigest))
+	name, err := normalizeTemplateName(rawName)
 	if err != nil {
-		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("invalid Template ID %q: %w", rawDigest, err))
+		return err
 	}
-	name, _ := conchimage.CanonicalTemplateRef(expected.String())
+	recordName := conchimage.TemplateRecordName(name)
 	nsctx := containerdclient.NewNamespaceContext(ctx)
-	record, err := s.images.Get(nsctx, name)
+	record, err := s.images.Get(nsctx, recordName)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			return nil
@@ -157,14 +155,9 @@ func (s *Store) Delete(ctx context.Context, rawDigest string) error {
 		return translateError("get Template image record", err)
 	}
 	if record.Labels[schemaLabel] != schemaVersion {
-		return nil
+		return conchtemplate.ErrNotFound.Wrap(fmt.Errorf("image record %s is not a Template", recordName))
 	}
-	if record.Target.Digest != expected {
-		return conchtemplate.ErrFailedPrecondition.Wrap(fmt.Errorf(
-			"canonical Template record %s targets %s, want %s", name, record.Target.Digest, expected,
-		))
-	}
-	if err := s.images.Delete(nsctx, name, images.DeleteTarget(&ocispec.Descriptor{Digest: expected})); err != nil && !errdefs.IsNotFound(err) {
+	if err := s.images.Delete(nsctx, recordName, images.DeleteTarget(&record.Target)); err != nil && !errdefs.IsNotFound(err) {
 		return translateError("delete Template image record", err)
 	}
 	return nil
@@ -174,9 +167,9 @@ func (s *Store) entryFromRecord(ctx context.Context, record images.Image) (conch
 	if record.Labels[schemaLabel] != schemaVersion {
 		return conchtemplate.Entry{}, conchtemplate.ErrNotFound.Wrap(fmt.Errorf("image record %s is not a Template", record.Name))
 	}
-	wantName, err := canonicalName(record.Target.Digest.String())
-	if err != nil || record.Name != wantName {
-		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("invalid canonical Template record %s", record.Name))
+	name, ok := conchimage.TemplateNameFromRecordName(record.Name)
+	if !ok {
+		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("invalid Template image record name %s", record.Name))
 	}
 	info, err := conchimage.InspectBootIndexContent(ctx, s.content, record.Target)
 	if err != nil {
@@ -190,6 +183,7 @@ func (s *Store) entryFromRecord(ctx context.Context, record images.Image) (conch
 		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("Template image kind does not match Boot Index"))
 	}
 	entry := conchtemplate.Entry{
+		Name:                  name,
 		Origin:                conchtemplate.Origin(record.Labels[originLabel]),
 		BootMode:              bootMode,
 		BootIndexDigest:       record.Target.Digest.String(),
@@ -216,12 +210,37 @@ func (s *Store) configured() error {
 	return nil
 }
 
-func canonicalName(rawDigest string) (string, error) {
-	parsed, err := digest.Parse(strings.TrimSpace(rawDigest))
-	if err != nil {
-		return "", conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("invalid Template ID %q: %w", rawDigest, err))
+func normalizeTemplateName(rawName string) (string, error) {
+	name := strings.TrimSpace(rawName)
+	if name == "" {
+		return "", conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template name is required"))
 	}
-	return conchimage.CanonicalTemplateRef(parsed.String())
+	return name, nil
+}
+
+func (s *Store) putRecord(ctx context.Context, record images.Image) (images.Image, error) {
+	created, err := s.images.Create(ctx, record)
+	if err == nil {
+		return created, nil
+	}
+	if !errdefs.IsAlreadyExists(err) {
+		return images.Image{}, err
+	}
+	existing, err := s.images.Get(ctx, record.Name)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return s.images.Create(ctx, record)
+		}
+		return images.Image{}, err
+	}
+	if existing.Labels[schemaLabel] != schemaVersion {
+		return images.Image{}, fmt.Errorf("image record %s is not a Template: %w", record.Name, errdefs.ErrAlreadyExists)
+	}
+	updated, err := s.images.Update(ctx, record)
+	if !errdefs.IsNotFound(err) {
+		return updated, err
+	}
+	return s.images.Create(ctx, record)
 }
 
 func encodeLabels(entry conchtemplate.Entry, kind string) (map[string]string, error) {

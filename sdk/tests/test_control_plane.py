@@ -31,6 +31,7 @@ class FakeSession:
             return FakeResponse(data=[{"sandboxID": "sandbox-1"}])
         return FakeResponse(data={
             "sandboxID": "sandbox-1",
+            "templateName": "registry.example/conch/test:latest",
             "templateID": "template-1",
             "domain": "192.0.2.10",
             "metadata": {"owner": "test"},
@@ -53,6 +54,7 @@ def test_control_plane_methods_use_configured_endpoint(monkeypatch):
     assert Sandbox.list() == [{"sandboxID": "sandbox-1"}]
 
     sandbox = Sandbox.get("sandbox-1")
+    assert sandbox.template_name == "registry.example/conch/test:latest"
     assert sandbox.template_id == "template-1"
     assert sandbox.metadata == {"owner": "test"}
     assert sandbox.control_plane_only is True
@@ -100,6 +102,29 @@ def test_control_plane_plain_text_error_fallback():
     error = requests.HTTPError(response=response)
 
     assert sandbox_module._request_exception_message(error) == "legacy server failure"
+
+
+def test_checkpoint_uses_requested_name_when_response_only_contains_id(monkeypatch):
+    class CheckpointSession:
+        def __init__(self):
+            self.payload = None
+
+        def post(self, url, json=None):
+            self.payload = json
+            return FakeResponse(data={"status": "ok", "template_id": "sha256:checkpoint"})
+
+    session = CheckpointSession()
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", lambda: session)
+    sandbox = Sandbox(sandbox_id="sandbox-1")
+
+    result = sandbox.checkpoint("  registry.example/conch/checkpoint:latest  ")
+
+    assert result.template_name == "registry.example/conch/checkpoint:latest"
+    assert result.template_id == "sha256:checkpoint"
+    assert session.payload == {
+        "sandbox_id": "sandbox-1",
+        "template_name": "registry.example/conch/checkpoint:latest",
+    }
 
 
 def test_network_config_is_hydrated_and_updated(monkeypatch):

@@ -74,11 +74,10 @@ type UnexpectedExitHandler func(sandboxID string)
 func New(
 	ctx context.Context,
 	client *containerdclient.Client,
-	templates TemplateReader,
 	snapshots SnapshotBackend,
 	cfg Config,
 ) (*Manager, error) {
-	boot, err := NewBootPreparer(templates, snapshots, client)
+	boot, err := NewBootPreparer(snapshots, client)
 	if err != nil {
 		return nil, err
 	}

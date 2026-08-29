@@ -95,7 +95,7 @@ class FakeFileClient:
 
 
 def sandbox_with_file_response(response):
-    sandbox = Sandbox(template_id="test")
+    sandbox = Sandbox(template_name="test")
     sandbox.client = FakeFileClient(response)
     return sandbox
 
@@ -389,7 +389,7 @@ def test_agent_client_list_and_search_files_map_entries():
 
 
 def test_files_read_rejects_invalid_format():
-    sandbox = Sandbox(template_id="test")
+    sandbox = Sandbox(template_name="test")
 
     with pytest.raises(InvalidArgumentError, match="format must be one of"):
         sandbox.files.read("/tmp/read.txt", format="json")

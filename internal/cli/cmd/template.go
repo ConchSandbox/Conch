@@ -14,6 +14,7 @@ import (
 )
 
 type templateCreateOptions struct {
+	name       string
 	source     string
 	kernel     string
 	initrd     string
@@ -55,13 +56,15 @@ func printTemplateHelp(out io.Writer) {
 
 func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  conch template create --source <image> --kernel <path> --initrd <path> [options]")
+	fmt.Fprintln(out, "  conch template create --name <name> --source <image> --kernel <path> --initrd <path> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Description:")
 	fmt.Fprintln(out, "  Convert an existing OCI rootfs image plus kernel/initrd files into")
 	fmt.Fprintln(out, "  a bootable Conch Template.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --name string")
+	fmt.Fprintln(out, "        mutable logical Template Name (mapped to an internal containerd image record)")
 	fmt.Fprintln(out, "  --source string")
 	fmt.Fprintln(out, "        OCI rootfs image reference; reuse local conchd/containerd image first, pull if missing")
 	fmt.Fprintln(out, "  --kernel string")
@@ -84,7 +87,7 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        registry password")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
-	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd")
+	fmt.Fprintln(out, "  conch template create --name localhost/conch/nginx:latest --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd")
 }
 
 func RunTemplate(ctx context.Context, args []string) error {
@@ -152,7 +155,7 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template pull: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Boot image: %s\n", result.BuildRef)
+	fmt.Fprintf(os.Stdout, "Template Name: %s\n", result.TemplateName)
 	fmt.Fprintf(os.Stdout, "Template ID: %s\n", result.TemplateID)
 	return nil
 }
@@ -166,7 +169,7 @@ func runTemplatePush(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("conch template push: exactly two arguments are required: <template-id> <remote-reference>")
+		return fmt.Errorf("conch template push: exactly two arguments are required: <template-name> <remote-reference>")
 	}
 	username, password, err := templateRegistryCredentials(opts)
 	if err != nil {
@@ -188,7 +191,7 @@ func runTemplatePush(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch template push: create API client: %w", err)
 	}
 	if err := conchClient.PushTemplate(ctx, client.TemplatePushRequest{
-		TemplateID:      fs.Arg(0),
+		Name:            fs.Arg(0),
 		RemoteReference: fs.Arg(1),
 		PlainHTTP:       opts.plainHTTP,
 		Username:        username,
@@ -248,13 +251,14 @@ func parseTemplateCreateArgs(args []string) (templateCreateOptions, error) {
 	if fs.NArg() != 0 {
 		return templateCreateOptions{}, fmt.Errorf("conch template create: unexpected positional arguments: %v", fs.Args())
 	}
-	if opts.source == "" || opts.kernel == "" || opts.initrd == "" {
-		return templateCreateOptions{}, fmt.Errorf("conch template create: --source, --kernel, and --initrd are required")
+	if opts.name == "" || opts.source == "" || opts.kernel == "" || opts.initrd == "" {
+		return templateCreateOptions{}, fmt.Errorf("conch template create: --name, --source, --kernel, and --initrd are required")
 	}
 	return opts, nil
 }
 
 func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) {
+	fs.StringVar(&opts.name, "name", "", "Template Name")
 	fs.StringVar(&opts.source, "source", "", "source rootfs image")
 	fs.StringVar(&opts.kernel, "kernel", "", "kernel file path")
 	fs.StringVar(&opts.initrd, "initrd", "", "initrd file path")
@@ -276,6 +280,7 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 		return fmt.Errorf("%s: create API client: %w", command, err)
 	}
 	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
+		Name:       opts.name,
 		Source:     opts.source,
 		KernelPath: opts.kernel,
 		InitrdPath: opts.initrd,
@@ -291,8 +296,8 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 }
 
 func printTemplateCreateSummary(out io.Writer, res client.TemplateCreateResponse) {
-	if res.BuildRef != "" {
-		fmt.Fprintf(out, "Boot image: %s\n", res.BuildRef)
+	if res.TemplateName != "" {
+		fmt.Fprintf(out, "Template Name: %s\n", res.TemplateName)
 	}
 	if res.TemplateID != "" {
 		fmt.Fprintf(out, "Template ID: %s\n", res.TemplateID)
@@ -331,7 +336,7 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("conch template inspect: exactly one Template ID is required")
+		return fmt.Errorf("conch template inspect: exactly one Template Name is required")
 	}
 	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
@@ -353,31 +358,31 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("conch template rm: exactly one Template ID is required")
+		return fmt.Errorf("conch template rm: exactly one Template Name is required")
 	}
-	id := fs.Arg(0)
+	name := fs.Arg(0)
 	conchClient, err := client.New(client.Options{ConfigPath: *configPath})
 	if err != nil {
 		return fmt.Errorf("conch template rm: create API client: %w", err)
 	}
-	if err := conchClient.RemoveTemplate(ctx, id); err != nil {
+	if err := conchClient.RemoveTemplate(ctx, name); err != nil {
 		return fmt.Errorf("conch template rm: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Removed template: %s\n", id)
+	fmt.Fprintf(os.Stdout, "Removed template: %s\n", name)
 	return nil
 }
 
 func printTemplates(out io.Writer, items []client.TemplateRecord) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TEMPLATE_ID\tORIGIN\tBOOT_MODE\tSOURCE_REF\tSOURCE_SANDBOX\tBUILD_REF")
+	fmt.Fprintln(tw, "NAME\tTEMPLATE_ID\tORIGIN\tBOOT_MODE\tSOURCE_REF\tSOURCE_SANDBOX")
 	for _, item := range items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			displayTemplateValue(item.Name),
 			displayTemplateValue(item.TemplateID),
 			displayTemplateValue(item.Origin),
 			displayTemplateValue(item.BootMode),
 			displayTemplateValue(item.SourceRef),
 			displayTemplateValue(item.SourceSandboxID),
-			displayTemplateValue(item.BuildRef),
 		)
 	}
 	_ = tw.Flush()
