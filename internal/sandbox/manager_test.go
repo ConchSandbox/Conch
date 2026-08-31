@@ -69,7 +69,7 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	mapKey := "sandbox-a"
 	m.sandboxes.Store(mapKey, entry)
 
-	m.handleSandboxExit(mapKey, entry, "sandbox-a", sbx)
+	m.handleSandboxExit(mapKey, entry, "sandbox-a", sbx, true)
 
 	if _, ok := m.sandboxes.Load(mapKey); ok {
 		t.Fatal("suspended sandbox entry remains after VMM exit")
@@ -87,8 +87,8 @@ func TestHandleSandboxExitCallsUnexpectedHandlerOnce(t *testing.T) {
 	}
 	called := make(chan exitResult, 2)
 	m.UnexpectedExitHandler = func(id string, err error) { called <- exitResult{id: id, err: err} }
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
 	select {
 	case result := <-called:
 		if result.id != "sandbox-a" || result.err != nil {
@@ -218,15 +218,19 @@ func TestCreateUsesLiveBoundedContextForBootCleanupAfterCancellation(t *testing.
 func TestDeleteRemovesEntryAfterCleanupFailure(t *testing.T) {
 	wantErr := errors.New("runtime cleanup failed")
 	boot := &recordingBootPreparer{}
-	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	m := &Manager{
+		boot:         boot,
+		cidAllocator: NewCIDAllocator(),
+		stopSandbox:  func(context.Context, *Sandbox) error { return nil },
+	}
 	cleanup := NewCleanup()
 	cleanup.Add(func(context.Context) error { return wantErr })
 	sbx := &Sandbox{cleanup: cleanup, sandboxID: "sandbox-a"}
 	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
 	m.sandboxes.Store("sandbox-a", entry)
 
-	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); !errors.Is(err, wantErr) {
-		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
 	}
 	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
 		t.Fatal("sandbox entry remains after one-shot cleanup failure")
@@ -243,7 +247,7 @@ func TestUnexpectedExitRemovesEntryAndReportsCleanupError(t *testing.T) {
 	called := make(chan error, 1)
 	m.UnexpectedExitHandler = func(_ string, err error) { called <- err }
 
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
 	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
 		t.Fatal("sandbox entry remains after one-shot unexpected-exit cleanup")
 	}
@@ -271,7 +275,7 @@ func TestWaitForSandboxExitCleansSandboxOnVirtiofsExit(t *testing.T) {
 		case <-vmmExit:
 		case <-virtiofsExit:
 		}
-		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, false)
 	}()
 	close(virtiofsExit)
 
@@ -305,7 +309,7 @@ func TestWaitForSandboxExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
 		case <-vmmExit:
 		case <-virtiofsExit:
 		}
-		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, false)
 	}()
 	deleteDone := make(chan error, 1)
 	go func() {
@@ -337,12 +341,61 @@ func TestWaitForSandboxExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
 }
 
 func newExitTestSandbox(cleanup func(context.Context) error) (*Manager, *sandboxEntry, *Sandbox) {
-	m := &Manager{boot: &recordingBootPreparer{}, cidAllocator: NewCIDAllocator()}
+	m := &Manager{
+		boot:         &recordingBootPreparer{},
+		cidAllocator: NewCIDAllocator(),
+		stopSandbox:  func(context.Context, *Sandbox) error { return nil },
+	}
 	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
 	sbx.cleanup.Add(cleanup)
 	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
 	m.sandboxes.Store("sandbox-a", entry)
 	return m, entry, sbx
+}
+
+func TestDeleteKeepsEntryWhenVMMStopFails(t *testing.T) {
+	m, entry, _ := newExitTestSandbox(func(context.Context) error {
+		t.Fatal("resource cleanup ran after VMM stop failed")
+		return nil
+	})
+	wantErr := errors.New("stop failed")
+	m.stopSandbox = func(context.Context, *Sandbox) error { return wantErr }
+
+	err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
+	}
+	if actual, ok := m.sandboxes.Load("sandbox-a"); !ok || actual != entry {
+		t.Fatal("sandbox entry was removed after VMM stop failure")
+	}
+}
+
+func TestHandleSandboxExitKeepsEntryWhenVMMStopFails(t *testing.T) {
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error {
+		t.Fatal("resource cleanup ran after VMM stop failed")
+		return nil
+	})
+	m.stopSandbox = func(context.Context, *Sandbox) error { return errors.New("stop failed") }
+
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, false)
+
+	if actual, ok := m.sandboxes.Load("sandbox-a"); !ok || actual != entry {
+		t.Fatal("sandbox entry was removed after VMM stop failure")
+	}
+}
+
+func TestCleanupCreateFailureStopsBeforeResourceCleanup(t *testing.T) {
+	wantErr := errors.New("stop failed")
+	m := &Manager{stopSandbox: func(context.Context, *Sandbox) error { return wantErr }}
+	sbx := &Sandbox{cleanup: NewCleanup()}
+	sbx.cleanup.Add(func(context.Context) error {
+		t.Fatal("resource cleanup ran after VMM stop failed")
+		return nil
+	})
+
+	if err := m.cleanupCreateFailure(sbx, "sandbox-a"); !errors.Is(err, wantErr) {
+		t.Fatalf("cleanupCreateFailure() error = %v, want %v", err, wantErr)
+	}
 }
 
 func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {

@@ -147,11 +147,6 @@ func RestoreSandbox(
 
 		return nil
 	})
-	cleanup.AddPriority(func(ctx context.Context) error {
-		// Stop the sandbox first if it is still running, otherwise do nothing
-		return sbx.Stop(ctx)
-	})
-
 	return sbx, nil
 }
 
@@ -237,11 +232,6 @@ func CreateSandbox(
 
 		return nil
 	})
-	cleanup.AddPriority(func(ctx context.Context) error {
-		// Stop the sandbox first if it is still running, otherwise do nothing
-		return sbx.Stop(ctx)
-	})
-
 	return sbx, nil
 }
 
@@ -258,7 +248,9 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (s *Sandbox) Close(ctx context.Context) error {
+// CleanupResources releases resources owned by a sandbox whose VMM has stopped.
+// Callers must confirm Stop succeeded (or observe VMM exit) before calling it.
+func (s *Sandbox) CleanupResources(ctx context.Context) error {
 	err := s.cleanup.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup sandbox: %w", err)
