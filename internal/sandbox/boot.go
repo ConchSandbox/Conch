@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -64,37 +67,50 @@ type BootPreparer interface {
 }
 
 type bootPreparer struct {
-	snapshots   SnapshotBackend
-	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error)
+	snapshots      SnapshotBackend
+	resolveContext context.Context
+	resolveTimeout time.Duration
+	resolveBoot    func(context.Context, string) (conchimage.ResolvedBoot, error)
+	resolveGroup   singleflight.Group
 }
 
-func NewBootPreparer(snapshots SnapshotBackend, client *containerdclient.Client) (BootPreparer, error) {
+func NewBootPreparer(ctx context.Context, snapshots SnapshotBackend, client *containerdclient.Client, timeout time.Duration) (BootPreparer, error) {
 	if client == nil || client.Client == nil {
 		return nil, fmt.Errorf("containerd client is required")
 	}
-	return newBootPreparer(snapshots, func(ctx context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
+	return newBootPreparer(ctx, snapshots, timeout, func(ctx context.Context, bootIndexDigest string) (conchimage.ResolvedBoot, error) {
 		return conchimage.ResolveBoot(ctx, client, bootIndexDigest)
 	})
 }
 
 func newBootPreparer(
+	ctx context.Context,
 	snapshots SnapshotBackend,
+	timeout time.Duration,
 	resolveBoot func(context.Context, string) (conchimage.ResolvedBoot, error),
 ) (BootPreparer, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("boot resolver context is required")
+	}
 	if snapshots == nil {
 		return nil, fmt.Errorf("snapshot backend is required")
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("boot resolver timeout must be positive")
 	}
 	if resolveBoot == nil {
 		return nil, fmt.Errorf("boot resolver is required")
 	}
 	return &bootPreparer{
-		snapshots:   snapshots,
-		resolveBoot: resolveBoot,
+		snapshots:      snapshots,
+		resolveContext: ctx,
+		resolveTimeout: timeout,
+		resolveBoot:    resolveBoot,
 	}, nil
 }
 
 func (p *bootPreparer) Prepare(ctx context.Context, req PrepareBootRequest) (PreparedBoot, error) {
-	if p == nil || p.snapshots == nil || p.resolveBoot == nil {
+	if p == nil || p.snapshots == nil || p.resolveContext == nil || p.resolveTimeout <= 0 || p.resolveBoot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
 	key := strings.TrimSpace(req.SandboxID)
@@ -119,18 +135,39 @@ func (p *bootPreparer) resolveTemplate(
 	if id == "" {
 		return conchimage.ResolvedBoot{}, fmt.Errorf("template_id is required")
 	}
-	resolved, err := p.resolveBoot(ctx, id)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return conchimage.ResolvedBoot{}, fmt.Errorf("resolve template boot index %s: %w", id, err)
 	}
-	if resolved.BootIndexDigest != id {
-		return conchimage.ResolvedBoot{}, fmt.Errorf(
-			"resolved boot index digest %s does not match template digest %s",
-			resolved.BootIndexDigest,
-			id,
-		)
+	result := p.resolveGroup.DoChan(id, func() (value any, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("boot resolver panicked: %v", recovered)
+			}
+		}()
+		resolveCtx, cancel := context.WithTimeout(p.resolveContext, p.resolveTimeout)
+		defer cancel()
+		return p.resolveBoot(resolveCtx, id)
+	})
+	select {
+	case <-ctx.Done():
+		return conchimage.ResolvedBoot{}, fmt.Errorf("resolve template boot index %s: %w", id, ctx.Err())
+	case call := <-result:
+		if err := ctx.Err(); err != nil {
+			return conchimage.ResolvedBoot{}, fmt.Errorf("resolve template boot index %s: %w", id, err)
+		}
+		if call.Err != nil {
+			return conchimage.ResolvedBoot{}, fmt.Errorf("resolve template boot index %s: %w", id, call.Err)
+		}
+		resolved := call.Val.(conchimage.ResolvedBoot)
+		if resolved.BootIndexDigest != id {
+			return conchimage.ResolvedBoot{}, fmt.Errorf(
+				"resolved boot index digest %s does not match template digest %s",
+				resolved.BootIndexDigest,
+				id,
+			)
+		}
+		return resolved, nil
 	}
-	return resolved, nil
 }
 
 func (p *bootPreparer) prepareResolvedBoot(

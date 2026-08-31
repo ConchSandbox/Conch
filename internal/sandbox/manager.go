@@ -77,13 +77,13 @@ func New(
 	snapshots SnapshotBackend,
 	cfg Config,
 ) (*Manager, error) {
-	boot, err := NewBootPreparer(snapshots, client)
+	requestTimeout := durationOrDefault(cfg.RequestTimeout, 60*time.Second)
+	boot, err := NewBootPreparer(ctx, snapshots, client, requestTimeout)
 	if err != nil {
 		return nil, err
 	}
 	vsockSignalRetry := durationOrDefault(cfg.VsockSignalRetry, 10*time.Millisecond)
 	vsockSignalTimeout := durationOrDefault(cfg.VsockSignalTimeout, 60*time.Second)
-	requestTimeout := durationOrDefault(cfg.RequestTimeout, 60*time.Second)
 
 	pool, err := netstack.NewPool(cfg.Network)
 	if err != nil {
