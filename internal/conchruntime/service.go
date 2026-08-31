@@ -416,10 +416,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 		}
 	}
 	cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
-	if errors.Is(cleanupErr, sandbox.ErrNotFound) {
-		cleanupErr = nil
-	}
-	if errors.Is(cleanupErr, sandbox.ErrFailedPrecondition) {
+	if cleanupErr != nil && !errors.Is(cleanupErr, sandbox.ErrNotFound) {
 		return cleanupErr
 	}
 	var deleteErr error
@@ -429,7 +426,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	if deleteErr == nil && rec.ID != "" {
 		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
-	return combineOperationErrors(cleanupErr, deleteErr)
+	return deleteErr
 }
 
 // HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.

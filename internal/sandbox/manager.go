@@ -428,7 +428,10 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (result Crea
 	vmStartSpec.VirtioFS = volumeDevicesToDriver(volumeDevices)
 	sbx, err := m.startSandbox(ctx, req, vmStartSpec, runtimeIDs, boot.Runtime.Resume)
 	if err != nil {
-		m.cleanupCreateFailure(sbx, req.SandboxID)
+		cleanupErr := m.cleanupCreateFailure(sbx, req.SandboxID)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
 		switch {
 		case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
 			return CreateResult{}, ErrInvalidEnvironment.Wrap(err)
@@ -541,16 +544,26 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 	)
 }
 
-func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) {
+func (m *Manager) cleanupCreateFailure(sbx *Sandbox, sandboxID string) error {
 	logger := ulog.GetLogger()
-	if sbx != nil {
-		if closeErr := sbx.Close(context.Background()); closeErr != nil {
-			logger.Warn("failed to cleanup sandbox after create failure",
-				ulog.F("sandbox_id", sandboxID),
-				ulog.F("error", closeErr),
-			)
-		}
+	if sbx == nil {
+		return nil
 	}
+	if stopErr := sbx.Stop(context.Background()); stopErr != nil {
+		logger.Warn("failed to stop sandbox after create failure",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("error", stopErr),
+		)
+		return stopErr
+	}
+	if cleanupErr := sbx.CleanupResources(context.Background()); cleanupErr != nil {
+		logger.Warn("failed to cleanup sandbox after create failure",
+			ulog.F("sandbox_id", sandboxID),
+			ulog.F("error", cleanupErr),
+		)
+		return cleanupErr
+	}
+	return nil
 }
 
 func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox, virtiofsExit <-chan struct{}) {
@@ -565,22 +578,39 @@ func (m *Manager) trackSandbox(ctx context.Context, mapKey string, entry *sandbo
 			close(vmmExit)
 		}()
 
+		vmmStopped := false
 		select {
 		case <-vmmExit:
+			vmmStopped = true
 		case <-virtiofsExit:
 		}
-		m.handleSandboxExit(mapKey, entry, sandboxID, sbx)
+		if err := m.handleSandboxExit(mapKey, entry, sandboxID, sbx, vmmStopped); err != nil {
+			// Stop was not confirmed. Keep monitoring without holding entry.mu;
+			// a concurrent Delete may finish cleanup before the VMM exits.
+			<-vmmExit
+			m.handleSandboxExit(mapKey, entry, sandboxID, sbx, true)
+		}
 	}()
 }
 
-func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox) {
+func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxID string, sbx *Sandbox, vmmStopped bool) error {
 	logger := ulog.GetLogger()
 	entry.mu.Lock()
 	if !m.isCurrentSandboxEntry(mapKey, entry) || entry.sbx != sbx {
 		entry.mu.Unlock()
-		return
+		return nil
 	}
-	cleanupErr := m.cleanupSandbox(context.Background(), sbx, sandboxID)
+	if !vmmStopped {
+		if err := sbx.Stop(context.Background()); err != nil {
+			entry.mu.Unlock()
+			logger.Warn("failed to stop VMM after sandbox dependency exited",
+				ulog.F("sandbox_id", sandboxID),
+				ulog.F("error", err),
+			)
+			return err
+		}
+	}
+	cleanupErr := m.cleanupSandboxResources(context.Background(), sbx, sandboxID)
 	if cleanupErr != nil {
 		logger.Warn("failed to cleanup sandbox after wait", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
 	}
@@ -589,6 +619,7 @@ func (m *Manager) handleSandboxExit(mapKey string, entry *sandboxEntry, sandboxI
 	if m.UnexpectedExitHandler != nil {
 		m.UnexpectedExitHandler(sandboxID, cleanupErr)
 	}
+	return nil
 }
 
 func buildSandboxCreateResult(req CreateRequest, sbx *Sandbox, boot PreparedBoot, runtimeIDs createRuntimeIDs, volumeDevices []volume.Device) CreateResult {
@@ -598,7 +629,7 @@ func buildSandboxCreateResult(req CreateRequest, sbx *Sandbox, boot PreparedBoot
 		AgentToken:       req.AgentToken,
 		SandboxID:        req.SandboxID,
 		VMMPID:           sbx.process.Pid(),
-		VMMSocketPath:    sbx.process.VmmSocketPath,
+		VMMSocketPath:    sbx.process.SocketPath(),
 		VsockCID:         runtimeIDs.vsockCID,
 		VsockSocketPath:  runtimeIDs.vsockSocketPath,
 		NetworkSlotID:    sbx.slot.ID(),
@@ -627,15 +658,15 @@ func registerSandboxVolumeCleanup(sb *Sandbox, volumeManager *volume.Manager, sa
 	})
 }
 
-func (m *Manager) cleanupSandbox(ctx context.Context, sbx *Sandbox, sandboxID string) error {
+func (m *Manager) cleanupSandboxResources(ctx context.Context, sbx *Sandbox, sandboxID string) error {
 	logger := ulog.GetLogger()
 	var errs []error
 	fields := []ulog.Field{
 		ulog.F("sandbox_id", sandboxID),
 	}
 
-	finishClose := cleanupdiag.Start("sandbox.close", fields...)
-	err := sbx.Close(ctx)
+	finishClose := cleanupdiag.Start("sandbox.resources.release", fields...)
+	err := sbx.CleanupResources(ctx)
 	finishClose(err)
 	if err != nil {
 		logger.Warn("sandbox runtime cleanup is incomplete",
@@ -689,9 +720,18 @@ func (m *Manager) Delete(req DeleteRequest) error {
 		return fmt.Errorf("invalid sandbox entry for %s: sandbox is nil", req.SandboxID)
 	}
 
-	err = m.cleanupSandbox(context.Background(), sbx, req.SandboxID)
+	if err := sbx.Stop(context.Background()); err != nil {
+		return err
+	}
+	cleanupErr := m.cleanupSandboxResources(context.Background(), sbx, req.SandboxID)
+	if cleanupErr != nil {
+		ulog.GetLogger().Warn("sandbox stopped but resource cleanup was incomplete",
+			ulog.F("sandbox_id", req.SandboxID),
+			ulog.F("error", cleanupErr),
+		)
+	}
 	m.sandboxes.CompareAndDelete(mapKey, entry)
-	return err
+	return nil
 }
 
 func (m *Manager) Suspend(req LifecycleRequest) error {

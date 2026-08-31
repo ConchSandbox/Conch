@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -19,6 +20,7 @@ import (
 
 const SocketDirPerm = 0755
 const unixSocketPathMax = 107
+const vmmStopTimeout = 10 * time.Second
 
 // EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
 func EnsureWorkSubDir(subDir string) (string, error) {
@@ -273,7 +275,6 @@ func getProcessState(pid int) (string, error) {
 
 func (p *Process) Stop() error {
 	logger := ulog.GetLogger()
-	var errs []error
 
 	if p.cmd == nil || p.cmd.Process == nil {
 		p.adapter.Cleanup()
@@ -285,14 +286,18 @@ func (p *Process) Stop() error {
 	case <-p.exitDone:
 		// Already exited
 		p.adapter.Cleanup()
-		return errors.Join(errs...)
+		return nil
 	default:
 	}
 
 	if p.isAPIReady() {
 		if _, err := os.Stat(p.VmmSocketPath); err == nil {
 			if deleteErr := p.adapter.DeleteVM(); deleteErr != nil {
-				errs = append(errs, fmt.Errorf("delete vmm via api: %w", deleteErr))
+				// API failure does not prevent termination through SIGTERM.
+				logger.Warn("failed to delete VMM via API, attempting SIGTERM",
+					ulog.F("pid", p.cmd.Process.Pid),
+					ulog.F("error", deleteErr),
+				)
 			}
 		}
 	}
@@ -309,29 +314,42 @@ func (p *Process) Stop() error {
 
 	err = p.cmd.Process.Signal(syscall.SIGTERM)
 	if err != nil {
+		select {
+		case <-p.exitDone:
+			p.adapter.Cleanup()
+			return nil
+		default:
+		}
 		if errors.Is(err, os.ErrProcessDone) {
 			logger.Debug("VMM process already exited",
 				ulog.F("pid", p.cmd.Process.Pid),
 			)
 			p.adapter.Cleanup()
-			return errors.Join(errs...)
+			return nil
 		}
 		logger.Error("Failed to send SIGTERM to VMM process",
 			ulog.F("pid", p.cmd.Process.Pid),
 			ulog.F("error", err),
 		)
-		errs = append(errs, fmt.Errorf("failed to send SIGTERM to vmm process, %d: %w", p.cmd.Process.Pid, err))
-		return errors.Join(errs...)
+		return fmt.Errorf("failed to send SIGTERM to vmm process, %d: %w", p.cmd.Process.Pid, err)
 	}
 
 	logger.Debug("Sent SIGTERM to VMM process",
 		ulog.F("pid", p.cmd.Process.Pid),
 	)
 
-	<-p.exitDone
-	p.adapter.Cleanup()
-	return errors.Join(errs...)
+	timer := time.NewTimer(vmmStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-p.exitDone:
+		p.adapter.Cleanup()
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timed out after %s waiting for VMM process %d to stop", vmmStopTimeout, p.cmd.Process.Pid)
+	}
 }
+
+func (p *Process) SocketPath() string { return p.VmmSocketPath }
 
 func (p *Process) Pid() int {
 	if p.cmd == nil || p.cmd.Process == nil {

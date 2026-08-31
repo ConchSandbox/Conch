@@ -167,6 +167,8 @@ sandbox.delete(sandbox_id=None) -> bool
 
 成功删除当前实例对应的沙箱后，SDK 清空该对象缓存的身份、元数据和运行时信息，并关闭 Agent 客户端。删除失败或删除其他 ID 的沙箱时，不修改当前对象。
 
+删除以 VMM 停止成功为提交点：VMM 停止失败时保留 Sandbox 记录和运行资源并返回错误；VMM 已停止后，即使网络、Volume、启动目录或 CID 等后续资源清理失败，Conch 也会记录错误、移除 Sandbox 记录并返回成功。清理失败的资源不会重新进入可复用资源池。
+
 **静态方法：**
 ```text
 Sandbox.delete_sandbox(sandbox_id) -> bool

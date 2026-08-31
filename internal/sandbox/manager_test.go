@@ -69,7 +69,7 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 	mapKey := "sandbox-a"
 	m.sandboxes.Store(mapKey, entry)
 
-	m.handleSandboxExit(mapKey, entry, "sandbox-a", sbx)
+	m.handleSandboxExit(mapKey, entry, "sandbox-a", sbx, true)
 
 	if _, ok := m.sandboxes.Load(mapKey); ok {
 		t.Fatal("suspended sandbox entry remains after VMM exit")
@@ -80,15 +80,18 @@ func TestHandleSandboxExitCleansSuspendedSandbox(t *testing.T) {
 }
 
 func TestHandleSandboxExitCallsUnexpectedHandlerOnce(t *testing.T) {
-	m, entry, sbx := newExitTestSandbox(func(context.Context) error { return nil })
+	m := &Manager{boot: &recordingBootPreparer{}, cidAllocator: NewCIDAllocator()}
+	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
+	m.sandboxes.Store("sandbox-a", entry)
 	type exitResult struct {
 		id  string
 		err error
 	}
 	called := make(chan exitResult, 2)
 	m.UnexpectedExitHandler = func(id string, err error) { called <- exitResult{id: id, err: err} }
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
 	select {
 	case result := <-called:
 		if result.id != "sandbox-a" || result.err != nil {
@@ -215,18 +218,106 @@ func TestCreateUsesLiveBoundedContextForBootCleanupAfterCancellation(t *testing.
 	}
 }
 
+type fakeSandboxProcess struct {
+	stopErr error
+}
+
+func (p *fakeSandboxProcess) Stop() error                                { return p.stopErr }
+func (*fakeSandboxProcess) Wait() error                                  { return nil }
+func (*fakeSandboxProcess) Pause(context.Context) error                  { return nil }
+func (*fakeSandboxProcess) ResumeVM(context.Context) error               { return nil }
+func (*fakeSandboxProcess) CreateSnapshot(context.Context, string) error { return nil }
+func (*fakeSandboxProcess) Pid() int                                     { return 0 }
+func (*fakeSandboxProcess) SocketPath() string                           { return "" }
+
+type delayedExitProcess struct {
+	fakeSandboxProcess
+	exited      chan struct{}
+	stopAttempt chan struct{}
+}
+
+func (p *delayedExitProcess) Wait() error {
+	<-p.exited
+	return nil
+}
+
+func (p *delayedExitProcess) Stop() error {
+	close(p.stopAttempt)
+	return p.stopErr
+}
+
+func TestTrackSandboxCleansAfterFailedStopAndLaterExit(t *testing.T) {
+	cleanupCalls := 0
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error {
+		cleanupCalls++
+		return nil
+	})
+	process := &delayedExitProcess{
+		fakeSandboxProcess: fakeSandboxProcess{stopErr: errors.New("stop failed")},
+		exited: make(chan struct{}), stopAttempt: make(chan struct{}),
+	}
+	sbx.process = process
+	exitReported := make(chan struct{}, 2)
+	m.UnexpectedExitHandler = func(string, error) { exitReported <- struct{}{} }
+	virtiofsExit := make(chan struct{})
+	m.trackSandbox(context.Background(), "sandbox-a", entry, "sandbox-a", sbx, virtiofsExit)
+	defer func() {
+		select {
+		case <-process.exited:
+		default:
+			close(process.exited)
+		}
+	}()
+	close(virtiofsExit)
+	select {
+	case <-process.stopAttempt:
+	case <-time.After(time.Second):
+		t.Fatal("dependency exit did not trigger Stop")
+	}
+	entry.mu.Lock()
+	retained := m.isCurrentSandboxEntry("sandbox-a", entry)
+	cleanedBeforeExit := cleanupCalls
+	entry.mu.Unlock()
+	if !retained || cleanedBeforeExit != 0 {
+		t.Fatal("stop failure released sandbox ownership or resources")
+	}
+	select {
+	case <-exitReported:
+		t.Fatal("exit reported before confirmed VMM exit")
+	default:
+	}
+	close(process.exited)
+	select {
+	case <-exitReported:
+	case <-time.After(time.Second):
+		t.Fatal("later VMM exit did not complete cleanup and notification")
+	}
+	if cleanupCalls != 1 || m.isCurrentSandboxEntry("sandbox-a", entry) {
+		t.Fatalf("cleanup calls = %d, want one cleanup and removed entry", cleanupCalls)
+	}
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
+	select {
+	case <-exitReported:
+		t.Fatal("duplicate exit notification")
+	default:
+	}
+}
+
 func TestDeleteRemovesEntryAfterCleanupFailure(t *testing.T) {
 	wantErr := errors.New("runtime cleanup failed")
 	boot := &recordingBootPreparer{}
-	m := &Manager{boot: boot, cidAllocator: NewCIDAllocator()}
+	m := &Manager{
+		boot:         boot,
+		cidAllocator: NewCIDAllocator(),
+	}
 	cleanup := NewCleanup()
 	cleanup.Add(func(context.Context) error { return wantErr })
-	sbx := &Sandbox{cleanup: cleanup, sandboxID: "sandbox-a"}
+	sbx := &Sandbox{process: &fakeSandboxProcess{}, cleanup: cleanup, sandboxID: "sandbox-a"}
 	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
 	m.sandboxes.Store("sandbox-a", entry)
 
-	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); !errors.Is(err, wantErr) {
-		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
+	if err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
 	}
 	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
 		t.Fatal("sandbox entry remains after one-shot cleanup failure")
@@ -243,7 +334,7 @@ func TestUnexpectedExitRemovesEntryAndReportsCleanupError(t *testing.T) {
 	called := make(chan error, 1)
 	m.UnexpectedExitHandler = func(_ string, err error) { called <- err }
 
-	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+	m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, true)
 	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
 		t.Fatal("sandbox entry remains after one-shot unexpected-exit cleanup")
 	}
@@ -271,7 +362,7 @@ func TestWaitForSandboxExitCleansSandboxOnVirtiofsExit(t *testing.T) {
 		case <-vmmExit:
 		case <-virtiofsExit:
 		}
-		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, false)
 	}()
 	close(virtiofsExit)
 
@@ -300,12 +391,14 @@ func TestWaitForSandboxExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
 
 	vmmExit := make(chan struct{})
 	virtiofsExit := make(chan struct{})
+	exitHandled := make(chan struct{})
 	go func() {
 		select {
 		case <-vmmExit:
 		case <-virtiofsExit:
 		}
-		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx)
+		m.handleSandboxExit("sandbox-a", entry, "sandbox-a", sbx, false)
+		close(exitHandled)
 	}()
 	deleteDone := make(chan error, 1)
 	go func() {
@@ -328,6 +421,11 @@ func TestWaitForSandboxExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Delete blocked after virtiofsd exit")
 	}
+	select {
+	case <-exitHandled:
+	case <-time.After(time.Second):
+		t.Fatal("exit handler did not finish after Delete")
+	}
 	if cleanupCalls != 1 {
 		t.Fatalf("sandbox cleanup calls = %d, want 1", cleanupCalls)
 	}
@@ -337,12 +435,32 @@ func TestWaitForSandboxExitDoesNotDuplicateDeleteCleanup(t *testing.T) {
 }
 
 func newExitTestSandbox(cleanup func(context.Context) error) (*Manager, *sandboxEntry, *Sandbox) {
-	m := &Manager{boot: &recordingBootPreparer{}, cidAllocator: NewCIDAllocator()}
-	sbx := &Sandbox{cleanup: NewCleanup(), sandboxID: "sandbox-a"}
+	m := &Manager{
+		boot:         &recordingBootPreparer{},
+		cidAllocator: NewCIDAllocator(),
+	}
+	sbx := &Sandbox{process: &fakeSandboxProcess{}, cleanup: NewCleanup(), sandboxID: "sandbox-a"}
 	sbx.cleanup.Add(cleanup)
 	entry := &sandboxEntry{state: sandboxReady, sbx: sbx}
 	m.sandboxes.Store("sandbox-a", entry)
 	return m, entry, sbx
+}
+
+func TestDeleteKeepsEntryWhenVMMStopFails(t *testing.T) {
+	m, entry, sbx := newExitTestSandbox(func(context.Context) error {
+		t.Fatal("resource cleanup ran after VMM stop failed")
+		return nil
+	})
+	wantErr := errors.New("stop failed")
+	sbx.process = &fakeSandboxProcess{stopErr: wantErr}
+
+	err := m.Delete(DeleteRequest{SandboxID: "sandbox-a"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
+	}
+	if actual, ok := m.sandboxes.Load("sandbox-a"); !ok || actual != entry {
+		t.Fatal("sandbox entry was removed after VMM stop failure")
+	}
 }
 
 func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
