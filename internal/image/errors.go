@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	containerdreference "github.com/containerd/containerd/v2/pkg/reference"
 	"github.com/containerd/errdefs"
 	"github.com/openeuler/Conch/internal/apperror"
 )
@@ -37,6 +38,11 @@ func translateRegistryError(err error) error {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
+	}
+	if errors.Is(err, containerdreference.ErrInvalid) ||
+		errors.Is(err, containerdreference.ErrObjectRequired) ||
+		errors.Is(err, containerdreference.ErrHostnameRequired) {
+		return ErrInvalidArgument.Wrap(err)
 	}
 	if errdefs.IsNotFound(err) {
 		return ErrRegistryNotFound.Wrap(err)

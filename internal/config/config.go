@@ -166,10 +166,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Open the file once so the permission check applies to the same file that is read.
 	file, err := os.Open(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Config file doesn't exist, use default
-			return DefaultConfig(), nil
-		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 	defer file.Close()
