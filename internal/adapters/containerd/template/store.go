@@ -149,15 +149,12 @@ func (s *Store) Delete(ctx context.Context, rawName string) error {
 	nsctx := containerdclient.NewNamespaceContext(ctx)
 	record, err := s.images.Get(nsctx, recordName)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil
-		}
 		return translateError("get Template image record", err)
 	}
 	if record.Labels[schemaLabel] != schemaVersion {
 		return conchtemplate.ErrNotFound.Wrap(fmt.Errorf("image record %s is not a Template", recordName))
 	}
-	if err := s.images.Delete(nsctx, recordName, images.DeleteTarget(&record.Target)); err != nil && !errdefs.IsNotFound(err) {
+	if err := s.images.Delete(nsctx, recordName, images.DeleteTarget(&record.Target)); err != nil {
 		return translateError("delete Template image record", err)
 	}
 	return nil
