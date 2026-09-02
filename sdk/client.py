@@ -3,14 +3,15 @@ import os
 import secrets
 import stat
 import sys
+from contextlib import contextmanager
 from itertools import chain
 from io import IOBase, TextIOBase
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import requests
-from connectrpc.code import Code
 from connectrpc.compat import google_protobuf_binary_codec
 from connectrpc.errors import ConnectError
+from pyqwest import SyncClient, SyncHTTPTransport
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -18,7 +19,10 @@ if PROJECT_ROOT not in sys.path:
 
 from api.py_proto import agent_connect
 from api.py_proto import agent_pb2
-from .errors import InvalidArgumentError, handle_rpc_error
+from .errors import InvalidArgumentError, NotFoundError, handle_rpc_error
+
+
+_DEFAULT_AGENT_REQUEST_TIMEOUT = 60.0
 
 
 def _create_download_temp(local_dir: str) -> tuple[int, str]:
@@ -30,6 +34,73 @@ def _create_download_temp(local_dir: str) -> tuple[int, str]:
         except FileExistsError:
             continue
     raise FileExistsError("failed to create a unique download temporary file")
+
+
+def _resolve_request_timeout(request_timeout: Optional[float]) -> Optional[float]:
+    if request_timeout == 0:
+        return None
+    if request_timeout is not None:
+        if request_timeout < 0:
+            raise InvalidArgumentError("request_timeout must not be negative")
+        return request_timeout
+    return _DEFAULT_AGENT_REQUEST_TIMEOUT
+
+
+class _AgentHTTPClient:
+    """Apply E2B-style request and stream timeouts to direct Agent calls."""
+
+    _REQUEST_TIMEOUT_HEADER = "x-conch-sdk-request-timeout"
+    _PROCESS_STREAM_HEADER = "x-conch-sdk-process-stream"
+    _MISSING_TIMEOUT = object()
+
+    @classmethod
+    def _headers(cls, headers):
+        copied = dict(headers or {})
+        raw_timeout = copied.pop(cls._REQUEST_TIMEOUT_HEADER, cls._MISSING_TIMEOUT)
+        process_stream = copied.pop(cls._PROCESS_STREAM_HEADER, None) == "1"
+        timeout = None if raw_timeout is cls._MISSING_TIMEOUT else float(raw_timeout)
+        return copied, _resolve_request_timeout(timeout), process_stream
+
+    @staticmethod
+    def _client(connect_timeout: Optional[float], read_timeout: Optional[float]):
+        transport = SyncHTTPTransport(
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+        return SyncClient(transport), transport
+
+    def get(self, url, headers=None, *, timeout=None, params=None):
+        headers, request_timeout, _ = self._headers(headers)
+        client, transport = self._client(request_timeout, request_timeout)
+        try:
+            return client.get(url, headers, timeout=request_timeout, params=params)
+        finally:
+            transport.close()
+
+    def post(self, url, headers=None, content=None, *, timeout=None, params=None):
+        headers, request_timeout, _ = self._headers(headers)
+        client, transport = self._client(request_timeout, request_timeout)
+        try:
+            return client.post(url, headers, content, timeout=request_timeout, params=params)
+        finally:
+            transport.close()
+
+    @contextmanager
+    def stream(self, method, url, headers=None, content=None, *, timeout=None, params=None):
+        headers, request_timeout, process_stream = self._headers(headers)
+        read_timeout = timeout if process_stream else request_timeout
+        stream_timeout = None if process_stream else request_timeout
+        client, transport = self._client(request_timeout, read_timeout)
+        try:
+            with client.stream(method, url, headers, content, timeout=stream_timeout, params=params) as response:
+                yield response
+        finally:
+            transport.close()
+
+    def close(self):
+        # Transports are scoped to individual requests and closed by each
+        # request method; keep this method for ConnectRPC client cleanup.
+        return None
 
 
 class AgentClient:
@@ -44,10 +115,14 @@ class AgentClient:
         self.token = token
         self.address = f"{host}:{port}"
         self.base_url = self._build_base_url(host, port)
-        self.session = requests.Session()
         codec = google_protobuf_binary_codec()
-        self.process_client = agent_connect.ProcessServiceClientSync(self.base_url, codec=codec)
-        self.file_client = agent_connect.FileServiceClientSync(self.base_url, codec=codec)
+        self._rpc_http_client = _AgentHTTPClient()
+        self.process_client = agent_connect.ProcessServiceClientSync(
+            self.base_url, codec=codec, http_client=self._rpc_http_client
+        )
+        self.file_client = agent_connect.FileServiceClientSync(
+            self.base_url, codec=codec, http_client=self._rpc_http_client
+        )
 
     @staticmethod
     def _build_base_url(host: str, port: int) -> str:
@@ -63,8 +138,14 @@ class AgentClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    def health_check(self) -> Dict[str, Any]:
-        response = self.session.get(self._url("/health"))
+    def health_check(self, request_timeout: Optional[float] = None) -> Dict[str, Any]:
+        # Do not reuse a direct Agent connection after its sandbox disappears.
+        with requests.Session() as session:
+            response = session.get(
+                self._url("/health"),
+                timeout=_resolve_request_timeout(request_timeout),
+                headers={"Connection": "close"},
+            )
         if response.status_code >= 400:
             raise RuntimeError(self._http_error(response))
         return response.json() if response.content else {"status": "OK", "message": "OK"}
@@ -81,6 +162,7 @@ class AgentClient:
         pty: Optional[Dict[str, int]] = None,
         stdin: Optional[Union[str, bytes]] = None,
         timeout_ms: Optional[int] = None,
+        request_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -93,7 +175,10 @@ class AgentClient:
             pty=pty,
             stdin=stdin,
         )
-        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
+        raw_events = self._rpc_call(
+            self.process_client.start_process, request, timeout_ms=timeout_ms,
+            request_timeout=request_timeout, process_stream=True,
+        )
         events = self._decode_process_events(self._rpc_iter(raw_events))
         if background:
             return self._start_background_process_response(request, events)
@@ -111,6 +196,7 @@ class AgentClient:
         pty: Optional[Dict[str, int]] = None,
         stdin: Optional[Union[str, bytes]] = None,
         timeout_ms: Optional[int] = None,
+        request_timeout: Optional[float] = None,
     ) -> Iterator[Dict[str, Any]]:
         request = self._build_start_process_request(
             cmd=cmd,
@@ -123,7 +209,10 @@ class AgentClient:
             pty=pty,
             stdin=stdin,
         )
-        raw_events = self._rpc_call(self.process_client.start_process, request, timeout_ms=timeout_ms)
+        raw_events = self._rpc_call(
+            self.process_client.start_process, request, timeout_ms=timeout_ms,
+            request_timeout=request_timeout, process_stream=True,
+        )
         yield from self._decode_process_events(self._rpc_iter(raw_events))
 
     def _build_start_process_request(
@@ -158,35 +247,39 @@ class AgentClient:
         return request
 
     def connect_process(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
-        tag: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        tag: Optional[str] = None, request_timeout: Optional[float] = None) -> Iterator[Dict[str, Any]]:
         selector = self._process_selector(process, pid=pid, tag=tag)
         request = agent_pb2.ConnectProcessRequest(process=selector)
-        raw_events = self._rpc_call(self.process_client.connect, request)
+        raw_events = self._rpc_call(
+            self.process_client.connect, request, request_timeout=request_timeout, process_stream=True
+        )
         yield from self._decode_process_events(self._rpc_iter(raw_events))
 
-    def list_processes(self) -> List[Dict[str, Any]]:
-        response = self._rpc_call(self.process_client.list, agent_pb2.ListProcessesRequest())
+    def list_processes(self, request_timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        response = self._rpc_call(
+            self.process_client.list, agent_pb2.ListProcessesRequest(), request_timeout=request_timeout
+        )
         return [self._process_info_to_dict(process) for process in response.processes]
 
     def send_signal(self, process: Optional[Dict[str, Any]] = None, *, pid: Optional[int] = None,
-                    tag: Optional[str] = None, signal: int = 15) -> bool:
+                    tag: Optional[str] = None, signal: int = 15,
+                    request_timeout: Optional[float] = None) -> bool:
         selector = self._process_selector(process, pid=pid, tag=tag)
         request = agent_pb2.SendSignalRequest(process=selector, signal=signal)
         try:
-            self.process_client.send_signal(request, headers=self._headers())
-        except ConnectError as exc:
-            if exc.code == Code.NOT_FOUND:
-                return False
-            raise handle_rpc_error(exc) from None
+            self._rpc_call(self.process_client.send_signal, request, request_timeout=request_timeout)
+        except NotFoundError:
+            return False
         return True
 
-    def post_files(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def post_files(self, files: List[Dict[str, Any]], request_timeout: Optional[float] = None) -> Dict[str, Any]:
         uploaded_count = 0
         entries = []
         for file_spec in files:
             response = self._rpc_call(
                 self.file_client.post_file_stream,
                 self._iter_file_chunk_messages(file_spec),
+                request_timeout=request_timeout,
             )
             uploaded_count += response.uploaded_count
             entries.extend(self._write_info_to_dict(entry) for entry in getattr(response, "entries", []))
@@ -197,7 +290,7 @@ class AgentClient:
             "message": f"uploaded {uploaded_count} files",
         }
 
-    def get_file(self, remote_path: str, local_path: str) -> Dict[str, Any]:
+    def get_file(self, remote_path: str, local_path: str, request_timeout: Optional[float] = None) -> Dict[str, Any]:
         local_dir = os.path.dirname(local_path) or "."
         os.makedirs(local_dir, exist_ok=True)
         try:
@@ -206,7 +299,7 @@ class AgentClient:
             target_mode = None
         size = 0
         request = agent_pb2.GetFileRequest(filepath=remote_path)
-        chunks = self._rpc_call(self.file_client.get_file_stream, request)
+        chunks = self._rpc_call(self.file_client.get_file_stream, request, request_timeout=request_timeout)
         temp_path = None
         committed = False
         try:
@@ -227,23 +320,26 @@ class AgentClient:
                     pass
         return {"status": self.STATUS_SUCCESS, "size": size, "message": "OK"}
 
-    def stream_file(self, remote_path: str) -> Iterator[bytes]:
+    def stream_file(self, remote_path: str, request_timeout: Optional[float] = None) -> Iterator[bytes]:
         request = agent_pb2.GetFileRequest(filepath=remote_path)
-        chunks = self._rpc_call(self.file_client.get_file_stream, request)
+        chunks = self._rpc_call(self.file_client.get_file_stream, request, request_timeout=request_timeout)
         for chunk in self._rpc_iter(chunks):
             yield chunk.content
 
-    def read_file(self, remote_path: str) -> bytes:
-        return b"".join(self.stream_file(remote_path))
+    def read_file(self, remote_path: str, request_timeout: Optional[float] = None) -> bytes:
+        return b"".join(self.stream_file(remote_path, request_timeout=request_timeout))
 
-    def get_files(self, mappings: List[Dict[str, str]]) -> Dict[str, Any]:
+    def get_files(self, mappings: List[Dict[str, str]], request_timeout: Optional[float] = None) -> Dict[str, Any]:
         downloaded = 0
         failed = []
         for item in mappings:
             if "remote" not in item or "local" not in item:
                 raise InvalidArgumentError("invalid file mapping, need 'remote' and 'local': " + str(item))
             try:
-                self.get_file(item["remote"], item["local"])
+                if request_timeout is None:
+                    self.get_file(item["remote"], item["local"])
+                else:
+                    self.get_file(item["remote"], item["local"], request_timeout=request_timeout)
                 downloaded += 1
             except OSError as exc:
                 failed.append({"remote": item["remote"], "local": item["local"], "error": str(exc)})
@@ -255,19 +351,19 @@ class AgentClient:
             "message": f"Downloaded {downloaded}, failed {len(failed)}",
         }
 
-    def list_files(self, path: str, depth: int = 1) -> List[Dict[str, Any]]:
+    def list_files(self, path: str, depth: int = 1, request_timeout: Optional[float] = None) -> List[Dict[str, Any]]:
         request = agent_pb2.ListFilesRequest(path=path, depth=depth)
-        response = self._rpc_call(self.file_client.list_files, request)
+        response = self._rpc_call(self.file_client.list_files, request, request_timeout=request_timeout)
         return [self._file_entry_to_dict(entry) for entry in response.entries]
 
-    def search_files(self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def search_files(self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None,
+                     request_timeout: Optional[float] = None) -> List[Dict[str, Any]]:
         request = agent_pb2.SearchFilesRequest(path=path, pattern=pattern)
         request.exclude_patterns.extend(exclude_patterns or [])
-        response = self._rpc_call(self.file_client.search_files, request)
+        response = self._rpc_call(self.file_client.search_files, request, request_timeout=request_timeout)
         return [self._file_entry_to_dict(entry) for entry in response.entries]
 
     def close(self):
-        self.session.close()
         self.process_client.close()
         self.file_client.close()
 
@@ -282,11 +378,22 @@ class AgentClient:
         body_text = response.text.strip()
         return f"HTTP {response.status_code}: {body_text}" if body_text else f"HTTP {response.status_code}"
 
-    def _rpc_call(self, method, request, timeout_ms: Optional[int] = None):
+    def _rpc_call(
+        self,
+        method,
+        request,
+        timeout_ms: Optional[int] = None,
+        request_timeout: Optional[float] = None,
+        process_stream: bool = False,
+    ):
         try:
             if timeout_ms is not None and timeout_ms < 0:
                 raise InvalidArgumentError("timeout_ms must not be negative")
             headers = self._headers()
+            if request_timeout is not None:
+                headers[_AgentHTTPClient._REQUEST_TIMEOUT_HEADER] = str(request_timeout)
+            if process_stream:
+                headers[_AgentHTTPClient._PROCESS_STREAM_HEADER] = "1"
             # Connect applies this deadline to its HTTP transport and emits the
             # corresponding protocol timeout header.
             if timeout_ms:

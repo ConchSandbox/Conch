@@ -394,8 +394,8 @@ class CommandHandle:
             )
         return self._result
 
-    def kill(self, signal: int = 15) -> bool:
-        return self._sandbox.client.send_signal(pid=self.pid, tag=self.tag, signal=signal)
+    def kill(self, signal: int = 15, request_timeout: Optional[float] = None) -> bool:
+        return self._sandbox.client.send_signal(pid=self.pid, tag=self.tag, signal=signal, request_timeout=request_timeout)
 
 
 class CommandManager:
@@ -416,6 +416,7 @@ class CommandManager:
             timeout: Optional[float] = None,
             on_stdout: Optional[OutputHandler] = None,
             on_stderr: Optional[OutputHandler] = None,
+            request_timeout: Optional[float] = None,
     ):
         if background and (on_stdout is not None or on_stderr is not None):
             raise InvalidArgumentError("callbacks are only supported by foreground run() or CommandHandle.wait()")
@@ -435,6 +436,7 @@ class CommandManager:
                 pty=pty,
                 stdin=stdin,
                 timeout_ms=timeout_ms,
+                request_timeout=request_timeout,
             )
             process = response.get("process")
             if not process:
@@ -453,6 +455,7 @@ class CommandManager:
                 pty=pty,
                 stdin=stdin,
                 timeout_ms=timeout_ms,
+                request_timeout=request_timeout,
             )
             try:
                 first_event = ProcessEvent(next(events))
@@ -492,6 +495,7 @@ class CommandManager:
             pty=pty,
             stdin=stdin,
             timeout_ms=timeout_ms,
+            request_timeout=request_timeout,
         )
         result = CommandResult(response)
         if result.exit_code != 0:
@@ -503,10 +507,11 @@ class CommandManager:
             )
         return result
 
-    def connect(self, pid: Optional[int] = None, tag: Optional[str] = None) -> CommandHandle:
+    def connect(self, pid: Optional[int] = None, tag: Optional[str] = None,
+                request_timeout: Optional[float] = None) -> CommandHandle:
         if pid is None and not tag:
             raise InvalidArgumentError("process pid or tag is required")
-        events = iter(self._sandbox.client.connect_process(pid=pid, tag=tag))
+        events = iter(self._sandbox.client.connect_process(pid=pid, tag=tag, request_timeout=request_timeout))
         try:
             start_event = ProcessEvent(next(events))
         except StopIteration as exc:
@@ -519,24 +524,25 @@ class CommandManager:
         }
         return CommandHandle(self._sandbox, process, events=events)
 
-    def list(self) -> List[ProcessInfo]:
-        return [ProcessInfo.from_dict(process) for process in self._sandbox.client.list_processes()]
+    def list(self, request_timeout: Optional[float] = None) -> List[ProcessInfo]:
+        return [ProcessInfo.from_dict(process) for process in self._sandbox.client.list_processes(request_timeout=request_timeout)]
 
-    def kill(self, pid: Optional[int] = None, tag: Optional[str] = None, signal: int = 15) -> bool:
-        return self._sandbox.client.send_signal(pid=pid, tag=tag, signal=signal)
+    def kill(self, pid: Optional[int] = None, tag: Optional[str] = None, signal: int = 15,
+             request_timeout: Optional[float] = None) -> bool:
+        return self._sandbox.client.send_signal(pid=pid, tag=tag, signal=signal, request_timeout=request_timeout)
 
 
 class FilesManager:
     def __init__(self, sandbox: "Sandbox"):
         self._sandbox = sandbox
 
-    def write(self, path: str, data: Union[str, bytes, IO]) -> WriteInfo:
-        result = self.write_files([{"path": path, "data": data}])
+    def write(self, path: str, data: Union[str, bytes, IO], request_timeout: Optional[float] = None) -> WriteInfo:
+        result = self.write_files([{"path": path, "data": data}], request_timeout=request_timeout)
         if len(result) != 1:
             raise RuntimeError("Received unexpected response from write operation")
         return result[0]
 
-    def write_files(self, files: List[WriteEntry]) -> List[WriteInfo]:
+    def write_files(self, files: List[WriteEntry], request_timeout: Optional[float] = None) -> List[WriteInfo]:
         if not files:
             return []
         specs: List[Dict[str, Any]] = []
@@ -549,43 +555,44 @@ class FilesManager:
             if not isinstance(data, (str, bytes, TextIOBase, IOBase)):
                 raise InvalidArgumentError(f"unsupported data type for file {item['path']}: {type(data)}")
             specs.append({"filepath": item["path"], "content": data})
-        return self._post_file_specs(specs)
+        return self._post_file_specs(specs, request_timeout=request_timeout)
 
-    def upload(self, *args, **kwargs):
+    def upload(self, *args, request_timeout: Optional[float] = None, **kwargs):
         specs = self._normalize_upload_specs(*args, **kwargs)
-        infos = self._post_file_specs(specs)
+        infos = self._post_file_specs(specs, request_timeout=request_timeout)
         return infos[0] if len(infos) == 1 else infos
 
     @overload
-    def read(self, path: str, format: Literal["text"] = "text") -> str:
+    def read(self, path: str, format: Literal["text"] = "text", request_timeout: Optional[float] = None) -> str:
         ...
 
     @overload
-    def read(self, path: str, format: Literal["bytes"]) -> bytes:
+    def read(self, path: str, format: Literal["bytes"], request_timeout: Optional[float] = None) -> bytes:
         ...
 
     @overload
-    def read(self, path: str, format: Literal["stream"]) -> Iterator[bytes]:
+    def read(self, path: str, format: Literal["stream"], request_timeout: Optional[float] = None) -> Iterator[bytes]:
         ...
 
-    def read(self, path: str, format: Literal["text", "bytes", "stream"] = "text"):
+    def read(self, path: str, format: Literal["text", "bytes", "stream"] = "text", request_timeout: Optional[float] = None):
         if format not in {"text", "bytes", "stream"}:
             raise InvalidArgumentError("format must be one of: text, bytes, stream")
         if format == "stream":
-            return self._sandbox.client.stream_file(path)
-        content = self._sandbox.client.read_file(path)
+            return self._sandbox.client.stream_file(path, request_timeout=request_timeout)
+        content = self._sandbox.client.read_file(path, request_timeout=request_timeout)
         if format == "bytes":
             return content
         return content.decode("utf-8")
 
-    def download(self, remote_path: str, local_path: str) -> Dict[str, Any]:
-        return self._sandbox.client.get_file(remote_path, local_path)
+    def download(self, remote_path: str, local_path: str, request_timeout: Optional[float] = None) -> Dict[str, Any]:
+        return self._sandbox.client.get_file(remote_path, local_path, request_timeout=request_timeout)
 
-    def list(self, path: str, depth: int = 1) -> List[EntryInfo]:
-        return [EntryInfo.from_dict(item) for item in self._sandbox.client.list_files(path, depth=depth)]
+    def list(self, path: str, depth: int = 1, request_timeout: Optional[float] = None) -> List[EntryInfo]:
+        return [EntryInfo.from_dict(item) for item in self._sandbox.client.list_files(path, depth=depth, request_timeout=request_timeout)]
 
-    def search(self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None) -> List[EntryInfo]:
-        return [EntryInfo.from_dict(item) for item in self._sandbox.client.search_files(path, pattern, exclude_patterns=exclude_patterns)]
+    def search(self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None,
+               request_timeout: Optional[float] = None) -> List[EntryInfo]:
+        return [EntryInfo.from_dict(item) for item in self._sandbox.client.search_files(path, pattern, exclude_patterns=exclude_patterns, request_timeout=request_timeout)]
 
     @staticmethod
     def _normalize_upload_specs(*args, **kwargs) -> List[Dict[str, Any]]:
@@ -625,10 +632,13 @@ class FilesManager:
             )
         return files
 
-    def _post_file_specs(self, files: List[Dict[str, Any]]) -> List[WriteInfo]:
+    def _post_file_specs(self, files: List[Dict[str, Any]], request_timeout: Optional[float] = None) -> List[WriteInfo]:
         if not files:
             return []
-        result = self._sandbox.client.post_files(files)
+        if request_timeout is None:
+            result = self._sandbox.client.post_files(files)
+        else:
+            result = self._sandbox.client.post_files(files, request_timeout=request_timeout)
         if result.get("status") != self._sandbox.client.STATUS_SUCCESS:
             message = result.get("error") or result.get("message") or "file upload failed"
             raise RuntimeError(message)
@@ -993,11 +1003,11 @@ class Sandbox:
             template_id=self.template_id,
         )
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self, request_timeout: Optional[float] = None) -> Dict[str, Any]:
         # Check sandbox health status
         client = self.client
         try:
-            return client.health_check()
+            return client.health_check(request_timeout=request_timeout)
         except Exception as e:
             return {
                 STATUS_KEY: "ERROR",
