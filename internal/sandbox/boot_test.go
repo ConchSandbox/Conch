@@ -2,9 +2,12 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 
@@ -32,6 +35,92 @@ func TestBootPreparerReturnsSnapshotRefsFromBackend(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.RuntimeSnapshots, want) {
 		t.Fatalf("runtime snapshot refs = %#v, want %#v", got.RuntimeSnapshots, want)
+	}
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan<- struct{}
+}
+
+func (c observedDoneContext) Done() <-chan struct{} {
+	select {
+	case c.observed <- struct{}{}:
+	default:
+	}
+	return c.Context.Done()
+}
+
+func TestBootPreparerCallerCancellationDoesNotCancelSharedResolution(t *testing.T) {
+	bootDigest := digest.FromString(t.Name()).String()
+	resolverContext := make(chan context.Context, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	preparer := &bootPreparer{
+		resolveContext: context.Background(),
+		resolveTimeout: time.Second,
+		resolveBoot: func(ctx context.Context, gotDigest string) (conchimage.ResolvedBoot, error) {
+			calls.Add(1)
+			select {
+			case resolverContext <- ctx:
+			default:
+			}
+			<-release
+			return resolvedBoot(gotDigest, false, ""), nil
+		},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := preparer.resolveTemplate(requestCtx, bootDigest)
+		done <- err
+	}()
+	sharedCtx := <-resolverContext
+	cancelRequest()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("resolveTemplate() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("canceled caller remained blocked by shared boot resolution")
+	}
+	if err := sharedCtx.Err(); err != nil {
+		t.Fatalf("request cancellation propagated to shared resolver: %v", err)
+	}
+
+	followerWaiting := make(chan struct{}, 1)
+	followerDone := make(chan error, 1)
+	go func() {
+		ctx := observedDoneContext{Context: context.Background(), observed: followerWaiting}
+		_, err := preparer.resolveTemplate(ctx, bootDigest)
+		followerDone <- err
+	}()
+	<-followerWaiting
+	close(release)
+	if err := <-followerDone; err != nil {
+		t.Fatalf("follower resolveTemplate() error = %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("ResolveBoot() calls = %d, want 1", got)
+	}
+}
+
+func TestBootPreparerContainsResolverPanic(t *testing.T) {
+	bootDigest := digest.FromString(t.Name()).String()
+	preparer := &bootPreparer{
+		resolveContext: context.Background(),
+		resolveTimeout: time.Second,
+		resolveBoot: func(context.Context, string) (conchimage.ResolvedBoot, error) {
+			panic("resolver failure")
+		},
+	}
+
+	_, err := preparer.resolveTemplate(context.Background(), bootDigest)
+	if err == nil || !strings.Contains(err.Error(), "boot resolver panicked") {
+		t.Fatalf("resolveTemplate() error = %v, want contained panic", err)
 	}
 }
 
@@ -324,7 +413,7 @@ func resolvedBoot(bootDigest string, resume bool, vmmName string) conchimage.Res
 
 func mustBootPreparer(t *testing.T, snapshots SnapshotBackend, resolver *fakeBootResolver) BootPreparer {
 	t.Helper()
-	preparer, err := newBootPreparer(snapshots, resolver.ResolveBoot)
+	preparer, err := newBootPreparer(context.Background(), snapshots, time.Minute, resolver.ResolveBoot)
 	if err != nil {
 		t.Fatalf("NewBootPreparer() error = %v", err)
 	}
