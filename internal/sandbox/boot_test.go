@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -10,6 +11,29 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
 )
+
+func TestBootPreparerReturnsSnapshotRefsFromBackend(t *testing.T) {
+	bootDigest := digest.FromString(t.Name()).String()
+	want := []snapshot.RuntimeSnapshotRef{
+		{Snapshotter: "erofs", Role: "rootfs", Key: "sandbox-a"},
+		{Snapshotter: "erofs", Role: "vm", Key: "view-vm-sandbox-a"},
+	}
+	snapshots := &fakeSnapshotBackend{runtimeRefs: want}
+	got, err := mustBootPreparer(t, snapshots, &fakeBootResolver{
+		result: resolvedBoot(bootDigest, false, ""),
+	}).Prepare(context.Background(), PrepareBootRequest{
+		TemplateID: bootDigest,
+		SandboxID:  "sandbox-a",
+		VMMName:    "stratovirt",
+		RAMMB:      512,
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if !reflect.DeepEqual(got.RuntimeSnapshots, want) {
+		t.Fatalf("runtime snapshot refs = %#v, want %#v", got.RuntimeSnapshots, want)
+	}
+}
 
 func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T) {
 	ctx := context.Background()
@@ -244,9 +268,10 @@ type bootLayoutCall struct {
 // successful prepare tests prove boot identity is resolved from immutable
 // Template and Boot Index data only.
 type fakeSnapshotBackend struct {
-	creates  []bootLayoutCall
-	restores []bootLayoutCall
-	releases []bootLayoutCall
+	creates     []bootLayoutCall
+	restores    []bootLayoutCall
+	releases    []bootLayoutCall
+	runtimeRefs []snapshot.RuntimeSnapshotRef
 }
 
 func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
@@ -256,7 +281,9 @@ func (f *fakeSnapshotBackend) CreateBootLayout(_ context.Context, key string, re
 		memoryLayout: req.MemoryLayout,
 		memorySizeMB: req.MemorySizeMB,
 	})
-	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
+	layout := fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout)
+	layout.RuntimeSnapshots = append([]snapshot.RuntimeSnapshotRef(nil), f.runtimeRefs...)
+	return layout, nil
 }
 
 func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error) {
@@ -266,7 +293,9 @@ func (f *fakeSnapshotBackend) RestoreBootLayout(_ context.Context, key string, r
 		memoryLayout: req.MemoryLayout,
 		memorySizeMB: req.MemorySizeMB,
 	})
-	return fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout), nil
+	layout := fakeBootLayout(key, req.MemorySizeMB, req.MemoryLayout)
+	layout.RuntimeSnapshots = append([]snapshot.RuntimeSnapshotRef(nil), f.runtimeRefs...)
+	return layout, nil
 }
 
 func (f *fakeSnapshotBackend) ReleaseBootLayout(_ context.Context, key string) error {

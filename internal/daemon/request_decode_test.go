@@ -196,6 +196,11 @@ func TestSandboxCreateRejectsUnknownFieldsWithoutSideEffects(t *testing.T) {
 			body:         `{"template_name":"` + testTemplateNameExplicit + `","sandbox_id":"must-not-exist","volumeMounts":[{"source":"/tmp/data","path":"/data","read_only":true}]}`,
 			unknownField: "read_only",
 		},
+		{
+			name:         "removed lease ID",
+			body:         `{"template_name":"` + testTemplateNameExplicit + `","sandbox_id":"must-not-exist","lease_id":"legacy-lease"}`,
+			unknownField: "lease_id",
+		},
 	}
 
 	for _, tt := range tests {

@@ -8,12 +8,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
-func TestRuntimeLeaseIDIsFixed(t *testing.T) {
-	if got := RuntimeLeaseID(); got != "conch.runtime" {
-		t.Fatalf("RuntimeLeaseID() = %q, want %q", got, "conch.runtime")
-	}
-}
-
 func TestWithNamespaceUsesConch(t *testing.T) {
 	ctx, err := (*Client)(nil).WithNamespace(context.Background())
 	if err == nil {

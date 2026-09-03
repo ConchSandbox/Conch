@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containerd/containerd/v2/core/leases"
-
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/plugin"
@@ -33,48 +31,11 @@ func NewInMemory(ic *plugin.InitContext, opts ...containerd.Opt) (*Client, error
 	return &Client{Client: cli}, nil
 }
 
-func RuntimeLeaseID() string {
-	return "conch.runtime"
-}
-
 func (c *Client) WithNamespace(ctx context.Context) (context.Context, error) {
 	if c == nil || c.Client == nil {
 		return nil, fmt.Errorf("containerd client is nil")
 	}
 	return NewNamespaceContext(ctx), nil
-}
-
-func (c *Client) WithRuntimeLease(ctx context.Context, leaseID string) (context.Context, string, error) {
-	if c == nil || c.Client == nil {
-		return nil, "", fmt.Errorf("containerd client is nil")
-	}
-	if leaseID == "" {
-		leaseID = RuntimeLeaseID()
-	}
-	namespaceCtx := NewNamespaceContext(ctx)
-	if err := c.ensureLease(namespaceCtx, leaseID, map[string]string{
-		"io.conch.lease.kind": "runtime",
-	}); err != nil {
-		return nil, "", err
-	}
-	return leases.WithLease(namespaceCtx, leaseID), leaseID, nil
-}
-
-func (c *Client) ensureLease(ctx context.Context, leaseID string, labels map[string]string) error {
-	items, err := c.LeasesService().List(ctx)
-	if err != nil {
-		return fmt.Errorf("list leases: %w", err)
-	}
-	for _, item := range items {
-		if item.ID == leaseID {
-			return nil
-		}
-	}
-	_, err = c.LeasesService().Create(ctx, leases.WithID(leaseID), leases.WithLabels(labels))
-	if err != nil {
-		return fmt.Errorf("create runtime lease %s: %w", leaseID, err)
-	}
-	return nil
 }
 
 // Close closes the containerd client connection.

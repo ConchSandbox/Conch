@@ -50,8 +50,9 @@ type PrepareBootRequest struct {
 }
 
 type PreparedBoot struct {
-	Spec    BootSpec
-	Runtime BootRuntime
+	Spec             BootSpec
+	Runtime          BootRuntime
+	RuntimeSnapshots []SnapshotRef
 }
 
 type ReleaseBootRequest struct {
@@ -177,7 +178,8 @@ func (p *bootPreparer) prepareResolvedBoot(
 		runtimeMemKey = snapshot.MemKeyFromRootfs(key)
 	}
 	return PreparedBoot{
-		Spec: bootSpecFromLayout(layout),
+		Spec:             bootSpecFromLayout(layout),
+		RuntimeSnapshots: append([]SnapshotRef(nil), layout.RuntimeSnapshots...),
 		Runtime: BootRuntime{
 			BootIndexDigest: resolved.BootIndexDigest,
 			CapturedVMMName: resolved.VMMName,

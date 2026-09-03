@@ -82,7 +82,6 @@ type sandboxCreateRequest struct {
 	TemplateID   string                           `json:"template_id"`
 	VMMName      string                           `json:"vmm_name"`
 	SandboxID    string                           `json:"sandbox_id"`
-	LeaseID      string                           `json:"lease_id,omitempty"`
 	VCPUNum      int64                            `json:"vcpu_num"`
 	VCPUMax      int64                            `json:"vcpu_max"`
 	RAMMB        int64                            `json:"ram_mb"`

@@ -49,7 +49,6 @@ const (
 
 type SandboxCreateOptions struct {
 	SandboxID    string
-	LeaseID      string
 	TemplateName string
 	TemplateID   string
 	VMMName      string

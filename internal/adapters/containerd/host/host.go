@@ -20,6 +20,7 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdsandbox "github.com/openeuler/Conch/internal/adapters/containerd/sandbox"
 	containerdtemplate "github.com/openeuler/Conch/internal/adapters/containerd/template"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
@@ -51,6 +52,7 @@ type Host struct {
 	client         *containerdclient.Client
 	snapshotServer *conchsnapshot.Server
 	templateStore  conchtemplate.Store
+	sandboxStore   conchsandbox.Store
 	sandboxManager *conchsandbox.Manager
 	cancel         context.CancelFunc
 	once           sync.Once
@@ -66,6 +68,10 @@ func (h *Host) SnapshotServer() *conchsnapshot.Server {
 
 func (h *Host) TemplateStore() conchtemplate.Store {
 	return h.templateStore
+}
+
+func (h *Host) SandboxStore() conchsandbox.Store {
+	return h.sandboxStore
 }
 
 func (h *Host) SandboxManager() *conchsandbox.Manager {
@@ -182,6 +188,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	host.templateStore = containerdtemplate.NewStore(inst.client)
+	host.sandboxStore = containerdsandbox.NewStore(inst.client.SandboxStore())
 
 	if cfg.Sandbox != nil {
 		host.sandboxManager, err = conchsandbox.New(

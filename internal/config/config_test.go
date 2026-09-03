@@ -176,9 +176,6 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Sandbox.DefaultSpec.RamMB != 2048 {
 		t.Errorf("LoadConfig().Sandbox.DefaultSpec.RamMB = %d, want %d", cfg.Sandbox.DefaultSpec.RamMB, 2048)
 	}
-	if cfg.StatePath() != "/tmp/conch-state/state.db" {
-		t.Errorf("LoadConfig().StatePath() = %q, want /tmp/conch-state/state.db", cfg.StatePath())
-	}
 }
 
 func TestValidateConfigTemplateSelector(t *testing.T) {
@@ -489,8 +486,8 @@ func TestDefaultConfigRuntimePaths(t *testing.T) {
 	if cfg.ContainerdRootDir() != "/var/lib/conch/containerd" || cfg.ContainerdStateDir() != "/var/run/conch/containerd" {
 		t.Errorf("unexpected containerd paths: root=%q state=%q", cfg.ContainerdRootDir(), cfg.ContainerdStateDir())
 	}
-	if cfg.VirtiofsRuntimeDir() != "/var/run/conch/sandboxes" || cfg.StatePath() != "/var/lib/conch/state.db" {
-		t.Errorf("unexpected state paths: virtiofs=%q store=%q", cfg.VirtiofsRuntimeDir(), cfg.StatePath())
+	if cfg.VirtiofsRuntimeDir() != "/var/run/conch/sandboxes" {
+		t.Errorf("unexpected virtiofs runtime path: %q", cfg.VirtiofsRuntimeDir())
 	}
 	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/usr/bin/stratovirt" {
 		t.Errorf("DefaultConfig().Sandbox.Stratovirt = %#v, want /usr/bin/stratovirt", cfg.Sandbox.Stratovirt)

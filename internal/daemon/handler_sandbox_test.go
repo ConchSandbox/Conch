@@ -10,7 +10,6 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openeuler/Conch/internal/conchruntime"
-	"github.com/openeuler/Conch/internal/daemon/state"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -96,37 +95,41 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 }
 
 func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
-	store, err := state.OpenBolt(t.TempDir() + "/state.db")
-	if err != nil {
-		t.Fatalf("OpenBolt() error = %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := newMemorySandboxStore()
 
-	ids := []string{"sandbox-a", "sandbox-b"}
-	for _, id := range ids {
-		if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-			SandboxID:                id,
+	records := []sandbox.Record{
+		{
+			ID:                       "sandbox-ready",
+			State:                    sandbox.StateReady,
 			CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		}); err != nil {
-			t.Fatalf("seed sandbox %s: %v", id, err)
+		},
+		{
+			ID:               "sandbox-creating",
+			State:            sandbox.StateCreating,
+			SourceTemplateID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	}
+	for _, record := range records {
+		if _, err := store.Create(context.Background(), record); err != nil {
+			t.Fatalf("seed sandbox %s: %v", record.ID, err)
 		}
 	}
 
 	sandboxOps := &fakeSandboxOps{}
 	server := &Daemon{
-		stateStore:     store,
+		sandboxStore:   store,
 		runtimeService: conchruntime.New(sandboxOps, nil, store),
 	}
 
 	if err := server.removeAllSandboxes(); err != nil {
 		t.Fatalf("removeAllSandboxes() error = %v", err)
 	}
-	if len(sandboxOps.deleteReqs) != len(ids) {
-		t.Fatalf("delete requests = %d, want %d", len(sandboxOps.deleteReqs), len(ids))
+	if len(sandboxOps.deleteReqs) != len(records) {
+		t.Fatalf("delete requests = %d, want %d", len(sandboxOps.deleteReqs), len(records))
 	}
-	remaining, err := store.ListSandboxes(context.Background())
+	remaining, err := store.List(context.Background(), sandbox.Filter{})
 	if err != nil {
-		t.Fatalf("ListSandboxes() error = %v", err)
+		t.Fatalf("List() error = %v", err)
 	}
 	if len(remaining) != 0 {
 		t.Fatalf("remaining sandbox records = %#v, want empty", remaining)
@@ -221,16 +224,13 @@ func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
 }
 
 func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
-	store, err := state.OpenBolt(t.TempDir() + "/state.db")
-	if err != nil {
-		t.Fatalf("OpenBolt() error = %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
-		SandboxID:                "sandbox-1",
+	store := newMemorySandboxStore()
+	if _, err := store.Create(context.Background(), sandbox.Record{
+		ID:                       "sandbox-1",
+		State:                    sandbox.StateReady,
 		CheckpointHeadTemplateID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}); err != nil {
-		t.Fatalf("UpsertSandbox() seed error = %v", err)
+		t.Fatalf("Create() seed error = %v", err)
 	}
 
 	runtimeService := conchruntime.New(&fakeSandboxOps{}, nil, store)
@@ -245,11 +245,7 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 }
 
 func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
-	store, err := state.OpenBolt(t.TempDir() + "/state.db")
-	if err != nil {
-		t.Fatalf("OpenBolt() error = %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := newMemorySandboxStore()
 
 	runtimeService := conchruntime.New(nil, nil, store)
 	runtimeService.Templates = missingTemplateStore{}
