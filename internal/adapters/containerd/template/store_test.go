@@ -105,8 +105,8 @@ func TestStoreCRUDUsesNamedImageRecord(t *testing.T) {
 	if err := store.Delete(ctx, name); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	if err := store.Delete(ctx, name); err != nil {
-		t.Fatalf("idempotent Delete() error = %v", err)
+	if err := store.Delete(ctx, name); !errors.Is(err, conchtemplate.ErrNotFound) {
+		t.Fatalf("second Delete() error = %v, want ErrNotFound", err)
 	}
 	if _, err := store.Get(ctx, name); !errors.Is(err, conchtemplate.ErrNotFound) {
 		t.Fatalf("Get() after Delete error = %v, want ErrNotFound", err)

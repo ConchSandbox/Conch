@@ -98,6 +98,9 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Daemon) {
 }
 
 func New(cfg *config.Config) (*Daemon, error) {
+	if err := ensureProcessTempDir(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Daemon{
@@ -206,6 +209,14 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger.Info("Server initialized successfully")
 	return s, nil
+}
+
+func ensureProcessTempDir() error {
+	tmpDir := os.TempDir()
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return fmt.Errorf("create process temp directory %s: %w", tmpDir, err)
+	}
+	return nil
 }
 
 func (s *Daemon) routes() {

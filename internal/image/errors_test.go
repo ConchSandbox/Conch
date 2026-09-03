@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
+	containerdreference "github.com/containerd/containerd/v2/pkg/reference"
 	"github.com/containerd/errdefs"
 	"github.com/openeuler/Conch/internal/apperror"
 )
@@ -61,6 +63,31 @@ func TestTranslateRegistryErrorClassifiesResolverNotFound(t *testing.T) {
 	}
 	if !errors.Is(got, errdefs.ErrNotFound) {
 		t.Fatal("resolver cause was not retained")
+	}
+}
+
+func TestTranslateRegistryErrorClassifiesInvalidReference(t *testing.T) {
+	resolver := docker.NewResolver(docker.ResolverOptions{})
+	for _, tc := range []struct {
+		reference string
+		cause     error
+	}{
+		{reference: "12345", cause: containerdreference.ErrObjectRequired},
+		{reference: "registry.example/team/image", cause: containerdreference.ErrObjectRequired},
+		{reference: "https://registry.example/team/image:latest", cause: containerdreference.ErrInvalid},
+		{reference: "/team/image:latest", cause: containerdreference.ErrHostnameRequired},
+	} {
+		_, _, cause := resolver.Resolve(context.Background(), tc.reference)
+		if !errors.Is(cause, tc.cause) {
+			t.Fatalf("Resolve(%q) error = %v, want %v", tc.reference, cause, tc.cause)
+		}
+		got := translateRegistryError(cause)
+		if !errors.Is(got, ErrInvalidArgument) {
+			t.Fatalf("error = %v, want %s", got, ErrInvalidArgument.Code())
+		}
+		if !errors.Is(got, tc.cause) {
+			t.Fatalf("error = %v, want cause %v", got, tc.cause)
+		}
 	}
 }
 

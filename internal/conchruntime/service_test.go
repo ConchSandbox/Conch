@@ -600,8 +600,8 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	if err := svc.RemoveTemplate(ctx, t1Name); err != nil {
 		t.Fatalf("RemoveTemplate(t1) error = %v", err)
 	}
-	if err := svc.RemoveTemplate(ctx, t1Name); err != nil {
-		t.Fatalf("RemoveTemplate(t1) second call error = %v", err)
+	if err := svc.RemoveTemplate(ctx, t1Name); !errors.Is(err, conchtemplate.ErrNotFound) {
+		t.Fatalf("RemoveTemplate(t1) second call error = %v, want ErrNotFound", err)
 	}
 	if _, err := svc.Templates.Get(ctx, t1Name); !errors.Is(err, conchtemplate.ErrNotFound) {
 		t.Fatalf("GetTemplate(t1) after removal error = %v, want ErrNotFound", err)

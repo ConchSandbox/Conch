@@ -177,14 +177,17 @@ func TestNewRejectsInvalidYAML(t *testing.T) {
 	}
 }
 
-func TestNewAllowsMissingConfigFile(t *testing.T) {
+func TestNewRejectsMissingExplicitConfigFile(t *testing.T) {
 	configPath := t.TempDir() + "/missing.yaml"
 	c, err := New(Options{ConfigPath: configPath})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+	if err == nil {
+		t.Fatal("New() error = nil")
 	}
-	if c == nil {
-		t.Fatal("New() client = nil")
+	if c != nil {
+		t.Fatalf("New() client = %#v, want nil", c)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("New() error = %v, want os.ErrNotExist", err)
 	}
 }
 
