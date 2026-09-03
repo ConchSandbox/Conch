@@ -76,5 +76,6 @@ Index closure, and returns the current Entry.
 
 ### Delete
 
-`Delete` removes the named image record and is idempotent for an unknown Name.
-Content reclamation is asynchronous and follows normal containerd GC rules.
+`Delete` removes the named image record. It returns `ErrNotFound` when the Name
+does not exist or when the record's target changes concurrently. Content
+reclamation is asynchronous and follows normal containerd GC rules.
