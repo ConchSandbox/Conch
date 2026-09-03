@@ -48,6 +48,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 		"-qmp unix:/tmp/conch-qmp.sock,server,nowait",
 		"-device vhost-vsock-pci,id=vsock0,guest-cid=42",
 		"conch.sandbox_id=sandbox-test",
+		"ipv6.disable=1",
 		"-m 1024M",
 	} {
 		if !strings.Contains(script, want) {

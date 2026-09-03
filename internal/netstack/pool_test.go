@@ -532,3 +532,20 @@ func TestGetAssignsWarmSlot(t *testing.T) {
 		t.Fatal("Get() did not signal refill")
 	}
 }
+
+func TestGetEmptyPoolSignalsRefill(t *testing.T) {
+	p := &Pool{
+		warmSlots:    slotstate.NewQueue[*Slot](1),
+		refillNeeded: make(chan struct{}, 1),
+	}
+
+	_, err := p.Get(context.Background(), "sandbox-a", nil)
+	if !errors.Is(err, errWarmPoolEmpty) {
+		t.Fatalf("Get() error = %v, want %v", err, errWarmPoolEmpty)
+	}
+	select {
+	case <-p.refillNeeded:
+	default:
+		t.Fatal("Get() did not signal refill for an empty pool")
+	}
+}

@@ -115,6 +115,40 @@ func extractCNIDNS(result *types100.Result) (DNSConfig, error) {
 	})
 }
 
+func validateCNIIPv4Only(result *types100.Result) error {
+	if result == nil {
+		return fmt.Errorf("cni returned nil result")
+	}
+	for _, ipConfig := range result.IPs {
+		if ipConfig == nil {
+			continue
+		}
+		if ip := ipConfig.Address.IP; len(ip) > 0 && ip.To4() == nil {
+			return fmt.Errorf("cni returned unsupported IPv6 address %s", ip)
+		}
+		if gateway := ipConfig.Gateway; len(gateway) > 0 && gateway.To4() == nil {
+			return fmt.Errorf("cni returned unsupported IPv6 gateway %s", gateway)
+		}
+	}
+	for _, route := range result.Routes {
+		if route == nil {
+			continue
+		}
+		if destination := route.Dst.IP; len(destination) > 0 && destination.To4() == nil {
+			return fmt.Errorf("cni returned unsupported IPv6 route %s", route.Dst.String())
+		}
+		if gateway := route.GW; len(gateway) > 0 && gateway.To4() == nil {
+			return fmt.Errorf("cni returned unsupported IPv6 route gateway %s", gateway)
+		}
+	}
+	for _, raw := range result.DNS.Nameservers {
+		if nameserver := net.ParseIP(raw); nameserver != nil && nameserver.To4() == nil {
+			return fmt.Errorf("cni returned unsupported IPv6 DNS server %s", raw)
+		}
+	}
+	return nil
+}
+
 // SetupSandboxNetwork performs CNI ADD and extracts the sandbox network result. The caller
 // owns rollback on every error because ADD may have taken effect before failing.
 func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netnsPath string) (CNIResult, error) {
@@ -124,6 +158,9 @@ func (m *CNIManager) SetupSandboxNetwork(ctx context.Context, cniID string, netn
 	result, err := m.backend.Setup(ctx, cniID, netnsPath)
 	if err != nil {
 		return CNIResult{}, fmt.Errorf("failed to setup cni network: %w", err)
+	}
+	if err := validateCNIIPv4Only(result); err != nil {
+		return CNIResult{}, err
 	}
 	cniIP, err := extractCNIIP(result)
 	if err != nil {

@@ -39,7 +39,7 @@ const startScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .PmemArgs }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
---cmdline "console=hvc0 root=/dev/ram0 rw debug conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
+--cmdline "console=hvc0 root=/dev/ram0 rw debug ipv6.disable=1 conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
 --api-socket fd={{ .ApiSocketFd }} \
 --console null \
 --net "tap={{ .TapName }}" \

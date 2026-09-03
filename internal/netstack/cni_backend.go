@@ -8,12 +8,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	cnilibrary "github.com/containernetworking/cni/libcni"
 	"github.com/containernetworking/cni/pkg/invoke"
 	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 )
+
+const cniPluginTimeout = 20 * time.Second
+
+func cniContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, cniPluginTimeout)
+}
 
 type cniNetwork struct {
 	config *cnilibrary.NetworkConfigList
@@ -130,8 +137,11 @@ func loadedBridgeNetwork(config *cnilibrary.NetworkConfigList) (string, string, 
 }
 
 func (b *libCNIBackend) Setup(ctx context.Context, containerID, netnsPath string) (*types100.Result, error) {
+	pluginCtx, cancel := cniContext(ctx)
+	defer cancel()
+
 	network := b.outerNetwork
-	result, err := b.client.AddNetworkList(ctx, network.config, runtimeConf(containerID, netnsPath, network.ifName))
+	result, err := b.client.AddNetworkList(pluginCtx, network.config, runtimeConf(containerID, netnsPath, network.ifName))
 	if err != nil {
 		return nil, fmt.Errorf("add CNI network %q: %w", network.config.Name, err)
 	}
@@ -143,8 +153,11 @@ func (b *libCNIBackend) Setup(ctx context.Context, containerID, netnsPath string
 }
 
 func (b *libCNIBackend) Remove(ctx context.Context, containerID, netnsPath string) error {
+	pluginCtx, cancel := cniContext(ctx)
+	defer cancel()
+
 	network := b.outerNetwork
-	if err := b.client.DelNetworkList(ctx, network.config, runtimeConf(containerID, netnsPath, network.ifName)); err != nil {
+	if err := b.client.DelNetworkList(pluginCtx, network.config, runtimeConf(containerID, netnsPath, network.ifName)); err != nil {
 		return fmt.Errorf("delete CNI network %q: %w", network.config.Name, err)
 	}
 	return nil

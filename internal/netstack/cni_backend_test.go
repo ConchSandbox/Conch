@@ -1,13 +1,43 @@
 package netstack
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	cnilibrary "github.com/containernetworking/cni/libcni"
 )
+
+func TestCNIContextUsesPluginTimeout(t *testing.T) {
+	earliestDeadline := time.Now().Add(cniPluginTimeout)
+	ctx, cancel := cniContext(context.Background())
+	defer cancel()
+	latestDeadline := time.Now().Add(cniPluginTimeout)
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("cniContext() has no deadline")
+	}
+	if deadline.Before(earliestDeadline) || deadline.After(latestDeadline) {
+		t.Fatalf("cniContext() deadline = %v, want between %v and %v", deadline, earliestDeadline, latestDeadline)
+	}
+}
+
+func TestCNIContextPreservesShorterCallerDeadline(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), time.Second)
+	defer parentCancel()
+	parentDeadline, _ := parent.Deadline()
+
+	ctx, cancel := cniContext(parent)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || !deadline.Equal(parentDeadline) {
+		t.Fatalf("cniContext() deadline = %v, want caller deadline %v", deadline, parentDeadline)
+	}
+}
 
 const testBridgeCNIConfig = `{
   "cniVersion": "1.0.0",
