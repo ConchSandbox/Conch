@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	slotstate "github.com/openeuler/Conch/internal/netstack/slot"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -554,6 +555,25 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 		return configureGuestTapNetwork(slot, cniResult.IP)
 	}); err != nil {
 		return fmt.Errorf("failed to setup guest tap network: %w", err)
+	}
+	if err := runInNetNSPath(ctx, netnsPath, func() error {
+		addresses, err := netlink.AddrList(nil, netlink.FAMILY_V6)
+		if err != nil {
+			return err
+		}
+		if len(addresses) != 0 {
+			return fmt.Errorf("network namespace has IPv6 address %s", addresses[0].String())
+		}
+		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		if len(routes) != 0 {
+			return fmt.Errorf("network namespace has IPv6 route %+v", routes[0])
+		}
+		return configureIPv4OnlyCurrentNetworkNamespace()
+	}); err != nil {
+		return fmt.Errorf("enforce IPv4-only network namespace: %w", err)
 	}
 
 	return nil
