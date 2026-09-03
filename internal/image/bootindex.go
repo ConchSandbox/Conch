@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
 	continuityfs "github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
@@ -30,6 +32,32 @@ const (
 	AnnotationVMM          = "io.conch.vmm"
 	AnnotationMemorySizeMB = "io.conch.memory-size-mb"
 )
+
+func withBootIndexLease(ctx context.Context, client *containerdclient.Client, bootIndexDigest string, operation func(context.Context) error) (retErr error) {
+	leaseCtx, done, err := client.WithLease(containerdclient.NewNamespaceContext(ctx))
+	if err != nil {
+		return fmt.Errorf("create Boot Index operation lease: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(
+			containerdclient.NewNamespaceContext(context.WithoutCancel(ctx)),
+			10*time.Second,
+		)
+		defer cancel()
+		if err := done(cleanupCtx); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("delete Boot Index operation lease: %w", err))
+		}
+	}()
+	leaseID, ok := leases.FromContext(leaseCtx)
+	if !ok {
+		return fmt.Errorf("Boot Index operation lease is missing from context")
+	}
+	lease := leases.Lease{ID: leaseID}
+	if err := client.LeasesService().AddResource(leaseCtx, lease, leases.Resource{Type: "content", ID: bootIndexDigest}); err != nil {
+		return fmt.Errorf("retain Boot Index %s: %w", bootIndexDigest, err)
+	}
+	return operation(leaseCtx)
+}
 
 type BootIndexContentOptions struct {
 	RootfsDescriptor  ocispec.Descriptor

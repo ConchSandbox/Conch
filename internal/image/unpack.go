@@ -45,14 +45,16 @@ var componentUnpackLocks = unpackLockSet{locks: make(map[string]*unpackLock)}
 // The Boot Index must be fully available locally before calling: all content
 // (manifests, configs, and layers) must exist in the content store.
 func UnpackBootIndex(ctx context.Context, client *containerdclient.Client, bootIndexDigest string) error {
-	unpackCtx, info, err := inspectBootIndex(ctx, client, bootIndexDigest)
-	if err != nil {
-		return err
-	}
-	if _, err := unpackBootIndexComponents(unpackCtx, client.Client, info); err != nil {
-		return fmt.Errorf("unpack boot index %s: %w", info.BootIndexDigest, err)
-	}
-	return nil
+	return withBootIndexLease(ctx, client, bootIndexDigest, func(operationCtx context.Context) error {
+		unpackCtx, info, err := inspectBootIndex(operationCtx, client, bootIndexDigest)
+		if err != nil {
+			return err
+		}
+		if _, err := unpackBootIndexComponents(unpackCtx, client.Client, info); err != nil {
+			return fmt.Errorf("unpack boot index %s: %w", info.BootIndexDigest, err)
+		}
+		return nil
+	})
 }
 
 func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, info BootIndexInfo) (map[string]string, error) {

@@ -57,21 +57,22 @@ func PushBootIndex(ctx context.Context, client *containerdclient.Client, req Pus
 	if req.RemoteReference == "" {
 		return fmt.Errorf("%w: remote_reference is required", ErrInvalidArgument)
 	}
-	pushCtx := containerdclient.NewNamespaceContext(ctx)
-	desc, _, err := inspectBootIndexByDigest(pushCtx, client.ContentStore(), req.BootIndexDigest)
-	if err != nil {
-		return fmt.Errorf("validate boot index %s before push: %w", req.BootIndexDigest, err)
-	}
-	resolver := docker.NewResolver(docker.ResolverOptions{
-		PlainHTTP: req.PlainHTTP,
-		Credentials: func(string) (string, string, error) {
-			return req.Username, req.Password, nil
-		},
+	return withBootIndexLease(ctx, client, req.BootIndexDigest, func(pushCtx context.Context) error {
+		desc, _, err := inspectBootIndexByDigest(pushCtx, client.ContentStore(), req.BootIndexDigest)
+		if err != nil {
+			return fmt.Errorf("validate boot index %s before push: %w", req.BootIndexDigest, err)
+		}
+		resolver := docker.NewResolver(docker.ResolverOptions{
+			PlainHTTP: req.PlainHTTP,
+			Credentials: func(string) (string, string, error) {
+				return req.Username, req.Password, nil
+			},
+		})
+		if err := client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
+			return translateRegistryError(fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err))
+		}
+		return nil
 	})
-	if err := client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
-		return translateRegistryError(fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err))
-	}
-	return nil
 }
 
 // PublishCheckpointBootIndex packages captured memory and VMM state into OCI
