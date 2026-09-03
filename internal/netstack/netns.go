@@ -29,6 +29,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func configureIPv4OnlyCurrentNetworkNamespace() error {
+	for _, setting := range [][2]string{
+		{"/proc/sys/net/ipv6/conf/all/accept_ra", "0\n"},
+		{"/proc/sys/net/ipv6/conf/all/autoconf", "0\n"},
+		{"/proc/sys/net/ipv6/conf/all/disable_ipv6", "1\n"},
+		{"/proc/sys/net/ipv6/conf/default/accept_ra", "0\n"},
+		{"/proc/sys/net/ipv6/conf/default/autoconf", "0\n"},
+		{"/proc/sys/net/ipv6/conf/default/disable_ipv6", "1\n"},
+	} {
+		if err := os.WriteFile(setting[0], []byte(setting[1]), 0o644); err != nil {
+			return fmt.Errorf("set IPv4-only sysctl %s: %w", setting[0], err)
+		}
+	}
+	return nil
+}
+
 func createNetworkNamespace(slot *Slot) (retErr error) {
 	if slot == nil {
 		return fmt.Errorf("slot is nil")
@@ -82,6 +98,9 @@ func createNetworkNamespace(slot *Slot) (retErr error) {
 		return fmt.Errorf("bind mount network namespace at %s: %w", netnsPath, err)
 	}
 	mounted = true
+	if err := configureIPv4OnlyCurrentNetworkNamespace(); err != nil {
+		return fmt.Errorf("configure IPv4-only network namespace: %w", err)
+	}
 
 	return nil
 }
