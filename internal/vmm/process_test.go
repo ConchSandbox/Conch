@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -185,5 +186,40 @@ func TestWaitForAgentAliveReturnsProcessExitError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exited before conch-init became ready") {
 		t.Fatalf("waitForAgentAlive() error = %q, want early exit context", err.Error())
+	}
+}
+
+func TestProcessReaperRecordsUnexpectedSIGKILL(t *testing.T) {
+	client := &blockingDaemonClient{release: make(chan struct{})}
+	process := &Process{
+		cmd:      exec.Command("sleep", "30"),
+		adapter:  client,
+		exitDone: make(chan struct{}),
+	}
+	if err := process.startCmd(context.Background()); err != nil {
+		t.Fatalf("startCmd() error = %v", err)
+	}
+	t.Cleanup(func() { _ = process.cmd.Process.Kill() })
+
+	if err := process.cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("send SIGKILL: %v", err)
+	}
+	select {
+	case <-process.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for process reaper")
+	}
+
+	err := process.Err()
+	if err == nil {
+		t.Fatal("Process.Err() = nil, want unexpected SIGKILL error")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Process.Err() = %v, want exec.ExitError", err)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("process wait status = %v, want SIGKILL", exitErr.Sys())
 	}
 }

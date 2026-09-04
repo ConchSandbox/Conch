@@ -67,6 +67,36 @@ func TestWaitReadyReturnsContextError(t *testing.T) {
 	}
 }
 
+type completedProcessExit struct {
+	done chan struct{}
+	err  error
+}
+
+func (p completedProcessExit) Done() <-chan struct{} { return p.done }
+func (p completedProcessExit) Err() error            { return p.err }
+
+func TestWaitReadyReturnsVMMExitError(t *testing.T) {
+	processErr := errors.New("exit status 1")
+	done := make(chan struct{})
+	close(done)
+
+	err := WaitReady(context.Background(), ReadyOptions{
+		SandboxID:       "sandbox-exited",
+		AgentToken:      "token",
+		Network:         testGuestNetwork(),
+		VsockSocketPath: t.TempDir() + "/missing.vsock",
+		Retry:           time.Millisecond,
+		Timeout:         time.Second,
+		ProcessExit:     completedProcessExit{done: done, err: processErr},
+	})
+	if !errors.Is(err, processErr) {
+		t.Fatalf("WaitReady() error = %v, want process exit error", err)
+	}
+	if !strings.Contains(err.Error(), "VMM exited before guest readiness") {
+		t.Fatalf("WaitReady() error = %q, want VMM exit context", err.Error())
+	}
+}
+
 func TestWaitReadySendsEnvironmentAndNetwork(t *testing.T) {
 	socketPath := t.TempDir() + "/vsock.sock"
 	listener, err := net.Listen("unix", socketPath)
