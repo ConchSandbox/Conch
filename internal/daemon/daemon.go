@@ -55,14 +55,12 @@ type Daemon struct {
 	volumeManager     *volume.Manager
 	daemonClient      *containerdclient.Client
 	httpServer        *http.Server
-	listener          net.Listener
-	unixSocketPath    string
 	cleanupOnce       sync.Once
 
 	// TODO: need ListCachedBuilds()
 }
 
-func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Daemon) {
+func handleSignals(cancel context.CancelFunc, s *Daemon) {
 	go func() {
 		var sig os.Signal
 		var handledSignals = []os.Signal{
@@ -76,23 +74,15 @@ func handleSignals(ctx context.Context, cancel context.CancelFunc, s *Daemon) {
 
 		signalChannel := make(chan os.Signal, 1)
 		signal.Notify(signalChannel, handledSignals...)
+		// Restore the default disposition once cleanup is done.
+		defer signal.Stop(signalChannel)
 
-		for {
-			select {
-			case <-ctx.Done():
-				ulog.Warn("Context done",
-					ulog.F("error", ctx.Err()),
-				)
-			case sig = <-signalChannel:
-				ulog.Info("Interrupted by signal, process exiting",
-					ulog.F("signal", sig),
-				)
-				cancel()
-				s.Cleanup()
-
-				return
-			}
-		}
+		sig = <-signalChannel
+		ulog.Info("Interrupted by signal, process exiting",
+			ulog.F("signal", sig),
+		)
+		cancel()
+		s.Cleanup()
 	}()
 	return
 }
@@ -107,6 +97,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		router: http.NewServeMux(),
 	}
 	s.routes()
+	s.httpServer = newHTTPServer(s.router)
 
 	logger := ulog.GetLogger()
 
@@ -205,7 +196,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}
 	}
 
-	handleSignals(ctx, cancel, s)
+	handleSignals(cancel, s)
 
 	logger.Info("Server initialized successfully")
 	return s, nil
@@ -251,6 +242,16 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/image/list", s.handleListImage)
 	s.router.HandleFunc("/api/image/remove", s.handleRemoveImage)
 }
+
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
+}
+
 func (s *Daemon) Start(unixSocket string) error {
 	logger := ulog.GetLogger()
 
@@ -273,22 +274,14 @@ func (s *Daemon) Start(unixSocket string) error {
 	}
 	if err := os.Chmod(unixSocket, 0o660); err != nil {
 		_ = ln.Close()
-		_ = os.Remove(unixSocket)
 		return fmt.Errorf("failed to set unix socket permissions: %w", err)
 	}
 
-	s.unixSocketPath = unixSocket
 	logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
 
-	s.listener = ln
-	s.httpServer = &http.Server{
-		Handler:           s.router,
-		ReadHeaderTimeout: serverReadHeaderTimeout,
-		IdleTimeout:       serverIdleTimeout,
-		MaxHeaderBytes:    serverMaxHeaderBytes,
-	}
 	// Listener is bound, so clients can connect before Serve accepts.
 	util.NotifyReady()
+	// Serve refuses to start once Shutdown has run, and closes ln on return.
 	err = s.httpServer.Serve(ln)
 	if err == http.ErrServerClosed {
 		logger.Info("Main server gracefully stopped")
@@ -311,7 +304,7 @@ func (s *Daemon) Shutdown() {
 		// Report deactivating while cleanup runs; TimeoutStopSec still applies.
 		util.NotifyStopping()
 
-		// stop httpServer
+		// Stops a Serve that has not started yet, and unlinks the socket.
 		if s.httpServer != nil {
 			finish := cleanupdiag.Start("daemon.http.shutdown", ulog.F("timeout", shutdownTimeout.String()))
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -322,20 +315,6 @@ func (s *Daemon) Shutdown() {
 				logger.Error("HTTP server shutdown error", ulog.F("error", err))
 			} else {
 				logger.Info("HTTP server gracefully stopped")
-			}
-		}
-
-		if s.unixSocketPath != "" {
-			finish := cleanupdiag.Start("daemon.http.remove_socket", ulog.F("socket", s.unixSocketPath))
-			err := os.Remove(s.unixSocketPath)
-			if err != nil && os.IsNotExist(err) {
-				err = nil
-			}
-			finish(err)
-			if err != nil {
-				logger.Error("Failed to remove unix socket", ulog.F("socket", s.unixSocketPath), ulog.F("error", err))
-			} else {
-				logger.Info("Removed unix socket", ulog.F("socket", s.unixSocketPath))
 			}
 		}
 
