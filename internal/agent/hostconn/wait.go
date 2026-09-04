@@ -33,6 +33,12 @@ type ReadyOptions struct {
 	VsockSocketPath string
 	Retry           time.Duration
 	Timeout         time.Duration
+	ProcessExit     ProcessExit
+}
+
+type ProcessExit interface {
+	Done() <-chan struct{}
+	Err() error
 }
 
 type initConn interface {
@@ -110,8 +116,17 @@ func waitReady(ctx context.Context, opts ReadyOptions, request agentprotocol.Ini
 	defer timer.Stop()
 
 	var lastErr error
+	var processDone <-chan struct{}
+	if opts.ProcessExit != nil {
+		processDone = opts.ProcessExit.Done()
+	}
 	for {
 		select {
+		case <-processDone:
+			if err := opts.ProcessExit.Err(); err != nil {
+				return fmt.Errorf("VMM exited before guest readiness: %w", err)
+			}
+			return fmt.Errorf("VMM exited before guest readiness")
 		case <-timer.C:
 			logger.Error("vsock signal attempts timed out",
 				ulog.F("sandboxId", opts.SandboxID),

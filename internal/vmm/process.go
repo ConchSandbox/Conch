@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/openeuler/Conch/internal/config"
@@ -59,6 +60,7 @@ type Process struct {
 	adapter  vmmAdapter
 	exitDone chan struct{}
 	exitErr  error
+	stopping atomic.Bool
 }
 
 func SandboxVmmSocketPath(sandboxId string) (string, error) {
@@ -166,15 +168,15 @@ func (p *Process) startCmd(
 		waitErr := p.cmd.Wait()
 		if waitErr != nil {
 			var exitErr *exec.ExitError
-			if errors.As(waitErr, &exitErr) {
+			if p.stopping.Load() && errors.As(waitErr, &exitErr) {
 				// Check if process was killed by a signal
-				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() && (status.Signal() == syscall.SIGKILL || status.Signal() == syscall.SIGTERM) {
-					logger.Debug("VMM process killed by signal")
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() && status.Signal() == syscall.SIGTERM {
+					logger.Debug("VMM process stopped by Conch")
 					p.recordExit(nil)
 					return
 				}
 			}
-			errMsg := fmt.Errorf("error waiting for vmm process: %w", waitErr)
+			errMsg := fmt.Errorf("unexpected VMM exit: %w", waitErr)
 			logger.Warn("VMM process error",
 				ulog.F("error", errMsg),
 			)
@@ -288,6 +290,7 @@ func (p *Process) Stop() error {
 		return errors.Join(errs...)
 	default:
 	}
+	p.stopping.Store(true)
 
 	if p.isAPIReady() {
 		if _, err := os.Stat(p.VmmSocketPath); err == nil {
