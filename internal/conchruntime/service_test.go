@@ -615,24 +615,9 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}
 }
 
-func TestRemoveSandboxDeletesRecordWhenCleanupFails(t *testing.T) {
+func TestRemoveSandboxKeepsRecordWhenVMMStopFails(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
-	events := make(chan webhook.Event, 1)
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var event webhook.Event
-		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-			t.Errorf("decode event: %v", err)
-			return
-		}
-		events <- event
-	}))
-	defer receiver.Close()
-	dispatcher := webhook.NewDispatcher()
-	if _, err := dispatcher.Create(runtimeapi.WebhookCreateOptions{Name: "receiver", URL: receiver.URL}); err != nil {
-		t.Fatalf("register webhook: %v", err)
-	}
-
 	record := sandbox.Record{
 		ID:                       "sandbox-1",
 		State:                    sandbox.StateReady,
@@ -642,23 +627,14 @@ func TestRemoveSandboxDeletesRecordWhenCleanupFails(t *testing.T) {
 		t.Fatalf("UpsertSandbox() error = %v", err)
 	}
 
-	wantErr := errors.New("cleanup failed")
+	wantErr := errors.New("VMM stop failed")
 	sandboxOps := &fakeSandboxOps{deleteErr: wantErr}
 	svc := New(sandboxOps, nil, store)
-	svc.WebhookDispatcher = dispatcher
 	if err := svc.RemoveSandbox(ctx, record.ID); !errors.Is(err, wantErr) {
 		t.Fatalf("RemoveSandbox() error = %v, want %v", err, wantErr)
 	}
-	if _, err := store.Get(ctx, record.ID); !errors.Is(err, sandbox.ErrNotFound) {
-		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
-	}
-	select {
-	case event := <-events:
-		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "request" || event.SandboxID != record.ID {
-			t.Fatalf("killed event = %#v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("killed event not delivered after record deletion")
+	if _, err := store.Get(ctx, record.ID); err != nil {
+		t.Fatalf("GetSandbox() error = %v, want record retained", err)
 	}
 }
 
