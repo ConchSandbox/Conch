@@ -17,7 +17,7 @@ import (
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-const SocketDirPerm = 0755
+const SocketDirPerm = 0750
 const unixSocketPathMax = 107
 
 // EnsureWorkSubDir creates a subdirectory under WorkDir and returns its path.
