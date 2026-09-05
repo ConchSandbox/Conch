@@ -269,7 +269,7 @@ func (s *Daemon) Start(unixSocket string) error {
 
 	// First create the parent directory if needed; this requires permission for the socket path.
 	// Then for any existing stale socket it should be removed before start to listen
-	if err := os.MkdirAll(filepath.Dir(unixSocket), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(unixSocket), 0o750); err != nil {
 		return fmt.Errorf("failed to create unix socket directory: %w", err)
 	}
 	if err := os.Remove(unixSocket); err != nil && !os.IsNotExist(err) {
