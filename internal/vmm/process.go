@@ -50,6 +50,7 @@ func SandboxSocketPath(subDir, sandboxId string) (string, error) {
 
 type Process struct {
 	cmd             *exec.Cmd
+	vmmName         string
 	SandboxId       string
 	VmmSocketPath   string
 	VsockSocketPath string
@@ -102,6 +103,7 @@ func NewProcess(
 	}
 
 	p := Process{
+		vmmName:         vmmName,
 		SandboxId:       sandboxId,
 		VsockSocketPath: vmmResourceArgs.VsockSocketPath,
 		VmmSocketPath:   vmmSocketPath,
@@ -144,10 +146,12 @@ func (p *Process) startCmd(
 	ctx context.Context,
 ) error {
 	logger := ulog.GetLogger()
-
-	// TODO: redirect stderr/stdout
-	p.cmd.Stdout = os.Stdout
-	p.cmd.Stderr = os.Stderr
+	if p.cmd.Stdout == nil {
+		p.cmd.Stdout = os.Stdout
+	}
+	if p.cmd.Stderr == nil {
+		p.cmd.Stderr = os.Stderr
+	}
 
 	logger.Debug("Starting VMM process")
 	err := p.cmd.Start()
@@ -162,7 +166,6 @@ func (p *Process) startCmd(
 	p.adapter.AfterProcessStart()
 
 	go func() {
-		// TODO: close fd after redirecting stderr/stdout
 		waitErr := p.cmd.Wait()
 		if waitErr != nil {
 			var exitErr *exec.ExitError
@@ -245,7 +248,9 @@ func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 	}
 	p.markAPIReady()
 
-	err = p.adapter.ResumeVM()
+	if p.vmmName != StratovirtName {
+		err = p.adapter.ResumeVM()
+	}
 	if err != nil {
 		vmmStopErr := p.Stop()
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)

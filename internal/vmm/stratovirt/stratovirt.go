@@ -9,12 +9,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"text/template"
 	"time"
 
+	"github.com/openeuler/Conch/internal/config"
 	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -56,7 +58,7 @@ const startScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VirtioFSDevices }} \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
--disable-seccomp`
+-disable-seccomp > "{{ .LogPath }}" 2>&1`
 
 const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
@@ -73,7 +75,7 @@ const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
 -disable-seccomp \
--incoming file:{{ .SnapfilePath }},mapped=true`
+-incoming file:{{ .SnapfilePath }},mapped=true > "{{ .LogPath }}" 2>&1`
 
 type StartScriptStratovirtArgs struct {
 	NSenterPath     string
@@ -91,6 +93,7 @@ type StartScriptStratovirtArgs struct {
 	SerialSocket    string
 	SnapfilePath    string
 	SandboxId       string
+	LogPath         string
 	VsockCID        uint32
 	PmemDevices     string
 	VirtioFSDevices string
@@ -105,6 +108,7 @@ type StratovirtClient struct {
 	vmmType    int
 	socketPath string
 	vmmBinary  string
+	logDir     string
 }
 
 func NewStratovirtClient(vmmType int, socketPath, vmmBinary string) *StratovirtClient {
@@ -112,6 +116,7 @@ func NewStratovirtClient(vmmType int, socketPath, vmmBinary string) *StratovirtC
 		vmmType:    vmmType,
 		socketPath: socketPath,
 		vmmBinary:  vmmBinary,
+		logDir:     config.StratovirtLogDir,
 	}
 }
 
@@ -172,6 +177,10 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited driv
 
 func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool) (string, error) {
 	logger := ulog.GetLogger()
+	sandboxLogDir := filepath.Join(s.logDir, args.SandboxId)
+	if err := os.MkdirAll(sandboxLogDir, 0o755); err != nil {
+		return "", fmt.Errorf("create Stratovirt log directory: %w", err)
+	}
 	nsenterPath, err := exec.LookPath("nsenter")
 	if err != nil {
 		return "", fmt.Errorf("resolve nsenter binary: %w", err)
@@ -204,6 +213,7 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 		SerialSocket:    s.socketPath + ".serial",
 		SnapfilePath:    args.SnapfilePath,
 		SandboxId:       args.SandboxId,
+		LogPath:         filepath.Join(sandboxLogDir, "vmm.log"),
 		VsockCID:        args.VsockCID,
 		PmemDevices:     buildStratovirtPmemDevices(args.PmemPaths),
 		VirtioFSDevices: buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths)),
