@@ -843,10 +843,44 @@ class Sandbox:
 
         try:
             self._delete_control_plane_requests(path)
+            if target_id == self.sandbox_id:
+                self._clear_sandbox_state()
             return True
 
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
+
+    def _clear_sandbox_state(self) -> None:
+        client = self._client
+        self._client = None
+        self.control_plane_only = False
+        self.sandbox_id = ""
+        self.ip = None
+        self.agent_token = None
+        self.template_name = None
+        self.template_id = None
+        self.vcpu_num = None
+        self.vcpu_max = None
+        self.ram_mb = None
+        self.vmm_name = None
+        self.image_name = None
+        self.snapshot_id = None
+        self.started_at = None
+        self.end_at = None
+        self.disk_size_mb = None
+        self.conch_init_version = None
+        self.alias = None
+        self.volume_mounts = []
+        self.env = None
+        self.network = None
+        self.metadata = {}
+        self.lifecycle = {}
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                # Local connection cleanup must not undo a successful delete.
+                pass
 
     @classmethod
     def service_health(cls) -> bool:
