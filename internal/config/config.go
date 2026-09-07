@@ -23,6 +23,13 @@ const (
 	defaultStateDir = "/var/lib/conch"
 )
 
+const (
+	// DefaultLogDir is the fixed root for logs owned by Conch components.
+	DefaultLogDir = "/var/log/conchd"
+	// StratovirtLogDir stores per-sandbox StratoVirt logs under the Conch log root.
+	StratovirtLogDir = DefaultLogDir + "/stratovirt"
+)
+
 // Config holds the application configuration
 type Config struct {
 	App     AppConfig     `yaml:"app"`
@@ -348,10 +355,10 @@ func (c *Config) GetLogConfig() (ulog.Config, error) {
 		outputPath = "" // No file output
 	case "file":
 		stdout = false
-		outputPath = "/var/log/conchd/"
+		outputPath = DefaultLogDir
 	case "both":
 		stdout = true
-		outputPath = "/var/log/conchd/"
+		outputPath = DefaultLogDir
 	default:
 		return ulog.Config{}, fmt.Errorf("invalid log output mode: %s (must be stdout, file, or both)", c.Log.Output)
 	}

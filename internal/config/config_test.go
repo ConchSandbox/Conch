@@ -36,7 +36,7 @@ func TestGetLogConfig(t *testing.T) {
 				Log: LogConfig{Level: "debug", Output: "file"},
 			},
 			wantStdout: false,
-			wantPath:   "/var/log/conchd/",
+			wantPath:   DefaultLogDir,
 		},
 		{
 			name: "both mode",
@@ -44,7 +44,7 @@ func TestGetLogConfig(t *testing.T) {
 				Log: LogConfig{Level: "warn", Output: "both"},
 			},
 			wantStdout: true,
-			wantPath:   "/var/log/conchd/",
+			wantPath:   DefaultLogDir,
 		},
 		{
 			name: "invalid mode",
@@ -491,6 +491,9 @@ func TestDefaultConfigRuntimePaths(t *testing.T) {
 	}
 	if cfg.Sandbox.CloudHypervisor != nil || cfg.Sandbox.Stratovirt == nil || cfg.Sandbox.Stratovirt.Binary != "/usr/bin/stratovirt" {
 		t.Errorf("DefaultConfig().Sandbox.Stratovirt = %#v, want /usr/bin/stratovirt", cfg.Sandbox.Stratovirt)
+	}
+	if StratovirtLogDir != "/var/log/conchd/stratovirt" {
+		t.Errorf("StratovirtLogDir = %q, want /var/log/conchd/stratovirt", StratovirtLogDir)
 	}
 	if cfg.Sandbox.Backend != DefaultSandboxBackend {
 		t.Errorf("DefaultConfig().Sandbox.Backend = %q, want %q", cfg.Sandbox.Backend, DefaultSandboxBackend)

@@ -116,6 +116,7 @@ func RestoreSandbox(
 		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
 		VsockCID:        vsockCID,
 		VsockSocketPath: vsockSocketPath,
+		SandboxId:       sandboxId,
 	}
 
 	vmmHandle, vmmErr := vmm.NewProcess(
