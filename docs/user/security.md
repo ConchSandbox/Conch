@@ -95,7 +95,20 @@ conchd 启动时会校验配置文件权限：组写、组执行以及 other 的
 
 > **注意：** `os.MkdirAll` 对已存在的目录不改权限。从 conchd 以 `0755` 创建该目录的旧版本升级时，或 `server.work_dir` 指向持久化路径（不随重启清空）时，遗留目录会保持 `0755`，需要手工 `chmod 0750` 一次。`/var/run` 位于 tmpfs，重启后由 conchd 重新以 `0750` 创建，不受此影响。
 
-如需授权特定账号调用 API，将该目录改为 `root:<管理组> 0750` 并把账号加入该组——`0750` 保留了属组的 `r-x`，收紧的只是 other；socket 自身的权限位不应放宽。
+**需要授权 root 以外的账号调用 API 时，用 `systemctl edit conchd` 创建 drop-in，把 work_dir 与 socket 的属组一并改为管理组**，再把账号加入该组：
+
+```ini
+# systemctl edit conchd
+[Service]
+ExecStartPost=/usr/bin/chgrp <管理组> /var/run/conch
+ExecStartPost=/usr/bin/chgrp <管理组> /var/run/conch/conchd.sock
+```
+
+两条缺一不可，**只改父目录属组不够**：`connect()` 检查的是 socket inode 自身的写权限，父目录的属组只提供穿过目录的权限，socket 仍属 `root:root`，管理组成员落在 other 位上，连接返回 `EACCES`。
+
+之所以要写进单元而不是手工执行一次：conchd 没有 socket 属组的配置项，而 work_dir 与 socket 每次启动都会重建，手工 `chgrp` 一重启就失效。conchd 为 `Type=notify`，在 socket 绑定并设置好权限之后才通知就绪，因此 `ExecStartPost` 执行时 socket 必定已存在。
+
+目录的 `0750` 与 socket 的 `0660` 已经给了属组所需的权限位，要改的只是属组，**权限位本身不应放宽**。该组成员获得的是 root 等价权限，授权范围应按此对待。
 
 ### 配置文件路径
 
@@ -121,16 +134,27 @@ Conch 支持为每个 Sandbox 配置 IP 级网络策略，但默认不启用任�
 
 每个 Sandbox 内的 Agent API 监听在所有网卡上，由创建时下发的访问凭据保护。该凭据是 Sandbox 之间唯一的认证边界，不应在业务侧记录或转发。
 
-要求 Sandbox 互不可达时，需在创建时显式传入网络策略：
+要求 Sandbox 互不可达时，需在创建时显式传入网络策略。**`allowOut` 不能覆盖 Sandbox 自身所在的网段**，否则等于显式放行全部兄弟 Sandbox：
 
 ```python
-sandbox = Sandbox(
-    template_id="sha256:...",
-    network={"allowOut": ["10.0.0.0/8"], "allow_internet_access": False},
-)
+# 错误：CNI 默认网段 10.12.0.0/20 落在 10.0.0.0/8 之内，
+# 生成的 EGRESS 链里 `-d 10.0.0.0/8 -j ACCEPT` 会把兄弟 Sandbox 一并放行
+network={"allowOut": ["10.0.0.0/8"], "allow_internet_access": False}
+
+# 正确：显式拒绝 Sandbox 网段。deny 规则先于 allow 下发，先匹配先生效
+network={"denyOut": ["10.12.0.0/20"],
+         "allowOut": ["10.0.0.0/8"],
+         "allow_internet_access": False}
+
+# 纯隔离：出方向全部拒绝
+network={"allow_internet_access": False}
 ```
 
+`denyOut` 里的网段须与部署实际使用的 CNI `subnet` 一致（见 `/etc/conch/cni/net.d/`），默认为 `10.12.0.0/20`。
+
 支持 `allowOut`、`denyOut`、`allowIn`、`denyIn` 和 `allow_internet_access`，单个 Sandbox 最多 1024 条目标地址。字段说明见 [Python SDK](python-sdk.md)。
+
+> **注意：** `allow_internet_access: false` 只作用于出方向。入方向的兜底 REJECT 仅在 `allowIn` 非空时才会下发，因此按上面配置的 Sandbox 仍可被**未配置策略的** Sandbox 主动连入。要求互不可达时，必须给每个 Sandbox 都配上出方向策略，或在需要保护的 Sandbox 上额外配置 `allowIn`。
 
 > **注意：** 宿主侧 `net.bridge.bridge-nf-call-iptables` 等内核开关不影响上述策略。策略下发在 Sandbox 自己的网络命名空间内，与宿主命名空间的网桥 netfilter 开关无关。
 
