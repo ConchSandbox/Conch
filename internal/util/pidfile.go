@@ -15,7 +15,7 @@ func WritePIDFile(pidFile string) error {
 	if pidFile == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(pidFile), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0o750); err != nil {
 		return fmt.Errorf("failed to create pid file directory: %w", err)
 	}
 	if existingPID, err := readPIDFile(pidFile); err == nil {
