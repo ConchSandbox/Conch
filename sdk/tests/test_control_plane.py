@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 import requests
 
@@ -79,6 +81,61 @@ def test_control_plane_transport_failures(monkeypatch):
     assert Sandbox.service_health() is False
     with pytest.raises(RuntimeError, match="unavailable"):
         Sandbox.list()
+
+
+@pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
+def test_delete_clears_local_sandbox_state(monkeypatch, close_error):
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", FakeSession)
+    sandbox = Sandbox.get("sandbox-1")
+    client = Mock()
+    client.close.side_effect = close_error
+    sandbox.client = client
+    cached_fields = (
+        "ip", "agent_token", "template_name", "template_id", "vcpu_num",
+        "vcpu_max", "ram_mb", "vmm_name", "image_name", "snapshot_id",
+        "started_at", "end_at", "disk_size_mb", "conch_init_version", "alias",
+    )
+    for field in cached_fields:
+        setattr(sandbox, field, "cached")
+    sandbox.volume_mounts = [{"path": "/data"}]
+    sandbox.env = {"KEY": "value"}
+    sandbox.lifecycle = {"state": "running"}
+
+    assert sandbox.delete() is True
+
+    assert sandbox.get_info() == sandbox_module.SandboxInfo("", "", None, None)
+    assert all(getattr(sandbox, field) is None for field in cached_fields)
+    assert sandbox.metadata == {}
+    assert sandbox.lifecycle == {}
+    assert sandbox.volume_mounts == []
+    assert sandbox.env is None
+    assert sandbox.network is None
+    assert sandbox._client is None
+    client.close.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        sandbox.health_check()
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_delete_preserves_state_on_failure_or_other_target(monkeypatch, delete_fails):
+    monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", FakeSession)
+    sandbox = Sandbox.get("sandbox-1")
+    client = Mock()
+    sandbox.client = client
+    before = vars(sandbox).copy()
+    delete = Mock(side_effect=requests.HTTPError("delete failed") if delete_fails else None)
+    monkeypatch.setattr(sandbox._session, "delete", delete)
+
+    if delete_fails:
+        with pytest.raises(RuntimeError, match="delete failed"):
+            sandbox.delete()
+    else:
+        delete.return_value = FakeResponse(204)
+        assert sandbox.delete("sandbox-2") is True
+        assert delete.call_args.args[0].endswith("/sandboxes/sandbox-2")
+
+    assert vars(sandbox) == before
+    client.close.assert_not_called()
 
 
 def test_control_plane_structured_error_uses_code_and_message():

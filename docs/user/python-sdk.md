@@ -165,6 +165,8 @@ sandbox.delete(sandbox_id=None) -> bool
 
 **返回：** 成功返回 `True`，失败抛出 `RuntimeError`
 
+成功删除当前实例对应的沙箱后，SDK 清空该对象缓存的身份、元数据和运行时信息，并关闭 Agent 客户端。删除失败或删除其他 ID 的沙箱时，不修改当前对象。
+
 **静态方法：**
 ```text
 Sandbox.delete_sandbox(sandbox_id) -> bool
@@ -286,6 +288,8 @@ sandbox.get_info() -> SandboxInfo
 ```
 
 获取当前实例保存的沙箱 ID、IP、源 Template Name 和实际 Template ID。
+
+该方法只读取本地缓存，不请求 daemon。当前对象成功调用 `delete()` 后，返回 `SandboxInfo(sandbox_id="", ip="", template_name=None, template_id=None)`。通过其他对象、CLI 或进程删除沙箱，不会自动清空此对象的缓存。
 
 **示例：**
 ```python
