@@ -582,18 +582,19 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 			return err
 		}
 		if len(addresses) != 0 {
-			return fmt.Errorf("network namespace has IPv6 address %s", addresses[0].String())
+			ulog.GetLogger().Warn("network namespace has IPv6 address", ulog.F("address", addresses[0].String()))
 		}
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 		if err != nil {
 			return err
 		}
 		if len(routes) != 0 {
-			return fmt.Errorf("network namespace has IPv6 route %+v", routes[0])
+			ulog.GetLogger().Warn("network namespace has IPv6 route", ulog.F("route", routes[0]))
 		}
-		return configureIPv4OnlyCurrentNetworkNamespace()
+		tryDisableIPv6()
+		return nil
 	}); err != nil {
-		return fmt.Errorf("enforce IPv4-only network namespace: %w", err)
+		return fmt.Errorf("check network namespace: %w", err)
 	}
 
 	return nil

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
@@ -79,8 +80,8 @@ func configureGuestTapNetwork(slot *Slot, cniIP string) error {
 		return fmt.Errorf("error setting lo device up: %w", err)
 	}
 
-	if err := os.WriteFile(ipv4ForwardingSysctlPath, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("error enabling ipv4 forwarding via %s: %w", ipv4ForwardingSysctlPath, err)
+	if err := ensureIPv4Forwarding(); err != nil {
+		return err
 	}
 
 	tables, err := iptables.New()
@@ -94,6 +95,17 @@ func configureGuestTapNetwork(slot *Slot, cniIP string) error {
 		return fmt.Errorf("error creating prerouting rule to guest tap: %w", err)
 	}
 
+	return nil
+}
+
+func ensureIPv4Forwarding() error {
+	data, err := os.ReadFile(ipv4ForwardingSysctlPath)
+	if err == nil && strings.TrimSpace(string(data)) == "1" {
+		return nil
+	}
+	if err := os.WriteFile(ipv4ForwardingSysctlPath, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("enable IPv4 forwarding via %s: %w", ipv4ForwardingSysctlPath, err)
+	}
 	return nil
 }
 

@@ -27,9 +27,11 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
-func configureIPv4OnlyCurrentNetworkNamespace() error {
+func tryDisableIPv6() {
 	for _, setting := range [][2]string{
 		{"/proc/sys/net/ipv6/conf/all/accept_ra", "0\n"},
 		{"/proc/sys/net/ipv6/conf/all/autoconf", "0\n"},
@@ -39,10 +41,10 @@ func configureIPv4OnlyCurrentNetworkNamespace() error {
 		{"/proc/sys/net/ipv6/conf/default/disable_ipv6", "1\n"},
 	} {
 		if err := os.WriteFile(setting[0], []byte(setting[1]), 0o644); err != nil {
-			return fmt.Errorf("set IPv4-only sysctl %s: %w", setting[0], err)
+			ulog.GetLogger().Warn("could not configure IPv4-only network namespace",
+				ulog.F("sysctl", setting[0]), ulog.F("error", err))
 		}
 	}
-	return nil
 }
 
 func createNetworkNamespace(slot *Slot) (retErr error) {
@@ -98,9 +100,7 @@ func createNetworkNamespace(slot *Slot) (retErr error) {
 		return fmt.Errorf("bind mount network namespace at %s: %w", netnsPath, err)
 	}
 	mounted = true
-	if err := configureIPv4OnlyCurrentNetworkNamespace(); err != nil {
-		return fmt.Errorf("configure IPv4-only network namespace: %w", err)
-	}
+	tryDisableIPv6()
 
 	return nil
 }
