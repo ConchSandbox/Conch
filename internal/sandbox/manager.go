@@ -48,9 +48,10 @@ type Manager struct {
 const createCleanupTimeout = 10 * time.Second
 
 type sandboxEntry struct {
-	state   State
-	sbx     *Sandbox
-	volumes []volume.Device
+	state        State
+	sbx          *Sandbox
+	volumes      []volume.Device
+	exitNotified bool
 }
 
 func New(
@@ -110,23 +111,37 @@ func (m *Manager) RecoverStaleResources(ctx context.Context, sandboxIDs []string
 	if err := m.pool.CleanupStaleResources(ctx); err != nil {
 		return fmt.Errorf("clean stale network resources: %w", err)
 	}
-	if err := m.cleanupStaleBootResources(ctx, sandboxIDs); err != nil {
-		return fmt.Errorf("clean stale boot resources: %w", err)
+	for _, sandboxID := range sandboxIDs {
+		if err := m.recoverStaleSandbox(ctx, sandboxID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (m *Manager) cleanupStaleBootResources(ctx context.Context, sandboxIDs []string) error {
-	if m == nil || m.boot == nil {
-		return fmt.Errorf("sandbox boot preparer is not configured")
+func (m *Manager) recoverStaleSandbox(ctx context.Context, sandboxID string) error {
+	unlock := m.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	rec, err := m.store.Get(ctx, sandboxID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
 	}
-	var errs []error
-	for _, sandboxID := range sandboxIDs {
-		if err := m.boot.Release(ctx, ReleaseBootRequest{SandboxID: sandboxID}); err != nil {
-			errs = append(errs, fmt.Errorf("release sandbox %s boot layout: %w", sandboxID, err))
-		}
+	exists := err == nil
+	// Keep the runtime unavailable until idempotent cleanup and finalization succeed.
+	value, _ := m.sandboxes.LoadOrStore(sandboxID, &sandboxEntry{state: StateUnknown})
+	entry := value.(*sandboxEntry)
+	if err := m.cleanupSandbox(ctx, sandboxID, entry); err != nil {
+		return m.persistSandboxFailure(ctx, rec, exists, err)
 	}
-	return errors.Join(errs...)
+	if err := m.releaseCreateLease(ctx, sandboxID); err != nil {
+		return m.persistSandboxFailure(ctx, rec, exists, err)
+	}
+	if err := m.store.Delete(ctx, sandboxID); err != nil {
+		return m.persistSandboxFailure(ctx, rec, exists, err)
+	}
+	m.sandboxes.Delete(sandboxID)
+
+	return nil
 }
 
 func durationOrDefault(value, fallback time.Duration) time.Duration {

@@ -191,11 +191,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 			cancel()
 			return nil, errors.Join(fmt.Errorf("recover stale sandbox resources during startup: %w", err), cleanupErr)
 		}
-		if err := s.removeAllSandboxes(); err != nil {
-			cleanupErr := host.Close()
-			cancel()
-			return nil, errors.Join(fmt.Errorf("clean up stale sandboxes during startup: %w", err), cleanupErr)
-		}
 		if err := manager.Start(ctx); err != nil {
 			cleanupErr := host.Close()
 			cancel()
@@ -622,7 +617,7 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if record == nil {
+	if record == nil || record.State == conchsandbox.StateUnknown {
 		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}

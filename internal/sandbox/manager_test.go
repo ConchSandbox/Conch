@@ -597,7 +597,7 @@ func TestDeleteRetainsRecordOnCleanupFailure(t *testing.T) {
 	}
 }
 
-func TestDeleteRecoversCreatingRecordAndLease(t *testing.T) {
+func TestDeleteWithoutEntryOnlyFinalizesRecordAndLease(t *testing.T) {
 	b := readyBoot()
 	m, store, ls := newLifecycleTestManager(t, b)
 	req := testCreateRequest()
@@ -609,7 +609,7 @@ func TestDeleteRecoversCreatingRecordAndLease(t *testing.T) {
 	if err := m.Delete(context.Background(), req.SandboxID); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.released) != 1 {
+	if len(b.released) != 0 {
 		t.Fatalf("boot release count = %d", len(b.released))
 	}
 	if got, _ := ls.List(context.Background()); len(got) != 0 {
@@ -672,6 +672,9 @@ func TestLifecycleEventsFollowPersistence(t *testing.T) {
 	rec, err := store.Get(context.Background(), "sandbox-a")
 	if err != nil || rec.State != StateUnknown || len(rec.RuntimeSnapshots) != 0 {
 		t.Fatalf("exit record = %#v, %v", rec, err)
+	}
+	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case event := <-events:
@@ -1050,6 +1053,114 @@ func (s *memorySandboxStore) Put(ctx context.Context, record Record) error {
 	}
 	_, err := s.Update(ctx, record)
 	return err
+}
+
+func TestDeleteFinalizationFailureRetainsProgress(t *testing.T) {
+	for _, stage := range []string{"lease", "record"} {
+		t.Run(stage, func(t *testing.T) {
+			m, store, ls := newLifecycleTestManager(t, readyBoot())
+			calls := 0
+			entry := seedRuntime(t, m, store, func(context.Context) error { calls++; return nil })
+			want := errors.New(stage + " failed")
+			if stage == "lease" {
+				ls.deleteErr = want
+			} else {
+				store.deleteHook = func() error { return want }
+			}
+			if err := m.Delete(context.Background(), "sandbox-a"); !errors.Is(err, want) {
+				t.Fatal(err)
+			}
+			value, ok := m.sandboxes.Load("sandbox-a")
+			rec, err := store.Get(context.Background(), "sandbox-a")
+			if !ok || value != entry || entry.state != StateUnknown || err != nil || !strings.Contains(rec.LastError, want.Error()) {
+				t.Fatalf("entry=%v record=%#v err=%v", ok, rec, err)
+			}
+			m.handleSandboxExit("sandbox-a", entry)
+			if calls != 1 {
+				t.Fatal("exit repeated cleanup")
+			}
+			ls.deleteErr, store.deleteHook = nil, nil
+			if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 {
+				t.Fatal("retry did not invoke idempotent cleanup")
+			}
+			if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+				t.Fatal("entry remains")
+			}
+		})
+	}
+}
+
+func TestDeleteReportsFailureToPersistError(t *testing.T) {
+	m, store, ls := newLifecycleTestManager(t, readyBoot())
+	seedRuntime(t, m, store, func(context.Context) error { return nil })
+	ls.deleteErr = errors.New("lease failure")
+	store.updateHook = func(Record) error { return errors.New("status failure") }
+	err := m.Delete(context.Background(), "sandbox-a")
+	if !errors.Is(err, ls.deleteErr) || !strings.Contains(err.Error(), "status failure") {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteCleanupContinuesAfterRequestCancellation(t *testing.T) {
+	m, store, _ := newLifecycleTestManager(t, readyBoot())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	seedRuntime(t, m, store, func(cleanupCtx context.Context) error {
+		cancel()
+		if _, ok := cleanupCtx.Deadline(); !ok {
+			t.Fatal("cleanup has no deadline")
+		}
+		return cleanupCtx.Err()
+	})
+	if err := m.Delete(ctx, "sandbox-a"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartupRecoveryRetriesIdempotentBootCleanup(t *testing.T) {
+	b := readyBoot()
+	m, store, ls := newLifecycleTestManager(t, b)
+	req := testCreateRequest()
+	_, _ = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateCreating, SourceTemplateID: req.TemplateID})
+	ls.deleteErr = errors.New("lease failure")
+	if err := m.recoverStaleSandbox(context.Background(), req.SandboxID); !errors.Is(err, ls.deleteErr) {
+		t.Fatal(err)
+	}
+	ls.deleteErr = nil
+	if err := m.recoverStaleSandbox(context.Background(), req.SandboxID); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.released) != 2 {
+		t.Fatalf("boot releases=%d", len(b.released))
+	}
+	if _, err := store.Get(context.Background(), req.SandboxID); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateRecordDeleteFailureRetainsEntry(t *testing.T) {
+	b := readyBoot()
+	m, store, _ := newLifecycleTestManager(t, b)
+	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
+		return nil, errors.New("launch failure")
+	}
+	store.deleteHook = func() error { return errors.New("record failure") }
+	if _, err := m.Create(context.Background(), testCreateRequest()); err == nil {
+		t.Fatal("Create succeeded")
+	}
+	if _, ok := m.sandboxes.Load("sandbox-a"); !ok {
+		t.Fatal("lost entry")
+	}
+	store.deleteHook = nil
+	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.released) != 2 {
+		t.Fatal("boot cleanup was not retried")
+	}
 }
 
 func TestCleanupRetainsProcessUntilSocketsAreRemoved(t *testing.T) {

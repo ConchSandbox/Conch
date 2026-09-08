@@ -69,30 +69,42 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	recordExists := err == nil
+	var entry *sandboxEntry
 	if value, ok := m.sandboxes.Load(sandboxID); ok {
-		entry := value.(*sandboxEntry)
+		entry = value.(*sandboxEntry)
+		entry.state = StateUnknown
+	}
+	if entry != nil {
 		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
-			entry.state = StateUnknown
-			rec.State, rec.LastError = StateUnknown, err.Error()
-			_, saveErr := m.store.Update(cleanupCtx, rec)
-			return combineOperationErrors(err, saveErr)
-		}
-		m.sandboxes.Delete(sandboxID)
-	} else if rec.ID != "" {
-		if err := m.boot.Release(cleanupCtx, ReleaseBootRequest{SandboxID: sandboxID}); err != nil {
-			return err
+			return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
 		}
 	}
 	if err := m.releaseCreateLease(cleanupCtx, sandboxID); err != nil {
-		return err
+		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
 	}
 	if err := m.store.Delete(cleanupCtx, sandboxID); err != nil {
-		return err
+		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
 	}
-	if rec.ID != "" {
+	m.sandboxes.Delete(sandboxID)
+
+	if recordExists && (entry == nil || !entry.exitNotified) {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
+}
+
+func (m *Manager) persistSandboxFailure(ctx context.Context, rec Record, exists bool, err error) error {
+	if !exists {
+		return err
+	}
+	// Incomplete creates retain their recovery classification.
+	if rec.State != StateCreating {
+		rec.State = StateUnknown
+	}
+	rec.LastError = err.Error()
+	_, saveErr := m.store.Update(ctx, rec)
+	return combineOperationErrors(err, saveErr)
 }
 
 func (m *Manager) Suspend(ctx context.Context, sandboxID string) error {
@@ -194,17 +206,13 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	unlock := m.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	current, ok := m.sandboxes.Load(sandboxID)
-	if !ok || current != entry {
+	if !ok || current != entry || entry.state == StateUnknown {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
 	defer cancel()
+	entry.state = StateUnknown
 	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
-	if cleanupErr == nil {
-		m.sandboxes.Delete(sandboxID)
-	} else {
-		entry.state = StateUnknown
-	}
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
 		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
@@ -224,6 +232,7 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	}
 	if !alreadyExited {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+		entry.exitNotified = true
 	}
 }
 

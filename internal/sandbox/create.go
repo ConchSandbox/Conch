@@ -60,6 +60,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 		defer cleanupCancel()
 		if err != nil {
+			entry.state = StateUnknown
 			cleanupErr := m.cleanupSandbox(cleanupCtx, req.SandboxID, entry)
 			if cleanupErr == nil && leaseCreated {
 				cleanupErr = m.releaseCreateLease(cleanupCtx, req.SandboxID)
@@ -77,11 +78,11 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 				err = combineOperationErrors(err, cleanupErr, saveErr)
 				return
 			}
-			m.sandboxes.Delete(req.SandboxID)
 			if deleteErr := m.store.Delete(cleanupCtx, req.SandboxID); deleteErr != nil {
-				err = combineOperationErrors(err, deleteErr)
+				err = combineOperationErrors(err, m.persistSandboxFailure(cleanupCtx, rec, true, deleteErr))
 				return
 			}
+			m.sandboxes.Delete(req.SandboxID)
 		}
 		if leaseCreated {
 			if releaseErr := m.releaseCreateLease(cleanupCtx, req.SandboxID); releaseErr != nil {
