@@ -50,7 +50,7 @@ const createCleanupTimeout = 10 * time.Second
 type sandboxEntry struct {
 	state   State
 	sbx     *Sandbox
-	cleanup *Cleanup
+	volumes []volume.Device
 }
 
 func New(
@@ -276,9 +276,10 @@ func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSp
 }
 
 func (m *Manager) trackSandbox(sandboxID string, entry *sandboxEntry, virtiofsExit <-chan struct{}) {
+	processDone := entry.sbx.process.Done()
 	go func() {
 		select {
-		case <-entry.sbx.process.Done():
+		case <-processDone:
 		case <-virtiofsExit:
 		case <-m.context.Done():
 			return

@@ -64,7 +64,11 @@ func (m *Manager) PrepareSandbox(sandboxID string, mounts []Mount) ([]Device, er
 	})
 }
 
+// CleanupSandbox is idempotent, including sandboxes without prepared volumes.
 func (m *Manager) CleanupSandbox(sandboxID string, devices []Device) error {
+	if m == nil || m.backend == nil {
+		return nil
+	}
 	return m.backend.Cleanup(sandboxID, devices)
 }
 

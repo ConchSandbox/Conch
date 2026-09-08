@@ -147,6 +147,7 @@ func checkpointTestManager(initialState State, capture CheckpointCapture) (*Mana
 type recordingBootPreparer struct {
 	released           []ReleaseBootRequest
 	releaseErr         error
+	releaseHook        func(context.Context) error
 	releaseErrors      []error
 	prepared           PreparedBoot
 	prepareHook        func()
@@ -163,6 +164,9 @@ func (r *recordingBootPreparer) Prepare(context.Context, PrepareBootRequest) (Pr
 
 func (r *recordingBootPreparer) Release(ctx context.Context, req ReleaseBootRequest) error {
 	r.released = append(r.released, req)
+	if r.releaseHook != nil {
+		return r.releaseHook(ctx)
+	}
 	r.releaseContextErr = ctx.Err()
 	_, r.releaseHasDeadline = ctx.Deadline()
 	if len(r.releaseErrors) > 0 {
@@ -213,8 +217,17 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 		cidAllocator: NewCIDAllocator(), requestTimeout: time.Second,
 		vmmBinaries: map[string]string{"cloud-hypervisor": "/unused"}, checkpointCapture: NewFullCheckpointCapture(),
 	}
+	// The launch fixture supplies only an IP placeholder, not an allocated slot.
+	placeholder := &netstack.Slot{}
 	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
-		return &Sandbox{process: &vmm.Process{}, slot: &netstack.Slot{}, cleanup: NewCleanup()}, nil
+		return &Sandbox{process: &vmm.Process{}, slot: placeholder}, nil
+	}
+	store.beforeUpdate = func() {
+		if value, ok := m.sandboxes.Load(testCreateRequest().SandboxID); ok {
+			if sbx := value.(*sandboxEntry).sbx; sbx != nil && sbx.slot == placeholder {
+				sbx.slot = nil
+			}
+		}
 	}
 	return m, store, leaseStore
 }
@@ -530,8 +543,8 @@ func seedRuntime(t *testing.T, m *Manager, store *memorySandboxStore, cleanup fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := &sandboxEntry{state: StateReady, cleanup: NewCleanup()}
-	entry.cleanup.Add(cleanup)
+	entry := &sandboxEntry{state: StateReady}
+	m.boot = &recordingBootPreparer{releaseHook: cleanup}
 	m.sandboxes.Store(req.SandboxID, entry)
 	return entry
 }
@@ -606,7 +619,7 @@ func TestDeleteRecoversCreatingRecordAndLease(t *testing.T) {
 
 func TestOldExitCannotChangeReplacementSandbox(t *testing.T) {
 	m, store, _ := newLifecycleTestManager(t, readyBoot())
-	old := &sandboxEntry{cleanup: NewCleanup()}
+	old := &sandboxEntry{}
 	seedRuntime(t, m, store, func(context.Context) error { return nil })
 	m.handleSandboxExit("sandbox-a", old)
 	rec, err := store.Get(context.Background(), "sandbox-a")
@@ -693,7 +706,7 @@ func TestSuspendResumePersistStateAndReturnWriteErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = process.Stop() })
+	t.Cleanup(func() { _ = process.Stop(context.Background()) })
 	fd, err := unix.Dup(args.ApiSocketFd)
 	if err != nil {
 		t.Fatal(err)
@@ -783,7 +796,7 @@ func checkpointFixture(t *testing.T) (*Manager, *memorySandboxStore, *testLeases
 	}
 	capture := &recordingCheckpointCapture{result: CapturedBootComponents{MemRootPath: dir, VMMName: "cloud-hypervisor", MemorySizeMB: 512}}
 	m.checkpointCapture = capture
-	m.sandboxes.Store(req.SandboxID, &sandboxEntry{state: StateReady, sbx: &Sandbox{}, cleanup: NewCleanup()})
+	m.sandboxes.Store(req.SandboxID, &sandboxEntry{state: StateReady, sbx: &Sandbox{}})
 	return m, store, leaseStore, capture
 }
 
@@ -901,45 +914,36 @@ func TestCheckpointSerializesDeleteUntilRegistrationCompletes(t *testing.T) {
 	}
 }
 
-func TestCleanupRetainsDependenciesAndRetriesOnlyRemainingResources(t *testing.T) {
-	cleanup := NewCleanup()
-	var calls []string
-	for _, name := range []string{"cid", "boot", "volumes"} {
-		cleanup.Add(func(context.Context) error { calls = append(calls, name); return nil })
+func TestCleanupRetriesIdempotentResourcesAndRetainsDependencies(t *testing.T) {
+	b := readyBoot()
+	m, _, _ := newLifecycleTestManager(t, b)
+	_, _ = m.AllocateUniqueCID("sandbox-a")
+	entry := &sandboxEntry{}
+	b.releaseErr = errors.New("boot release failed")
+	if err := m.cleanupSandbox(context.Background(), "sandbox-a", entry); !errors.Is(err, b.releaseErr) {
+		t.Fatal(err)
 	}
-	fail := true
-	want := errors.New("VMM has not stopped")
-	cleanup.AddPriority(func(context.Context) error {
-		calls = append(calls, "vmm")
-		if fail {
-			return want
+	if m.cidAllocator.GetActiveCount() != 1 {
+		t.Fatal("released CID before boot cleanup succeeded")
+	}
+	b.releaseErr = nil
+	for range 2 {
+		if err := m.cleanupSandbox(context.Background(), "sandbox-a", entry); err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	})
-	if err := cleanup.Run(context.Background()); !errors.Is(err, want) {
-		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(calls, []string{"vmm"}) {
-		t.Fatalf("released dependencies while VMM is alive: %v", calls)
-	}
-	fail = false
-	if err := cleanup.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := cleanup.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(calls, []string{"vmm", "vmm", "volumes", "boot", "cid"}) {
-		t.Fatalf("cleanup calls=%v", calls)
+	if len(b.released) != 3 || m.cidAllocator.GetActiveCount() != 0 {
+		t.Fatal("idempotent cleanup did not finish")
 	}
 }
 
 type memorySandboxStore struct {
-	mu         sync.Mutex
-	records    map[string]Record
-	operations []string
-	updateHook func(Record) error
-	deleteHook func() error
+	mu           sync.Mutex
+	records      map[string]Record
+	operations   []string
+	beforeUpdate func()
+	updateHook   func(Record) error
+	deleteHook   func() error
 }
 
 func newMemorySandboxStore() *memorySandboxStore {
@@ -964,6 +968,9 @@ func (s *memorySandboxStore) Create(_ context.Context, record Record) (Record, e
 }
 
 func (s *memorySandboxStore) Update(_ context.Context, record Record) (Record, error) {
+	if s.beforeUpdate != nil {
+		s.beforeUpdate()
+	}
 	if s.updateHook != nil {
 		if err := s.updateHook(record); err != nil {
 			return Record{}, err
@@ -1043,4 +1050,44 @@ func (s *memorySandboxStore) Put(ctx context.Context, record Record) error {
 	}
 	_, err := s.Update(ctx, record)
 	return err
+}
+
+func TestCleanupRetainsProcessUntilSocketsAreRemoved(t *testing.T) {
+	b := readyBoot()
+	m, _, _ := newLifecycleTestManager(t, b)
+	_, _ = m.AllocateUniqueCID("sandbox-a")
+	socket := filepath.Join(t.TempDir(), "vmm.sock")
+	if err := os.WriteFile(socket, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	process := &vmm.Process{VmmSocketPath: socket, VsockSocketPath: "invalid\x00socket"}
+	entry := &sandboxEntry{sbx: &Sandbox{process: process}}
+	if err := m.cleanupSandbox(context.Background(), "sandbox-a", entry); err == nil {
+		t.Fatal("socket deletion unexpectedly succeeded")
+	}
+	if entry.sbx.process != process {
+		t.Fatal("lost process paths after socket deletion failure")
+	}
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Fatalf("first socket was not removed: %v", err)
+	}
+	if len(b.released) != 0 || m.cidAllocator.GetActiveCount() != 1 {
+		t.Fatal("released dependencies after socket deletion failure")
+	}
+	process.VsockSocketPath = filepath.Join(t.TempDir(), "vsock.sock")
+	if err := os.WriteFile(process.VsockSocketPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.cleanupSandbox(context.Background(), "sandbox-a", entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.sbx.process != nil {
+		t.Fatal("process remains after socket cleanup")
+	}
+	if _, err := os.Stat(process.VsockSocketPath); !os.IsNotExist(err) {
+		t.Fatalf("vsock socket remains: %v", err)
+	}
+	if len(b.released) != 1 || m.cidAllocator.GetActiveCount() != 0 {
+		t.Fatal("cleanup did not finish")
+	}
 }

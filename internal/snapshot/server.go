@@ -541,36 +541,18 @@ func (s *Server) RestoreBootLayout(
 // ReleaseBootLayout releases active snapshots and per-sandbox views for a runtime layout.
 func (s *Server) ReleaseBootLayout(ctx context.Context, key string) error {
 	namespace := containerdclient.Namespace
-	memKey := getMemKeyFromRootfs(key)
-	var errs []error
-
+	// Both key forms may remain after partial preparation. Each release is
+	// idempotent and only removes the expected snapshot kind.
 	rootfsMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountRootfs)
-	if s.activeSnapshotExists(ctx, namespace, key) {
-		if err := s.releaseActiveSnapshot(ctx, namespace, key, rootfsMount); err != nil {
-			errs = append(errs, err)
-		}
-	} else if err := s.releaseViewSnapshot(ctx, namespace, getRootfsViewSnapshotKey(key), rootfsMount); err != nil {
-		errs = append(errs, err)
-	}
-
 	memMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountMem)
-	if s.activeSnapshotExists(ctx, namespace, memKey) {
-		if err := s.releaseActiveSnapshot(ctx, namespace, memKey, memMount); err != nil {
-			errs = append(errs, err)
-		}
-	} else {
-		memViewSnapshotKey := getMemViewSnapshotKey(key)
-		if s.snapshotKindExists(ctx, namespace, memViewSnapshotKey, snapshots.KindView) {
-			if err := s.releaseViewSnapshot(ctx, namespace, memViewSnapshotKey, memMount); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	if err := s.releaseViewSnapshot(ctx, namespace, getVMViewSnapshotKey(key), getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM)); err != nil {
-		errs = append(errs, err)
-	}
-
-	return errors.Join(errs...)
+	vmMount := getActiveMountPath(s.workDir, namespace, key, common.SnapshotMountVM)
+	return errors.Join(
+		s.releaseActiveSnapshot(ctx, namespace, key, rootfsMount),
+		s.releaseViewSnapshot(ctx, namespace, getRootfsViewSnapshotKey(key), rootfsMount),
+		s.releaseActiveSnapshot(ctx, namespace, getMemKeyFromRootfs(key), memMount),
+		s.releaseViewSnapshot(ctx, namespace, getMemViewSnapshotKey(key), memMount),
+		s.releaseViewSnapshot(ctx, namespace, getVMViewSnapshotKey(key), vmMount),
+	)
 }
 
 // Close releases snapshot resources.

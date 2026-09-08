@@ -46,7 +46,6 @@ type VMStartSpec struct {
 }
 
 type Sandbox struct {
-	cleanup     *Cleanup
 	process     *vmm.Process
 	vmStartSpec VMStartSpec
 	vmmName     string
@@ -59,13 +58,12 @@ type Sandbox struct {
 func launchSandbox(ctx context.Context, req CreateRequest, spec VMStartSpec, vmmBinary string,
 	pool *netstack.Pool, runtimeIDs createRuntimeIDs, readyOpts *hostconn.ReadyOptions, restore bool,
 ) (*Sandbox, error) {
-	sbx := &Sandbox{cleanup: NewCleanup(), vmStartSpec: spec, vmmName: req.VMMName, sandboxID: req.SandboxID}
+	sbx := &Sandbox{vmStartSpec: spec, vmmName: req.VMMName, sandboxID: req.SandboxID}
 	slot, err := pool.Get(ctx, req.SandboxID, req.Network)
 	if err != nil {
 		return sbx, fmt.Errorf("prepare network: %w", err)
 	}
 	sbx.slot = slot
-	sbx.cleanup.Add(func(ctx context.Context) error { return pool.Release(ctx, slot) })
 	readyOpts.Network = slot.GuestNetworkConfig()
 	if _, err := hostconn.ValidateReadyRequest(*readyOpts); err != nil {
 		return sbx, fmt.Errorf("validate initialization before VMM start: %w", err)
@@ -84,13 +82,6 @@ func launchSandbox(ctx context.Context, req CreateRequest, spec VMStartSpec, vmm
 		return sbx, fmt.Errorf("prepare VMM: %w", err)
 	}
 	sbx.process = process
-	sbx.cleanup.Add(func(context.Context) error { return cleanupFiles(process.VmmSocketPath, process.VsockSocketPath) })
-	sbx.cleanup.AddPriority(func(ctx context.Context) error {
-		if process.Pid() == 0 {
-			return nil
-		}
-		return sbx.Stop(ctx)
-	})
 	if restore {
 		err = process.Restore(ctx, spec.SnapfilePath)
 	} else {
@@ -107,19 +98,11 @@ func (s *Sandbox) Wait(ctx context.Context) error {
 }
 
 func (s *Sandbox) Stop(ctx context.Context) error {
-	vmmStopErr := s.process.Stop()
+	vmmStopErr := s.process.Stop(ctx)
 	if vmmStopErr != nil {
 		return fmt.Errorf("failed to stop VMM: %w", vmmStopErr)
 	}
 
-	return nil
-}
-
-func (s *Sandbox) Close(ctx context.Context) error {
-	err := s.cleanup.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup sandbox: %w", err)
-	}
 	return nil
 }
 

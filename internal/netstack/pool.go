@@ -587,8 +587,12 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		if slot != nil {
 			cleanupCtx := context.WithoutCancel(ctx)
 			if err := prepareSlotForReuse(cleanupCtx, slot); err != nil {
-				discardErr := p.Discard(cleanupCtx, slot)
-				return errors.Join(err, discardErr)
+				if discardErr := p.Discard(cleanupCtx, slot); discardErr != nil {
+					return errors.Join(err, discardErr)
+				}
+				// Discard relinquished ownership, so callers must not retry this slot.
+				ulog.GetLogger().Warn("discarded released slot because reuse preparation failed", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
+				return nil
 			}
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {

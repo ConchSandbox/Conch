@@ -66,7 +66,46 @@ func TestCleanupWaitsForVirtiofsProcessExit(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Cleanup did not finish after process exit notification")
 	}
+	if err := backend.Cleanup(sandboxID, []Device{{Exited: done}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
 		t.Fatalf("runtime directory remains after Cleanup: %v", err)
+	}
+}
+
+func TestCleanupIsIdempotentWithoutPreparedVolumes(t *testing.T) {
+	backend := &virtiofsBackend{runtimeDir: t.TempDir()}
+	for range 3 {
+		if err := backend.Cleanup("sandbox-a", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCleanupRetainsDirectoryOnReadFailure(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "sandbox-a")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	volumeDir := filepath.Join(runtimeDir, volumeDirName)
+	if err := os.WriteFile(volumeDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &virtiofsBackend{runtimeDir: root}
+	if err := backend.Cleanup("sandbox-a", nil); err == nil {
+		t.Fatal("ignored unreadable volume directory")
+	}
+	if _, err := os.Stat(runtimeDir); err != nil {
+		t.Fatal("lost recovery directory")
+	}
+	if err := os.Remove(volumeDir); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := backend.Cleanup("sandbox-a", nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

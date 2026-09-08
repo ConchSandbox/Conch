@@ -322,6 +322,68 @@ func TestTeardownDerivesCNIIdentityFromSlot(t *testing.T) {
 	}
 }
 
+func TestReleaseAfterReuseFailureReportsRemainingOwnership(t *testing.T) {
+	removeErr := errors.New("cni del failed")
+	for _, tt := range []struct {
+		name       string
+		discardErr error
+	}{
+		{name: "discard succeeds"},
+		{name: "discard fails", discardErr: removeErr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allocator := slotstate.NewAllocator(firstSlotID+maxSlots-1, 1)
+			id, err := allocator.Acquire()
+			if err != nil {
+				t.Fatal(err)
+			}
+			slot, err := newSlot(id, newSlotConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A missing namespace prevents reuse without requiring privileged setup.
+			if _, err := os.Stat(slot.NetNSPath()); !os.IsNotExist(err) {
+				t.Skipf("requires an absent namespace at %s", slot.NetNSPath())
+			}
+			removeCalls := 0
+			p := &Pool{
+				slotIDs: allocator, refillNeeded: make(chan struct{}, 1),
+				cniManager: &CNIManager{backend: &fakeCNIBackend{
+					remove: func(context.Context, string, string) error {
+						removeCalls++
+						return tt.discardErr
+					},
+				}},
+			}
+			err = p.Release(context.Background(), slot)
+			if tt.discardErr == nil {
+				if err != nil {
+					t.Fatalf("Release() after successful discard: %v", err)
+				}
+				if reused, err := allocator.Acquire(); err != nil || reused != id {
+					t.Fatalf("Acquire() = (%d, %v), want (%d, nil)", reused, err, id)
+				}
+				if len(p.refillNeeded) != 1 {
+					t.Fatal("successful discard did not signal refill")
+				}
+			} else {
+				if !errors.Is(err, tt.discardErr) || !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Release() = %v, want both reuse and discard errors", err)
+				}
+				if _, err := allocator.Acquire(); !errors.Is(err, slotstate.ErrCapacity) {
+					t.Fatalf("slot ID was not retained after failed discard: %v", err)
+				}
+				if len(p.refillNeeded) != 0 {
+					t.Fatal("failed discard signaled refill")
+				}
+			}
+			if removeCalls != 1 {
+				t.Fatalf("CNI Remove calls = %d, want 1", removeCalls)
+			}
+		})
+	}
+}
+
 func TestNetworkSlotIntegrationDestroyKeepsIDReservedWithoutSignalAfterCNIDelFailure(t *testing.T) {
 	p, slot := integrationTestSlot(t)
 	allocator := p.slotIDs

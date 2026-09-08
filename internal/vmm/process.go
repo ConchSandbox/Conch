@@ -198,12 +198,12 @@ func (p *Process) Create(ctx context.Context) error {
 	logger.Debug("Creating VMM")
 	err := p.startCmd(ctx)
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
 	if err := p.adapter.WaitForCreateReady(ctx, p); err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error waiting for vmm create readiness: %w", err), vmmStopErr)
 	}
 	p.markAPIReady()
@@ -211,7 +211,7 @@ func (p *Process) Create(ctx context.Context) error {
 	// check conch-init alive
 	err = p.waitForAgentAlive(ctx)
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error starting conch-init in vmm: %w", err), vmmStopErr)
 	}
 
@@ -228,33 +228,33 @@ func (p *Process) Restore(ctx context.Context, snapshotPath string) error {
 
 	err := p.startCmd(ctx)
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error starting vmm process: %w", err), vmmStopErr)
 	}
 
 	if err := p.adapter.WaitForRestoreReady(ctx, p); err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error waiting for vmm restore readiness: %w", err), vmmStopErr)
 	}
 
 	// preferVNC=false: to achieve fast startup, load memory on demand.
 	err = p.adapter.LoadSnapshot(snapshotPath, false)
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error loading snapshot: %w", err), vmmStopErr)
 	}
 	p.markAPIReady()
 
 	err = p.adapter.ResumeVM()
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error resuming vm: %w", err), vmmStopErr)
 	}
 
 	// check conch-init alive
 	err = p.waitForAgentAlive(ctx)
 	if err != nil {
-		vmmStopErr := p.Stop()
+		vmmStopErr := p.Stop(ctx)
 		return errors.Join(fmt.Errorf("error starting conch-init in vmm: %w", err), vmmStopErr)
 	}
 
@@ -271,14 +271,15 @@ func getProcessState(pid int) (string, error) {
 	return state, nil
 }
 
-func (p *Process) Stop() error {
+func (p *Process) Stop(ctx context.Context) error {
 	logger := ulog.GetLogger()
 	var errs []error
 
 	if p.cmd == nil || p.cmd.Process == nil {
-		p.adapter.Cleanup()
-		logger.Warn("VMM process not started")
-		return fmt.Errorf("vmm process not started")
+		if p.adapter != nil {
+			p.adapter.Cleanup()
+		}
+		return nil
 	}
 
 	select {
@@ -328,7 +329,11 @@ func (p *Process) Stop() error {
 		ulog.F("pid", p.cmd.Process.Pid),
 	)
 
-	<-p.exitDone
+	select {
+	case <-p.exitDone:
+	case <-ctx.Done():
+		return errors.Join(append(errs, ctx.Err())...)
+	}
 	p.adapter.Cleanup()
 	return errors.Join(errs...)
 }

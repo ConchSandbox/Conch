@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -70,7 +71,7 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	defer cleanupCancel()
 	if value, ok := m.sandboxes.Load(sandboxID); ok {
 		entry := value.(*sandboxEntry)
-		if err := entry.cleanup.Run(cleanupCtx); err != nil {
+		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
 			entry.state = StateUnknown
 			rec.State, rec.LastError = StateUnknown, err.Error()
 			_, saveErr := m.store.Update(cleanupCtx, rec)
@@ -198,7 +199,7 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
 	defer cancel()
-	cleanupErr := entry.cleanup.Run(ctx)
+	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
 	if cleanupErr == nil {
 		m.sandboxes.Delete(sandboxID)
 	} else {
@@ -238,4 +239,41 @@ func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason
 		return
 	}
 	m.WebhookDispatcher.Publish(event)
+}
+
+// cleanupSandbox runs under the lifecycle lock. ID-based cleanup is idempotent;
+// failures stop before releasing dependent resources.
+func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *sandboxEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sbx := entry.sbx; sbx != nil {
+		if process := sbx.process; process != nil {
+			if err := sbx.Stop(ctx); err != nil {
+				return err
+			}
+			for _, path := range []string{process.VmmSocketPath, process.VsockSocketPath} {
+				if err := os.RemoveAll(path); err != nil {
+					return fmt.Errorf("remove sandbox socket: %w", err)
+				}
+			}
+			sbx.process = nil
+		}
+		if sbx.slot != nil {
+			if err := m.pool.Release(ctx, sbx.slot); err != nil {
+				return fmt.Errorf("release network: %w", err)
+			}
+			sbx.slot = nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.volumeManager.CleanupSandbox(sandboxID, entry.volumes); err != nil {
+		return fmt.Errorf("clean volumes: %w", err)
+	}
+	if err := m.boot.Release(ctx, ReleaseBootRequest{SandboxID: sandboxID}); err != nil {
+		return err
+	}
+	return m.ReleaseCID(sandboxID)
 }

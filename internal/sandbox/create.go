@@ -53,14 +53,14 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, fmt.Errorf("persist creating sandbox: %w", err)
 	}
-	entry := &sandboxEntry{state: StateCreating, cleanup: NewCleanup()}
+	entry := &sandboxEntry{state: StateCreating}
 	m.sandboxes.Store(req.SandboxID, entry)
 	leaseCreated := false
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 		defer cleanupCancel()
 		if err != nil {
-			cleanupErr := entry.cleanup.Run(cleanupCtx)
+			cleanupErr := m.cleanupSandbox(cleanupCtx, req.SandboxID, entry)
 			if cleanupErr == nil && leaseCreated {
 				cleanupErr = m.releaseCreateLease(cleanupCtx, req.SandboxID)
 				if cleanupErr == nil {
@@ -101,12 +101,6 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, err
 	}
-	entry.cleanup.Add(func(context.Context) error { return m.ReleaseCID(req.SandboxID) })
-	// Register before Prepare so partially prepared layouts are cleaned with a
-	// live, bounded context even when Prepare itself returns cancellation.
-	entry.cleanup.Add(func(ctx context.Context) error {
-		return m.boot.Release(ctx, ReleaseBootRequest{SandboxID: req.SandboxID})
-	})
 	boot, err := m.prepareSandboxBoot(ctx, req)
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, translateBootError(err)
@@ -115,13 +109,13 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	rec.RamMB = boot.Spec.MemorySizeMB
 	vmSpec := boot.Spec
 	devices, err := m.prepareVolumes(req, boot.Resume)
+	entry.volumes = devices
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, err
 	}
 	var volumeExit <-chan struct{}
 	if len(devices) > 0 {
 		volumeExit = devices[0].Exited
-		entry.cleanup.Add(func(context.Context) error { return m.volumeManager.CleanupSandbox(req.SandboxID, devices) })
 	}
 	vmSpec.VirtioFS = volumeDevicesToDriver(devices)
 	sbx, err := m.launch(ctx, req, vmSpec, runtimeIDs, boot.Resume)
@@ -130,7 +124,6 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 		if sbx.process != nil {
 			rec.VMMPID = sbx.process.Pid()
 		}
-		entry.cleanup.Add(sbx.Close)
 	}
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, translateStartError(err)
