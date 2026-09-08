@@ -195,6 +195,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 			hostCtx,
 			inst.client,
 			host.snapshotServer,
+			host.sandboxStore,
 			*cfg.Sandbox,
 		)
 		if err != nil {

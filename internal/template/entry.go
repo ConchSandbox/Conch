@@ -21,9 +21,8 @@ const (
 	BootModeResume BootMode = "resume"
 )
 
-// Entry is the non-persistent domain representation of a fully published and
-// validated named Template. Name is user-visible and maps deterministically to
-// one internal image-record key; no separate name mapping is persisted.
+// Entry is the metadata of a named Template. Name maps to one image record;
+// BootIndexDigest identifies its immutable content.
 type Entry struct {
 	Name                  string
 	Origin                Origin

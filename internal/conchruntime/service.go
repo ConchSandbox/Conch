@@ -4,36 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
-
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
-	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
-	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
-	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
-	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type SandboxOps interface {
-	Create(context.Context, sandbox.CreateRequest) (sandbox.CreateResult, error)
-	Delete(sandbox.DeleteRequest) error
-	Suspend(sandbox.LifecycleRequest) error
-	Resume(sandbox.LifecycleRequest) error
+	Create(context.Context, sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error)
+	Delete(context.Context, string) error
+	Suspend(context.Context, string) error
+	Resume(context.Context, string) error
 	UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error
-	Checkpoint(sandbox.CheckpointRequest) (sandbox.CheckpointResult, error)
+	Checkpoint(context.Context, string, func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error)
 }
 
 type SnapshotOps interface {
@@ -42,58 +34,18 @@ type SnapshotOps interface {
 	Info(context.Context, runtimeapi.SnapshotInfoOptions) (runtimeapi.SnapshotRecord, error)
 }
 
+// Service adapts API requests and resolves Template names. Sandbox lifecycle
+// state, leases and resource ownership belong to sandbox.Manager.
 type Service struct {
-	Sandbox           SandboxOps
-	Containerd        *containerdclient.Client
-	Snapshot          SnapshotOps
-	Store             sandbox.Store
-	Templates         conchtemplate.Store
-	SandboxDefaults   SandboxDefaults
-	WebhookDispatcher *webhook.Dispatcher
-	lifecycleLocks    sandboxLifecycleLocks
+	Sandbox         SandboxOps
+	Containerd      *containerdclient.Client
+	Snapshot        SnapshotOps
+	Templates       conchtemplate.Store
+	SandboxDefaults SandboxDefaults
 }
 
-type sandboxLifecycleLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-type sandboxLifecycleLocks struct {
-	mu      sync.Mutex
-	entries map[string]*sandboxLifecycleLock
-}
-
-func (l *sandboxLifecycleLocks) lock(id string) func() {
-	l.mu.Lock()
-	if l.entries == nil {
-		l.entries = make(map[string]*sandboxLifecycleLock)
-	}
-	entry := l.entries[id]
-	if entry == nil {
-		entry = &sandboxLifecycleLock{}
-		l.entries[id] = entry
-	}
-	entry.refs++
-	l.mu.Unlock()
-
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		l.mu.Lock()
-		entry.refs--
-		if entry.refs == 0 && l.entries[id] == entry {
-			delete(l.entries, id)
-		}
-		l.mu.Unlock()
-	}
-}
-
-func New(sandboxOps SandboxOps, client *containerdclient.Client, store sandbox.Store) *Service {
-	return &Service{
-		Sandbox:    sandboxOps,
-		Containerd: client,
-		Store:      store,
-	}
+func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
+	return &Service{Sandbox: sandboxOps, Containerd: client}
 }
 
 func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
@@ -107,225 +59,60 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
 	}
-	if err := agentprotocol.ValidateEnvironment(opts.Env); err != nil {
-		return SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
-	}
-	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
-	opts.TemplateName = strings.TrimSpace(opts.TemplateName)
-	opts.TemplateID = strings.TrimSpace(opts.TemplateID)
-	if opts.SandboxID == "" {
-		id, err := id.New()
-		if err != nil {
-			return SandboxCreateResult{}, err
-		}
-		opts.SandboxID = id
-	} else {
-		if err := id.Validate(opts.SandboxID); err != nil {
-			return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
-				fmt.Errorf("invalid sandbox_id: %w", err),
-			)
-		}
-	}
-	unlock := s.lifecycleLocks.lock(opts.SandboxID)
-	defer unlock()
-	if s.Store != nil {
-		if _, err := s.Store.Get(ctx, opts.SandboxID); err == nil {
-			return SandboxCreateResult{}, sandbox.ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already exists", opts.SandboxID))
-		} else if !errors.Is(err, sandbox.ErrNotFound) {
-			return SandboxCreateResult{}, fmt.Errorf("get sandbox state: %w", err)
-		}
-	}
 	s.applySandboxDefaults(&opts)
-	templateSelection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
+	selection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
-	templateID := templateSelection.ID
-	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
-	}
-	if opts.RamMB < 1 {
-		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
-	}
-	if err := s.validateSandboxLimits(opts); err != nil {
-		return SandboxCreateResult{}, err
-	}
-	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
-		return SandboxCreateResult{}, err
-	}
-	agentToken, err := sandbox.GenerateAgentToken()
-	if err != nil {
-		return SandboxCreateResult{}, err
-	}
-
-	req := sandbox.CreateRequest{
-		TemplateID:   templateID,
-		VMMName:      opts.VMMName,
-		SandboxID:    opts.SandboxID,
-		VCPUNum:      opts.VCPUNum,
-		VCPUMax:      opts.VCPUMax,
-		RAMMB:        opts.RamMB,
-		AgentToken:   agentToken,
-		Env:          copyMap(opts.Env),
-		VolumeMounts: opts.VolumeMounts,
-		Network:      opts.Network,
-	}
-
-	createdAt := time.Now().UnixNano()
-	creatingRecord := sandbox.Record{
-		ID:                 opts.SandboxID,
-		State:              sandbox.StateCreating,
-		CreatedAt:          createdAt,
-		SourceTemplateName: templateSelection.Name,
-		SourceTemplateID:   templateID,
-		VCPUNum:            opts.VCPUNum,
-		RamMB:              opts.RamMB,
-		Network:            opts.Network,
-	}
-	if s.Store != nil {
-		creatingRecord, err = s.Store.Create(ctx, creatingRecord)
-		if err != nil {
-			return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
-		}
-		createdAt = creatingRecord.CreatedAt
-	}
-	deleteCreatingRecord := func() error {
-		if s.Store == nil {
-			return nil
-		}
-		return s.Store.Delete(context.Background(), opts.SandboxID)
-	}
-	createCtx := ctx
-	releaseOperationLease := func() error { return nil }
-	if s.Containerd != nil && s.Store != nil {
-		var done func(context.Context) error
-		createCtx, done, err = s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
-		if err != nil {
-			return SandboxCreateResult{}, combineOperationErrors(
-				fmt.Errorf("create sandbox operation lease: %w", err),
-				deleteCreatingRecord(),
-			)
-		}
-		releaseOperationLease = func() error {
-			return done(context.WithoutCancel(createCtx))
-		}
-	}
-
-	createResult, err := s.Sandbox.Create(createCtx, req)
-	if err != nil {
-		if cleanupErr := errors.Join(releaseOperationLease(), deleteCreatingRecord()); cleanupErr != nil {
-			ulog.GetLogger().Warn("failed to clean up sandbox create operation",
-				ulog.F("sandbox_id", opts.SandboxID),
-				ulog.F("error", cleanupErr),
-			)
-		}
-		return SandboxCreateResult{}, translateSandboxError(err)
-	}
-	rec := sandbox.Record{
-		ID:                       opts.SandboxID,
-		VMMPID:                   createResult.VMMPID,
-		State:                    sandbox.StateReady,
-		CreatedAt:                createdAt,
-		SourceTemplateName:       templateSelection.Name,
-		SourceTemplateID:         templateID,
-		CheckpointHeadTemplateID: createResult.BootIndexDigest,
-		IP:                       createResult.IP,
-		VCPUNum:                  opts.VCPUNum,
-		RamMB:                    opts.RamMB,
-		Network:                  opts.Network,
-		RuntimeSnapshots:         append([]sandbox.SnapshotRef(nil), createResult.RuntimeSnapshots...),
-	}
-	if s.Store != nil {
-		_, err = s.Store.Update(ctx, rec)
-	}
-	if err != nil {
-		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
-		if errors.Is(cleanupErr, sandbox.ErrNotFound) {
-			cleanupErr = nil
-		}
-		cleanupErr = errors.Join(cleanupErr, releaseOperationLease(), deleteCreatingRecord())
-		if cleanupErr != nil {
-			ulog.GetLogger().Warn("failed to clean up sandbox after state persistence failure",
-				ulog.F("sandbox_id", opts.SandboxID),
-				ulog.F("error", cleanupErr),
-			)
-		}
-		return SandboxCreateResult{}, fmt.Errorf("persist sandbox state: %w", err)
-	}
-	if err := releaseOperationLease(); err != nil {
-		ulog.GetLogger().Warn("failed to release sandbox operation lease",
-			ulog.F("sandbox_id", opts.SandboxID),
-			ulog.F("error", err),
-		)
-	}
-	s.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
-	return SandboxCreateResult{
-		SandboxID:    opts.SandboxID,
-		IP:           createResult.IP,
-		AgentToken:   createResult.AgentToken,
-		TemplateName: templateSelection.Name,
-		TemplateID:   templateID,
-		VCPUNum:      opts.VCPUNum,
-		RamMB:        opts.RamMB,
-		CreatedAt:    createdAt,
-	}, nil
+	return s.Sandbox.Create(ctx, sandbox.CreateRequest{
+		TemplateID: selection.ID, TemplateName: selection.Name,
+		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
+		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
+		Env: copyMap(opts.Env), VolumeMounts: opts.VolumeMounts, Network: opts.Network,
+	})
 }
 
-func (s *Service) validateSandboxLimits(opts SandboxCreateOptions) error {
-	if opts.VCPUNum > runtimeapi.SandboxMaxVCPU || opts.VCPUMax > runtimeapi.SandboxMaxVCPU {
-		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
-			"requested vcpu_num=%d and vcpu_max=%d exceed maximum %d",
-			opts.VCPUNum, opts.VCPUMax, runtimeapi.SandboxMaxVCPU,
-		))
-	}
-	if opts.RamMB > runtimeapi.SandboxMaxRAMMB {
-		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
-			"requested ram_mb=%d exceeds maximum %d",
-			opts.RamMB, runtimeapi.SandboxMaxRAMMB,
-		))
-	}
-	return nil
+func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
+	return s.Sandbox.Delete(ctx, sandboxID)
+}
+
+func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
+	return s.Sandbox.Suspend(ctx, sandboxID)
+}
+
+func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
+	return s.Sandbox.Resume(ctx, sandboxID)
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	return s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network})
+}
+
+// Template registration stays at the API boundary. Manager calls it under the
+// checkpoint lease and lifecycle lock, and owns head persistence and rollback.
+func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointOptions) (SandboxCheckpointResult, error) {
 	if s == nil || s.Sandbox == nil {
-		return fmt.Errorf("sandbox service is not configured")
+		return SandboxCheckpointResult{}, fmt.Errorf("sandbox service is not configured")
 	}
-	if strings.TrimSpace(opts.SandboxID) == "" {
-		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	if s.Templates == nil {
+		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
 	}
-	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
+	name := strings.TrimSpace(opts.TemplateName)
+	if name == "" {
+		return SandboxCheckpointResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_name is required"))
+	}
+	result, err := s.Sandbox.Checkpoint(ctx, opts.SandboxID, func(ctx context.Context, result sandbox.CheckpointResult) error {
+		_, err := s.Templates.Put(ctx, conchtemplate.Entry{
+			Name: name, Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume,
+			BootIndexDigest: result.BootIndexDigest, ParentBootIndexDigest: result.ParentBootIndexDigest,
+			SourceSandboxID: strings.TrimSpace(opts.SandboxID), Labels: copyMap(opts.Labels),
+		}, result.Target)
 		return err
-	}
-	unlock := s.lifecycleLocks.lock(opts.SandboxID)
-	defer unlock()
-	rec, err := s.getSandbox(ctx, opts.SandboxID)
+	})
 	if err != nil {
-		return err
+		return SandboxCheckpointResult{}, err
 	}
-	if rec.State != sandbox.StateReady && rec.State != sandbox.StateSuspended {
-		return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", opts.SandboxID, rec.State))
-	}
-	oldNetwork := rec.Network
-	rec.Network = opts.Network
-	rec.LastError = ""
-	if _, err := s.Store.Update(ctx, rec); err != nil {
-		return err
-	}
-	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network}); err != nil {
-		rollbackCtx := context.WithoutCancel(ctx)
-		rollbackErr := s.Sandbox.UpdateNetwork(rollbackCtx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: oldNetwork})
-		rec.Network = oldNetwork
-		applyErr := combineOperationErrors(err, rollbackErr)
-		if rollbackErr != nil {
-			rec.State = sandbox.StateUnknown
-			applyErr = combineOperationErrors(applyErr, s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: opts.SandboxID}))
-		}
-		rec.LastError = applyErr.Error()
-		_, rollbackStoreErr := s.Store.Update(rollbackCtx, rec)
-		return combineOperationErrors(applyErr, rollbackStoreErr)
-	}
-	return nil
+	return SandboxCheckpointResult{TemplateID: result.BootIndexDigest}, nil
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
@@ -380,273 +167,7 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 	if err != nil {
 		return sandboxTemplateSelection{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid template_id %q: %w", rawID, err))
 	}
-	if s.Containerd == nil {
-		return sandboxTemplateSelection{}, fmt.Errorf("containerd client is not configured")
-	}
-	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, parsedID.String())
-	if err != nil {
-		switch {
-		case errors.Is(err, conchimage.ErrNotFound):
-			return sandboxTemplateSelection{}, conchtemplate.ErrNotFound.Wrap(err)
-		case errors.Is(err, conchimage.ErrInvalidArgument), errors.Is(err, conchimage.ErrInvalidContent):
-			return sandboxTemplateSelection{}, conchtemplate.ErrInvalidArtifact.Wrap(err)
-		default:
-			return sandboxTemplateSelection{}, err
-		}
-	}
-	return sandboxTemplateSelection{ID: info.BootIndexDigest}, nil
-}
-
-func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
-	if s == nil || s.Sandbox == nil {
-		return fmt.Errorf("sandbox service is not configured")
-	}
-	sandboxID = strings.TrimSpace(sandboxID)
-	if sandboxID == "" {
-		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
-	}
-	unlock := s.lifecycleLocks.lock(sandboxID)
-	defer unlock()
-	var rec sandbox.Record
-	if s.Store != nil {
-		var getErr error
-		rec, getErr = s.getSandbox(ctx, sandboxID)
-		if getErr != nil && !errors.Is(getErr, sandbox.ErrNotFound) {
-			return getErr
-		}
-	}
-	cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
-	if errors.Is(cleanupErr, sandbox.ErrNotFound) {
-		cleanupErr = nil
-	}
-	if errors.Is(cleanupErr, sandbox.ErrFailedPrecondition) {
-		return cleanupErr
-	}
-	var deleteErr error
-	if s.Store != nil {
-		deleteErr = s.Store.Delete(ctx, sandboxID)
-	}
-	if deleteErr == nil && rec.ID != "" {
-		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
-	}
-	return combineOperationErrors(cleanupErr, deleteErr)
-}
-
-// HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
-// It is called by sandbox.Manager after the runtime resources have been cleaned up.
-func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error) {
-	if s == nil || s.Store == nil {
-		return
-	}
-	unlock := s.lifecycleLocks.lock(sandboxID)
-	defer unlock()
-	rec, err := s.getSandbox(context.Background(), sandboxID)
-	if errors.Is(err, sandbox.ErrNotFound) {
-		return
-	}
-	if err != nil {
-		ulog.GetLogger().Error("failed to read sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
-	}
-	if rec.State == sandbox.StateUnknown {
-		return
-	}
-	rec.State = sandbox.StateUnknown
-	if cleanupErr != nil {
-		rec.LastError = cleanupErr.Error()
-	}
-	if _, err := s.Store.Update(context.Background(), rec); err != nil {
-		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
-	}
-	s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
-}
-
-func (s *Service) publishLifecycleEvent(eventType string, rec sandbox.Record, killReason string) {
-	if s == nil || s.WebhookDispatcher == nil {
-		return
-	}
-	event, err := webhook.NewEvent(eventType, rec.ID, killReason, webhook.Execution{
-		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339),
-		VCPUNum:   rec.VCPUNum,
-		RamMB:     rec.RamMB,
-	})
-	if err != nil {
-		ulog.GetLogger().Error("failed to create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
-		return
-	}
-	s.WebhookDispatcher.Publish(event)
-}
-
-func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
-	if s == nil || s.Sandbox == nil {
-		return fmt.Errorf("sandbox service is not configured")
-	}
-	sandboxID = strings.TrimSpace(sandboxID)
-	if sandboxID == "" {
-		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
-	}
-	unlock := s.lifecycleLocks.lock(sandboxID)
-	defer unlock()
-	rec, _ := s.getSandbox(ctx, sandboxID)
-	err := s.Sandbox.Suspend(sandbox.LifecycleRequest{SandboxID: sandboxID})
-	if rec.ID != "" {
-		rec.State = sandbox.StateSuspended
-		if err != nil {
-			rec.State = sandbox.StateUnknown
-			rec.LastError = err.Error()
-		} else {
-			rec.LastError = ""
-		}
-		_, _ = s.Store.Update(ctx, rec)
-	}
-	return err
-}
-
-func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
-	if s == nil || s.Sandbox == nil {
-		return fmt.Errorf("sandbox service is not configured")
-	}
-	sandboxID = strings.TrimSpace(sandboxID)
-	if sandboxID == "" {
-		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
-	}
-	unlock := s.lifecycleLocks.lock(sandboxID)
-	defer unlock()
-	rec, _ := s.getSandbox(ctx, sandboxID)
-	err := s.Sandbox.Resume(sandbox.LifecycleRequest{SandboxID: sandboxID})
-	if rec.ID != "" {
-		rec.State = sandbox.StateReady
-		if err != nil {
-			rec.State = sandbox.StateUnknown
-			rec.LastError = err.Error()
-		} else {
-			rec.LastError = ""
-		}
-		_, _ = s.Store.Update(ctx, rec)
-	}
-	return err
-}
-
-func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointOptions) (SandboxCheckpointResult, error) {
-	if s == nil || s.Sandbox == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("sandbox service is not configured")
-	}
-	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
-	if opts.SandboxID == "" {
-		return SandboxCheckpointResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
-	}
-	unlock := s.lifecycleLocks.lock(opts.SandboxID)
-	defer unlock()
-	rec, err := s.getSandbox(ctx, opts.SandboxID)
-	if err != nil {
-		return SandboxCheckpointResult{}, err
-	}
-	if s.Containerd == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("containerd client is not configured")
-	}
-	if s.Store == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint publisher is not configured")
-	}
-	if s.Templates == nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("template store is not configured")
-	}
-	sandboxID := rec.ID
-	parentID := strings.TrimSpace(rec.CheckpointHeadTemplateID)
-	if parentID == "" {
-		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head Template ID", sandboxID))
-	}
-	templateName := strings.TrimSpace(opts.TemplateName)
-	if templateName == "" {
-		return SandboxCheckpointResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("template_name is required"))
-	}
-	if _, err := conchimage.InspectBootIndex(ctx, s.Containerd, parentID); err != nil {
-		return SandboxCheckpointResult{}, sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf(
-			"sandbox %s checkpoint head Template %s is unavailable: %w", sandboxID, parentID, err,
-		))
-	}
-
-	captured, err := s.Sandbox.Checkpoint(sandbox.CheckpointRequest{
-		SandboxID: sandboxID,
-	})
-	if err != nil {
-		return SandboxCheckpointResult{}, err
-	}
-	defer os.RemoveAll(captured.MemRootPath)
-
-	publishCtx, done, err := s.Containerd.WithLease(containerdclient.NewNamespaceContext(ctx))
-	if err != nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("create checkpoint content lease: %w", err)
-	}
-	defer done(publishCtx)
-	leaseID, ok := leases.FromContext(publishCtx)
-	if !ok {
-		return SandboxCheckpointResult{}, fmt.Errorf("checkpoint content lease is missing from context")
-	}
-	if err := s.Containerd.LeasesService().AddResource(publishCtx, leases.Lease{ID: leaseID}, leases.Resource{
-		Type: "content",
-		ID:   parentID,
-	}); err != nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("retain checkpoint parent Boot Index %s: %w", parentID, err)
-	}
-	published, err := conchimage.PublishCheckpointBootIndex(publishCtx, s.Containerd, conchimage.PublishCheckpointBootIndexOptions{
-		SourceBootIndexDigest: parentID,
-		MemRoot:               captured.MemRootPath,
-		VMMName:               captured.VMMName,
-		MemorySizeMB:          captured.MemorySizeMB,
-	})
-	if err != nil {
-		return SandboxCheckpointResult{}, err
-	}
-	info, err := conchimage.InspectBootIndexContent(publishCtx, s.Containerd.ContentStore(), published.Target)
-	if err != nil {
-		return SandboxCheckpointResult{}, fmt.Errorf("validate published checkpoint boot index: %w", err)
-	}
-	if !info.Resume {
-		return SandboxCheckpointResult{}, fmt.Errorf("published checkpoint boot index is not resume-capable")
-	}
-	if info.BootIndexDigest != published.BootIndexDigest {
-		return SandboxCheckpointResult{}, fmt.Errorf(
-			"validated checkpoint boot index digest %s does not match published digest %s",
-			info.BootIndexDigest,
-			published.BootIndexDigest,
-		)
-	}
-	if info.VMMName != captured.VMMName {
-		return SandboxCheckpointResult{}, fmt.Errorf(
-			"validated checkpoint VMM %s does not match captured VMM %s",
-			info.VMMName,
-			captured.VMMName,
-		)
-	}
-	if info.MemorySizeMB != captured.MemorySizeMB {
-		return SandboxCheckpointResult{}, fmt.Errorf(
-			"validated checkpoint memory size %d MB does not match captured size %d MB",
-			info.MemorySizeMB,
-			captured.MemorySizeMB,
-		)
-	}
-	rec.CheckpointHeadTemplateID = info.BootIndexDigest
-	if _, err := s.Store.Update(ctx, rec); err != nil {
-		return SandboxCheckpointResult{}, err
-	}
-	entry, err := s.Templates.Put(publishCtx, conchtemplate.Entry{
-		Name:                  templateName,
-		Origin:                conchtemplate.OriginCheckpoint,
-		BootMode:              conchtemplate.BootModeResume,
-		BootIndexDigest:       info.BootIndexDigest,
-		ParentBootIndexDigest: parentID,
-		SourceSandboxID:       sandboxID,
-		Labels:                copyMap(opts.Labels),
-	}, published.Target)
-	if err != nil {
-		rec.CheckpointHeadTemplateID = parentID
-		_, rollbackErr := s.Store.Update(context.WithoutCancel(ctx), rec)
-		return SandboxCheckpointResult{}, combineOperationErrors(err, rollbackErr)
-	}
-	return SandboxCheckpointResult{
-		TemplateID: entry.BootIndexDigest,
-	}, nil
+	return sandboxTemplateSelection{ID: parsedID.String()}, nil
 }
 
 // PullTemplate fetches and statically validates a registry Boot Index before
@@ -950,55 +471,11 @@ func (s *Service) SnapshotInfo(ctx context.Context, opts runtimeapi.SnapshotInfo
 	return s.Snapshot.Info(ctx, opts)
 }
 
-func (s *Service) getSandbox(ctx context.Context, id string) (sandbox.Record, error) {
-	if s == nil || s.Store == nil {
-		return sandbox.Record{}, fmt.Errorf("sandbox state store is not configured")
-	}
-	return s.Store.Get(ctx, id)
-}
-
-func translateSandboxError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var appErr *apperror.Error
-	if errors.As(err, &appErr) {
-		return err
-	}
-	switch {
-	case errors.Is(err, agentprotocol.ErrInvalidEnvironment):
-		return sandbox.ErrInvalidEnvironment.Wrap(err)
-	case errors.Is(err, agentprotocol.ErrPayloadTooLarge):
-		return sandbox.ErrInitializationTooLarge.Wrap(err)
-	default:
-		return err
-	}
-}
-
 func translateTemplateArtifactError(err error) error {
 	if errors.Is(err, conchimage.ErrInvalidArgument) || errors.Is(err, conchimage.ErrInvalidContent) {
 		return conchtemplate.ErrInvalidArtifact.Wrap(err)
 	}
 	return err
-}
-
-// combineOperationErrors preserves the primary operation's application
-// classification. Secondary rollback or cleanup errors remain available as
-// causes when a primary classification exists, but can never accidentally turn
-// an otherwise internal failure into a client error.
-func combineOperationErrors(primary error, secondary ...error) error {
-	if primary == nil {
-		return errors.Join(secondary...)
-	}
-	additional := errors.Join(secondary...)
-	if additional == nil {
-		return primary
-	}
-	var appErr *apperror.Error
-	if errors.As(primary, &appErr) {
-		return appErr.WrapMessage(errors.Join(primary, additional), appErr.PublicMessage())
-	}
-	return fmt.Errorf("%w; additional operation failures: %v", primary, additional)
 }
 
 func copyMap(in map[string]string) map[string]string {

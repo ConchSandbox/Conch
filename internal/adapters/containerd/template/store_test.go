@@ -439,3 +439,29 @@ func copyLabels(in map[string]string) map[string]string {
 	}
 	return out
 }
+
+func TestGetAndListDoNotInspectBootIndexContent(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, cs, false)
+	store := &Store{images: newMemoryImageStore(), content: cs}
+	const name = "example:latest"
+	_, err := store.Put(ctx, conchtemplate.Entry{Name: name, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: target.Digest.String()}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Delete(ctx, target.Digest); err != nil {
+		t.Fatal(err)
+	}
+	// The record is still inspectable even when its content is unavailable.
+	got, err := store.Get(ctx, name)
+	if err != nil || got.BootIndexDigest != target.Digest.String() {
+		t.Fatalf("Get = %#v, %v", got, err)
+	}
+	if items, err := store.List(ctx, conchtemplate.Filter{}); err != nil || len(items) != 1 {
+		t.Fatalf("List = %#v, %v", items, err)
+	}
+	if _, err := conchimage.InspectBootIndexContent(ctx, cs, target); err == nil {
+		t.Fatal("explicit content validation accepted a missing index")
+	}
+}

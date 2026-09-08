@@ -25,77 +25,53 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"sync/atomic"
 )
 
+// Cleanup releases resources in reverse acquisition order. A failed release
+// keeps that resource and its dependencies for a later retry.
 type Cleanup struct {
-	cleanup         []func(ctx context.Context) error
-	priorityCleanup []func(ctx context.Context) error
-	err             error
-	once            sync.Once
-
-	hasRun atomic.Bool
-	mu     sync.Mutex
+	cleanup         []func(context.Context) error
+	priorityCleanup []func(context.Context) error
+	started         bool
+	mu              sync.Mutex
 }
 
-func NewCleanup() *Cleanup {
-	return &Cleanup{}
-}
+func NewCleanup() *Cleanup { return &Cleanup{} }
 
-func (c *Cleanup) Add(f func(ctx context.Context) error) {
-	if c.hasRun.Load() {
-		slog.Error("Add called after cleanup has run, ignoring function")
-		return
-	}
-
+func (c *Cleanup) Add(f func(context.Context) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
+	if c.started {
+		slog.Error("Add called after cleanup started")
+		return
+	}
 	c.cleanup = append(c.cleanup, f)
 }
 
-func (c *Cleanup) AddPriority(f func(ctx context.Context) error) {
-	if c.hasRun.Load() {
-		slog.Error("AddPriority called after cleanup has run, ignoring function")
-		return
-	}
-
+func (c *Cleanup) AddPriority(f func(context.Context) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
+	if c.started {
+		slog.Error("AddPriority called after cleanup started")
+		return
+	}
 	c.priorityCleanup = append(c.priorityCleanup, f)
 }
 
 func (c *Cleanup) Run(ctx context.Context) error {
-	c.once.Do(func() {
-		c.run(context.WithoutCancel(ctx))
-	})
-	return c.err
-}
-
-func (c *Cleanup) run(ctx context.Context) {
-	c.hasRun.Store(true)
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	var errs []error
-
-	for i := len(c.priorityCleanup) - 1; i >= 0; i-- {
-		err := c.priorityCleanup[i](ctx)
-		if err != nil {
-			errs = append(errs, err)
+	c.started = true
+	for _, actions := range []*[]func(context.Context) error{&c.priorityCleanup, &c.cleanup} {
+		for len(*actions) > 0 {
+			i := len(*actions) - 1
+			if err := (*actions)[i](ctx); err != nil {
+				return err
+			}
+			*actions = (*actions)[:i]
 		}
 	}
-
-	for i := len(c.cleanup) - 1; i >= 0; i-- {
-		err := c.cleanup[i](ctx)
-		if err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	c.err = errors.Join(errs...)
+	return nil
 }
 
 func cleanupFiles(files ...string) error {

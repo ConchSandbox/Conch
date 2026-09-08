@@ -10,6 +10,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openeuler/Conch/internal/conchruntime"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -63,7 +64,7 @@ func testTemplateStore() templateStoreStub {
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService := newHandlerRuntime(sandboxOps, nil, nil)
 	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
 		TemplateName: testTemplateNameDefault,
 		VMMName:      "stratovirt",
@@ -118,7 +119,7 @@ func TestRemoveAllSandboxesDeletesRuntimeAndStateRecords(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	server := &Daemon{
 		sandboxStore:   store,
-		runtimeService: conchruntime.New(sandboxOps, nil, store),
+		runtimeService: newHandlerRuntime(sandboxOps, nil, store),
 	}
 
 	if err := server.removeAllSandboxes(); err != nil {
@@ -155,7 +156,7 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sandboxOps := &fakeSandboxOps{}
-			runtimeService := conchruntime.New(sandboxOps, nil, nil)
+			runtimeService := newHandlerRuntime(sandboxOps, nil, nil)
 			runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{
 				TemplateName: tt.defaultTemplateName,
 				VCPUNum:      2,
@@ -191,7 +192,7 @@ func TestHandleCreateSandboxTemplateSelection(t *testing.T) {
 
 func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService := newHandlerRuntime(sandboxOps, nil, nil)
 	runtimeService.Templates = testTemplateStore()
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
@@ -206,7 +207,7 @@ func TestHandleCreateSandboxRejectsMissingResources(t *testing.T) {
 
 func TestHandleCreateSandboxRejectsRAMBelowMinimum(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, nil)
+	runtimeService := newHandlerRuntime(sandboxOps, nil, nil)
 	runtimeService.SetSandboxDefaults(conchruntime.SandboxDefaults{TemplateName: testTemplateNameDefault})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
@@ -233,7 +234,9 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 		t.Fatalf("Create() seed error = %v", err)
 	}
 
-	runtimeService := conchruntime.New(&fakeSandboxOps{}, nil, store)
+	runtimeService := newHandlerRuntime(&fakeSandboxOps{}, nil, store)
+	runtimeService.Templates = testTemplateStore()
+	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{VCPUNum: 1, VCPUMax: 1, RamMB: 128})
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 	recorder := httptest.NewRecorder()
@@ -247,7 +250,7 @@ func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
 func TestHandleInspectMissingTemplateReturnsDomainError(t *testing.T) {
 	store := newMemorySandboxStore()
 
-	runtimeService := conchruntime.New(nil, nil, store)
+	runtimeService := newHandlerRuntime(nil, nil, store)
 	runtimeService.Templates = missingTemplateStore{}
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
