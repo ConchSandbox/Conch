@@ -459,6 +459,11 @@ func TestCreateRejectsInvalidRequestsBeforeResourceAllocation(t *testing.T) {
 		want   error
 	}{
 		{"id", func(r *CreateRequest) { r.SandboxID = "../escape" }, ErrInvalidArgument},
+		{"memory snapshot id", func(r *CreateRequest) { r.SandboxID = "foo-mem" }, ErrInvalidArgument},
+		{"rootfs view id", func(r *CreateRequest) { r.SandboxID = "view-rootfs-foo" }, ErrInvalidArgument},
+		{"memory view id", func(r *CreateRequest) { r.SandboxID = "view-mem-foo" }, ErrInvalidArgument},
+		{"vm view id", func(r *CreateRequest) { r.SandboxID = "view-vm-foo" }, ErrInvalidArgument},
+		{"padded reserved id", func(r *CreateRequest) { r.SandboxID = " foo-mem " }, ErrInvalidArgument},
 		{"template", func(r *CreateRequest) { r.TemplateID = "not-a-digest" }, ErrInvalidArgument},
 		{"vmm", func(r *CreateRequest) { r.VMMName = "unknown" }, ErrInvalidArgument},
 		{"cpu", func(r *CreateRequest) { r.VCPUMax = 1 }, ErrInvalidArgument},
@@ -476,6 +481,16 @@ func TestCreateRejectsInvalidRequestsBeforeResourceAllocation(t *testing.T) {
 			}
 			if len(store.operationLog()) != 0 {
 				t.Fatal("invalid request wrote state")
+			}
+		})
+	}
+}
+
+func TestValidateSandboxIDAllowsNamesOutsideReservedPatterns(t *testing.T) {
+	for _, sandboxID := range []string{"foo", "foo-mem-extra", "my-view-vm-foo", "view-vm", "foo-MEM", "View-vm-foo"} {
+		t.Run(sandboxID, func(t *testing.T) {
+			if err := validateSandboxID(sandboxID); err != nil {
+				t.Fatalf("validateSandboxID(%q): %v", sandboxID, err)
 			}
 		})
 	}

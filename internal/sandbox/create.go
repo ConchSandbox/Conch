@@ -153,7 +153,7 @@ func (m *Manager) validateCreateRequest(ctx context.Context, req *CreateRequest)
 	if req.SandboxID == "" {
 		req.SandboxID, err = id.New()
 	} else {
-		err = id.Validate(req.SandboxID)
+		err = validateSandboxID(req.SandboxID)
 	}
 	if err != nil {
 		return ErrInvalidArgument.Wrap(err)
@@ -182,6 +182,22 @@ func (m *Manager) validateCreateRequest(ctx context.Context, req *CreateRequest)
 	req.Env = cloneStringMap(req.Env)
 	req.AgentToken, err = GenerateAgentToken()
 	return err
+}
+
+// validateSandboxID reserves names used by runtime memory and view snapshots.
+func validateSandboxID(sandboxID string) error {
+	if err := id.Validate(sandboxID); err != nil {
+		return err
+	}
+	if strings.HasSuffix(sandboxID, "-mem") {
+		return fmt.Errorf("sandbox id suffix %q is reserved for internal snapshots", "-mem")
+	}
+	for _, prefix := range []string{"view-rootfs-", "view-mem-", "view-vm-"} {
+		if strings.HasPrefix(sandboxID, prefix) {
+			return fmt.Errorf("sandbox id prefix %q is reserved for internal snapshots", prefix)
+		}
+	}
+	return nil
 }
 
 func GenerateAgentToken() (string, error) {
