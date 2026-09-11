@@ -256,11 +256,26 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *s
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if entry.sbx == nil || entry.sbx.process == nil {
+		m.releaseRAM(entry)
+	}
 	if sbx := entry.sbx; sbx != nil {
 		if process := sbx.process; process != nil {
-			if err := sbx.Stop(ctx); err != nil {
-				return err
+			stopErr := sbx.Stop(ctx)
+			if process.Pid() == 0 {
+				m.releaseRAM(entry)
+			} else {
+				// A secondary shutdown error can accompany a confirmed process exit.
+				select {
+				case <-process.Done():
+					m.releaseRAM(entry)
+				default:
+				}
 			}
+			if stopErr != nil {
+				return stopErr
+			}
+
 			for _, path := range []string{process.VmmSocketPath, process.VsockSocketPath} {
 				if err := os.RemoveAll(path); err != nil {
 					return fmt.Errorf("remove sandbox socket: %w", err)

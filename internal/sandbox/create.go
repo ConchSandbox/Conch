@@ -109,6 +109,12 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	rec.RuntimeSnapshots = append([]SnapshotRef(nil), boot.RuntimeSnapshots...)
 	rec.RamMB = boot.Spec.MemorySizeMB
 	vmSpec := boot.Spec
+	if m.memOvercommitRatio > 0 {
+		if err = m.reserveRAM(vmSpec.MemorySizeMB); err != nil {
+			return runtimeapi.SandboxCreateResult{}, err
+		}
+		entry.ramMB = vmSpec.MemorySizeMB
+	}
 	devices, err := m.prepareVolumes(req, boot.Resume)
 	entry.volumes = devices
 	if err != nil {
@@ -144,6 +150,33 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	}, nil
 }
 
+func (m *Manager) reserveRAM(requestedMB int64) error {
+	limitMB := float64(m.memLimitMB) * m.memOvercommitRatio
+	for {
+		usedMB := m.usedRAM.Load()
+		if float64(usedMB)+float64(requestedMB) > limitMB {
+			err := fmt.Errorf(
+				"sandbox memory limit exceeded: requested=%dMiB used=%dMiB limit=%dMiB overcommit_ratio=%g effective_limit=%gMiB",
+				requestedMB, usedMB, m.memLimitMB, m.memOvercommitRatio, limitMB,
+			)
+			ulog.GetLogger().Warn("sandbox create rejected by memory admission", ulog.F("error", err))
+			return ErrResourceExhausted.WrapMessage(err, "sandbox memory limit exceeded")
+		}
+		if m.usedRAM.CompareAndSwap(usedMB, usedMB+requestedMB) {
+			return nil
+		}
+	}
+}
+
+func (m *Manager) releaseRAM(entry *sandboxEntry) {
+	if entry == nil || entry.ramMB == 0 {
+		return
+	}
+	ramMB := entry.ramMB
+	entry.ramMB = 0
+	m.usedRAM.Add(-ramMB)
+}
+
 func (m *Manager) validateCreateRequest(ctx context.Context, req *CreateRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -171,7 +204,7 @@ func (m *Manager) validateCreateRequest(ctx context.Context, req *CreateRequest)
 		return ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
 	}
 	if req.VCPUNum > runtimeapi.SandboxMaxVCPU || req.VCPUMax > runtimeapi.SandboxMaxVCPU || req.RAMMB > runtimeapi.SandboxMaxRAMMB {
-		return ErrResourceExhausted.Wrap(fmt.Errorf("sandbox CPU or memory request exceeds limits"))
+		return ErrInvalidArgument.Wrap(fmt.Errorf("sandbox CPU or memory request exceeds limits"))
 	}
 	if err := agentprotocol.ValidateEnvironment(req.Env); err != nil {
 		return ErrInvalidEnvironment.Wrap(err)

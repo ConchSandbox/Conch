@@ -91,6 +91,17 @@ volume:
     binary: /actual/path/to/virtiofsd
 ```
 
+### 沙箱内存准入
+
+创建沙箱前，Conch 按配置的沙箱内存上限决定是否允许创建：
+
+```text
+usedRAM + requestedRAM
+    <= memory_limit_mb * memory_overcommit_ratio
+```
+
+`usedRAM` 包含创建中、运行中和已挂起沙箱的配置内存。准入时以原子方式预留请求内存；确认 VMM 未启动或已停止后释放配额。条件不满足时，创建请求返回资源不足错误。
+
 ## 验证
 
 ```bash
