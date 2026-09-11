@@ -164,25 +164,6 @@ func (s *Server) releaseViewSnapshot(ctx context.Context, namespace, viewSnapsho
 	return s.tryRemoveSnapshotKind(ctx, namespace, viewSnapshotKey, snapshots.KindView)
 }
 
-func (s *Server) activeSnapshotExists(ctx context.Context, namespace, key string) bool {
-	if s.getActiveSnapshot(namespace, key) != nil {
-		return true
-	}
-	if s.snt == nil {
-		return false
-	}
-	info, err := s.snt.Stat(ctx, key)
-	return err == nil && info.Kind == snapshots.KindActive
-}
-
-func (s *Server) snapshotKindExists(ctx context.Context, namespace, key string, kind snapshots.Kind) bool {
-	if s.snt == nil {
-		return false
-	}
-	info, err := s.snt.Stat(ctx, key)
-	return err == nil && info.Kind == kind
-}
-
 // prepareAndMountActiveSnapshot prepares and mounts an active snapshot, then records it in the runtime cache.
 // It returns the path callers should use to access the mounted snapshot.
 func (s *Server) prepareAndMountActiveSnapshot(
@@ -352,6 +333,9 @@ func (s *Server) tryRemoveSnapshotKind(ctx context.Context, namespace, key strin
 	activeCached := s.getActiveSnapshot(namespace, key) != nil
 	info, err := s.snt.Stat(ctx, key)
 	if err != nil {
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("stat snapshot %s: %w", key, err)
+		}
 		s.removeActiveSnapshot(namespace, key)
 		return nil
 	}
@@ -365,7 +349,7 @@ func (s *Server) tryRemoveSnapshotKind(ctx context.Context, namespace, key strin
 	if !allowedKind {
 		return nil
 	}
-	if err := s.snt.Remove(ctx, key); err != nil {
+	if err := s.snt.Remove(ctx, key); err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("remove snapshot %s: %w", key, err)
 	}
 	s.removeActiveSnapshot(namespace, key)

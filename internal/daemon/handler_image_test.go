@@ -9,12 +9,11 @@ import (
 	"testing"
 
 	"github.com/openeuler/Conch/internal/apperror"
-	"github.com/openeuler/Conch/internal/conchruntime"
 	conchimage "github.com/openeuler/Conch/internal/image"
 )
 
 func TestHandlePullImageUnavailable(t *testing.T) {
-	runtimeService := conchruntime.New(nil, nil, nil)
+	runtimeService := newHandlerRuntime(nil, nil, nil)
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 

@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
-	"github.com/openeuler/Conch/internal/snapshot/common"
 	"github.com/openeuler/Conch/internal/vmm"
 )
 
@@ -20,29 +18,6 @@ type SnapshotBackend interface {
 	CreateBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
 	RestoreBootLayout(ctx context.Context, key string, req snapshot.BootLayoutRequest) (*snapshot.BootLayout, error)
 	ReleaseBootLayout(ctx context.Context, key string) error
-}
-
-type BootSpec struct {
-	MemorySizeMB int64
-
-	MemoryPath   string
-	KernelPath   string
-	InitrdPath   string
-	SnapfilePath string
-	PmemPaths    []string
-}
-
-type BootRuntime struct {
-	BootIndexDigest string
-	CapturedVMMName string
-	RootfsKey       string
-	MemKey          string
-	RootfsMount     string
-	MemMount        string
-	VMMount         string
-	RootDir         string
-	MemSize         int64
-	Resume          bool
 }
 
 type PrepareBootRequest struct {
@@ -53,8 +28,8 @@ type PrepareBootRequest struct {
 }
 
 type PreparedBoot struct {
-	Spec             BootSpec
-	Runtime          BootRuntime
+	Spec             VMStartSpec
+	Resume           bool
 	RuntimeSnapshots []SnapshotRef
 }
 
@@ -210,25 +185,9 @@ func (p *bootPreparer) prepareResolvedBoot(
 	if err != nil {
 		return PreparedBoot{}, fmt.Errorf("failed to prepare boot layout: %w", err)
 	}
-	runtimeMemKey := ""
-	if strings.TrimSpace(layout.MemMount) != "" {
-		runtimeMemKey = snapshot.MemKeyFromRootfs(key)
-	}
 	return PreparedBoot{
-		Spec:             bootSpecFromLayout(layout),
+		Spec: vmStartSpecFromLayout(layout), Resume: resume,
 		RuntimeSnapshots: append([]SnapshotRef(nil), layout.RuntimeSnapshots...),
-		Runtime: BootRuntime{
-			BootIndexDigest: resolved.BootIndexDigest,
-			CapturedVMMName: resolved.VMMName,
-			RootfsKey:       key,
-			MemKey:          runtimeMemKey,
-			RootfsMount:     layout.RootfsMount,
-			MemMount:        layout.MemMount,
-			VMMount:         layout.VMMount,
-			RootDir:         layout.SnapshotDir,
-			MemSize:         layout.MemorySizeMB,
-			Resume:          resume,
-		},
 	}, nil
 }
 
@@ -280,40 +239,16 @@ func validateResolvedBoot(resolved conchimage.ResolvedBoot, requestedVMM string)
 	return nil
 }
 
-func bootSpecFromLayout(layout *snapshot.BootLayout) BootSpec {
+func vmStartSpecFromLayout(layout *snapshot.BootLayout) VMStartSpec {
 	if layout == nil {
-		return BootSpec{}
+		return VMStartSpec{}
 	}
-	return BootSpec{
+	return VMStartSpec{
 		MemorySizeMB: layout.MemorySizeMB,
 		MemoryPath:   layout.SnapshotMemFile(),
 		KernelPath:   layout.KernelFile(),
 		InitrdPath:   layout.InitrdFile(),
 		SnapfilePath: layout.SnapDir(),
 		PmemPaths:    layout.PmemFiles(),
-	}
-}
-
-func BootSpecFromRuntime(runtime BootRuntime) BootSpec {
-	rootDir := runtime.RootDir
-	if rootDir == "" {
-		rootDir = "conch/snapshot"
-	}
-	memSize := runtime.MemSize
-	if memSize <= 0 {
-		memSize = common.MemFileDefaultSize
-	}
-	memoryPath := ""
-	snapfilePath := ""
-	if strings.TrimSpace(runtime.MemMount) != "" {
-		memoryPath = filepath.Join(runtime.MemMount, common.MemFileName)
-		snapfilePath = filepath.Join(runtime.MemMount, strings.TrimLeft(rootDir, string(filepath.Separator)))
-	}
-	return BootSpec{
-		MemorySizeMB: memSize,
-		MemoryPath:   memoryPath,
-		KernelPath:   filepath.Join(runtime.VMMount, common.VmKernelRelativePath),
-		InitrdPath:   filepath.Join(runtime.VMMount, common.VmInitrdRelativePath),
-		SnapfilePath: snapfilePath,
 	}
 }

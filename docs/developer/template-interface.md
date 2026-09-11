@@ -66,8 +66,8 @@ Template record. Updating one Name does not affect other Names.
 
 ### Get
 
-`Get` resolves a Template Name, validates the record schema and current Boot
-Index closure, and returns the current Entry.
+`Get` resolves a Template Name, validates the image record schema, target digest
+and metadata labels, and returns the current Entry.
 
 ### List
 

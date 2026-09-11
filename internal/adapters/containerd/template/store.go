@@ -96,7 +96,7 @@ func (s *Store) Get(ctx context.Context, rawName string) (conchtemplate.Entry, e
 	if err != nil {
 		return conchtemplate.Entry{}, translateError("get Template image record", err)
 	}
-	return s.entryFromRecord(nsctx, record)
+	return entryFromRecord(record)
 }
 
 func (s *Store) List(ctx context.Context, filter conchtemplate.Filter) ([]conchtemplate.Entry, error) {
@@ -122,7 +122,7 @@ func (s *Store) List(ctx context.Context, filter conchtemplate.Filter) ([]concht
 		if _, ok := conchimage.TemplateNameFromRecordName(record.Name); !ok {
 			continue
 		}
-		entry, err := s.entryFromRecord(nsctx, record)
+		entry, err := entryFromRecord(record)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +160,7 @@ func (s *Store) Delete(ctx context.Context, rawName string) error {
 	return nil
 }
 
-func (s *Store) entryFromRecord(ctx context.Context, record images.Image) (conchtemplate.Entry, error) {
+func entryFromRecord(record images.Image) (conchtemplate.Entry, error) {
 	if record.Labels[schemaLabel] != schemaVersion {
 		return conchtemplate.Entry{}, conchtemplate.ErrNotFound.Wrap(fmt.Errorf("image record %s is not a Template", record.Name))
 	}
@@ -168,16 +168,17 @@ func (s *Store) entryFromRecord(ctx context.Context, record images.Image) (conch
 	if !ok {
 		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("invalid Template image record name %s", record.Name))
 	}
-	info, err := conchimage.InspectBootIndexContent(ctx, s.content, record.Target)
-	if err != nil {
-		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(err)
+	var bootMode conchtemplate.BootMode
+	switch record.Labels[conchimage.ImageKindLabel] {
+	case conchimage.ImageKindBootIndexCold:
+		bootMode = conchtemplate.BootModeCold
+	case conchimage.ImageKindBootIndexResume:
+		bootMode = conchtemplate.BootModeResume
+	default:
+		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("invalid Template image kind"))
 	}
-	bootMode, wantKind := conchtemplate.BootModeCold, conchimage.ImageKindBootIndexCold
-	if info.Resume {
-		bootMode, wantKind = conchtemplate.BootModeResume, conchimage.ImageKindBootIndexResume
-	}
-	if record.Labels[conchimage.ImageKindLabel] != wantKind {
-		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("Template image kind does not match Boot Index"))
+	if record.Target.MediaType != ocispec.MediaTypeImageIndex {
+		return conchtemplate.Entry{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("Template target must be a Boot Index"))
 	}
 	entry := conchtemplate.Entry{
 		Name:                  name,

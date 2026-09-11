@@ -10,6 +10,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/errdefs"
 
 	"github.com/openeuler/Conch/internal/snapshot/common"
 )
@@ -187,6 +188,7 @@ func (r *recordingServerSnapshotter) Update(context.Context, snapshots.Info, ...
 
 func (r *recordingServerSnapshotter) Remove(_ context.Context, key string) error {
 	r.removedKeys = append(r.removedKeys, key)
+	delete(r.statByKey, key)
 	return nil
 }
 
@@ -197,7 +199,7 @@ func (r *recordingServerSnapshotter) Stat(_ context.Context, key string) (snapsh
 	if r.statByKey != nil {
 		info, ok := r.statByKey[key]
 		if !ok {
-			return snapshots.Info{}, errors.New("snapshot not found")
+			return snapshots.Info{}, errdefs.ErrNotFound
 		}
 		return info, nil
 	}
@@ -210,4 +212,37 @@ func (r *recordingServerSnapshotter) List(context.Context, map[string]*snapshots
 
 func (r *recordingServerSnapshotter) Close() error {
 	return nil
+}
+
+func TestReleaseBootLayoutIsIdempotent(t *testing.T) {
+	const key = "sandbox-retry"
+	backend := &recordingServerSnapshotter{statByKey: map[string]snapshots.Info{
+		key:                        {Kind: snapshots.KindActive},
+		getMemViewSnapshotKey(key): {Kind: snapshots.KindView},
+		getVMViewSnapshotKey(key):  {Kind: snapshots.KindView},
+	}}
+	srv := &Server{snt: backend, workDir: t.TempDir()}
+	for range 3 {
+		if err := srv.ReleaseBootLayout(context.Background(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(backend.statByKey) != 0 || len(backend.removedKeys) != 3 {
+		t.Fatalf("remaining=%v removals=%v", backend.statByKey, backend.removedKeys)
+	}
+}
+
+func TestReleaseBootLayoutReturnsLookupFailure(t *testing.T) {
+	backend := &recordingServerSnapshotter{statErr: os.ErrPermission}
+	srv := &Server{snt: backend, workDir: t.TempDir()}
+	if err := srv.ReleaseBootLayout(context.Background(), "sandbox-retry"); !errors.Is(err, os.ErrPermission) {
+		t.Fatal(err)
+	}
+	if len(backend.removedKeys) != 0 {
+		t.Fatal("removed snapshots after lookup failure")
+	}
+	backend.statErr = errdefs.ErrNotFound
+	if err := srv.ReleaseBootLayout(context.Background(), "sandbox-retry"); err != nil {
+		t.Fatal(err)
+	}
 }

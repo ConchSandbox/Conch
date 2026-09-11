@@ -151,9 +151,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 	daemonClient := host.Client()
 	s.daemonClient = daemonClient
 
-	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client(), s.sandboxStore)
+	s.runtimeService = conchruntime.New(host.SandboxManager(), host.Client())
 	s.webhookDispatcher = webhook.NewDispatcher()
-	s.runtimeService.WebhookDispatcher = s.webhookDispatcher
+	host.SandboxManager().WebhookDispatcher = s.webhookDispatcher
 	s.runtimeService.Snapshot = host.SnapshotServer()
 	s.runtimeService.Templates = host.TemplateStore()
 	s.runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
@@ -167,7 +167,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	manager := host.SandboxManager()
 	if manager != nil {
-		manager.UnexpectedExitHandler = s.runtimeService.HandleSandboxUnexpectedExit
 		records, err := s.sandboxStore.List(ctx, conchsandbox.Filter{})
 		if err != nil {
 			cleanupErr := host.Close()
@@ -191,11 +190,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 			cleanupErr := host.Close()
 			cancel()
 			return nil, errors.Join(fmt.Errorf("recover stale sandbox resources during startup: %w", err), cleanupErr)
-		}
-		if err := s.removeAllSandboxes(); err != nil {
-			cleanupErr := host.Close()
-			cancel()
-			return nil, errors.Join(fmt.Errorf("clean up stale sandboxes during startup: %w", err), cleanupErr)
 		}
 		if err := manager.Start(ctx); err != nil {
 			cleanupErr := host.Close()
@@ -389,8 +383,7 @@ func (s *Daemon) controlPlaneReady() bool {
 		s.containerdHost != nil &&
 		s.daemonClient != nil &&
 		s.runtimeService != nil &&
-		s.runtimeService.Sandbox != nil &&
-		s.runtimeService.Store != nil
+		s.runtimeService.Sandbox != nil
 }
 
 func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
@@ -624,7 +617,7 @@ func (s *Daemon) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	if record == nil {
+	if record == nil || record.State == conchsandbox.StateUnknown {
 		writeAPIError(w, conchsandbox.ErrNotFound.New())
 		return
 	}

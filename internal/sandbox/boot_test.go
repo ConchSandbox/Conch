@@ -154,11 +154,8 @@ func TestBootPreparerColdCreateResolvesBootIndexWithoutSnapshotInfo(t *testing.T
 	if call.parents != (snapshot.ParentSnapshotIDs{Rootfs: "rootfs-committed", VM: "vm-committed"}) {
 		t.Fatalf("cold parents = %#v", call.parents)
 	}
-	if got.Runtime.Resume || got.Runtime.BootIndexDigest != bootDigest || got.Runtime.CapturedVMMName != "" {
-		t.Fatalf("cold runtime = %#v", got.Runtime)
-	}
-	if got.Runtime.RootfsKey != "sandbox-a" || got.Runtime.MemKey != "sandbox-a-mem" {
-		t.Fatalf("runtime handles = %#v", got.Runtime)
+	if got.Resume {
+		t.Fatal("cold boot marked as resume")
 	}
 	if got.Spec.MemorySizeMB != 512 || !strings.Contains(got.Spec.MemoryPath, "sandbox-a") {
 		t.Fatalf("cold boot spec = %#v", got.Spec)
@@ -189,9 +186,7 @@ func TestBootPreparerStratovirtColdCreateUsesNoMemoryLayer(t *testing.T) {
 	if got.Spec.MemoryPath != "" || got.Spec.SnapfilePath != "" {
 		t.Fatalf("StratoVirt cold spec = %#v", got.Spec)
 	}
-	if got.Runtime.MemKey != "" || got.Runtime.MemMount != "" {
-		t.Fatalf("StratoVirt cold runtime = %#v", got.Runtime)
-	}
+
 }
 
 func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
@@ -223,8 +218,8 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	if call.parents != (snapshot.ParentSnapshotIDs{Rootfs: "rootfs-committed", Mem: "mem-committed", VM: "vm-committed"}) {
 		t.Fatalf("resume parents = %#v", call.parents)
 	}
-	if !got.Runtime.Resume || got.Runtime.BootIndexDigest != bootDigest || got.Runtime.CapturedVMMName != "cloud-hypervisor" {
-		t.Fatalf("resume runtime = %#v", got.Runtime)
+	if !got.Resume {
+		t.Fatal("checkpoint boot is not marked as resume")
 	}
 	if got.Spec.SnapfilePath == "" {
 		t.Fatalf("resume boot = %#v", got)
@@ -303,13 +298,8 @@ func TestBootPreparerCreatesDistinctRuntimeHandlesFromSharedCommittedParents(t *
 		t.Fatalf("second Prepare() error = %v", err)
 	}
 
-	if first.Runtime.RootfsKey == second.Runtime.RootfsKey || first.Runtime.MemKey == second.Runtime.MemKey {
-		t.Fatalf("runtime handles are shared: first=%#v second=%#v", first.Runtime, second.Runtime)
-	}
-	if first.Runtime.RootfsMount == second.Runtime.RootfsMount ||
-		first.Runtime.MemMount == second.Runtime.MemMount ||
-		first.Runtime.VMMount == second.Runtime.VMMount {
-		t.Fatalf("runtime mounts are shared: first=%#v second=%#v", first.Runtime, second.Runtime)
+	if first.Spec.KernelPath == second.Spec.KernelPath || first.Spec.SnapfilePath == second.Spec.SnapfilePath {
+		t.Fatalf("instances share boot paths: first=%#v second=%#v", first.Spec, second.Spec)
 	}
 	if len(snapshots.restores) != 2 || snapshots.restores[0].parents != snapshots.restores[1].parents {
 		t.Fatalf("restore parents = %#v", snapshots.restores)

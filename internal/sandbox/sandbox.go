@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/openeuler/Conch/internal/agent/hostconn"
@@ -46,19 +45,7 @@ type VMStartSpec struct {
 	VirtioFS     []driver.VirtioFSDevice
 }
 
-func vmStartSpecFromBootSpec(spec BootSpec) VMStartSpec {
-	return VMStartSpec{
-		MemorySizeMB: spec.MemorySizeMB,
-		MemoryPath:   spec.MemoryPath,
-		KernelPath:   spec.KernelPath,
-		InitrdPath:   spec.InitrdPath,
-		SnapfilePath: spec.SnapfilePath,
-		PmemPaths:    append([]string(nil), spec.PmemPaths...),
-	}
-}
-
 type Sandbox struct {
-	cleanup     *Cleanup
 	process     *vmm.Process
 	vmStartSpec VMStartSpec
 	vmmName     string
@@ -66,182 +53,43 @@ type Sandbox struct {
 	slot        *netstack.Slot
 }
 
-func RestoreSandbox(
-	ctx context.Context,
-	vmStartSpec VMStartSpec,
-	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
-	readyOpts *hostconn.ReadyOptions,
-) (s *Sandbox, e error) {
-	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
-		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
-	}
-
-	cleanup := NewCleanup()
-	defer func() {
-		if e != nil {
-			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
-			e = errors.Join(e, cleanupErr)
-		}
-	}()
-
-	slot, err := pool.Get(ctx, sandboxId, network)
+// launchSandbox returns acquired resources even on failure. Manager owns
+// rollback, including a VMM that was started but failed to become ready.
+func launchSandbox(ctx context.Context, req CreateRequest, spec VMStartSpec, vmmBinary string,
+	pool *netstack.Pool, runtimeIDs createRuntimeIDs, readyOpts *hostconn.ReadyOptions, restore bool,
+) (*Sandbox, error) {
+	sbx := &Sandbox{vmStartSpec: spec, vmmName: req.VMMName, sandboxID: req.SandboxID}
+	slot, err := pool.Get(ctx, req.SandboxID, req.Network)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init network: %w", err)
+		return sbx, fmt.Errorf("prepare network: %w", err)
 	}
-
-	cleanup.Add(func(ctx context.Context) error {
-		err := pool.Release(ctx, slot)
-		if err != nil {
-			return fmt.Errorf("failed to release network slot %d: %w", slot.ID(), err)
-		}
-		return nil
-	})
+	sbx.slot = slot
 	readyOpts.Network = slot.GuestNetworkConfig()
 	if _, err := hostconn.ValidateReadyRequest(*readyOpts); err != nil {
-		return nil, fmt.Errorf("validate initialization before VMM start: %w", err)
+		return sbx, fmt.Errorf("validate initialization before VMM start: %w", err)
 	}
-
-	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         vcpuNum,
-		CPUMax:          vcpuMax,
-		MemorySize:      vmStartSpec.MemorySizeMB,
-		MemoryPath:      vmStartSpec.MemoryPath,
-		NetNSPath:       slot.NetNSPath(),
-		TapName:         slot.TapName(),
-		KernelPath:      vmStartSpec.KernelPath,
-		SnapfilePath:    vmStartSpec.SnapfilePath,
-		InitrdPath:      vmStartSpec.InitrdPath,
-		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
-		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
-		VsockCID:        vsockCID,
-		VsockSocketPath: vsockSocketPath,
+	resources := &vmm.ResourceArgs{
+		CPUBoot: req.VCPUNum, CPUMax: req.VCPUMax, MemorySize: spec.MemorySizeMB, MemoryPath: spec.MemoryPath,
+		NetNSPath: slot.NetNSPath(), TapName: slot.TapName(), KernelPath: spec.KernelPath, InitrdPath: spec.InitrdPath,
+		PmemPaths: append([]string(nil), spec.PmemPaths...), VirtioFS: append([]driver.VirtioFSDevice(nil), spec.VirtioFS...),
+		VsockCID: runtimeIDs.vsockCID, VsockSocketPath: runtimeIDs.vsockSocketPath, SandboxId: req.SandboxID,
 	}
-
-	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, vmmBinary, sandboxId, vmmResourceArgs, true,
-	)
-	if vmmErr != nil {
-		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
+	if restore {
+		resources.SnapfilePath = spec.SnapfilePath
 	}
-
-	err = vmmHandle.Restore(ctx, vmStartSpec.SnapfilePath)
+	process, err := vmm.NewProcess(req.VMMName, vmmBinary, req.SandboxID, resources, restore)
 	if err != nil {
-		return nil, fmt.Errorf("failed to restore VMM: %w", err)
+		return sbx, fmt.Errorf("prepare VMM: %w", err)
 	}
-
-	sbx := &Sandbox{
-		vmStartSpec: vmStartSpec,
-		process:     vmmHandle,
-		cleanup:     cleanup,
-		vmmName:     vmmName,
-		sandboxID:   sandboxId,
-		slot:        slot,
+	sbx.process = process
+	if restore {
+		err = process.Restore(ctx, spec.SnapfilePath)
+	} else {
+		err = process.Create(ctx)
 	}
-
-	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(sbx.process.VmmSocketPath, sbx.process.VsockSocketPath)
-		if filesErr != nil {
-			return fmt.Errorf("failed to cleanup files: %w", filesErr)
-		}
-
-		return nil
-	})
-	cleanup.AddPriority(func(ctx context.Context) error {
-		// Stop the sandbox first if it is still running, otherwise do nothing
-		return sbx.Stop(ctx)
-	})
-
-	return sbx, nil
-}
-
-func CreateSandbox(
-	ctx context.Context,
-	vmStartSpec VMStartSpec,
-	vmmName, vmmBinary, sandboxId string, vcpuNum, vcpuMax int64, pool *netstack.Pool,
-	vsockCID uint32, vsockSocketPath string, network *netstack.SandboxNetworkConfig,
-	readyOpts *hostconn.ReadyOptions,
-) (s *Sandbox, e error) {
-
-	if err := validateVCPUNum(vcpuNum, vcpuMax); err != nil {
-		return nil, fmt.Errorf("invalid vcpu configuration: %w", err)
-	}
-
-	cleanup := NewCleanup()
-	defer func() {
-		if e != nil {
-			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
-			e = errors.Join(e, cleanupErr)
-		}
-	}()
-
-	slot, err := pool.Get(ctx, sandboxId, network)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init network: %w", err)
+		return sbx, fmt.Errorf("start VMM: %w", err)
 	}
-
-	cleanup.Add(func(ctx context.Context) error {
-		err := pool.Release(ctx, slot)
-		if err != nil {
-			return fmt.Errorf("failed to release network slot %d: %w", slot.ID(), err)
-		}
-		return nil
-	})
-	readyOpts.Network = slot.GuestNetworkConfig()
-	if _, err := hostconn.ValidateReadyRequest(*readyOpts); err != nil {
-		return nil, fmt.Errorf("validate initialization before VMM start: %w", err)
-	}
-
-	vmmResourceArgs := &vmm.ResourceArgs{
-		CPUBoot:         vcpuNum,
-		CPUMax:          vcpuMax,
-		MemorySize:      vmStartSpec.MemorySizeMB,
-		MemoryPath:      vmStartSpec.MemoryPath,
-		NetNSPath:       slot.NetNSPath(),
-		TapName:         slot.TapName(),
-		KernelPath:      vmStartSpec.KernelPath,
-		InitrdPath:      vmStartSpec.InitrdPath,
-		PmemPaths:       append([]string(nil), vmStartSpec.PmemPaths...),
-		VirtioFS:        append([]driver.VirtioFSDevice(nil), vmStartSpec.VirtioFS...),
-		VsockCID:        vsockCID,
-		VsockSocketPath: vsockSocketPath,
-		SandboxId:       sandboxId,
-	}
-
-	vmmHandle, vmmErr := vmm.NewProcess(
-		vmmName, vmmBinary, sandboxId, vmmResourceArgs, false,
-	)
-	if vmmErr != nil {
-		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
-	}
-
-	err = vmmHandle.Create(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create VMM: %w", err)
-	}
-
-	sbx := &Sandbox{
-		vmStartSpec: vmStartSpec,
-		process:     vmmHandle,
-		cleanup:     cleanup,
-		vmmName:     vmmName,
-		sandboxID:   sandboxId,
-		slot:        slot,
-	}
-
-	cleanup.Add(func(ctx context.Context) error {
-		filesErr := cleanupFiles(sbx.process.VmmSocketPath, sbx.process.VsockSocketPath)
-		if filesErr != nil {
-			return fmt.Errorf("failed to cleanup files: %w", filesErr)
-		}
-
-		return nil
-	})
-	cleanup.AddPriority(func(ctx context.Context) error {
-		// Stop the sandbox first if it is still running, otherwise do nothing
-		return sbx.Stop(ctx)
-	})
-
 	return sbx, nil
 }
 
@@ -250,19 +98,11 @@ func (s *Sandbox) Wait(ctx context.Context) error {
 }
 
 func (s *Sandbox) Stop(ctx context.Context) error {
-	vmmStopErr := s.process.Stop()
+	vmmStopErr := s.process.Stop(ctx)
 	if vmmStopErr != nil {
 		return fmt.Errorf("failed to stop VMM: %w", vmmStopErr)
 	}
 
-	return nil
-}
-
-func (s *Sandbox) Close(ctx context.Context) error {
-	err := s.cleanup.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup sandbox: %w", err)
-	}
 	return nil
 }
 

@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/openeuler/Conch/internal/id"
+	"github.com/openeuler/Conch/internal/netstack"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
+	"time"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
@@ -33,11 +34,12 @@ type fakeSnapshotService struct {
 }
 
 type fakeSandboxOps struct {
+	store          *memorySandboxStore
 	createReq      sandbox.CreateRequest
-	checkpointReq  sandbox.CheckpointRequest
-	suspendReq     sandbox.LifecycleRequest
-	resumeReq      sandbox.LifecycleRequest
-	deleteReqs     []sandbox.DeleteRequest
+	checkpointReq  string
+	suspendReq     string
+	resumeReq      string
+	deleteReqs     []string
 	createErr      error
 	createCalls    int
 	checkpointErr  error
@@ -46,7 +48,7 @@ type fakeSandboxOps struct {
 }
 
 func newSnapshotHandlerServer(svc conchruntime.SnapshotOps) *Daemon {
-	runtimeService := conchruntime.New(nil, nil, nil)
+	runtimeService := newHandlerRuntime(nil, nil, nil)
 	runtimeService.Snapshot = svc
 	s := &Daemon{
 		router:         http.NewServeMux(),
@@ -85,56 +87,99 @@ func (f *fakeSnapshotService) Info(_ context.Context, req runtimeapi.SnapshotInf
 	}, nil
 }
 
-func (f *fakeSandboxOps) Create(_ context.Context, req sandbox.CreateRequest) (sandbox.CreateResult, error) {
-	f.createCalls++
-	f.createReq = req
-	if f.createErr != nil {
-		return sandbox.CreateResult{}, f.createErr
+func newHandlerRuntime(ops conchruntime.SandboxOps, client *containerdclient.Client, store sandbox.Store) *conchruntime.Service {
+	if fake, ok := ops.(*fakeSandboxOps); ok {
+		fake.store, _ = store.(*memorySandboxStore)
 	}
-	return sandbox.CreateResult{
-		IP:              "192.0.2.2",
-		AgentToken:      req.AgentToken,
-		SandboxID:       req.SandboxID,
-		BootIndexDigest: req.TemplateID,
-	}, nil
+	return conchruntime.New(ops, client)
 }
 
-func (f *fakeSandboxOps) Delete(req sandbox.DeleteRequest) error {
-	f.deleteReqs = append(f.deleteReqs, req)
+func (f *fakeSandboxOps) Create(ctx context.Context, req sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error) {
+	f.createCalls++
+	if f.createErr != nil {
+		return runtimeapi.SandboxCreateResult{}, f.createErr
+	}
+	if req.SandboxID == "" {
+		req.SandboxID, _ = id.New()
+	}
+	if err := id.Validate(req.SandboxID); err != nil {
+		return runtimeapi.SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(err)
+	}
+	if err := agentprotocol.ValidateEnvironment(req.Env); err != nil {
+		return runtimeapi.SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
+	}
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, req.Network); err != nil {
+		return runtimeapi.SandboxCreateResult{}, err
+	}
+	if req.VCPUNum < 1 || req.RAMMB < 1 {
+		return runtimeapi.SandboxCreateResult{}, sandbox.ErrInvalidArgument.New()
+	}
+	req.AgentToken, _ = sandbox.GenerateAgentToken()
+	f.createReq = req
+	result := runtimeapi.SandboxCreateResult{
+		IP: "192.0.2.2", AgentToken: req.AgentToken, SandboxID: req.SandboxID,
+		TemplateID: req.TemplateID, TemplateName: req.TemplateName, VCPUNum: req.VCPUNum, RamMB: req.RAMMB, CreatedAt: time.Now().UnixNano(),
+	}
+	if f.store != nil {
+		_, err := f.store.Create(ctx, sandbox.Record{ID: req.SandboxID, State: sandbox.StateReady,
+			SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
+			CheckpointHeadTemplateID: req.TemplateID, CreatedAt: result.CreatedAt,
+			IP: result.IP, VCPUNum: req.VCPUNum, RamMB: req.RAMMB, Network: req.Network})
+		if err != nil {
+			return runtimeapi.SandboxCreateResult{}, err
+		}
+	}
+	return result, nil
+}
+func (f *fakeSandboxOps) Delete(ctx context.Context, sandboxID string) error {
+	f.deleteReqs = append(f.deleteReqs, sandboxID)
+	if f.store != nil {
+		return f.store.Delete(ctx, sandboxID)
+	}
 	return nil
 }
-
-func (f *fakeSandboxOps) Suspend(req sandbox.LifecycleRequest) error {
-	f.suspendReq = req
-	return nil
+func (f *fakeSandboxOps) Suspend(ctx context.Context, sandboxID string) error {
+	f.suspendReq = sandboxID
+	return f.setState(ctx, sandboxID, sandbox.StateSuspended)
 }
-
-func (f *fakeSandboxOps) Resume(req sandbox.LifecycleRequest) error {
-	f.resumeReq = req
-	return nil
+func (f *fakeSandboxOps) Resume(ctx context.Context, sandboxID string) error {
+	f.resumeReq = sandboxID
+	return f.setState(ctx, sandboxID, sandbox.StateReady)
 }
-
-func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
+func (f *fakeSandboxOps) setState(ctx context.Context, sandboxID string, state sandbox.State) error {
+	if f.store == nil {
+		return nil
+	}
+	rec, err := f.store.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	rec.State = state
+	_, err = f.store.Update(ctx, rec)
+	return err
+}
+func (f *fakeSandboxOps) UpdateNetwork(ctx context.Context, req sandbox.NetworkUpdateRequest) error {
+	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, req.Network); err != nil {
+		return err
+	}
 	f.updateReq = req
-	return nil
+	if f.store == nil {
+		return nil
+	}
+	rec, err := f.store.Get(ctx, req.SandboxID)
+	if err != nil {
+		return err
+	}
+	rec.Network = req.Network
+	_, err = f.store.Update(ctx, rec)
+	return err
 }
-
-func (f *fakeSandboxOps) Checkpoint(req sandbox.CheckpointRequest) (sandbox.CheckpointResult, error) {
-	f.checkpointReq = req
+func (f *fakeSandboxOps) Checkpoint(ctx context.Context, sandboxID string, register func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error) {
+	f.checkpointReq = sandboxID
 	if f.checkpointErr != nil {
 		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
-	if f.checkpointResp.MemRootPath != "" {
-		return f.checkpointResp, nil
-	}
-	memRoot, err := os.MkdirTemp("", "conch-daemon-checkpoint-test-*")
-	if err != nil {
-		return sandbox.CheckpointResult{}, err
-	}
-	return sandbox.CheckpointResult{
-		MemRootPath: memRoot,
-		VMMName:     "cloud-hypervisor",
-	}, nil
+	return f.checkpointResp, register(ctx, f.checkpointResp)
 }
 
 func TestHandleHealth(t *testing.T) {
@@ -143,7 +188,7 @@ func TestHandleHealth(t *testing.T) {
 		sandboxStore:   store,
 		containerdHost: &containerdhost.Host{},
 		daemonClient:   &containerdclient.Client{},
-		runtimeService: &conchruntime.Service{Sandbox: &fakeSandboxOps{}, Store: store},
+		runtimeService: &conchruntime.Service{Sandbox: &fakeSandboxOps{store: store}},
 	}
 	for _, test := range []struct {
 		name     string
@@ -239,7 +284,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 	store := newMemorySandboxStore()
 
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, store)
+	runtimeService := newHandlerRuntime(sandboxOps, nil, store)
 	runtimeService.SetSandboxDefaults(runtimeapi.SandboxDefaults{
 		TemplateName: testTemplateNameDefault,
 		VCPUNum:      4,
@@ -348,6 +393,9 @@ func TestSandboxV1Handlers(t *testing.T) {
 			if err := json.Unmarshal(response.Body.Bytes(), &apiErr); err != nil || string(apiErr.Code) != test.wantCode {
 				t.Fatalf("body = %s, decoded response = %#v, error = %v", test.body, apiErr, err)
 			}
+			if test.wantCode != "request.invalid_body" {
+				createCalls++
+			}
 			if sandboxOps.createCalls != createCalls {
 				t.Fatalf("body = %s, runtime Create() calls = %d, want %d", test.body, sandboxOps.createCalls, createCalls)
 			}
@@ -355,7 +403,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 	})
 
 	t.Run("maps oversized initialization payload to bad request", func(t *testing.T) {
-		sandboxOps.createErr = fmt.Errorf("marshal initialization: %w", agentprotocol.ErrPayloadTooLarge)
+		sandboxOps.createErr = sandbox.ErrInitializationTooLarge.Wrap(agentprotocol.ErrPayloadTooLarge)
 		t.Cleanup(func() { sandboxOps.createErr = nil })
 		response := serveSandboxRequest(server, http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
 			"sandbox_id":"oversized-env","template_name":"`+testTemplateNameOther+`"
@@ -415,7 +463,7 @@ func TestSandboxV1Handlers(t *testing.T) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
-		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0].SandboxID != "sandbox-1" {
+		if len(sandboxOps.deleteReqs) != 1 || sandboxOps.deleteReqs[0] != "sandbox-1" {
 			t.Fatalf("delete requests = %#v", sandboxOps.deleteReqs)
 		}
 		if _, err := store.Get(context.Background(), "sandbox-1"); !errors.Is(err, sandbox.ErrNotFound) {
