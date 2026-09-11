@@ -195,6 +195,39 @@ func testCreateRequest() CreateRequest {
 	return CreateRequest{SandboxID: "sandbox-a", TemplateID: digest.FromString("template").String(), TemplateName: "example:latest", VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RAMMB: 512}
 }
 
+func TestReserveCreateRAMAllowsOnlyOneConcurrentRequestAtCapacity(t *testing.T) {
+	m := &Manager{memoryOvercommit: 1.0, memorySafetyMB: 1024}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- m.reserveCreateRAMWithAvailable(4096, 5120)
+		}()
+	}
+	close(start)
+
+	var succeeded, exhausted int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrResourceExhausted):
+			exhausted++
+		default:
+			t.Fatalf("reserveCreateRAM() error = %v", err)
+		}
+	}
+	if succeeded != 1 || exhausted != 1 {
+		t.Fatalf("results = %d succeeded, %d exhausted; want 1 each", succeeded, exhausted)
+	}
+	m.pendingCreateRAM.Add(-4096)
+	if pending := m.pendingCreateRAM.Load(); pending != 0 {
+		t.Fatalf("pendingCreateRAM after release = %d, want 0", pending)
+	}
+}
+
 func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memorySandboxStore, *testLeases) {
 	t.Helper()
 	old := config.WorkDir

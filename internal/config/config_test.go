@@ -118,7 +118,7 @@ func TestLoadConfig(t *testing.T) {
 		"app:\n  name: conch-test\n" +
 			"log:\n  level: debug\n  output: both\n" +
 			"server:\n  work_dir: /tmp/conch\n  state_dir: /tmp/conch-state\n" +
-			"sandbox:\n  backend: cloud-hypervisor\n  default_spec:\n    template_name: " + testDefaultTemplateName + "\n    vcpu_num: 3\n    vcpu_max: 5\n    ram_mb: 2048\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
+			"sandbox:\n  backend: cloud-hypervisor\n  memory_overcommit_ratio: 1.5\n  memory_safety_margin_mb: 2048\n  default_spec:\n    template_name: " + testDefaultTemplateName + "\n    vcpu_num: 3\n    vcpu_max: 5\n    ram_mb: 2048\n  cloud_hypervisor:\n    binary: /opt/vmm/cloud-hypervisor\n  stratovirt:\n    binary: /opt/vmm/stratovirt\n" +
 			"network:\n  warm_pool_size: 123\n" +
 			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n",
 	)
@@ -163,6 +163,12 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.Sandbox.Backend != "cloud-hypervisor" {
 		t.Errorf("LoadConfig().Sandbox.Backend = %q, want cloud-hypervisor", cfg.Sandbox.Backend)
+	}
+	if cfg.Sandbox.MemoryOvercommitRatio != 1.5 {
+		t.Errorf("LoadConfig().Sandbox.MemoryOvercommitRatio = %v, want 1.5", cfg.Sandbox.MemoryOvercommitRatio)
+	}
+	if cfg.Sandbox.MemorySafetyMarginMB != 2048 {
+		t.Errorf("LoadConfig().Sandbox.MemorySafetyMarginMB = %d, want 2048", cfg.Sandbox.MemorySafetyMarginMB)
 	}
 	if cfg.Sandbox.DefaultSpec.TemplateName != testDefaultTemplateName {
 		t.Errorf("LoadConfig().Sandbox.DefaultSpec.TemplateName = %q, want %q", cfg.Sandbox.DefaultSpec.TemplateName, testDefaultTemplateName)
@@ -384,7 +390,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("network:\n  warm_pool_size: 0\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
+	data := []byte("network:\n  warm_pool_size: 0\nsandbox:\n  memory_overcommit_ratio: 5.1\n  memory_safety_margin_mb: 65537\nvolume:\n  max_mounts: 0\n  backend: \"\"\n")
 	if err := os.WriteFile(cfgPath, data, 0640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -402,6 +408,12 @@ func TestLoadConfigKeepsZeroValueDefaults(t *testing.T) {
 	}
 	if cfg.Volume.Backend != want.Volume.Backend {
 		t.Errorf("LoadConfig().Volume.Backend = %q, want default %q", cfg.Volume.Backend, want.Volume.Backend)
+	}
+	if cfg.Sandbox.MemoryOvercommitRatio != want.Sandbox.MemoryOvercommitRatio {
+		t.Errorf("LoadConfig().Sandbox.MemoryOvercommitRatio = %v, want default %v", cfg.Sandbox.MemoryOvercommitRatio, want.Sandbox.MemoryOvercommitRatio)
+	}
+	if cfg.Sandbox.MemorySafetyMarginMB != want.Sandbox.MemorySafetyMarginMB {
+		t.Errorf("LoadConfig().Sandbox.MemorySafetyMarginMB = %d, want default %d", cfg.Sandbox.MemorySafetyMarginMB, want.Sandbox.MemorySafetyMarginMB)
 	}
 }
 

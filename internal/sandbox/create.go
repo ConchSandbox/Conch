@@ -1,11 +1,14 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +38,12 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	}
 	if err = m.validateCreateRequest(parent, &req); err != nil {
 		return runtimeapi.SandboxCreateResult{}, err
+	}
+	if m.memoryOvercommit > 0 {
+		if err = m.reserveCreateRAM(req.RAMMB); err != nil {
+			return runtimeapi.SandboxCreateResult{}, err
+		}
+		defer m.pendingCreateRAM.Add(-req.RAMMB)
 	}
 	ctx, cancel := context.WithTimeout(parent, m.requestTimeout)
 	defer cancel()
@@ -142,6 +151,60 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 		TemplateName: req.TemplateName, TemplateID: req.TemplateID,
 		VCPUNum: rec.VCPUNum, RamMB: rec.RamMB, CreatedAt: rec.CreatedAt,
 	}, nil
+}
+
+func (m *Manager) reserveCreateRAM(requestedMB int64) error {
+	availableMB, err := readMemAvailableMB()
+	if err != nil {
+		return fmt.Errorf("read available host memory: %w", err)
+	}
+	return m.reserveCreateRAMWithAvailable(requestedMB, availableMB)
+}
+
+func (m *Manager) reserveCreateRAMWithAvailable(requestedMB, availableMB int64) error {
+	if availableMB < m.memorySafetyMB {
+		return ErrResourceExhausted.Wrap(fmt.Errorf(
+			"insufficient host memory: available=%dMiB is below safety margin=%dMiB",
+			availableMB, m.memorySafetyMB,
+		))
+	}
+	limitMB := float64(availableMB-m.memorySafetyMB) * m.memoryOvercommit
+	for {
+		pendingMB := m.pendingCreateRAM.Load()
+		if float64(pendingMB)+float64(requestedMB) > limitMB {
+			return ErrResourceExhausted.Wrap(fmt.Errorf(
+				"insufficient host memory: requested=%dMiB pending=%dMiB available=%dMiB safety_margin=%dMiB overcommit_ratio=%g",
+				requestedMB, pendingMB, availableMB, m.memorySafetyMB, m.memoryOvercommit,
+			))
+		}
+		if m.pendingCreateRAM.CompareAndSwap(pendingMB, pendingMB+requestedMB) {
+			return nil
+		}
+	}
+}
+
+func readMemAvailableMB() (int64, error) {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[0] == "MemAvailable:" {
+			availableKB, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse MemAvailable: %w", err)
+			}
+			return availableKB / 1024, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("MemAvailable is missing from /proc/meminfo")
 }
 
 func (m *Manager) validateCreateRequest(ctx context.Context, req *CreateRequest) error {
