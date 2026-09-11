@@ -17,6 +17,10 @@ sandbox:
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
   request_timeout: 60s
+  # Valid range: 1.0-5.0. Values above 2.0 are risky and not recommended.
+  memory_overcommit_ratio: 1.0
+  # Valid range: 128-65536 MiB.
+  memory_safety_margin_mb: 1024
   default_spec:
     # Default Template selector used when a create request does not specify one.
     # template_name and template_id are mutually exclusive.

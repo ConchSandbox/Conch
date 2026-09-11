@@ -134,11 +134,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 				WarmPoolSize: cfg.Network.WarmPoolSize,
 				CNI:          cfg.Network.CNI,
 			},
-			VMMBinaries:        cfg.Sandbox.BinaryPaths(),
-			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
-			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
-			RequestTimeout:     cfg.Sandbox.RequestTimeout,
-			VolumeManager:      s.volumeManager,
+			VMMBinaries:           cfg.Sandbox.BinaryPaths(),
+			VsockSignalRetry:      cfg.Sandbox.VsockSignalRetry,
+			VsockSignalTimeout:    cfg.Sandbox.VsockSignalTimeout,
+			RequestTimeout:        cfg.Sandbox.RequestTimeout,
+			MemoryOvercommitRatio: cfg.Sandbox.MemoryOvercommitRatio,
+			MemorySafetyMarginMB:  cfg.Sandbox.MemorySafetyMarginMB,
+			VolumeManager:         s.volumeManager,
 		},
 	})
 	if err != nil {

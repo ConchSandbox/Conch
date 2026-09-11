@@ -65,18 +65,26 @@ type VMMBinaryConfig struct {
 }
 
 const (
-	DefaultSandboxBackend = "stratovirt"
-	defaultVolumeBackend  = "virtiofs"
+	DefaultSandboxBackend       = "stratovirt"
+	defaultVolumeBackend        = "virtiofs"
+	defaultMemoryOvercommit     = 1.0
+	defaultMemorySafetyMarginMB = 1024
+	minMemoryOvercommit         = 1.0
+	maxMemoryOvercommit         = 5.0
+	minMemorySafetyMarginMB     = 128
+	maxMemorySafetyMarginMB     = 65536
 )
 
 type SandboxConfig struct {
-	VsockSignalRetry   time.Duration    `yaml:"vsock_signal_retry"`
-	VsockSignalTimeout time.Duration    `yaml:"vsock_signal_timeout"`
-	RequestTimeout     time.Duration    `yaml:"request_timeout"`
-	Backend            string           `yaml:"backend"`
-	DefaultSpec        SandboxSpec      `yaml:"default_spec"`
-	CloudHypervisor    *VMMBinaryConfig `yaml:"cloud_hypervisor"`
-	Stratovirt         *VMMBinaryConfig `yaml:"stratovirt"`
+	VsockSignalRetry      time.Duration    `yaml:"vsock_signal_retry"`
+	VsockSignalTimeout    time.Duration    `yaml:"vsock_signal_timeout"`
+	RequestTimeout        time.Duration    `yaml:"request_timeout"`
+	MemoryOvercommitRatio float64          `yaml:"memory_overcommit_ratio"`
+	MemorySafetyMarginMB  int64            `yaml:"memory_safety_margin_mb"`
+	Backend               string           `yaml:"backend"`
+	DefaultSpec           SandboxSpec      `yaml:"default_spec"`
+	CloudHypervisor       *VMMBinaryConfig `yaml:"cloud_hypervisor"`
+	Stratovirt            *VMMBinaryConfig `yaml:"stratovirt"`
 }
 
 type SandboxSpec struct {
@@ -132,10 +140,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		Sandbox: SandboxConfig{
-			VsockSignalRetry:   10 * time.Millisecond,
-			VsockSignalTimeout: 60 * time.Second,
-			RequestTimeout:     60 * time.Second,
-			Backend:            DefaultSandboxBackend,
+			VsockSignalRetry:      10 * time.Millisecond,
+			VsockSignalTimeout:    60 * time.Second,
+			RequestTimeout:        60 * time.Second,
+			MemoryOvercommitRatio: defaultMemoryOvercommit,
+			MemorySafetyMarginMB:  defaultMemorySafetyMarginMB,
+			Backend:               DefaultSandboxBackend,
 			DefaultSpec: SandboxSpec{
 				VCPUNum: 2,
 				VCPUMax: 2,
@@ -228,6 +238,14 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
+	}
+	if !(cfg.Sandbox.MemoryOvercommitRatio >= minMemoryOvercommit &&
+		cfg.Sandbox.MemoryOvercommitRatio <= maxMemoryOvercommit) {
+		cfg.Sandbox.MemoryOvercommitRatio = defaultCfg.Sandbox.MemoryOvercommitRatio
+	}
+	if !(cfg.Sandbox.MemorySafetyMarginMB >= minMemorySafetyMarginMB &&
+		cfg.Sandbox.MemorySafetyMarginMB <= maxMemorySafetyMarginMB) {
+		cfg.Sandbox.MemorySafetyMarginMB = defaultCfg.Sandbox.MemorySafetyMarginMB
 	}
 	if cfg.Sandbox.Backend == "" {
 		cfg.Sandbox.Backend = defaultCfg.Sandbox.Backend
