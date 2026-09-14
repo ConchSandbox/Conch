@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -141,7 +142,7 @@ func mountPmemDevices() string {
 		ulog.GetLogger().Warn("No pmem devices found")
 		return ""
 	}
-
+	entries = orderedPmemDevices(entries)
 	var lowerDirs []string
 	logger := ulog.GetLogger()
 	for _, device := range entries {
@@ -158,15 +159,47 @@ func mountPmemDevices() string {
 			continue
 		}
 
-		if lowerDirs == nil {
-			lowerDirs = []string{mountPoint}
-		} else {
-			lowerDirs = append([]string{mountPoint}, lowerDirs...)
-		}
+		// OverlayFS resolves overlapping lower files from left to right. The host
+		// exposes rootfs layers in pmem index order, with pmem0 being the newest
+		// layer, so preserve that order in lowerdir.
+		lowerDirs = append(lowerDirs, mountPoint)
 		logger.Info("Mounted pmem device", ulog.F("device", device), ulog.F("target", mountPoint))
 	}
 
 	return strings.Join(lowerDirs, ":")
+}
+
+// orderedPmemDevices preserves VMM device order beyond nine layers.
+// filepath.Glob returns lexical order, which would put pmem10 before pmem2.
+// Partition nodes are not rootfs layers and are excluded.
+func orderedPmemDevices(entries []string) []string {
+	type device struct {
+		name  string
+		index uint64
+	}
+
+	devices := make([]device, 0, len(entries))
+	for _, name := range entries {
+		suffix, ok := strings.CutPrefix(filepath.Base(name), "pmem")
+		if !ok || suffix == "" {
+			continue
+		}
+		index, err := strconv.ParseUint(suffix, 10, 64)
+		if err != nil {
+			continue
+		}
+		if strconv.FormatUint(index, 10) != suffix {
+			continue
+		}
+		devices = append(devices, device{name: name, index: index})
+	}
+
+	sort.SliceStable(devices, func(i, j int) bool { return devices[i].index < devices[j].index })
+	result := make([]string, 0, len(devices))
+	for _, device := range devices {
+		result = append(result, device.name)
+	}
+	return result
 }
 
 // mountOverlayFS mounts the OverlayFS merge layer
