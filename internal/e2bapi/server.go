@@ -90,7 +90,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Existing Conch suspend/resume only pauses a live VMM. Full
 				// E2B checkpoint/release/restore and connect semantics are future work.
 				unimplemented(w, "pause/resume/connect")
-			case "fork", "snapshots", "timeout", "refreshes":
+			case "snapshots":
+				s.checkpoint(w, r, parts[0])
+			case "fork", "timeout", "refreshes":
 				unimplemented(w, parts[1])
 			default:
 				writeError(w, http.StatusNotFound, "endpoint not found")
@@ -367,7 +369,7 @@ func (s *Server) runtimeError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		status = 504
-		message = "sandbox creation timed out"
+		message = "sandbox operation timed out"
 	}
 	if status >= 500 {
 		ulog.Warn("E2B operation failed", ulog.F("error", err))
