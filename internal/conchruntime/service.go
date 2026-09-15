@@ -247,7 +247,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		if err != nil {
 			return SandboxCreateResult{}, rollbackAfterCreate(fmt.Errorf("persist sandbox state: %w", err))
 		}
-		if err := s.ProxyRoutes.Publish(opts.SandboxID, routeGeneration, createResult.IP); err != nil {
+		if err := s.ProxyRoutes.PublishWithHostMask(opts.SandboxID, routeGeneration, createResult.IP, opts.MaskRequestHost); err != nil {
 			return SandboxCreateResult{}, rollbackAfterCreate(err)
 		}
 	}
@@ -290,7 +290,59 @@ func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
-	return s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network})
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
+	if opts.SandboxID == "" {
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
+	mask, err := sandboxproxy.ValidateMaskRequestHost(opts.MaskRequestHost)
+	if err != nil {
+		return sandbox.ErrInvalidArgument.Wrap(err)
+	}
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
+	defer unlock()
+	var generation uint64
+	var route sandboxproxy.Route
+	if s.Store != nil {
+		rec, err := s.getSandbox(ctx, opts.SandboxID)
+		if err != nil {
+			return err
+		}
+		if rec.E2B {
+			if s.ProxyRoutes == nil {
+				return fmt.Errorf("E2B proxy routes are not configured")
+			}
+			generation, _ = s.ProxyRoutes.CurrentGeneration(opts.SandboxID)
+			var ok bool
+			route, ok = s.ProxyRoutes.Lookup(opts.SandboxID)
+			if !ok || route.Generation != generation {
+				return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no active proxy route", opts.SandboxID))
+			}
+		}
+	}
+	if err := s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network}); err != nil {
+		return err
+	}
+	if s.Store == nil {
+		return nil
+	}
+	rec, err := s.getSandbox(ctx, opts.SandboxID)
+	if err != nil {
+		return err
+	}
+	if !rec.E2B {
+		return nil
+	}
+	rec.MaskRequestHost = mask
+	if _, err := s.Store.Update(ctx, rec); err != nil {
+		return err
+	}
+	if err := s.ProxyRoutes.PublishWithHostMask(opts.SandboxID, generation, route.IP, mask); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Template registration stays at the API boundary. Manager calls it under the

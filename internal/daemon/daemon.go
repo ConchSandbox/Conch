@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/adapters/bolt/volumestore"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
@@ -59,6 +60,7 @@ type Daemon struct {
 	cleanupOnce       sync.Once
 	e2bServer         *http.Server
 	e2bListenAddr     string
+	volumeStore       *volumestore.Store
 	reporter          *cluster.Reporter
 	e2bLifecycleMu    sync.Mutex
 	e2bStopping       bool

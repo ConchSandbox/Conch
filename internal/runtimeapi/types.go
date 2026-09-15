@@ -13,8 +13,9 @@ type SandboxNetworkConfig struct {
 }
 
 type SandboxNetworkUpdateOptions struct {
-	SandboxID string
-	Network   *SandboxNetworkConfig
+	SandboxID       string
+	Network         *SandboxNetworkConfig
+	MaskRequestHost string
 }
 
 // WebhookCreateOptions describes a Webhook registration for this conchd instance.

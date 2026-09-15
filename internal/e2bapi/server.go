@@ -35,7 +35,16 @@ type Config struct {
 type Server struct {
 	runtime *conchruntime.Service
 	proxy   *sandboxproxy.Handler
+	volumes volumeAPI
 	config  Config
+}
+
+// SetVolumes wires the node-local volume registry used by the /volumes API and
+// to resolve create-time volumeMounts entries into host-backed directories.
+func (s *Server) SetVolumes(volumes volumeAPI) {
+	if s != nil {
+		s.volumes = volumes
+	}
 }
 
 func New(cfg Config, service *conchruntime.Service, routes *sandboxproxy.Registry) (*Server, error) {
@@ -84,34 +93,47 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if len(parts) == 2 && r.Method == http.MethodPost {
-			switch parts[1] {
-			case "pause", "resume", "connect":
-				// Existing Conch suspend/resume only pauses a live VMM. Full
-				// E2B checkpoint/release/restore and connect semantics are future work.
-				unimplemented(w, "pause/resume/connect")
-			case "snapshots":
-				s.checkpoint(w, r, parts[0])
-			case "fork", "timeout", "refreshes":
+		if len(parts) == 2 {
+			switch parts[1] + " " + r.Method {
+			case "pause POST", "connect POST", "resume POST", "fork POST":
+				// Conch's native resume only un-pauses a live VMM process; full
+				// E2B pause/restore semantics are future work.
 				unimplemented(w, parts[1])
+			case "snapshots POST":
+				s.checkpoint(w, r, parts[0])
+			case "timeout POST", "refreshes POST":
+				unimplemented(w, parts[1])
+			case "network PUT":
+				s.updateNetwork(w, r, parts[0])
+			case "metrics GET":
+				unimplemented(w, "sandbox metrics")
 			default:
 				writeError(w, http.StatusNotFound, "endpoint not found")
 			}
 			return
 		}
 		unimplemented(w, "sandbox operation")
-	case path == "/sandboxes-cold" || strings.HasPrefix(path, "/templates") || strings.HasPrefix(path, "/volumes"):
-		unimplemented(w, "cold creation, template and volume APIs")
+	case strings.HasPrefix(path, "/volumes"):
+		s.volumeRoutes(w, r, strings.Split(strings.TrimPrefix(path, "/volumes"), "/"))
+	case path == "/sandboxes-cold" || strings.HasPrefix(path, "/templates"):
+		unimplemented(w, "cold creation and template APIs")
 	default:
 		writeError(w, http.StatusNotFound, "endpoint not found")
 	}
 }
 
 type networkRequest struct {
-	AllowPublicTraffic *bool    `json:"allowPublicTraffic"`
-	AllowOut           []string `json:"allowOut"`
-	DenyOut            []string `json:"denyOut"`
-	MaskRequestHost    string   `json:"maskRequestHost"`
+	AllowPublicTraffic *bool             `json:"allowPublicTraffic"`
+	AllowOut           []string          `json:"allowOut"`
+	DenyOut            []string          `json:"denyOut"`
+	EgressProxy        json.RawMessage   `json:"egressProxy"`
+	Rules              []json.RawMessage `json:"rules"`
+	MaskRequestHost    string            `json:"maskRequestHost"`
+}
+
+type volumeMountRequest struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type createRequest struct {
@@ -123,6 +145,7 @@ type createRequest struct {
 	AllowInternetAccess *bool             `json:"allow_internet_access"`
 	Network             *networkRequest   `json:"network"`
 	AutoPause           *bool             `json:"autoPause"`
+	AutoPauseMemory     *bool             `json:"autoPauseMemory"`
 	AutoResume          *struct {
 		Enabled bool `json:"enabled"`
 	} `json:"autoResume"`
@@ -170,11 +193,21 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if (request.AutoPause != nil && *request.AutoPause) || (request.AutoResume != nil && request.AutoResume.Enabled) {
+		// Full pause semantics (checkpoint, restore, connect) are ported with
+		// the pause/TTL feature.
 		unimplemented(w, "automatic pause/resume")
 		return
 	}
-	if len(request.VolumeMounts) > 0 || nonemptyJSON(request.MCP) || nonemptyJSON(request.CustomExtensionParams) {
-		unimplemented(w, "volume mounts, MCP and custom extensions")
+	if request.AutoPauseMemory != nil && !*request.AutoPauseMemory {
+		writeError(w, 400, "autoPauseMemory=false (disk-only pause) is not supported")
+		return
+	}
+	if request.AutoPause != nil && *request.AutoPause && len(request.VolumeMounts) > 0 {
+		writeError(w, 400, "autoPause with volumeMounts is not supported")
+		return
+	}
+	if nonemptyJSON(request.MCP) || nonemptyJSON(request.CustomExtensionParams) {
+		unimplemented(w, "MCP and custom extensions")
 		return
 	}
 	ttl := int64(300)
@@ -194,14 +227,44 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		opts.TemplateName = request.TemplateID
 	}
 	if request.Network != nil {
-		if (request.Network.AllowPublicTraffic != nil && !*request.Network.AllowPublicTraffic) || request.Network.MaskRequestHost != "" {
-			unimplemented(w, "private traffic and maskRequestHost")
+		if request.Network.AllowPublicTraffic != nil && !*request.Network.AllowPublicTraffic {
+			unimplemented(w, "private traffic")
 			return
 		}
-		opts.Network = &runtimeapi.SandboxNetworkConfig{AllowOut: request.Network.AllowOut, DenyOut: request.Network.DenyOut, AllowInternetAccess: request.AllowInternetAccess}
+		if nonemptyJSON(request.Network.EgressProxy) || len(request.Network.Rules) > 0 {
+			unimplemented(w, "network egressProxy and rules")
+			return
+		}
+		network := &runtimeapi.SandboxNetworkConfig{
+			AllowOut: request.Network.AllowOut, DenyOut: request.Network.DenyOut,
+			AllowInternetAccess: request.AllowInternetAccess,
+		}
+		opts.MaskRequestHost = request.Network.MaskRequestHost
+		opts.Network = network
 	} else if request.AllowInternetAccess != nil {
 		opts.Network = &runtimeapi.SandboxNetworkConfig{AllowInternetAccess: request.AllowInternetAccess}
 	}
+	var volumeMounts []runtimeapi.VolumeMountSpec
+	for _, raw := range request.VolumeMounts {
+		var mount volumeMountRequest
+		if err := json.Unmarshal(raw, &mount); err != nil || strings.TrimSpace(mount.Name) == "" || strings.TrimSpace(mount.Path) == "" {
+			writeError(w, 400, "volumeMounts entries require name and path")
+			return
+		}
+		volumeMounts = append(volumeMounts, runtimeapi.VolumeMountSpec{Name: mount.Name, Path: mount.Path})
+	}
+	if s.volumes != nil && len(volumeMounts) > 0 {
+		resolved, err := s.volumes.ResolveMounts(r.Context(), volumeMounts)
+		if err != nil {
+			s.runtimeError(w, err)
+			return
+		}
+		volumeMounts = resolved
+	} else if len(volumeMounts) > 0 {
+		writeError(w, 400, "volume mounts are not configured on this node")
+		return
+	}
+	opts.VolumeMounts = volumeMounts
 	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
 	defer cancel()
 	created, err := s.runtime.CreateSandbox(ctx, opts)
@@ -233,13 +296,19 @@ type sandboxModel struct {
 
 type sandboxDetail struct {
 	sandboxModel
-	StartedAt  time.Time         `json:"startedAt"`
-	EndAt      time.Time         `json:"endAt"`
-	CPUCount   int64             `json:"cpuCount"`
-	MemoryMB   int64             `json:"memoryMB"`
-	DiskSizeMB int64             `json:"diskSizeMB"`
-	State      string            `json:"state"`
-	Metadata   map[string]string `json:"metadata"`
+	StartedAt    time.Time          `json:"startedAt"`
+	EndAt        time.Time          `json:"endAt"`
+	CPUCount     int64              `json:"cpuCount"`
+	MemoryMB     int64              `json:"memoryMB"`
+	DiskSizeMB   int64              `json:"diskSizeMB"`
+	State        string             `json:"state"`
+	Metadata     map[string]string  `json:"metadata"`
+	VolumeMounts []volumeMountModel `json:"volumeMounts,omitempty"`
+}
+
+type volumeMountModel struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 func (s *Server) model(rec sandbox.Record) sandboxModel {
@@ -260,8 +329,15 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
+	var mounts []volumeMountModel
+	for _, mount := range rec.VolumeMounts {
+		mounts = append(mounts, volumeMountModel{Name: mount.Name, Path: mount.Path})
+	}
+	if mounts == nil {
+		mounts = []volumeMountModel{}
+	}
 	return sandboxDetail{sandboxModel: s.model(rec), StartedAt: time.Unix(0, rec.CreatedAt).UTC(), EndAt: end,
-		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: "running", Metadata: metadata}
+		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: "running", Metadata: metadata, VolumeMounts: mounts}
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/openeuler/Conch/internal/adapters/bolt/volumestore"
 	"github.com/openeuler/Conch/internal/cluster"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/openeuler/Conch/internal/envd"
 	"github.com/openeuler/Conch/internal/sandboxproxy"
 	"github.com/openeuler/Conch/internal/util"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -30,12 +32,24 @@ func (s *Daemon) initE2B(cfg *config.Config) error {
 	s.runtimeService.Store = s.sandboxStore
 	s.runtimeService.Envd = envd.NewClient()
 	s.runtimeService.ProxyRoutes = sandboxproxy.NewRegistry()
+	volumeStore, err := volumestore.Open(cfg.VolumeDBPath())
+	if err != nil {
+		return fmt.Errorf("open volume registry: %w", err)
+	}
+	volumes, err := volume.NewRegistry(volumeStore, cfg.VolumeDataDir())
+	if err != nil {
+		_ = volumeStore.Close()
+		return fmt.Errorf("init volume registry: %w", err)
+	}
 	handler, err := e2bapi.New(e2bapi.Config{
 		APIKey: cfg.E2B.APIKey, Domains: cfg.E2B.SandboxProxyDomains, RequestTimeout: cfg.Sandbox.RequestTimeout,
 	}, s.runtimeService, s.runtimeService.ProxyRoutes)
 	if err != nil {
+		_ = volumeStore.Close()
 		return err
 	}
+	handler.SetVolumes(volumes)
+	s.volumeStore = volumeStore
 	s.e2bServer = newHTTPServer(handler)
 	s.e2bListenAddr = cfg.E2B.ListenAddr
 	if cfg.Cluster.SchedulerAddr != "" {
@@ -44,6 +58,7 @@ func (s *Daemon) initE2B(cfg *config.Config) error {
 			Interval: 5 * time.Second, RPCTimeout: 5 * time.Second,
 		}, s.sandboxStore, s.runtimeService)
 		if err != nil {
+			_ = volumeStore.Close()
 			return err
 		}
 	}
@@ -117,6 +132,12 @@ func (s *Daemon) shutdownE2B() {
 		_ = s.e2bServer.Close()
 	}
 	s.e2bWorkers.Wait()
+	if s.volumeStore != nil {
+		if err := s.volumeStore.Close(); err != nil {
+			ulog.Warn("close volume registry", ulog.F("error", err))
+		}
+		s.volumeStore = nil
+	}
 	if s.reporter != nil {
 		if err := s.reporter.Shutdown(ctx); err != nil {
 			ulog.Warn("Scheduler unregister", ulog.F("error", err))
