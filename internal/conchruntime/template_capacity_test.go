@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/envd"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -67,6 +69,9 @@ func TestResumeTemplateWithoutCapturedCPURejectedForE2B(t *testing.T) {
 	ops := &fakeSandboxOps{}
 	svc := New(ops, host.Client())
 	svc.Templates = host.TemplateStore()
+	svc.Store = newMemorySandboxStore()
+	svc.Envd = envd.NewClient()
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
 	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 512})
 
 	_, err = svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateName: name, E2B: true})

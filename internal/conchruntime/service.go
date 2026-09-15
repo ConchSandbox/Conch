@@ -5,16 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/envd"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -41,12 +45,18 @@ type Service struct {
 	Sandbox         SandboxOps
 	Containerd      *containerdclient.Client
 	Snapshot        SnapshotOps
+	Store           sandbox.Store
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
+	lifecycleLocks  sandboxLifecycleLocks
 	// Capacity bounds concurrent sandbox CPU/memory reservations when set.
-	// Reserve/release wiring into create/remove arrives with the E2B
-	// coordination layer.
 	Capacity *Capacity
+	Envd     *envd.Client
+	// ProxyRoutes routes E2B data-plane traffic to this Node's guests.
+	ProxyRoutes       *sandboxproxy.Registry
+	createSuccesses   atomic.Uint64
+	createFailures    atomic.Uint64
+	rosterMu          sync.Mutex
 }
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
@@ -60,9 +70,40 @@ func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
 	s.SandboxDefaults = defaults
 }
 
-func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (SandboxCreateResult, error) {
+func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (result SandboxCreateResult, err error) {
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
+	}
+	defer func() {
+		if err != nil {
+			s.createFailures.Add(1)
+		} else {
+			s.createSuccesses.Add(1)
+		}
+	}()
+	if opts.E2B && (s.Envd == nil || s.ProxyRoutes == nil || s.Store == nil) {
+		return SandboxCreateResult{}, fmt.Errorf("E2B runtime is not configured")
+	}
+	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
+	if opts.SandboxID == "" {
+		generated, err := id.New()
+		if err != nil {
+			return SandboxCreateResult{}, err
+		}
+		opts.SandboxID = generated
+	} else if err := id.Validate(opts.SandboxID); err != nil {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
+			fmt.Errorf("invalid sandbox_id: %w", err),
+		)
+	}
+	unlock := s.lifecycleLocks.lock(opts.SandboxID)
+	defer unlock()
+	if s.Store != nil {
+		if _, err := s.Store.Get(ctx, opts.SandboxID); err == nil {
+			return SandboxCreateResult{}, sandbox.ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already exists", opts.SandboxID))
+		} else if !errors.Is(err, sandbox.ErrNotFound) {
+			return SandboxCreateResult{}, fmt.Errorf("get sandbox state: %w", err)
+		}
 	}
 	s.applySandboxDefaults(&opts)
 	selection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
@@ -82,20 +123,162 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if selection.MemorySizeMB > 0 {
 		opts.RamMB = selection.MemorySizeMB
 	}
-	volumeMounts := make([]volume.Mount, 0, len(opts.VolumeMounts))
+	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
+	}
+	if opts.RamMB < 1 {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
+	}
+	if err := s.validateSandboxLimits(opts); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	if err := s.Capacity.reserve(opts.SandboxID, opts.VCPUNum, opts.RamMB); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	keepReservation := false
+	defer func() {
+		if !keepReservation {
+			s.Capacity.release(opts.SandboxID)
+		}
+	}()
+	runtimeID, err := id.New()
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
+	var volumeMounts []volume.Mount
+	var volumeMountRecords []sandbox.VolumeMountRecord
 	for _, spec := range opts.VolumeMounts {
 		volumeMounts = append(volumeMounts, volume.Mount{Source: spec.Source, Path: spec.Path})
+		volumeMountRecords = append(volumeMountRecords, sandbox.VolumeMountRecord{Name: spec.Name, Path: spec.Path})
 	}
-	return s.Sandbox.Create(ctx, sandbox.CreateRequest{
-		TemplateID: selection.ID, TemplateName: selection.Name,
+	var routeGeneration uint64
+	if opts.E2B {
+		routeGeneration = s.ProxyRoutes.Begin(opts.SandboxID)
+		defer func() {
+			if err != nil {
+				s.ProxyRoutes.Remove(opts.SandboxID, routeGeneration)
+			}
+		}()
+	}
+	// Manager owns the CREATING/READY record lifecycle, the create lease and
+	// the agent token. On failure it retains the record when its cleanup
+	// cannot confirm resource release and deletes it otherwise; a retained
+	// record still owns this reservation.
+	createResult, err := s.Sandbox.Create(ctx, sandbox.CreateRequest{
+		RuntimeID:    runtimeID,
+		TemplateID:   selection.ID, TemplateName: selection.Name,
 		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
 		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
 		Env: copyMap(opts.Env), VolumeMounts: volumeMounts, Network: opts.Network,
 	})
+	if err != nil {
+		if s.Store != nil {
+			if _, getErr := s.Store.Get(ctx, opts.SandboxID); getErr == nil || !errors.Is(getErr, sandbox.ErrNotFound) {
+				keepReservation = true
+			}
+		}
+		return SandboxCreateResult{}, err
+	}
+	// rollbackAfterCreate tears down a created sandbox whose E2B bootstrap or
+	// state persistence failed. Manager.Delete retains the record when its own
+	// cleanup cannot confirm release; the reservation follows that owner.
+	rollbackAfterCreate := func(cause error) error {
+		cleanupErr := s.Sandbox.Delete(ctx, opts.SandboxID)
+		if errors.Is(cleanupErr, sandbox.ErrNotFound) {
+			cleanupErr = nil
+		}
+		if cleanupErr != nil {
+			keepReservation = true
+		}
+		return combineOperationErrors(cause, cleanupErr)
+	}
+	envdVersion := ""
+	if opts.E2B {
+		generationCtx, current := s.ProxyRoutes.GenerationContext(opts.SandboxID, routeGeneration)
+		if !current {
+			generationCtx = ctx
+		}
+		// Keep the remaining creation deadline and synchronous generation
+		// cancellation; envd initialization has no separate timeout budget.
+		var initCtx context.Context
+		var cancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			initCtx, cancel = context.WithDeadline(generationCtx, deadline)
+		} else {
+			initCtx, cancel = context.WithCancel(generationCtx)
+		}
+		stop := context.AfterFunc(ctx, cancel)
+		if !current || ctx.Err() != nil {
+			cancel()
+		}
+		err = s.Envd.WaitReady(initCtx, createResult.IP)
+		if err == nil {
+			err = s.Envd.Init(initCtx, createResult.IP, envd.InitOptions{
+				EnvVars: copyMap(opts.Env), DefaultUser: "user", DefaultWorkdir: "/home/user",
+			})
+		}
+		if err == nil {
+			envdVersion, err = s.Envd.Version(initCtx, createResult.IP, createResult.AgentToken)
+		}
+		cancel()
+		stop()
+		if err != nil {
+			return SandboxCreateResult{}, rollbackAfterCreate(fmt.Errorf("initialize envd: %w", err))
+		}
+		// Manager persisted the READY record; overlay the E2B fields it does
+		// not know about. A crash in this window leaves a READY record without
+		// ExpiresAt; RunExpiry treats a zero deadline as immediately due.
+		rec, getErr := s.Store.Get(ctx, opts.SandboxID)
+		if getErr != nil {
+			return SandboxCreateResult{}, rollbackAfterCreate(fmt.Errorf("read created sandbox state: %w", getErr))
+		}
+		rec.E2B = true
+		rec.EnvdVersion = envdVersion
+		rec.Metadata = copyMap(opts.Metadata)
+		rec.Env = copyMap(opts.Env)
+		rec.TimeoutAction = opts.TimeoutAction
+		rec.MaskRequestHost = opts.MaskRequestHost
+		rec.VolumeMounts = volumeMountRecords
+		// The upstream treats a zero TTL as an immediately due deadline.
+		rec.ExpiresAt = time.Now().Add(opts.Timeout).UnixNano()
+		unlockRoster := s.LockSandboxRoster()
+		_, err = s.Store.Update(ctx, rec)
+		unlockRoster()
+		if err != nil {
+			return SandboxCreateResult{}, rollbackAfterCreate(fmt.Errorf("persist sandbox state: %w", err))
+		}
+		if err := s.ProxyRoutes.Publish(opts.SandboxID, routeGeneration, createResult.IP); err != nil {
+			return SandboxCreateResult{}, rollbackAfterCreate(err)
+		}
+	}
+	keepReservation = true
+	return SandboxCreateResult{
+		SandboxID:    opts.SandboxID,
+		IP:           createResult.IP,
+		AgentToken:   createResult.AgentToken,
+		TemplateName: selection.Name,
+		TemplateID:   selection.ID,
+		VCPUNum:      opts.VCPUNum,
+		RamMB:        opts.RamMB,
+		CreatedAt:    createResult.CreatedAt,
+		EnvdVersion:  envdVersion,
+	}, nil
 }
 
-func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
-	return s.Sandbox.Delete(ctx, sandboxID)
+func (s *Service) validateSandboxLimits(opts SandboxCreateOptions) error {
+	if opts.VCPUNum > runtimeapi.SandboxMaxVCPU || opts.VCPUMax > runtimeapi.SandboxMaxVCPU {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested vcpu_num=%d and vcpu_max=%d exceed maximum %d",
+			opts.VCPUNum, opts.VCPUMax, runtimeapi.SandboxMaxVCPU,
+		))
+	}
+	if opts.RamMB > runtimeapi.SandboxMaxRAMMB {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested ram_mb=%d exceeds maximum %d",
+			opts.RamMB, runtimeapi.SandboxMaxRAMMB,
+		))
+	}
+	return nil
 }
 
 func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {
