@@ -189,6 +189,12 @@ func New(cfg *config.Config) (*Daemon, error) {
 		vmmPIDs := make([]int, 0, len(records))
 		hasCreatingSandbox := false
 		for _, record := range records {
+			// This fork's RecoverStaleResources deletes the record of every ID
+			// it is handed; a paused sandbox owns no runtime resources, so its
+			// record and resume template must stay out of that list.
+			if record.State == conchsandbox.StatePaused {
+				continue
+			}
 			sandboxIDs = append(sandboxIDs, record.ID)
 			if record.State == conchsandbox.StateCreating {
 				hasCreatingSandbox = true
@@ -379,6 +385,11 @@ func (s *Daemon) removeAllSandboxes() error {
 
 	var errs []error
 	for _, record := range records {
+		// A paused sandbox has no runtime to remove; its record and resume
+		// template are exactly what must survive a daemon restart.
+		if record.State == conchsandbox.StatePaused {
+			continue
+		}
 		if err := s.runtimeService.RemoveSandbox(context.Background(), record.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove sandbox %s: %w", record.ID, err))
 		}

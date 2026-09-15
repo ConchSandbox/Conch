@@ -95,14 +95,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 2 {
 			switch parts[1] + " " + r.Method {
-			case "pause POST", "connect POST", "resume POST", "fork POST":
-				// Conch's native resume only un-pauses a live VMM process; full
-				// E2B pause/restore semantics are future work.
+			case "pause POST":
+				s.pause(w, r, parts[0])
+			case "connect POST":
+				s.connect(w, r, parts[0])
+			case "resume POST", "fork POST":
+				// Conch's native resume only un-pauses a live VMM process; E2B
+				// resume and fork remain future work (connect restores paused
+				// sandboxes).
 				unimplemented(w, parts[1])
 			case "snapshots POST":
 				s.checkpoint(w, r, parts[0])
-			case "timeout POST", "refreshes POST":
-				unimplemented(w, parts[1])
+			case "timeout POST":
+				s.setTimeout(w, r, parts[0])
+			case "refreshes POST":
+				s.refresh(w, r, parts[0])
 			case "network PUT":
 				s.updateNetwork(w, r, parts[0])
 			default:
@@ -190,10 +197,8 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		unimplemented(w, "secure envd; explicitly set secure=false")
 		return
 	}
-	if (request.AutoPause != nil && *request.AutoPause) || (request.AutoResume != nil && request.AutoResume.Enabled) {
-		// Full pause semantics (checkpoint, restore, connect) are ported with
-		// the pause/TTL feature.
-		unimplemented(w, "automatic pause/resume")
+	if request.AutoResume != nil && request.AutoResume.Enabled {
+		unimplemented(w, "automatic resume")
 		return
 	}
 	if request.AutoPauseMemory != nil && !*request.AutoPauseMemory {
@@ -214,6 +219,9 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := runtimeapi.SandboxCreateOptions{
 		SandboxID: uuid.NewString(), E2B: true, Env: request.EnvVars, Metadata: request.Metadata, Timeout: time.Duration(ttl) * time.Second,
+	}
+	if request.AutoPause != nil && *request.AutoPause {
+		opts.TimeoutAction = sandbox.TimeoutActionPause
 	}
 	if parsed, err := digest.Parse(request.TemplateID); err == nil {
 		opts.TemplateID = parsed.String()
@@ -324,6 +332,10 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
+	state := "running"
+	if rec.State == sandbox.StatePaused {
+		state = "paused"
+	}
 	var mounts []volumeMountModel
 	for _, mount := range rec.VolumeMounts {
 		mounts = append(mounts, volumeMountModel{Name: mount.Name, Path: mount.Path})
@@ -332,7 +344,7 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 		mounts = []volumeMountModel{}
 	}
 	return sandboxDetail{sandboxModel: s.model(rec), StartedAt: time.Unix(0, rec.CreatedAt).UTC(), EndAt: end,
-		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: "running", Metadata: metadata, VolumeMounts: mounts}
+		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: state, Metadata: metadata, VolumeMounts: mounts}
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
@@ -345,11 +357,12 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, 404, "sandbox not found")
 		return
 	}
-	if rec.State != sandbox.StateReady {
+	switch rec.State {
+	case sandbox.StateReady, sandbox.StatePaused:
+		writeJSON(w, 200, s.detail(rec))
+	default:
 		writeError(w, 409, "sandbox is not running")
-		return
 	}
-	writeJSON(w, 200, s.detail(rec))
 }
 
 func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
@@ -370,7 +383,9 @@ func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // RunExpiry enforces creation timeouts and retries requested runtime cleanup.
-// Timeout refresh and automatic pause/resume endpoints remain unimplemented.
+// A timeout on a TimeoutAction=pause sandbox checkpoints and pauses it instead
+// of deleting it; pause failures are retried on the next tick, never degraded
+// to a kill.
 func (s *Server) RunExpiry(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -387,9 +402,21 @@ func (s *Server) RunExpiry(ctx context.Context) {
 				continue
 			}
 			for _, rec := range records {
-				// Manager retains UNKNOWN records after an unconfirmed cleanup.
-				expired := rec.E2B && rec.ExpiresAt > 0 && rec.ExpiresAt <= now.UnixNano()
-				if rec.State != sandbox.StateUnknown && !expired {
+				// Manager retains UNKNOWN records after an unconfirmed cleanup;
+				// the maintenance worker keeps retrying their release.
+				if rec.State == sandbox.StateUnknown {
+					if err := s.runtime.ReconcileSandbox(ctx, rec.ID, rec.RuntimeID, now); err != nil {
+						ulog.Warn("remove expired E2B sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+					}
+					continue
+				}
+				if !rec.E2B || rec.ExpiresAt <= 0 || rec.ExpiresAt > now.UnixNano() {
+					continue
+				}
+				if rec.TimeoutAction == sandbox.TimeoutActionPause && rec.State == sandbox.StateReady {
+					if err := s.runtime.PauseSandbox(ctx, rec.ID); err != nil {
+						ulog.Warn("auto-pause expired E2B sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+					}
 					continue
 				}
 				if err := s.runtime.ReconcileSandbox(ctx, rec.ID, rec.RuntimeID, now); err != nil {

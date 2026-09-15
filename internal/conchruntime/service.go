@@ -290,6 +290,9 @@ func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
 	return s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network})
 }
 
@@ -386,6 +389,31 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 		return sandboxTemplateSelection{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid template_id %q: %w", rawID, err))
 	}
 	return sandboxTemplateSelection{ID: parsedID.String()}, nil
+}
+
+// inspectResumeTemplate reads the captured CPU/memory sizing of a raw template
+// digest. E2B resume paths need it to size the restored sandbox; the plain
+// create path deliberately resolves digests without containerd access.
+func (s *Service) inspectResumeTemplate(ctx context.Context, templateID string) (sandboxTemplateSelection, error) {
+	parsedID, err := digest.Parse(templateID)
+	if err != nil {
+		return sandboxTemplateSelection{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid template_id %q: %w", templateID, err))
+	}
+	if s.Containerd == nil {
+		return sandboxTemplateSelection{}, fmt.Errorf("containerd client is not configured")
+	}
+	info, err := conchimage.InspectBootIndex(ctx, s.Containerd, parsedID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, conchimage.ErrNotFound):
+			return sandboxTemplateSelection{}, conchtemplate.ErrNotFound.Wrap(err)
+		case errors.Is(err, conchimage.ErrInvalidArgument), errors.Is(err, conchimage.ErrInvalidContent):
+			return sandboxTemplateSelection{}, conchtemplate.ErrInvalidArtifact.Wrap(err)
+		default:
+			return sandboxTemplateSelection{}, err
+		}
+	}
+	return sandboxTemplateSelection{ID: info.BootIndexDigest, MemorySizeMB: info.MemorySizeMB, CPUCount: info.CPUCount, Resume: info.Resume}, nil
 }
 
 // PullTemplate fetches and statically validates a registry Boot Index before

@@ -191,16 +191,32 @@ func TestAuthenticationAndProxyClassification(t *testing.T) {
 func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	service, routes := testRuntime(t)
 	server := testServer(t, service, routes)
-	for _, operation := range []string{"pause", "resume", "connect", "fork", "timeout", "refreshes"} {
+	// resume (native VMM unpause) and fork stay unimplemented; pause and
+	// connect are implemented and fail with 404 for a missing sandbox.
+	for _, operation := range []string{"resume", "fork"} {
 		resp, body := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
 		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "Unimplemented") {
 			t.Errorf("%s = %d %q", operation, resp.StatusCode, body)
 		}
 	}
+	for _, operation := range []string{"pause", "connect", "refreshes"} {
+		resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404", operation, resp.StatusCode)
+		}
+	}
+	// set_timeout requires a valid timeout before the sandbox lookup.
+	resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/timeout", `{"timeout":0}`, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("timeout = %d, want 400", resp.StatusCode)
+	}
+	resp, _ = doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/timeout", `{"timeout":60}`, true)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("timeout = %d, want 404", resp.StatusCode)
+	}
 	for _, body := range []string{
 		`{"templateID":"base","secure":true}`,
 		`{"templateID":"base"}`,
-		`{"templateID":"base","secure":false,"autoPause":true}`,
 		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
 	} {
@@ -209,9 +225,9 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 			t.Errorf("unsupported %s = %d %q", body, resp.StatusCode, data)
 		}
 	}
-	// set_timeout validates its payload before the sandbox lookup; the network
-	// endpoint reaches the store and fails with 404 for a missing sandbox.
-	resp, _ := doRequest(t, server, http.MethodPut, "/sandboxes/"+uuid.NewString()+"/network", `{}`, true)
+	// the network endpoint reaches the store and fails with 404 for a missing
+	// sandbox.
+	resp, _ = doRequest(t, server, http.MethodPut, "/sandboxes/"+uuid.NewString()+"/network", `{}`, true)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("network = %d, want 404", resp.StatusCode)
 	}
