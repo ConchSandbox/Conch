@@ -19,7 +19,10 @@ const (
 type SnapshotRef = snapshot.RuntimeSnapshotRef
 
 type Record struct {
-	ID                       string
+	ID string
+	// RuntimeID is the immutable identity of one runtime allocation. It
+	// outlives entry removal and survives reuse of the public sandbox ID.
+	RuntimeID                string
 	VMMPID                   int
 	State                    State
 	CreatedAt                int64

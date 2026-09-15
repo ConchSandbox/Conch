@@ -159,3 +159,20 @@ func (s *Sandbox) VMMName() string {
 	}
 	return s.vmmName
 }
+
+// ComputeResourcesReleased reports confirmed CPU and guest-RAM release. An
+// API delete error does not imply a live VMM: Process.Stop can retain that
+// diagnostic after its process reaper has confirmed exit. Conversely, a cleanup
+// result by itself never proves termination. Call after runtime cleanup while
+// the Manager holds this runtime's lifecycle lock.
+func (s *Sandbox) ComputeResourcesReleased() bool {
+	if s == nil || s.process == nil || s.process.Pid() == 0 {
+		return true
+	}
+	select {
+	case <-s.process.Done():
+		return true
+	default:
+		return false
+	}
+}

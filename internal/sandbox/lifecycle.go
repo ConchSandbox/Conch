@@ -234,6 +234,9 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
 		entry.exitNotified = true
 	}
+	if m.UnexpectedExitHandler != nil {
+		m.UnexpectedExitHandler(sandboxID, entry.runtimeID, cleanupErr)
+	}
 }
 
 func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason string) {
@@ -269,6 +272,11 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *s
 			sbx.process = nil
 		}
 		if sbx.slot != nil {
+			// Revoke data-plane routing before the network slot returns to the
+			// pool and its IP can be assigned to another guest.
+			if m.BeforeRuntimeRelease != nil {
+				m.BeforeRuntimeRelease(sandboxID)
+			}
 			if err := m.pool.Release(ctx, sbx.slot); err != nil {
 				return fmt.Errorf("release network: %w", err)
 			}
