@@ -13,6 +13,7 @@ const (
 	StateCreating  State = "CREATING"
 	StateReady     State = "READY"
 	StateSuspended State = "SUSPENDED"
+	StatePaused    State = "PAUSED"
 	StateUnknown   State = "UNKNOWN"
 )
 

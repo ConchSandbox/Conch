@@ -306,13 +306,13 @@ func assertContentNotFound(t *testing.T, ctx context.Context, store content.Stor
 	}
 }
 
-func TestStoreRoundTripE2BFields(t *testing.T) {
+func TestStoreRoundTripE2BFieldsAndPausedState(t *testing.T) {
 	ctx := context.Background()
 	store, _, _, _ := newTestStore(t)
 	want := conchsandbox.Record{
 		ID:                       "sandbox-e2b",
 		RuntimeID:                "runtime-7",
-		State:                    conchsandbox.StateReady,
+		State:                    conchsandbox.StatePaused,
 		SourceTemplateID:         "sha256:source",
 		CheckpointHeadTemplateID: "sha256:head",
 		VCPUNum:                  2,
@@ -335,6 +335,6 @@ func TestStoreRoundTripE2BFields(t *testing.T) {
 	}
 	got.RuntimeSnapshots = nil // decode returns an empty slice for no refs
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("e2b record round trip =\n%#v\nwant\n%#v", got, want)
+		t.Fatalf("paused record round trip =\n%#v\nwant\n%#v", got, want)
 	}
 }

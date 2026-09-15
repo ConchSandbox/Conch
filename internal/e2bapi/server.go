@@ -84,24 +84,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if len(parts) == 2 && r.Method == http.MethodPost {
-			switch parts[1] {
-			case "pause", "resume", "connect":
-				// Existing Conch suspend/resume only pauses a live VMM. Full
-				// E2B checkpoint/release/restore and connect semantics are future work.
-				unimplemented(w, "pause/resume/connect")
-			case "snapshots":
-				s.checkpoint(w, r, parts[0])
-			case "fork", "timeout", "refreshes":
+		if len(parts) == 2 {
+			switch parts[1] + " " + r.Method {
+			case "pause POST":
+				s.pause(w, r, parts[0])
+			case "connect POST":
+				s.connect(w, r, parts[0])
+			case "resume POST", "fork POST":
+				// Conch's native resume only un-pauses a live VMM process; E2B
+				// resume and fork remain future work (connect restores paused
+				// sandboxes).
 				unimplemented(w, parts[1])
+			case "snapshots POST":
+				s.checkpoint(w, r, parts[0])
+			case "timeout POST":
+				s.setTimeout(w, r, parts[0])
+			case "refreshes POST":
+				s.refresh(w, r, parts[0])
+			case "metrics GET":
+				unimplemented(w, "sandbox metrics")
 			default:
 				writeError(w, http.StatusNotFound, "endpoint not found")
 			}
 			return
 		}
 		unimplemented(w, "sandbox operation")
-	case path == "/sandboxes-cold" || strings.HasPrefix(path, "/templates") || strings.HasPrefix(path, "/volumes"):
-		unimplemented(w, "cold creation, template and volume APIs")
+	case path == "/sandboxes-cold" || strings.HasPrefix(path, "/templates"):
+		unimplemented(w, "cold creation and template APIs")
 	default:
 		writeError(w, http.StatusNotFound, "endpoint not found")
 	}
@@ -123,6 +132,7 @@ type createRequest struct {
 	AllowInternetAccess *bool             `json:"allow_internet_access"`
 	Network             *networkRequest   `json:"network"`
 	AutoPause           *bool             `json:"autoPause"`
+	AutoPauseMemory     *bool             `json:"autoPauseMemory"`
 	AutoResume          *struct {
 		Enabled bool `json:"enabled"`
 	} `json:"autoResume"`
@@ -169,8 +179,12 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		unimplemented(w, "secure envd; explicitly set secure=false")
 		return
 	}
-	if (request.AutoPause != nil && *request.AutoPause) || (request.AutoResume != nil && request.AutoResume.Enabled) {
-		unimplemented(w, "automatic pause/resume")
+	if request.AutoResume != nil && request.AutoResume.Enabled {
+		unimplemented(w, "automatic resume")
+		return
+	}
+	if request.AutoPauseMemory != nil && !*request.AutoPauseMemory {
+		writeError(w, 400, "autoPauseMemory=false (disk-only pause) is not supported")
 		return
 	}
 	if len(request.VolumeMounts) > 0 || nonemptyJSON(request.MCP) || nonemptyJSON(request.CustomExtensionParams) {
@@ -187,6 +201,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := runtimeapi.SandboxCreateOptions{
 		SandboxID: uuid.NewString(), E2B: true, Env: request.EnvVars, Metadata: request.Metadata, Timeout: time.Duration(ttl) * time.Second,
+		TimeoutAction: runtimeapi.TimeoutActionDelete,
+	}
+	if request.AutoPause != nil && *request.AutoPause {
+		opts.TimeoutAction = runtimeapi.TimeoutActionPause
 	}
 	if parsed, err := digest.Parse(request.TemplateID); err == nil {
 		opts.TemplateID = parsed.String()
@@ -194,6 +212,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		opts.TemplateName = request.TemplateID
 	}
 	if request.Network != nil {
+		if request.Network.AllowPublicTraffic != nil && !*request.Network.AllowPublicTraffic {
+			unimplemented(w, "private traffic")
+			return
+		}
 		if (request.Network.AllowPublicTraffic != nil && !*request.Network.AllowPublicTraffic) || request.Network.MaskRequestHost != "" {
 			unimplemented(w, "private traffic and maskRequestHost")
 			return
@@ -260,8 +282,12 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
+	state := "running"
+	if rec.State == sandbox.StatePaused {
+		state = "paused"
+	}
 	return sandboxDetail{sandboxModel: s.model(rec), StartedAt: time.Unix(0, rec.CreatedAt).UTC(), EndAt: end,
-		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: "running", Metadata: metadata}
+		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: state, Metadata: metadata}
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
@@ -274,11 +300,12 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, 404, "sandbox not found")
 		return
 	}
-	if rec.State != sandbox.StateReady {
+	switch rec.State {
+	case sandbox.StateReady, sandbox.StatePaused:
+		writeJSON(w, 200, s.detail(rec))
+	default:
 		writeError(w, 409, "sandbox is not running")
-		return
 	}
-	writeJSON(w, 200, s.detail(rec))
 }
 
 func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
@@ -298,8 +325,119 @@ func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type pauseRequest struct {
+	// Memory selects a full-state pause. Only true is supported; a false
+	// value would need a disk-only snapshot, which Conch cannot produce.
+	Memory *bool `json:"memory"`
+}
+
+type connectRequest struct {
+	Timeout *int64 `json:"timeout"`
+}
+
+// pause captures the sandbox's full memory state into a checkpoint and
+// releases its runtime resources. The record survives as PAUSED with no
+// expiry, holding the checkpoint head produced by the checkpoint pipeline.
+func (s *Server) pause(w http.ResponseWriter, r *http.Request, id string) {
+	var request *pauseRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	if request == nil {
+		writeError(w, http.StatusBadRequest, "request body must be an object")
+		return
+	}
+	if request.Memory != nil && !*request.Memory {
+		writeError(w, http.StatusBadRequest, "memory=false (disk-only pause) is not supported")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
+	defer cancel()
+	rec, err := s.runtime.GetSandbox(ctx, id)
+	if err != nil {
+		s.runtimeError(w, err)
+		return
+	}
+	if !rec.E2B {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	if rec.State == sandbox.StatePaused {
+		writeError(w, http.StatusConflict, "sandbox is already paused")
+		return
+	}
+	if rec.State != sandbox.StateReady {
+		writeError(w, http.StatusConflict, "sandbox is not running")
+		return
+	}
+	if err := s.runtime.PauseSandbox(ctx, rec.ID); err != nil {
+		s.runtimeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// connect implements the E2B connect semantics: a running sandbox only has
+// its TTL extended (200), while a paused sandbox is restored under the same
+// ID from its checkpoint head (201).
+func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
+	var request *connectRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	if request == nil {
+		writeError(w, http.StatusBadRequest, "request body must be an object")
+		return
+	}
+	ttl := int64(300)
+	if request.Timeout != nil {
+		ttl = *request.Timeout
+	}
+	if ttl < 1 || ttl > 86400 {
+		writeError(w, http.StatusBadRequest, "timeout must be between 1 and 86400 seconds")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
+	defer cancel()
+	rec, err := s.runtime.GetSandbox(ctx, id)
+	if err != nil {
+		s.runtimeError(w, err)
+		return
+	}
+	if !rec.E2B {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	switch rec.State {
+	case sandbox.StateReady:
+		updated, err := s.runtime.ApplySandboxTTL(ctx, rec.ID, time.Duration(ttl)*time.Second, false)
+		if err != nil {
+			s.runtimeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.detail(updated))
+	case sandbox.StatePaused:
+		if _, err := s.runtime.ResumePausedSandbox(ctx, rec.ID, time.Duration(ttl)*time.Second); err != nil {
+			s.runtimeError(w, err)
+			return
+		}
+		restored, err := s.runtime.GetSandbox(ctx, id)
+		if err != nil {
+			s.runtimeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, s.detail(restored))
+	case sandbox.StateCreating:
+		writeError(w, http.StatusConflict, "sandbox is still creating")
+	default:
+		writeError(w, http.StatusNotFound, "sandbox is shutting down")
+	}
+}
+
 // RunExpiry enforces creation timeouts and retries requested runtime cleanup.
-// Timeout refresh and automatic pause/resume endpoints remain unimplemented.
+// A timeout on a TimeoutAction=pause sandbox checkpoints and pauses it instead
+// of deleting it; pause failures are retried on the next tick, never degraded
+// to a kill.
 func (s *Server) RunExpiry(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -316,9 +454,21 @@ func (s *Server) RunExpiry(ctx context.Context) {
 				continue
 			}
 			for _, rec := range records {
-				// Manager retains UNKNOWN records after an unconfirmed cleanup.
-				expired := rec.E2B && rec.ExpiresAt > 0 && rec.ExpiresAt <= now.UnixNano()
-				if rec.State != sandbox.StateUnknown && !expired {
+				// Manager retains UNKNOWN records after an unconfirmed cleanup;
+				// the maintenance worker keeps retrying their release.
+				if rec.State == sandbox.StateUnknown {
+					if err := s.runtime.ReconcileSandbox(ctx, rec.ID, rec.RuntimeID, now); err != nil {
+						ulog.Warn("remove expired E2B sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+					}
+					continue
+				}
+				if !rec.E2B || rec.ExpiresAt <= 0 || rec.ExpiresAt > now.UnixNano() {
+					continue
+				}
+				if rec.TimeoutAction == runtimeapi.TimeoutActionPause && rec.State == sandbox.StateReady {
+					if err := s.runtime.PauseSandbox(ctx, rec.ID); err != nil {
+						ulog.Warn("auto-pause expired E2B sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+					}
 					continue
 				}
 				if err := s.runtime.ReconcileSandbox(ctx, rec.ID, rec.RuntimeID, now); err != nil {

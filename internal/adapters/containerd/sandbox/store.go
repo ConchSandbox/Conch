@@ -195,7 +195,7 @@ func (s *Store) validate(record conchsandbox.Record) error {
 
 func validState(state conchsandbox.State) bool {
 	switch state {
-	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StateUnknown:
+	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StatePaused, conchsandbox.StateUnknown:
 		return true
 	default:
 		return false
