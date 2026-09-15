@@ -87,7 +87,7 @@ func (s *Store) Create(ctx context.Context, record volume.VolumeRecord) error {
 }
 
 func (s *Store) Get(ctx context.Context, id string) (volume.VolumeRecord, error) {
-	var record volume.VolumeRecord
+	var record recordV1
 	err := s.db.View(func(tx *bolt.Tx) error {
 		volumes := tx.Bucket(volumesBucket)
 		if volumes == nil {
@@ -102,7 +102,7 @@ func (s *Store) Get(ctx context.Context, id string) (volume.VolumeRecord, error)
 	if err != nil {
 		return volume.VolumeRecord{}, err
 	}
-	return record, nil
+	return volume.VolumeRecord{ID: record.ID, Name: record.Name, Token: record.Token, CreatedAt: record.CreatedAt}, nil
 }
 
 func (s *Store) GetByName(ctx context.Context, name string) (volume.VolumeRecord, error) {
@@ -133,11 +133,13 @@ func (s *Store) List(ctx context.Context) ([]volume.VolumeRecord, error) {
 			return fmt.Errorf("volumes bucket missing")
 		}
 		return volumes.ForEach(func(_, raw []byte) error {
-			var record volume.VolumeRecord
+			var record recordV1
 			if err := json.Unmarshal(raw, &record); err != nil {
 				return fmt.Errorf("decode volume record: %w", err)
 			}
-			records = append(records, record)
+			records = append(records, volume.VolumeRecord{
+				ID: record.ID, Name: record.Name, Token: record.Token, CreatedAt: record.CreatedAt,
+			})
 			return nil
 		})
 	})
