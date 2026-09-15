@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -27,6 +29,12 @@ func NewWithPrefix(prefix string) (string, error) {
 }
 
 func Validate(value string) error {
+	// AgentENV host routing and cluster-list cursors use canonical UUIDs.
+	if len(value) == 36 {
+		if parsed, err := uuid.Parse(value); err == nil && parsed.String() == value {
+			return nil
+		}
+	}
 	if len(value) < MinLength || len(value) > MaxLength {
 		return fmt.Errorf("length must be between %d and %d characters", MinLength, MaxLength)
 	}
