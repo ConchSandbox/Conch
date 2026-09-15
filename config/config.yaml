@@ -12,6 +12,27 @@ server:
   work_dir: /var/run/conch
   state_dir: /var/lib/conch
 
+# Private E2B Node API consumed by AgentENV Gateway. Empty listen_addr disables
+# it. All candidate nodes must have the same template names/digests and artifacts.
+# SDK callers must explicitly select secure=false; E2B pause/resume/connect are
+# not implemented in this MVP.
+e2b:
+  listen_addr: ""
+  # Authentication reads AENV_API_KEY, shared with AgentENV Gateway.
+  # Bare Gateway DNS suffixes without scheme/port; first is returned to the SDK.
+  # Empty supports SDK commands/files through E2B_SANDBOX_URL header routing.
+  # get_host/app URLs require a domain and wildcard DNS pointing to Gateway,
+  # e.g. ["sandboxes.example.com"], matching Gateway's sandbox_proxy_domains.
+  sandbox_proxy_domains: []
+
+cluster:
+  # Empty disables reporting for a standalone E2B Node. Example: scheduler:9090.
+  scheduler_addr: ""
+  # Stable ID must exactly match this Node's ID in Scheduler discovery.
+  node_id: ""
+  # Use the same cluster_id on all nodes. service_instance_id is generated.
+  cluster_id: ""
+
 sandbox:
   backend: stratovirt
   vsock_signal_retry: 10ms
