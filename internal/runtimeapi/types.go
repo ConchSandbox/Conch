@@ -2,8 +2,6 @@ package runtimeapi
 
 import (
 	"time"
-
-	"github.com/openeuler/Conch/internal/volume"
 )
 
 type SandboxNetworkConfig struct {
@@ -47,6 +45,14 @@ const (
 	ImageKindBootComponentMemory  = "boot-component-memory"
 )
 
+// VolumeMountSpec describes a named volume mount requested by the E2B API.
+// Source is the resolved host directory backing the named volume.
+type VolumeMountSpec struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Source string `json:"source"`
+}
+
 type SandboxCreateOptions struct {
 	SandboxID    string
 	TemplateName string
@@ -55,9 +61,17 @@ type SandboxCreateOptions struct {
 	VCPUNum      int64
 	VCPUMax      int64
 	RamMB        int64
-	VolumeMounts []volume.Mount
+	VolumeMounts []VolumeMountSpec
 	Env          map[string]string
 	Network      *SandboxNetworkConfig
+	// E2B requests require envd readiness in addition to conch-init bootstrap.
+	E2B bool
+	// TimeoutAction selects the E2B expiry behavior ("" deletes, "pause" pauses).
+	TimeoutAction string
+	// MaskRequestHost preserves the E2B network host mask applied by the sandbox proxy.
+	MaskRequestHost string
+	Metadata        map[string]string
+	Timeout         time.Duration
 }
 
 type SandboxDefaults struct {
@@ -85,6 +99,7 @@ type SandboxCreateResult struct {
 	VCPUNum      int64
 	RamMB        int64
 	CreatedAt    int64
+	EnvdVersion  string
 }
 
 type SandboxCheckpointOptions struct {
@@ -95,6 +110,12 @@ type SandboxCheckpointOptions struct {
 
 type SandboxCheckpointResult struct {
 	TemplateID string
+}
+
+// SandboxResumeOptions carries the E2B connect parameters for restoring a
+// paused sandbox. Timeout follows the create semantics.
+type SandboxResumeOptions struct {
+	Timeout time.Duration
 }
 
 type TemplateCreateOptions struct {

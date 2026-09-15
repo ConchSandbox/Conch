@@ -305,3 +305,39 @@ func assertContentNotFound(t *testing.T, ctx context.Context, store content.Stor
 		t.Fatalf("content %s error = %v, want not found", dgst, err)
 	}
 }
+
+func TestStoreRoundTripE2BFieldsAndPausedState(t *testing.T) {
+	ctx := context.Background()
+	store, _, _, _ := newTestStore(t)
+	want := conchsandbox.Record{
+		ID:                       "sandbox-e2b",
+		RuntimeID:                "runtime-7",
+		State:                    conchsandbox.StatePaused,
+		SourceTemplateID:         "sha256:source",
+		CheckpointHeadTemplateID: "sha256:head",
+		VCPUNum:                  2,
+		RamMB:                    512,
+		E2B:                      true,
+		EnvdVersion:              "0.1.0",
+		Metadata:                 map[string]string{"team": "infra"},
+		ExpiresAt:                1758000000000000000,
+		Env:                      map[string]string{"FOO": "bar"},
+		TimeoutAction:            conchsandbox.TimeoutActionPause,
+		MaskRequestHost:          "app.example.com",
+		VolumeMounts:             []conchsandbox.VolumeMountRecord{{Name: "data", Path: "/data"}},
+		PauseTemplateName:        "pause-abcd",
+	}
+	created, err := store.Create(ctx, want)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	want.CreatedAt = created.CreatedAt
+	got, err := store.Get(ctx, want.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	got.RuntimeSnapshots = nil // decode returns an empty slice for no refs
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("paused record round trip =\n%#v\nwant\n%#v", got, want)
+	}
+}

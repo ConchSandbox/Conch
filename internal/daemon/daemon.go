@@ -409,6 +409,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
+	volumeMounts := make([]runtimeapi.VolumeMountSpec, 0, len(req.VolumeMounts))
+	for _, mount := range req.VolumeMounts {
+		volumeMounts = append(volumeMounts, runtimeapi.VolumeMountSpec{Source: mount.Source, Path: mount.Path})
+	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		SandboxID:    req.SandboxID,
 		TemplateName: req.TemplateName,
@@ -417,7 +421,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUNum:      req.VCPUNum,
 		VCPUMax:      req.VCPUMax,
 		RamMB:        req.RAMMB,
-		VolumeMounts: req.VolumeMounts,
+		VolumeMounts: volumeMounts,
 		Env:          req.Env,
 		Network:      req.Network,
 	})

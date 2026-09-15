@@ -16,6 +16,7 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -64,11 +65,15 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
+	volumeMounts := make([]volume.Mount, 0, len(opts.VolumeMounts))
+	for _, spec := range opts.VolumeMounts {
+		volumeMounts = append(volumeMounts, volume.Mount{Source: spec.Source, Path: spec.Path})
+	}
 	return s.Sandbox.Create(ctx, sandbox.CreateRequest{
 		TemplateID: selection.ID, TemplateName: selection.Name,
 		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
 		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
-		Env: copyMap(opts.Env), VolumeMounts: opts.VolumeMounts, Network: opts.Network,
+		Env: copyMap(opts.Env), VolumeMounts: volumeMounts, Network: opts.Network,
 	})
 }
 
