@@ -25,6 +25,7 @@ func TestE2BListenersStopTogether(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.E2B.ListenAddr = addr
 	cfg.E2B.APIKey = "node-key"
+	cfg.E2B.MaxSandboxTTL = 24 * time.Hour
 	if err := s.initE2B(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +90,7 @@ func TestE2BStartAfterShutdownDoesNotStartWorkers(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.E2B.ListenAddr = "127.0.0.1:18080"
 	cfg.E2B.APIKey = "node-key"
+	cfg.E2B.MaxSandboxTTL = 24 * time.Hour
 	if err := s.initE2B(cfg); err != nil {
 		t.Fatal(err)
 	}

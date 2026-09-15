@@ -32,6 +32,7 @@ func (s *Daemon) initE2B(cfg *config.Config) error {
 	s.runtimeService.ProxyRoutes = sandboxproxy.NewRegistry()
 	handler, err := e2bapi.New(e2bapi.Config{
 		APIKey: cfg.E2B.APIKey, Domains: cfg.E2B.SandboxProxyDomains, RequestTimeout: cfg.Sandbox.RequestTimeout,
+		MaxSandboxTTL: cfg.E2B.MaxSandboxTTL,
 	}, s.runtimeService, s.runtimeService.ProxyRoutes)
 	if err != nil {
 		return err

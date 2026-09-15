@@ -3,6 +3,7 @@ package conchruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -31,7 +33,13 @@ type fakeSandboxOps struct {
 	createCalls  int
 	deleteErr    error
 	deleteCalls  int
-	createHook   func(context.Context)
+	releaseErr   error
+	releaseCalls int
+	// releaseHook runs inside a successful ReleaseRuntime, simulating a guest
+	// exit whose cleanup persists UNKNOWN while the release is in flight.
+	releaseHook func(context.Context, string)
+	resumeCalls int
+	createHook  func(context.Context)
 	// afterCreate runs after the READY record is persisted, simulating a
 	// runtime exit that lands between Manager.Create and the caller's next
 	// read of the record.
@@ -103,14 +111,63 @@ func (f *fakeSandboxOps) Delete(ctx context.Context, sandboxID string) error {
 	return nil
 }
 
+// ReleaseRuntime mimics Manager.ReleaseRuntime: the record survives the
+// release, and a failed release retains it as UNKNOWN with the error.
+func (f *fakeSandboxOps) ReleaseRuntime(ctx context.Context, sandboxID string) error {
+	f.releaseCalls++
+	if f.releaseErr == nil {
+		if f.releaseHook != nil {
+			f.releaseHook(ctx, sandboxID)
+		}
+		return nil
+	}
+	if f.store != nil {
+		if rec, err := f.store.Get(ctx, sandboxID); err == nil {
+			rec.State = sandbox.StateUnknown
+			rec.LastError = f.releaseErr.Error()
+			if _, err := f.store.Update(ctx, rec); err != nil {
+				return err
+			}
+		}
+	}
+	return f.releaseErr
+}
+
 func (f *fakeSandboxOps) Suspend(context.Context, string) error { return nil }
-func (f *fakeSandboxOps) Resume(context.Context, string) error  { return nil }
+
+// Resume mimics Manager.Resume: only a SUSPENDED record returns to READY.
+func (f *fakeSandboxOps) Resume(ctx context.Context, sandboxID string) error {
+	f.resumeCalls++
+	if f.store == nil {
+		return nil
+	}
+	rec, err := f.store.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if rec.State != sandbox.StateSuspended {
+		return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", sandboxID, rec.State))
+	}
+	rec.State = sandbox.StateReady
+	rec.LastError = ""
+	_, err = f.store.Update(ctx, rec)
+	return err
+}
+
 func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
 	f.updateReq = req
 	return f.updateErr
 }
-func (f *fakeSandboxOps) Checkpoint(ctx context.Context, _ string, register func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error) {
+func (f *fakeSandboxOps) Checkpoint(ctx context.Context, sandboxID string, register func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error) {
 	if f.checkpointErr != nil {
+		// ErrCheckpointResume leaves the sandbox SUSPENDED, matching
+		// captureCheckpoint's persistence on that error.
+		if errors.Is(f.checkpointErr, sandbox.ErrCheckpointResume) && f.store != nil {
+			if rec, err := f.store.Get(ctx, sandboxID); err == nil {
+				rec.State, rec.LastError = sandbox.StateSuspended, f.checkpointErr.Error()
+				_, _ = f.store.Update(ctx, rec)
+			}
+		}
 		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
 	return f.checkpoint, register(ctx, f.checkpoint)
@@ -136,6 +193,191 @@ func TestNativeCreateDoesNotReserveE2BCapacity(t *testing.T) {
 	}
 	if err := svc.Capacity.reserve("e2b-capacity", 2, 512); err != nil {
 		t.Fatalf("native create consumed E2B capacity: %v", err)
+	}
+}
+
+func TestPauseKeepsProxyRouteWhenRuntimeTeardownFails(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{
+		store: store, releaseErr: errors.New("runtime teardown failed"),
+		checkpoint: sandbox.CheckpointResult{BootIndexDigest: digest.FromString("pause-route-head").String()},
+	}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "pause-route", RuntimeID: "runtime-pause", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("pause-route-template").String(), VCPUNum: 1, RamMB: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := svc.ProxyRoutes.Begin(record.ID)
+	if err := svc.ProxyRoutes.Publish(record.ID, generation, "192.0.2.11"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PauseSandbox(ctx, record.ID, time.Time{}); err == nil {
+		t.Fatal("PauseSandbox succeeded after teardown failure")
+	}
+	if _, ok := svc.ProxyRoutes.Lookup(record.ID); !ok {
+		t.Fatal("pause teardown failure removed the live proxy route")
+	}
+}
+
+// TestExpiryPauseRevalidatesDeadline proves the expiredBefore guard: a TTL
+// extension that landed after the expiry tick must stop the auto-pause, while
+// a deadline still due at that instant pauses normally.
+func TestExpiryPauseRevalidatesDeadline(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{
+		store:      store,
+		checkpoint: sandbox.CheckpointResult{BootIndexDigest: digest.FromString("expiry-head").String()},
+	}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	tick := time.Now()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "expiry-revalidate", RuntimeID: "runtime-expiry", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("expiry-template").String(), VCPUNum: 1, RamMB: 128,
+		ExpiresAt: tick.Add(-time.Second).UnixNano(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The client refreshed the deadline after the tick observed the expiry.
+	refreshed, err := store.Update(ctx, sandbox.Record{
+		ID: record.ID, RuntimeID: record.RuntimeID, State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: record.CheckpointHeadTemplateID, VCPUNum: 1, RamMB: 128,
+		ExpiresAt: tick.Add(time.Minute).UnixNano(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = svc.PauseSandbox(ctx, record.ID, tick)
+	if !errors.Is(err, sandbox.ErrFailedPrecondition) {
+		t.Fatalf("refreshed pause error = %v, want FailedPrecondition", err)
+	}
+	after, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != sandbox.StateReady || after.ExpiresAt != refreshed.ExpiresAt {
+		t.Fatalf("rejected pause mutated the record: %#v", after)
+	}
+
+	// A deadline still due at the tick instant pauses normally. Use the exact
+	// deadline as the tick: due-at-that-instant must pass the guard.
+	if err := svc.PauseSandbox(ctx, record.ID, time.Unix(0, refreshed.ExpiresAt)); err != nil {
+		t.Fatalf("expired pause = %v", err)
+	}
+	paused, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.State != sandbox.StatePaused || paused.ExpiresAt != 0 {
+		t.Fatalf("paused record = %#v", paused)
+	}
+}
+
+// TestPauseResumesSandboxWhenCheckpointResumeFails proves the ErrCheckpointResume
+// fallback: the sandbox is un-suspended so it keeps running under its READY
+// record instead of being stranded in SUSPENDED.
+func TestPauseResumesSandboxWhenCheckpointResumeFails(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{
+		store:         store,
+		checkpointErr: fmt.Errorf("capture: %w", sandbox.ErrCheckpointResume),
+	}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "pause-resume-fail", RuntimeID: "runtime-resume-fail", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("resume-fail-template").String(), VCPUNum: 1, RamMB: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = svc.PauseSandbox(ctx, record.ID, time.Time{})
+	if !errors.Is(err, sandbox.ErrCheckpointResume) {
+		t.Fatalf("pause error = %v, want ErrCheckpointResume", err)
+	}
+	if ops.resumeCalls != 1 {
+		t.Fatalf("resume calls = %d, want 1", ops.resumeCalls)
+	}
+	after, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != sandbox.StateReady {
+		t.Fatalf("record state after failed checkpoint = %s, want READY", after.State)
+	}
+	if ops.releaseCalls != 0 {
+		t.Fatalf("release calls after failed checkpoint = %d, want 0", ops.releaseCalls)
+	}
+}
+
+// TestPauseHealsRecordWhenGuestExitsDuringRelease proves the post-release
+// heal: a guest exit that persisted UNKNOWN between the PAUSED commit and the
+// runtime release must not strand the sandbox — the record is rewritten to
+// the pause outcome the caller was told about.
+func TestPauseHealsRecordWhenGuestExitsDuringRelease(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{
+		store:      store,
+		checkpoint: sandbox.CheckpointResult{BootIndexDigest: digest.FromString("pause-heal-head").String()},
+		// Mirror cleanupExitedSandbox: it reads the current record — already
+		// PAUSED with the RuntimeID cleared — persists UNKNOWN and clears
+		// RuntimeSnapshots, without checking whether the record was paused.
+		releaseHook: func(ctx context.Context, sandboxID string) {
+			rec, err := store.Get(ctx, sandboxID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.State != sandbox.StatePaused {
+				t.Fatalf("release observed state %s, want PAUSED committed first", rec.State)
+			}
+			rec.State = sandbox.StateUnknown
+			rec.LastError = ""
+			rec.RuntimeSnapshots = nil
+			if _, err := store.Update(ctx, rec); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "pause-heal", RuntimeID: "runtime-heal", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("pause-heal-template").String(), VCPUNum: 1, RamMB: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.PauseSandbox(ctx, record.ID, time.Time{}); err != nil {
+		t.Fatalf("pause with racing exit = %v", err)
+	}
+	after, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != sandbox.StatePaused {
+		t.Fatalf("record after racing exit = %s, want PAUSED", after.State)
+	}
+	if after.RuntimeID != "" || after.ExpiresAt != 0 || after.LastError != "" {
+		t.Fatalf("healed record kept runtime fields: %#v", after)
+	}
+	if after.CheckpointHeadTemplateID != ops.checkpoint.BootIndexDigest {
+		t.Fatalf("healed record head = %q, want %q", after.CheckpointHeadTemplateID, ops.checkpoint.BootIndexDigest)
 	}
 }
 

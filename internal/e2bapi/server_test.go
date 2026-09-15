@@ -59,12 +59,16 @@ func testRuntime(t *testing.T) (*conchruntime.Service, *sandboxproxy.Registry) {
 	routes := sandboxproxy.NewRegistry()
 	t.Cleanup(routes.Close)
 	service.ProxyRoutes = routes
+	service.Capacity, err = conchruntime.NewCapacity(conchruntime.CapacityLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return service, routes
 }
 
 func testServer(t *testing.T, service *conchruntime.Service, routes *sandboxproxy.Registry) *httptest.Server {
 	t.Helper()
-	api, err := New(Config{APIKey: testAPIKey, Domains: []string{"sandbox.example.test"}, RequestTimeout: 5 * time.Second}, service, routes)
+	api, err := New(Config{APIKey: testAPIKey, Domains: []string{"sandbox.example.test"}, RequestTimeout: 5 * time.Second, MaxSandboxTTL: 24 * time.Hour}, service, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,25 +192,45 @@ func TestAuthenticationAndProxyClassification(t *testing.T) {
 func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	service, routes := testRuntime(t)
 	server := testServer(t, service, routes)
-	for _, operation := range []string{"pause", "resume", "connect", "fork", "timeout", "refreshes"} {
+	// resume (native VMM unpause) and fork stay unimplemented; pause and
+	// connect are implemented and fail with 404 for a missing sandbox.
+	for _, operation := range []string{"resume", "fork"} {
 		resp, body := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
 		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "Unimplemented") {
 			t.Errorf("%s = %d %q", operation, resp.StatusCode, body)
 		}
 	}
+	for _, operation := range []string{"pause", "connect", "refreshes"} {
+		resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404", operation, resp.StatusCode)
+		}
+	}
+	// set_timeout requires a valid timeout before the sandbox lookup.
+	resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/timeout", `{"timeout":0}`, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("timeout = %d, want 400", resp.StatusCode)
+	}
+	resp, _ = doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/timeout", `{"timeout":60}`, true)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("timeout = %d, want 404", resp.StatusCode)
+	}
 	for _, body := range []string{
 		`{"templateID":"base","secure":true}`,
 		`{"templateID":"base"}`,
-		`{"templateID":"base","secure":false,"autoPause":true}`,
 		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
-		`{"templateID":"base","secure":false,"network":{"maskRequestHost":"example.com"}}`,
-		`{"templateID":"base","secure":false,"volumeMounts":[{}]}`,
 	} {
 		resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Errorf("unsupported %s = %d %q", body, resp.StatusCode, data)
 		}
+	}
+	// the network endpoint reaches the store and fails with 404 for a missing
+	// sandbox.
+	resp, _ = doRequest(t, server, http.MethodPut, "/sandboxes/"+uuid.NewString()+"/network", `{}`, true)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("network = %d, want 404", resp.StatusCode)
 	}
 	for _, body := range []string{
 		`{`, `null`, `{}`, `{"templateID":"base","secure":"false"}`,
@@ -214,6 +238,7 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 		`{"templateID":"base","secure":false,"cpuCount":2}`,
 		`{"templateID":"base","secure":false,"timeout":-1}`,
 		`{"templateID":"base","secure":false,"timeout":0}`,
+		`{"templateID":"base","secure":false,"timeout":86401}`,
 		`{"templateID":"base","secure":false,"timeout":2147483648}`,
 		`{"templateID":"base","secure":false,"network":{"private":true}}`,
 	} {
@@ -222,9 +247,65 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 			t.Errorf("malformed %s = %d %q", body, resp.StatusCode, data)
 		}
 	}
-	resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"`+strings.Repeat("a", maxBodyBytes)+`"}`, true)
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Errorf("oversized create = %d", resp.StatusCode)
+	oversized, _ := doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"`+strings.Repeat("a", maxBodyBytes)+`"}`, true)
+	if oversized.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized create = %d", oversized.StatusCode)
+	}
+}
+
+func TestConfigurableMaxSandboxTTL(t *testing.T) {
+	service, routes := testRuntime(t)
+	api, err := New(Config{
+		APIKey: testAPIKey, Domains: []string{"sandbox.example.test"},
+		RequestTimeout: 5 * time.Second, MaxSandboxTTL: 300 * time.Second,
+	}, service, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	// All TTL-setting endpoints reject a timeout above the configured ceiling
+	// before any sandbox lookup, with the ceiling in the message.
+	id := uuid.NewString()
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"create", http.MethodPost, "/sandboxes", `{"templateID":"base","secure":false,"timeout":301}`},
+		{"connect", http.MethodPost, "/sandboxes/" + id + "/connect", `{"timeout":301}`},
+		{"set_timeout", http.MethodPost, "/sandboxes/" + id + "/timeout", `{"timeout":301}`},
+	} {
+		resp, data := doRequest(t, server, tc.method, tc.path, tc.body, true)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), "between 1 and 300 seconds") {
+			t.Errorf("%s = %d %q, want 400 naming the 300s ceiling", tc.name, resp.StatusCode, data)
+		}
+	}
+	// A timeout at the ceiling passes validation and fails on the missing
+	// sandbox instead.
+	resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes/"+id+"/timeout", `{"timeout":300}`, true)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("set_timeout at the ceiling = %d, want 404", resp.StatusCode)
+	}
+	// A ceiling below the default refresh cap clamps refreshes to itself.
+	ready := seedRecord(t, service.Store, true, true, "")
+	resp, _ = doRequest(t, server, http.MethodPost, "/sandboxes/"+ready.ID+"/refreshes", `{"duration":3600}`, true)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("refreshes = %d, want 204", resp.StatusCode)
+	}
+	updated, err := service.Store.Get(t.Context(), ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := time.Until(time.Unix(0, updated.ExpiresAt)); remaining > 301*time.Second {
+		t.Errorf("refreshed deadline extends %s beyond the 300s ceiling", remaining)
+	}
+	// New rejects a missing or sub-second ceiling (also covering negatives).
+	for _, ceiling := range []time.Duration{0, 500 * time.Millisecond, -time.Second} {
+		if _, err := New(Config{APIKey: testAPIKey, RequestTimeout: time.Second, MaxSandboxTTL: ceiling}, service, routes); err == nil {
+			t.Errorf("MaxSandboxTTL %s accepted", ceiling)
+		}
 	}
 }
 
