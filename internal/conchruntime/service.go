@@ -43,6 +43,10 @@ type Service struct {
 	Snapshot        SnapshotOps
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
+	// Capacity bounds concurrent sandbox CPU/memory reservations when set.
+	// Reserve/release wiring into create/remove arrives with the E2B
+	// coordination layer.
+	Capacity *Capacity
 }
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
@@ -64,6 +68,19 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	selection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
 	if err != nil {
 		return SandboxCreateResult{}, err
+	}
+	if selection.Resume && (opts.E2B || s.Capacity != nil) && selection.CPUCount <= 0 {
+		return SandboxCreateResult{}, sandbox.ErrFailedPrecondition.WrapMessage(nil,
+			"resume template lacks captured CPU metadata; recreate the checkpoint template")
+	}
+	if selection.CPUCount > 0 {
+		opts.VCPUNum = selection.CPUCount
+		if opts.VCPUMax < opts.VCPUNum {
+			opts.VCPUMax = opts.VCPUNum
+		}
+	}
+	if selection.MemorySizeMB > 0 {
+		opts.RamMB = selection.MemorySizeMB
 	}
 	volumeMounts := make([]volume.Mount, 0, len(opts.VolumeMounts))
 	for _, spec := range opts.VolumeMounts {
@@ -146,8 +163,11 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 }
 
 type sandboxTemplateSelection struct {
-	Name string
-	ID   string
+	Name         string
+	ID           string
+	MemorySizeMB int64
+	CPUCount     int64
+	Resume       bool
 }
 
 func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string) (sandboxTemplateSelection, error) {
@@ -166,7 +186,17 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 		if err != nil {
 			return sandboxTemplateSelection{}, err
 		}
-		return sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}, nil
+		selection := sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}
+		if entry.BootMode == conchtemplate.BootModeResume {
+			info, err := conchimage.InspectBootIndex(ctx, s.Containerd, entry.BootIndexDigest)
+			if err != nil {
+				return sandboxTemplateSelection{}, err
+			}
+			selection.MemorySizeMB = info.MemorySizeMB
+			selection.CPUCount = info.CPUCount
+			selection.Resume = true
+		}
+		return selection, nil
 	}
 	parsedID, err := digest.Parse(rawID)
 	if err != nil {

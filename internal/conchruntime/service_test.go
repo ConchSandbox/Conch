@@ -237,7 +237,7 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		RamMB:      4096,
 	})
 	svc.Templates = &fakeTemplateStore{entries: map[string]conchtemplate.Entry{
-		explicitName: {Name: explicitName, Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume, BootIndexDigest: explicitDigest},
+		explicitName: {Name: explicitName, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: explicitDigest},
 	}}
 
 	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
