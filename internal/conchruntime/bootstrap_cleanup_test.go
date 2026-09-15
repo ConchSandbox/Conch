@@ -132,9 +132,11 @@ func TestCreateFailureReleasesCapacityAfterRollback(t *testing.T) {
 
 	initFailed := &atomic.Bool{}
 	initialized := &atomic.Bool{}
-	localGuestEnvd(t, "127.0.0.38", initFailed, initialized)
+	// A distinct loopback address from the envd and E2B node API tests so all
+	// test binaries can bind their local guests concurrently.
+	localGuestEnvd(t, "127.0.0.36", initFailed, initialized)
 	// Route the fake guest through the create result IP.
-	ops.createResult.IP = "127.0.0.38"
+	ops.createResult.IP = "127.0.0.36"
 
 	const sandboxID = "b541d234-baf9-4d67-a3ca-5696e49e39db"
 	// A failed envd /init must roll back VM, store record, route and capacity
