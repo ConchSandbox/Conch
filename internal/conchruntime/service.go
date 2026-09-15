@@ -43,6 +43,10 @@ type Service struct {
 	Snapshot        SnapshotOps
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
+	// Capacity bounds concurrent sandbox CPU/memory reservations when set.
+	// Reserve/release wiring into create/remove arrives with the E2B
+	// coordination layer.
+	Capacity *Capacity
 }
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
@@ -69,6 +73,10 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	// they win over defaults and caller values so the restored record tracks
 	// the physical memory file. Legacy resume templates predate CPU capture
 	// and keep the caller's CPU count.
+	if selection.Resume && (opts.E2B || s.Capacity != nil) && selection.CPUCount <= 0 {
+		return SandboxCreateResult{}, sandbox.ErrFailedPrecondition.WrapMessage(nil,
+			"resume template lacks captured CPU metadata; recreate the checkpoint template")
+	}
 	if selection.CPUCount > 0 {
 		opts.VCPUNum = selection.CPUCount
 		if opts.VCPUMax < opts.VCPUNum {
@@ -163,6 +171,7 @@ type sandboxTemplateSelection struct {
 	ID           string
 	MemorySizeMB int64
 	CPUCount     int64
+	Resume       bool
 }
 
 func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string) (sandboxTemplateSelection, error) {
@@ -189,6 +198,7 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 			}
 			selection.MemorySizeMB = info.MemorySizeMB
 			selection.CPUCount = info.CPUCount
+			selection.Resume = true
 		}
 		return selection, nil
 	}
