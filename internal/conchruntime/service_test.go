@@ -18,6 +18,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
@@ -129,6 +130,33 @@ func TestNativeCreateDoesNotReserveE2BCapacity(t *testing.T) {
 	}
 	if err := svc.Capacity.reserve("e2b-capacity", 2, 512); err != nil {
 		t.Fatalf("native create consumed E2B capacity: %v", err)
+	}
+}
+
+
+func TestPauseKeepsProxyRouteWhenRuntimeTeardownFails(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{store: store, deleteErr: errors.New("runtime teardown failed")}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "pause-route", RuntimeID: "runtime-pause", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("pause-route-template").String(), VCPUNum: 1, RamMB: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := svc.ProxyRoutes.Begin(record.ID)
+	if err := svc.ProxyRoutes.Publish(record.ID, generation, "192.0.2.11"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PauseSandbox(ctx, record.ID); err == nil {
+		t.Fatal("PauseSandbox succeeded after teardown failure")
+	}
+	if _, ok := svc.ProxyRoutes.Lookup(record.ID); !ok {
+		t.Fatal("pause teardown failure removed the live proxy route")
 	}
 }
 

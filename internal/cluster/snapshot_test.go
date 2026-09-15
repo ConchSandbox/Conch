@@ -49,6 +49,30 @@ func TestResourceSnapshotKeepsUnconfirmedRecordAllocated(t *testing.T) {
 	}
 }
 
+// A PAUSED record owns no live runtime: its resources count only into the
+// paused_* metrics and never into the running allocation.
+func TestResourceSnapshotSeparatesPausedFromRunning(t *testing.T) {
+	snapshot, ids, err := resourceSnapshot([]sandbox.Record{
+		{ID: "a-paused", State: sandbox.StatePaused, VCPUNum: 2, RamMB: 512},
+		{ID: "b-running", State: sandbox.StateReady, VCPUNum: 1, RamMB: 256},
+		{ID: "c-creating", State: sandbox.StateCreating, VCPUNum: 1, RamMB: 256},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("roster lost records: %v", ids)
+	}
+	if snapshot.SandboxCount != 1 || snapshot.SandboxStartingCount != 1 ||
+		snapshot.AllocatedCpu != 2 || snapshot.AllocatedMemoryBytes != 512*1024*1024 {
+		t.Fatalf("running totals include paused sandbox: %v", snapshot)
+	}
+	if snapshot.PausedSandboxCount != 1 || snapshot.PausedAllocatedCpu != 2 ||
+		snapshot.PausedAllocatedMemoryBytes != 512*1024*1024 {
+		t.Fatalf("paused metrics = %v", snapshot)
+	}
+}
+
 func TestCPUPercentDoesNotDoubleCountGuestTime(t *testing.T) {
 	before := procfs.CPUStat{User: 100, Idle: 100, Guest: 100}
 	after := procfs.CPUStat{User: 150, Idle: 150, Guest: 150}
