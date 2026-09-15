@@ -27,9 +27,9 @@ import (
 const maxBodyBytes = 1 << 20
 
 type Config struct {
-	APIKey        string
-	Domains       []string
-	CreateTimeout time.Duration
+	APIKey         string
+	Domains        []string
+	RequestTimeout time.Duration
 }
 
 type Server struct {
@@ -39,8 +39,8 @@ type Server struct {
 }
 
 func New(cfg Config, service *conchruntime.Service, routes *sandboxproxy.Registry) (*Server, error) {
-	if cfg.APIKey == "" || cfg.CreateTimeout <= 0 || service == nil || service.Store == nil || routes == nil {
-		return nil, fmt.Errorf("E2B API requires an API key, create timeout, runtime/store and proxy registry")
+	if cfg.APIKey == "" || cfg.RequestTimeout <= 0 || service == nil || service.Store == nil || routes == nil {
+		return nil, fmt.Errorf("E2B API requires an API key, request timeout, runtime/store and proxy registry")
 	}
 	return &Server{runtime: service, proxy: sandboxproxy.NewHandler(routes, cfg.Domains), config: cfg}, nil
 }
@@ -90,7 +90,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Existing Conch suspend/resume only pauses a live VMM. Full
 				// E2B checkpoint/release/restore and connect semantics are future work.
 				unimplemented(w, "pause/resume/connect")
-			case "fork", "snapshots", "timeout", "refreshes":
+			case "snapshots":
+				s.checkpoint(w, r, parts[0])
+			case "fork", "timeout", "refreshes":
 				unimplemented(w, parts[1])
 			default:
 				writeError(w, http.StatusNotFound, "endpoint not found")
@@ -200,7 +202,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	} else if request.AllowInternetAccess != nil {
 		opts.Network = &runtimeapi.SandboxNetworkConfig{AllowInternetAccess: request.AllowInternetAccess}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.config.CreateTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
 	defer cancel()
 	created, err := s.runtime.CreateSandbox(ctx, opts)
 	if err != nil {
@@ -367,7 +369,7 @@ func (s *Server) runtimeError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		status = 504
-		message = "sandbox creation timed out"
+		message = "sandbox operation timed out"
 	}
 	if status >= 500 {
 		ulog.Warn("E2B operation failed", ulog.F("error", err))

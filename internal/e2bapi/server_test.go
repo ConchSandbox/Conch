@@ -67,7 +67,7 @@ func testRuntime(t *testing.T) (*conchruntime.Service, *sandboxproxy.Registry) {
 
 func testServer(t *testing.T, service *conchruntime.Service, routes *sandboxproxy.Registry) *httptest.Server {
 	t.Helper()
-	api, err := New(Config{APIKey: testAPIKey, Domains: []string{"sandbox.example.test"}, CreateTimeout: 5 * time.Second}, service, routes)
+	api, err := New(Config{APIKey: testAPIKey, Domains: []string{"sandbox.example.test"}, RequestTimeout: 5 * time.Second}, service, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestAuthenticationAndProxyClassification(t *testing.T) {
 func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	service, routes := testRuntime(t)
 	server := testServer(t, service, routes)
-	for _, operation := range []string{"pause", "resume", "connect"} {
+	for _, operation := range []string{"pause", "resume", "connect", "fork", "timeout", "refreshes"} {
 		resp, body := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
 		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "Unimplemented") {
 			t.Errorf("%s = %d %q", operation, resp.StatusCode, body)
