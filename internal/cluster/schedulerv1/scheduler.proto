@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package scheduler.v1;
+
+option go_package = "agentenv/services/api/proto;schedulerv1";
+
+service Scheduler {
+  rpc Schedule(ScheduleRequest) returns (ScheduleResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc LookupNode(LookupNodeRequest) returns (LookupNodeResponse);
+  rpc RecordAssignment(RecordAssignmentRequest) returns (RecordAssignmentResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ReportSandboxEvent(ReportSandboxEventRequest) returns (ReportSandboxEventResponse);
+  rpc ListObservedNodes(ListObservedNodesRequest) returns (ListObservedNodesResponse);
+  rpc ListP2pPeers(ListP2pPeersRequest) returns (ListP2pPeersResponse);
+  rpc RecordP2pArtifact(RecordP2pArtifactRequest) returns (RecordP2pArtifactResponse);
+  rpc ForgetP2pArtifact(ForgetP2pArtifactRequest) returns (ForgetP2pArtifactResponse);
+  rpc LookupP2pArtifact(LookupP2pArtifactRequest) returns (LookupP2pArtifactResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
+}
+
+message Node {
+  string node_id = 1;
+  string endpoint = 2;
+}
+
+// ScheduleRequestHint carries structured information parsed from the incoming
+// request so the scheduler can make a more informed placement decision. Only
+// request types that benefit from scheduling hints are represented; other
+// requests omit the hint entirely.
+message ScheduleRequestHint {
+  oneof kind {
+    NewColdSandboxHint new_cold_sandbox = 1;
+    NewSandboxHint new_sandbox = 2;
+  }
+}
+
+// NewColdSandboxHint describes a POST /sandboxes-cold request.
+message NewColdSandboxHint {
+  uint32 cpu_count = 1;
+  uint64 memory_mb = 2;
+  // OCI image references involved in the cold start: the rootfs image plus any
+  // attached-drive images.
+  repeated string images = 3;
+  // Sandbox metadata key/value pairs parsed from the request body.
+  map<string, string> metadata = 4;
+}
+
+// NewSandboxHint describes a POST /sandboxes request.
+message NewSandboxHint {
+  // Sandbox metadata key/value pairs parsed from the request body.
+  map<string, string> metadata = 1;
+}
+
+message ScheduleRequest {
+  reserved 1;  // formerly: string hint = 1
+  ScheduleRequestHint hint = 2;
+}
+
+message ScheduleResponse {
+  Node node = 1;
+}
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+}
+
+message LookupNodeRequest {
+  string sandbox_id = 1;
+}
+
+message LookupNodeResponse {
+  Node node = 1;
+}
+
+message RecordAssignmentRequest {
+  string sandbox_id = 1;
+  Node node = 2;
+}
+
+message RecordAssignmentResponse {}
+
+message MachineInfo {
+  string cpu_family = 1;
+  string cpu_model = 2;
+  string cpu_model_name = 3;
+  string cpu_architecture = 4;
+  string cpu_config_json = 5;
+}
+
+message DiskMetric {
+  string mount_point = 1;
+  string device = 2;
+  string filesystem_type = 3;
+  uint64 used_bytes = 4;
+  uint64 total_bytes = 5;
+}
+
+// NodeStatus describes the effective state of a node as derived by the
+// scheduler from its discovery state and heartbeat history.
+//
+//   active  + heartbeat OK      → READY        — accepts new sandboxes
+//   active  + no heartbeat      → CONNECTING    — discovered but not yet confirmed
+//   active  + heartbeat timeout → UNHEALTHY     — heartbeat lost
+//   lingering + heartbeat OK    → LINGERING     — terminating, draining existing work
+//   lingering + no heartbeat    → CONNECTING    — terminating, never confirmed
+//   lingering + heartbeat timeout → UNHEALTHY   — terminating, heartbeat lost
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_READY = 1;
+  NODE_STATUS_CONNECTING = 2;
+  NODE_STATUS_UNHEALTHY = 3;
+  NODE_STATUS_LINGERING = 4;
+}
+
+message NodeSnapshot {
+  NodeStatus status = 1;
+  uint32 allocated_cpu = 2;
+  uint64 allocated_memory_bytes = 3;
+  uint32 cpu_percent = 4;
+  uint32 cpu_count = 5;
+  uint64 memory_used_bytes = 6;
+  uint64 memory_total_bytes = 7;
+  repeated DiskMetric disks = 8;
+  uint32 sandbox_count = 9;
+  uint32 sandbox_starting_count = 10;
+  uint64 create_successes = 11;
+  uint64 create_fails = 12;
+  int64 reported_at_unix_ms = 13;
+  // Paused-sandbox resource accounting. These are *not* included in
+  // sandbox_count, allocated_cpu, or allocated_memory_bytes — those report the
+  // active running set only. Paused sandboxes have released their VM-side
+  // CPU / memory but still own persisted state on the node, so the scheduler
+  // can use these fields (together with the active fields) to apply
+  // "including paused" capacity limits.
+  uint32 paused_sandbox_count = 14;
+  uint32 paused_allocated_cpu = 15;
+  uint64 paused_allocated_memory_bytes = 16;
+}
+
+message P2pEndpoint {
+  string backend = 1;
+  string address = 2;
+}
+
+message ObservedNode {
+  string node_id = 1;
+  string endpoint = 2;
+  string cluster_id = 3;
+  string service_instance_id = 4;
+  string version = 5;
+  string commit = 6;
+  MachineInfo machine_info = 7;
+  NodeSnapshot snapshot = 8;
+  int64 last_seen_unix_ms = 9;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  string cluster_id = 2;
+  string service_instance_id = 3;
+  string version = 4;
+  string commit = 5;
+  MachineInfo machine_info = 6;
+  NodeSnapshot snapshot = 7;
+  repeated string sandbox_ids = 8;
+  P2pEndpoint p2p_endpoint = 9;
+}
+
+message HeartbeatResponse {
+  string cpu_config_json = 1;
+}
+
+enum SandboxEventType {
+  SANDBOX_EVENT_TYPE_UNSPECIFIED = 0;
+  SANDBOX_EVENT_TYPE_CREATE = 1;
+  SANDBOX_EVENT_TYPE_DELETE = 2;
+  SANDBOX_EVENT_TYPE_PAUSE = 3;
+  SANDBOX_EVENT_TYPE_RESUME = 4;
+  // Fork events are reported once per child sandbox; sandbox_id and requested
+  // resources refer to the child sandbox, not the source sandbox.
+  SANDBOX_EVENT_TYPE_FORK = 5;
+}
+
+message SandboxEvent {
+  string sandbox_id = 1;
+  SandboxEventType event_type = 2;
+  uint32 requested_cpu = 3;
+  uint64 requested_memory_bytes = 4;
+  uint64 requested_disk_bytes = 5;
+}
+
+message ReportSandboxEventRequest {
+  string node_id = 1;
+  string cluster_id = 2;
+  string service_instance_id = 3;
+  repeated SandboxEvent events = 4;
+}
+
+message ReportSandboxEventResponse {}
+
+message ListObservedNodesRequest {
+  string cluster_id = 1;
+}
+
+message ListObservedNodesResponse {
+  repeated ObservedNode nodes = 1;
+}
+
+message P2pPeer {
+  string node_id = 1;
+  P2pEndpoint endpoint = 2;
+}
+
+message ListP2pPeersRequest {
+  string cluster_id = 1;
+  string backend = 2;
+  string exclude_node_id = 3;
+}
+
+message ListP2pPeersResponse {
+  repeated P2pPeer peers = 1;
+}
+
+message RecordP2pArtifactRequest {
+  string cluster_id = 1;
+  string backend = 2;
+  string key = 3;
+  string node_id = 4;
+}
+
+message RecordP2pArtifactResponse {}
+
+message ForgetP2pArtifactRequest {
+  string cluster_id = 1;
+  string backend = 2;
+  string key = 3;
+  string node_id = 4;
+}
+
+message ForgetP2pArtifactResponse {}
+
+message LookupP2pArtifactRequest {
+  string cluster_id = 1;
+  string backend = 2;
+  string key = 3;
+  string exclude_node_id = 4;
+}
+
+message LookupP2pArtifactResponse {
+  repeated P2pPeer peers = 1;
+}
+
+message GetNodeRequest {
+  string node_id = 1;
+  string cluster_id = 2;
+}
+
+message GetNodeResponse {
+  ObservedNode node = 1;
+}
+
+message UnregisterNodeRequest {
+  string node_id = 1;
+  string service_instance_id = 2;
+}
+
+message UnregisterNodeResponse {}
