@@ -49,11 +49,16 @@ type Manager struct {
 	WebhookDispatcher  *webhook.Dispatcher
 	lifecycleLocks     sandboxLifecycleLocks
 	launch             func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error)
+	UnexpectedExitHandler UnexpectedExitHandler
+	BeforeRuntimeRelease   func(sandboxID string)
 }
 
 const createCleanupTimeout = 10 * time.Second
 
+type UnexpectedExitHandler func(sandboxID, runtimeID string, cleanupErr error)
+
 type sandboxEntry struct {
+	runtimeID    string
 	state        State
 	sbx          *Sandbox
 	volumes      []volume.Device
@@ -182,6 +187,7 @@ type CreateRequest struct {
 	TemplateName string
 	VMMName      string
 	SandboxID    string
+	RuntimeID    string
 	VCPUNum      int64
 	VCPUMax      int64
 	RAMMB        int64
