@@ -46,6 +46,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	// Store.Create is the persistent ID reservation; no preceding Get is needed.
 	rec, err := m.store.Create(ctx, Record{
 		ID: req.SandboxID, State: StateCreating, CreatedAt: time.Now().UnixNano(),
+		RuntimeID:          req.RuntimeID,
 		SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
 		CheckpointHeadTemplateID: req.TemplateID,
 		VCPUNum:                  req.VCPUNum, RamMB: req.RAMMB, Network: req.Network,
@@ -53,7 +54,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 	if err != nil {
 		return runtimeapi.SandboxCreateResult{}, fmt.Errorf("persist creating sandbox: %w", err)
 	}
-	entry := &sandboxEntry{state: StateCreating}
+	entry := &sandboxEntry{state: StateCreating, runtimeID: req.RuntimeID}
 	m.sandboxes.Store(req.SandboxID, entry)
 	leaseCreated := false
 	defer func() {

@@ -727,6 +727,117 @@ func TestOldExitCannotChangeReplacementSandbox(t *testing.T) {
 	}
 }
 
+func TestRuntimeReleaseRevokesRouteBeforeResourceCleanup(t *testing.T) {
+	for _, operation := range []string{"unexpected exit", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			m, store, _ := newLifecycleTestManager(t, readyBoot())
+			req := testCreateRequest()
+			if _, err := store.Create(context.Background(), Record{
+				ID: req.SandboxID, RuntimeID: "runtime-1", State: StateReady,
+				SourceTemplateID: req.TemplateID, CheckpointHeadTemplateID: req.TemplateID,
+				RuntimeSnapshots: readyBoot().prepared.RuntimeSnapshots,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			entry := &sandboxEntry{runtimeID: "runtime-1", state: StateReady, sbx: &Sandbox{slot: &netstack.Slot{}}}
+			m.sandboxes.Store(req.SandboxID, entry)
+			routeRevoked := false
+			boot := &recordingBootPreparer{releaseHook: func(context.Context) error {
+				if !routeRevoked {
+					t.Error("boot resources released before the data-plane route was revoked")
+				}
+				return nil
+			}}
+			m.boot = boot
+			exited := make(chan exitCall, 2)
+			m.UnexpectedExitHandler = func(id, runtimeID string, err error) {
+				exited <- exitCall{id: id, runtimeID: runtimeID, err: err}
+			}
+			m.BeforeRuntimeRelease = func(id string) {
+				if id != req.SandboxID {
+					t.Errorf("revoked route for %q", id)
+				}
+				// The network slot must still be owned when the route is
+				// revoked; dropping it here stands in for a real registry
+				// removal racing the pool release.
+				routeRevoked = true
+				entry.sbx.slot = nil
+			}
+			if operation == "delete" {
+				if err := m.Delete(context.Background(), req.SandboxID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				m.handleSandboxExit(req.SandboxID, entry)
+			}
+			// A delayed waiter for the removed runtime must not repeat the
+			// revocation or notify the exit twice.
+			m.handleSandboxExit(req.SandboxID, entry)
+			if operation == "unexpected exit" {
+				select {
+				case call := <-exited:
+					if call.id != req.SandboxID || call.runtimeID != "runtime-1" || call.err != nil {
+						t.Fatalf("exit call = %+v", call)
+					}
+				default:
+					t.Fatal("unexpected exit was not reported")
+				}
+				select {
+				case call := <-exited:
+					t.Fatalf("duplicate exit call = %+v", call)
+				default:
+				}
+			} else {
+				select {
+				case call := <-exited:
+					t.Fatalf("requested delete reported as unexpected exit: %+v", call)
+				default:
+				}
+			}
+			if !routeRevoked {
+				t.Fatal("route was never revoked")
+			}
+		})
+	}
+}
+
+func TestStaleRuntimeExitDoesNotInvokeReleaseHooks(t *testing.T) {
+	m, store, _ := newLifecycleTestManager(t, readyBoot())
+	req := testCreateRequest()
+	if _, err := store.Create(context.Background(), Record{
+		ID: req.SandboxID, State: StateReady,
+		SourceTemplateID: req.TemplateID, CheckpointHeadTemplateID: req.TemplateID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale := &sandboxEntry{runtimeID: "runtime-1", state: StateReady, sbx: &Sandbox{}}
+	m.sandboxes.Store(req.SandboxID, stale)
+	m.BeforeRuntimeRelease = func(string) {
+		t.Error("stale runtime invoked route-revocation callback")
+	}
+	exited := make(chan exitCall, 1)
+	m.UnexpectedExitHandler = func(_, _ string, _ error) { exited <- exitCall{} }
+	// The entry is replaced by a newer runtime; the stale waiter must abort.
+	replacement := &sandboxEntry{runtimeID: "runtime-2", state: StateReady, sbx: &Sandbox{}}
+	m.sandboxes.Store(req.SandboxID, replacement)
+	m.handleSandboxExit(req.SandboxID, stale)
+	select {
+	case <-exited:
+		t.Fatal("stale exit notified the handler")
+	default:
+	}
+	rec, err := store.Get(context.Background(), req.SandboxID)
+	if err != nil || rec.State != StateReady {
+		t.Fatalf("replacement record = %#v, %v", rec, err)
+	}
+}
+
+type exitCall struct {
+	id        string
+	runtimeID string
+	err       error
+}
+
 func TestLifecycleEventsFollowPersistence(t *testing.T) {
 	m, store, _ := newLifecycleTestManager(t, readyBoot())
 	events := make(chan webhook.Event, 4)

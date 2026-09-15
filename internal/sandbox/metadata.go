@@ -20,6 +20,7 @@ type SnapshotRef = snapshot.RuntimeSnapshotRef
 
 type Record struct {
 	ID                       string
+	RuntimeID                string
 	VMMPID                   int
 	State                    State
 	CreatedAt                int64
