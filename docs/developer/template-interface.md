@@ -48,6 +48,20 @@ target. They are replaced when the Name moves and are not retained as history.
 | `cold` | Starts without saved memory state. |
 | `resume` | Restores saved memory state. |
 
+Resume Boot Indexes published by checkpoint record `io.conch.cpu-count` and
+`io.conch.memory-size-mb` on both the index and its `mem-snapshot` descriptor.
+Each value is a positive integer and the two copies must agree. The CPU count
+describes the captured runtime; it does not resize a restored VM. Admission
+uses these values before reserving capacity, and API responses and Scheduler
+reports describe the same allocation. Cold templates use the create request's
+resources and do not carry these captured-resource annotations.
+
+`BootIndexInfo.CPUCount == 0` means an older resume artifact has no CPU
+metadata. Inspection can still read that artifact, but E2B or capacity-managed
+creation must reject it instead of substituting the Node's default CPU count.
+Rebuilding the checkpoint produces the required metadata; no migration is
+performed.
+
 ## Store Interface
 
 ```go
