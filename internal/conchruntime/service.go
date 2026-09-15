@@ -42,6 +42,10 @@ type Service struct {
 	Snapshot        SnapshotOps
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
+	// Capacity bounds concurrent sandbox CPU/memory reservations when set.
+	// Reserve/release wiring into create/remove arrives with the E2B
+	// coordination layer.
+	Capacity *Capacity
 }
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
