@@ -2,8 +2,6 @@ package runtimeapi
 
 import (
 	"time"
-
-	"github.com/openeuler/Conch/internal/volume"
 )
 
 type SandboxNetworkConfig struct {
@@ -47,18 +45,36 @@ const (
 	ImageKindBootComponentMemory  = "boot-component-memory"
 )
 
-type SandboxCreateOptions struct {
-	SandboxID    string
-	TemplateName string
-	TemplateID   string
-	VMMName      string
-	VCPUNum      int64
-	VCPUMax      int64
-	RamMB        int64
-	VolumeMounts []volume.Mount
-	Env          map[string]string
-	Network      *SandboxNetworkConfig
+// VolumeMountSpec describes a named volume mount requested by the E2B API.
+// Source is the resolved host directory backing the named volume.
+type VolumeMountSpec struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Source string `json:"source"`
 }
+
+type SandboxCreateOptions struct {
+	SandboxID       string
+	TemplateName    string
+	TemplateID      string
+	VMMName         string
+	VCPUNum         int64
+	VCPUMax         int64
+	RamMB           int64
+	VolumeMounts    []VolumeMountSpec
+	Env             map[string]string
+	Network         *SandboxNetworkConfig
+	E2B             bool
+	TimeoutAction   string
+	MaskRequestHost string
+	Metadata        map[string]string
+	Timeout         time.Duration
+}
+
+const (
+	TimeoutActionPause  = "pause"
+	TimeoutActionDelete = "delete"
+)
 
 type SandboxDefaults struct {
 	TemplateName string
@@ -85,6 +101,7 @@ type SandboxCreateResult struct {
 	VCPUNum      int64
 	RamMB        int64
 	CreatedAt    int64
+	EnvdVersion  string
 }
 
 type SandboxCheckpointOptions struct {

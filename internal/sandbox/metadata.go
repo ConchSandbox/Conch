@@ -13,6 +13,7 @@ const (
 	StateCreating  State = "CREATING"
 	StateReady     State = "READY"
 	StateSuspended State = "SUSPENDED"
+	StatePaused    State = "PAUSED"
 	StateUnknown   State = "UNKNOWN"
 )
 
@@ -33,6 +34,19 @@ type Record struct {
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef
+	E2B                      bool
+	EnvdVersion              string
+	Metadata                 map[string]string
+	ExpiresAt                int64
+	TimeoutAction            string
+	MaskRequestHost          string
+	VolumeMounts             []VolumeMountRecord
+}
+
+// VolumeMountRecord is the persisted form of a named volume mount.
+type VolumeMountRecord struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type Filter struct {
