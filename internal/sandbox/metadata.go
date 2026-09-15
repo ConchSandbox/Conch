@@ -33,6 +33,12 @@ type Record struct {
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef
+	E2B                      bool
+	EnvdVersion              string
+	Metadata                 map[string]string
+	ExpiresAt                int64
+	TimeoutAction            string
+	MaskRequestHost          string
 }
 
 type Filter struct {

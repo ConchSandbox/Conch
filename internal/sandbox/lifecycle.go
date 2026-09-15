@@ -203,20 +203,34 @@ func (m *Manager) UpdateNetwork(parent context.Context, req NetworkUpdateRequest
 }
 
 func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
+	handled, runtimeID, cleanupErr := m.cleanupExitedSandbox(sandboxID, entry)
+	if !handled {
+		return
+	}
+	// Invoke the exit observer after the lifecycle lock is released: the
+	// handler takes the runtime service's own lifecycle locks, while Remove
+	// calls Manager.Delete while holding them.
+	if m.UnexpectedExitHandler != nil {
+		m.UnexpectedExitHandler(sandboxID, runtimeID, cleanupErr)
+	}
+}
+
+func (m *Manager) cleanupExitedSandbox(sandboxID string, entry *sandboxEntry) (handled bool, runtimeID string, cleanupErr error) {
 	unlock := m.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	current, ok := m.sandboxes.Load(sandboxID)
 	if !ok || current != entry || entry.state == StateUnknown {
-		return
+		return false, "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
 	defer cancel()
 	entry.state = StateUnknown
-	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
+	cleanupErr = m.cleanupSandbox(ctx, sandboxID, entry)
+	runtimeID = entry.runtimeID
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
 		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
+		return true, runtimeID, cleanupErr
 	}
 	alreadyExited := rec.State == StateUnknown
 	rec.State = StateUnknown
@@ -228,15 +242,13 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	}
 	if _, err := m.store.Update(ctx, rec); err != nil {
 		ulog.GetLogger().Error("persist exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
+		return true, runtimeID, cleanupErr
 	}
 	if !alreadyExited {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
 		entry.exitNotified = true
 	}
-	if m.UnexpectedExitHandler != nil {
-		m.UnexpectedExitHandler(sandboxID, entry.runtimeID, cleanupErr)
-	}
+	return true, runtimeID, cleanupErr
 }
 
 func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason string) {
