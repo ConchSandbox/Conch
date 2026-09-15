@@ -14,8 +14,8 @@ server:
 
 # Private E2B Node API consumed by AgentENV Gateway. Empty listen_addr disables
 # it. All candidate nodes must have the same template names/digests and artifacts.
-# SDK callers must explicitly select secure=false; E2B pause/resume/connect are
-# not implemented in this MVP.
+# SDK callers must explicitly select secure=false; E2B resume/fork and secure
+# envd are not implemented in this MVP.
 e2b:
   listen_addr: ""
   # Authentication reads AENV_API_KEY, shared with AgentENV Gateway.
