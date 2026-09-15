@@ -203,13 +203,17 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 		`{"templateID":"base","secure":false,"autoPause":true}`,
 		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
-		`{"templateID":"base","secure":false,"network":{"maskRequestHost":"example.com"}}`,
-		`{"templateID":"base","secure":false,"volumeMounts":[{}]}`,
 	} {
 		resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Errorf("unsupported %s = %d %q", body, resp.StatusCode, data)
 		}
+	}
+	// set_timeout validates its payload before the sandbox lookup; the network
+	// endpoint reaches the store and fails with 404 for a missing sandbox.
+	resp, _ := doRequest(t, server, http.MethodPut, "/sandboxes/"+uuid.NewString()+"/network", `{}`, true)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("network = %d, want 404", resp.StatusCode)
 	}
 	for _, body := range []string{
 		`{`, `null`, `{}`, `{"templateID":"base","secure":"false"}`,
@@ -218,15 +222,18 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 		`{"templateID":"base","secure":false,"timeout":-1}`,
 		`{"templateID":"base","secure":false,"timeout":2147483648}`,
 		`{"templateID":"base","secure":false,"network":{"private":true}}`,
+		`{"templateID":"base","secure":false,"autoPauseMemory":false}`,
+		`{"templateID":"base","secure":false,"volumeMounts":[{}]}`,
+		`{"templateID":"base","secure":false,"volumeMounts":[{"name":"data"}]}`,
 	} {
 		resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("malformed %s = %d %q", body, resp.StatusCode, data)
 		}
 	}
-	resp, _ := doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"`+strings.Repeat("a", maxBodyBytes)+`"}`, true)
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Errorf("oversized create = %d", resp.StatusCode)
+	oversized, _ := doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"`+strings.Repeat("a", maxBodyBytes)+`"}`, true)
+	if oversized.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized create = %d", oversized.StatusCode)
 	}
 }
 

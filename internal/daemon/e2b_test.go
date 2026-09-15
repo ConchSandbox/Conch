@@ -23,6 +23,9 @@ func TestE2BListenersStopTogether(t *testing.T) {
 	s.runtimeService = newHandlerRuntime(&fakeSandboxOps{}, nil, store)
 	s.routes()
 	cfg := config.DefaultConfig()
+	// Keep the volume registry the E2B wiring opens inside the test sandbox;
+	// the default state directory belongs to a possibly live node.
+	cfg.Server.StateDir = t.TempDir()
 	cfg.E2B.ListenAddr = addr
 	cfg.E2B.APIKey = "node-key"
 	if err := s.initE2B(cfg); err != nil {
@@ -87,6 +90,7 @@ func TestE2BStartAfterShutdownDoesNotStartWorkers(t *testing.T) {
 	s := newTestDaemon(store)
 	s.runtimeService = newHandlerRuntime(&fakeSandboxOps{}, nil, store)
 	cfg := config.DefaultConfig()
+	cfg.Server.StateDir = t.TempDir()
 	cfg.E2B.ListenAddr = "127.0.0.1:18080"
 	cfg.E2B.APIKey = "node-key"
 	if err := s.initE2B(cfg); err != nil {
