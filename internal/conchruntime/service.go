@@ -247,7 +247,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		if err != nil {
 			return SandboxCreateResult{}, rollbackAfterCreate(fmt.Errorf("persist sandbox state: %w", err))
 		}
-		if err := s.ProxyRoutes.Publish(opts.SandboxID, routeGeneration, createResult.IP); err != nil {
+		if err := s.ProxyRoutes.PublishWithHostMask(opts.SandboxID, routeGeneration, createResult.IP, opts.MaskRequestHost); err != nil {
 			return SandboxCreateResult{}, rollbackAfterCreate(err)
 		}
 	}

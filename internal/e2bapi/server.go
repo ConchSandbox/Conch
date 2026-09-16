@@ -112,6 +112,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.refresh(w, r, parts[0])
 			case "network PUT":
 				s.updateNetwork(w, r, parts[0])
+			case "metrics GET":
+				unimplemented(w, "sandbox metrics")
 			default:
 				writeError(w, http.StatusNotFound, "endpoint not found")
 			}
