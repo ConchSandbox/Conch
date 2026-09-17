@@ -8,6 +8,7 @@ type SandboxDefaults = runtimeapi.SandboxDefaults
 type SandboxNetworkUpdateOptions = runtimeapi.SandboxNetworkUpdateOptions
 type SandboxCheckpointOptions = runtimeapi.SandboxCheckpointOptions
 type SandboxCheckpointResult = runtimeapi.SandboxCheckpointResult
+type SandboxResumeOptions = runtimeapi.SandboxResumeOptions
 type TemplateCreateOptions = runtimeapi.TemplateCreateOptions
 type TemplateCreateResult = runtimeapi.TemplateCreateResult
 type TemplatePullOptions = runtimeapi.TemplatePullOptions

@@ -31,6 +31,8 @@ type Config struct {
 	Network NetworkConfig `yaml:"network"`
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	Volume  VolumeConfig  `yaml:"volume"`
+	E2B     E2BConfig     `yaml:"e2b"`
+	Cluster ClusterConfig `yaml:"cluster"`
 }
 
 // AppConfig holds application-specific configuration
@@ -44,8 +46,8 @@ type LogConfig struct {
 	Output string `yaml:"output"` // "stdout", "file", or "both"
 }
 
-// ServerConfig holds server configuration. conchd only ever serves the API on
-// a local Unix socket; there is no TCP listener.
+// ServerConfig holds paths for the local daemon API and runtime. The optional
+// TCP E2B Node listener is configured separately by E2BConfig.
 type ServerConfig struct {
 	WorkDir  string `yaml:"work_dir"`
 	StateDir string `yaml:"state_dir"`
@@ -166,7 +168,9 @@ func DefaultConfig() *Config {
 func LoadConfig(configPath string) (*Config, error) {
 	// If config path is empty, use default config
 	if configPath == "" {
-		return DefaultConfig(), nil
+		cfg := DefaultConfig()
+		cfg.applyE2BEnvironment()
+		return cfg, validateConfig(cfg)
 	}
 	if absPath, err := filepath.Abs(configPath); err == nil {
 		configPath = absPath
@@ -268,6 +272,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Volume.Virtiofs.Binary == "" {
 		cfg.Volume.Virtiofs.Binary = defaultCfg.Volume.Virtiofs.Binary
 	}
+	cfg.applyE2BEnvironment()
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
@@ -334,7 +339,7 @@ func validateConfig(cfg *Config) error {
 	if _, ok := vmmBinaries[cfg.Sandbox.Backend]; !ok {
 		return fmt.Errorf("sandbox.backend %q is not configured", cfg.Sandbox.Backend)
 	}
-	return nil
+	return validateE2BConfig(cfg)
 }
 
 func validateVMMBinaryConfig(name string, cfg *VMMBinaryConfig) error {
@@ -399,6 +404,12 @@ func (c *Config) ContainerdRootDir() string { return filepath.Join(c.Server.Stat
 func (c *Config) ContainerdStateDir() string { return filepath.Join(c.Server.WorkDir, "containerd") }
 
 func (c *Config) VirtiofsRuntimeDir() string { return filepath.Join(c.Server.WorkDir, "sandboxes") }
+
+// VolumeDataDir and VolumeDBPath place volume payload and records under
+// StateDir: volume data must survive reboots, and WorkDir is often tmpfs.
+func (c *Config) VolumeDataDir() string { return filepath.Join(c.Server.StateDir, "volumes") }
+
+func (c *Config) VolumeDBPath() string { return filepath.Join(c.Server.StateDir, "volumes.db") }
 
 // parseLogLevel converts string log level to ulog.LogLevel
 func parseLogLevel(level string) (ulog.LogLevel, error) {
