@@ -237,7 +237,7 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		RamMB:      4096,
 	})
 	svc.Templates = &fakeTemplateStore{entries: map[string]conchtemplate.Entry{
-		explicitName: {Name: explicitName, Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume, BootIndexDigest: explicitDigest},
+		explicitName: {Name: explicitName, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: explicitDigest},
 	}}
 
 	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
@@ -456,5 +456,111 @@ func TestCheckpointRegistersPublishedArtifact(t *testing.T) {
 	entry := templates.entries["snapshot:latest"]
 	if entry.ParentBootIndexDigest != result.ParentBootIndexDigest || entry.SourceSandboxID != "sandbox-a" || entry.BootMode != conchtemplate.BootModeResume {
 		t.Fatalf("registered=%#v", entry)
+	}
+}
+
+func TestResumeTemplateCapturedResourcesOverrideRequest(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	cold := buildColdBootIndex(t, host, "capacity-cold")
+	published, err := conchimage.PublishCheckpointBootIndex(ctx, host.Client(), conchimage.PublishCheckpointBootIndexOptions{
+		SourceBootIndexDigest: cold, MemRoot: t.TempDir(), VMMName: "cloud-hypervisor", MemorySizeMB: 512, CPUCount: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "capacity-resume"
+	seedTemplate(t, ctx, host, name, published.BootIndexDigest, conchtemplate.BootModeResume)
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.Templates = host.TemplateStore()
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateName: name}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 8 || ops.req.VCPUMax < 8 || ops.req.RAMMB != 512 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
+	}
+}
+
+// TestResumeDigestCapturedResourcesOverrideRequest pins the digest path of the
+// same rule: creating by a checkpoint template_id boots with the resources
+// captured at checkpoint time.
+func TestResumeDigestCapturedResourcesOverrideRequest(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	cold := buildColdBootIndex(t, host, "capacity-cold-digest")
+	published, err := conchimage.PublishCheckpointBootIndex(ctx, host.Client(), conchimage.PublishCheckpointBootIndexOptions{
+		SourceBootIndexDigest: cold, MemRoot: t.TempDir(), VMMName: "cloud-hypervisor", MemorySizeMB: 512, CPUCount: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateID: published.BootIndexDigest}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 8 || ops.req.VCPUMax < 8 || ops.req.RAMMB != 512 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
+	}
+}
+
+// TestColdDigestKeepsRequestResources guards the resume gate on the digest
+// path: a cold boot index carries no captured sizing, so the request keeps
+// its resources.
+func TestColdDigestKeepsRequestResources(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	cold := buildColdBootIndex(t, host, "capacity-keep-cold-digest")
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateID: cold, VCPUNum: 4, VCPUMax: 4, RamMB: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 4 || ops.req.RAMMB != 4096 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
+	}
+}
+
+// TestMissingDigestContentFailsResolve proves a template_id whose content is
+// absent is rejected at resolve time as not found, before any runtime work
+// starts.
+func TestMissingDigestContentFailsResolve(t *testing.T) {
+	host := newRuntimeImageHost(t)
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{TemplateID: digest.FromString("missing").String()})
+	if err == nil || !strings.Contains(err.Error(), "image not found") {
+		t.Fatalf("CreateSandbox() error = %v, want image not found", err)
+	}
+	if ops.createCalls != 0 {
+		t.Fatalf("create calls = %d, want none", ops.createCalls)
+	}
+}
+
+func TestColdTemplateKeepsRequestResources(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	digest := buildColdBootIndex(t, host, "capacity-keep-cold")
+	const name = "capacity-keep"
+	seedTemplate(t, ctx, host, name, digest, conchtemplate.BootModeCold)
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.Templates = host.TemplateStore()
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateName: name, VCPUNum: 4, VCPUMax: 4, RamMB: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 4 || ops.req.RAMMB != 4096 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
 	}
 }

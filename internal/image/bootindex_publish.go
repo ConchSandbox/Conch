@@ -107,6 +107,9 @@ func PublishCheckpointBootIndex(
 	if req.MemorySizeMB <= 0 {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: memory_size_mb must be positive", ErrInvalidArgument)
 	}
+	if req.CPUCount <= 0 {
+		return PublishCheckpointBootIndexResult{}, fmt.Errorf("%w: cpu_count must be positive", ErrInvalidArgument)
+	}
 
 	_, sourceInfo, err := inspectBootIndexByDigest(ctx, client.ContentStore(), req.SourceBootIndexDigest)
 	if err != nil {
@@ -126,6 +129,7 @@ func PublishCheckpointBootIndex(
 		SandboxDescriptor: sourceInfo.SandboxDescriptor,
 		VMMName:           req.VMMName,
 		MemorySizeMB:      req.MemorySizeMB,
+		CPUCount:          req.CPUCount,
 	})
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)
