@@ -64,6 +64,19 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
+	// Resume sandboxes boot with the resources captured at checkpoint time;
+	// they win over defaults and caller values so the restored record tracks
+	// the physical memory file. Legacy resume templates predate CPU capture
+	// and keep the caller's CPU count.
+	if selection.CPUCount > 0 {
+		opts.VCPUNum = selection.CPUCount
+		if opts.VCPUMax < opts.VCPUNum {
+			opts.VCPUMax = opts.VCPUNum
+		}
+	}
+	if selection.MemorySizeMB > 0 {
+		opts.RamMB = selection.MemorySizeMB
+	}
 	return s.Sandbox.Create(ctx, sandbox.CreateRequest{
 		TemplateID: selection.ID, TemplateName: selection.Name,
 		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
@@ -141,8 +154,10 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 }
 
 type sandboxTemplateSelection struct {
-	Name string
-	ID   string
+	Name         string
+	ID           string
+	MemorySizeMB int64
+	CPUCount     int64
 }
 
 func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string) (sandboxTemplateSelection, error) {
@@ -161,7 +176,16 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 		if err != nil {
 			return sandboxTemplateSelection{}, err
 		}
-		return sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}, nil
+		selection := sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}
+		if entry.BootMode == conchtemplate.BootModeResume {
+			info, err := conchimage.InspectBootIndex(ctx, s.Containerd, entry.BootIndexDigest)
+			if err != nil {
+				return sandboxTemplateSelection{}, err
+			}
+			selection.MemorySizeMB = info.MemorySizeMB
+			selection.CPUCount = info.CPUCount
+		}
+		return selection, nil
 	}
 	parsedID, err := digest.Parse(rawID)
 	if err != nil {

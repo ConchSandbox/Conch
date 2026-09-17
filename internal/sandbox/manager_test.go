@@ -888,7 +888,7 @@ func checkpointFixture(t *testing.T) (*Manager, *memorySandboxStore, *testLeases
 		t.Fatal(err)
 	}
 	req := testCreateRequest()
-	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String()})
+	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String(), VCPUNum: req.VCPUNum})
 	if err != nil {
 		t.Fatal(err)
 	}

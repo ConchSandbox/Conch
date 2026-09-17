@@ -16,7 +16,7 @@ sandbox:
   backend: stratovirt
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
-  request_timeout: 60s
+  request_timeout: 120s
   # Valid range: 1.0-5.0. Values above 2.0 are risky and not recommended.
   memory_overcommit_ratio: 1.0
   # Total RAM budget for active and creating sandboxes. Minimum: 128 MiB.
