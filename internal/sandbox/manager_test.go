@@ -195,6 +195,81 @@ func testCreateRequest() CreateRequest {
 	return CreateRequest{SandboxID: "sandbox-a", TemplateID: digest.FromString("template").String(), TemplateName: "example:latest", VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RAMMB: 512}
 }
 
+func TestReserveRAMAllowsOnlyOneConcurrentRequestAtCapacity(t *testing.T) {
+	m := &Manager{memOvercommitRatio: 1.0, memLimitMB: 4096}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- m.reserveRAM(4096)
+		}()
+	}
+	close(start)
+
+	var succeeded, exhausted int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrResourceExhausted):
+			exhausted++
+		default:
+			t.Fatalf("reserveRAM() error = %v", err)
+		}
+	}
+	if succeeded != 1 || exhausted != 1 {
+		t.Fatalf("results = %d succeeded, %d exhausted; want 1 each", succeeded, exhausted)
+	}
+	entry := &sandboxEntry{ramMB: 4096}
+	if got := m.usedRAM.Load(); got != 4096 {
+		t.Fatalf("used RAM after reservation = %d", got)
+	}
+	m.releaseRAM(entry)
+	if got := m.usedRAM.Load(); got != 0 {
+		t.Fatalf("used RAM after release = %d", got)
+	}
+}
+
+func TestCreateAdmissionUsesPreparedBootMemory(t *testing.T) {
+	boot := readyBoot()
+	boot.prepared.Resume = true
+	boot.prepared.Spec.MemorySizeMB = 1 << 50
+	m, _, _ := newLifecycleTestManager(t, boot)
+	m.memOvercommitRatio = 1
+	m.memLimitMB = 1024
+	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
+		t.Fatal("launch called after resolved memory exceeded admission limit")
+		return nil, nil
+	}
+
+	_, err := m.Create(context.Background(), testCreateRequest())
+	if !errors.Is(err, ErrResourceExhausted) {
+		t.Fatalf("Create() error = %v, want resource exhausted", err)
+	}
+	if got := m.usedRAM.Load(); got != 0 {
+		t.Fatalf("used RAM after rejected create = %d", got)
+	}
+}
+
+func TestCreateFailureReleasesRAMReservation(t *testing.T) {
+	m, _, _ := newLifecycleTestManager(t, readyBoot())
+	m.memOvercommitRatio, m.memLimitMB = 1, 1024
+	launchErr := errors.New("launch failed")
+	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
+		return nil, launchErr
+	}
+
+	_, err := m.Create(context.Background(), testCreateRequest())
+	if !errors.Is(err, launchErr) {
+		t.Fatalf("Create() error = %v, want %v", err, launchErr)
+	}
+	if got := m.usedRAM.Load(); got != 0 {
+		t.Fatalf("used RAM after failed create = %d", got)
+	}
+}
+
 func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memorySandboxStore, *testLeases) {
 	t.Helper()
 	old := config.WorkDir
@@ -325,6 +400,7 @@ func TestCreateOwnsPersistenceAndLease(t *testing.T) {
 	ctx := context.Background()
 	b := &observingBoot{}
 	m, store, leaseStore := newLifecycleTestManager(t, b)
+	m.memOvercommitRatio, m.memLimitMB = 1, 1024
 	calls := 0
 	b.prepare = func(ctx context.Context, _ PrepareBootRequest) (PreparedBoot, error) {
 		calls++
@@ -360,6 +436,9 @@ func TestCreateOwnsPersistenceAndLease(t *testing.T) {
 	remaining, _ := leaseStore.List(ctx)
 	if len(remaining) != 0 {
 		t.Fatalf("remaining leases = %#v", remaining)
+	}
+	if got := m.usedRAM.Load(); got != 512 {
+		t.Fatalf("used RAM after create = %d", got)
 	}
 }
 
@@ -468,7 +547,7 @@ func TestCreateRejectsInvalidRequestsBeforeResourceAllocation(t *testing.T) {
 		{"vmm", func(r *CreateRequest) { r.VMMName = "unknown" }, ErrInvalidArgument},
 		{"cpu", func(r *CreateRequest) { r.VCPUMax = 1 }, ErrInvalidArgument},
 		{"memory", func(r *CreateRequest) { r.RAMMB = 0 }, ErrInvalidArgument},
-		{"limit", func(r *CreateRequest) { r.RAMMB = runtimeapi.SandboxMaxRAMMB + 1 }, ErrResourceExhausted},
+		{"limit", func(r *CreateRequest) { r.RAMMB = runtimeapi.SandboxMaxRAMMB + 1 }, ErrInvalidArgument},
 		{"environment", func(r *CreateRequest) { r.Env = map[string]string{"BAD=KEY": "x"} }, ErrInvalidEnvironment},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -569,6 +648,8 @@ func TestDeleteAndExitShareLifecycleLock(t *testing.T) {
 	entered, proceed := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	entry := seedRuntime(t, m, store, func(context.Context) error { calls.Add(1); close(entered); <-proceed; return nil })
+	entry.ramMB = 512
+	m.usedRAM.Store(512)
 	deleted := make(chan error, 1)
 	go func() { deleted <- m.Delete(context.Background(), "sandbox-a") }()
 	<-entered
@@ -590,6 +671,9 @@ func TestDeleteAndExitShareLifecycleLock(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("cleanup calls = %d", calls.Load())
+	}
+	if got := m.usedRAM.Load(); got != 0 {
+		t.Fatalf("used RAM after delete = %d", got)
 	}
 	if _, err := store.Get(context.Background(), "sandbox-a"); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)

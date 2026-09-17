@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
@@ -18,12 +19,14 @@ import (
 )
 
 type Config struct {
-	Network            netstack.PoolConfig
-	VMMBinaries        map[string]string
-	VsockSignalRetry   time.Duration
-	VsockSignalTimeout time.Duration
-	RequestTimeout     time.Duration
-	VolumeManager      *volume.Manager
+	Network               netstack.PoolConfig
+	VMMBinaries           map[string]string
+	VsockSignalRetry      time.Duration
+	VsockSignalTimeout    time.Duration
+	RequestTimeout        time.Duration
+	MemoryOvercommitRatio float64
+	MemoryLimitMB         int64
+	VolumeManager         *volume.Manager
 }
 
 type Manager struct {
@@ -35,6 +38,9 @@ type Manager struct {
 	vsockSignalRetry   time.Duration
 	vsockSignalTimeout time.Duration
 	requestTimeout     time.Duration
+	memOvercommitRatio float64
+	memLimitMB         int64
+	usedRAM            atomic.Int64
 	cidAllocator       *CIDAllocator
 	volumeManager      *volume.Manager
 	vmmBinaries        map[string]string
@@ -52,6 +58,7 @@ type sandboxEntry struct {
 	sbx          *Sandbox
 	volumes      []volume.Device
 	exitNotified bool
+	ramMB        int64
 }
 
 func New(
@@ -80,7 +87,8 @@ func New(
 		context: ctx, store: store, client: client, pool: pool, boot: boot,
 		checkpointCapture: NewFullCheckpointCapture(),
 		vsockSignalRetry:  vsockSignalRetry, vsockSignalTimeout: vsockSignalTimeout,
-		requestTimeout: requestTimeout, volumeManager: cfg.VolumeManager,
+		requestTimeout: requestTimeout, memOvercommitRatio: cfg.MemoryOvercommitRatio,
+		memLimitMB: cfg.MemoryLimitMB, volumeManager: cfg.VolumeManager,
 		vmmBinaries: cloneStringMap(cfg.VMMBinaries), cidAllocator: NewCIDAllocator(),
 	}
 	manager.launch = manager.startSandbox

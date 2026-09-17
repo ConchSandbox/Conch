@@ -65,18 +65,25 @@ type VMMBinaryConfig struct {
 }
 
 const (
-	DefaultSandboxBackend = "stratovirt"
-	defaultVolumeBackend  = "virtiofs"
+	DefaultSandboxBackend   = "stratovirt"
+	defaultVolumeBackend    = "virtiofs"
+	defaultMemoryOvercommit = 1.0
+	defaultMemoryLimitMB    = 64 * 1024
+	minMemoryOvercommit     = 1.0
+	maxMemoryOvercommit     = 5.0
+	minMemoryLimitMB        = 128
 )
 
 type SandboxConfig struct {
-	VsockSignalRetry   time.Duration    `yaml:"vsock_signal_retry"`
-	VsockSignalTimeout time.Duration    `yaml:"vsock_signal_timeout"`
-	RequestTimeout     time.Duration    `yaml:"request_timeout"`
-	Backend            string           `yaml:"backend"`
-	DefaultSpec        SandboxSpec      `yaml:"default_spec"`
-	CloudHypervisor    *VMMBinaryConfig `yaml:"cloud_hypervisor"`
-	Stratovirt         *VMMBinaryConfig `yaml:"stratovirt"`
+	VsockSignalRetry      time.Duration    `yaml:"vsock_signal_retry"`
+	VsockSignalTimeout    time.Duration    `yaml:"vsock_signal_timeout"`
+	RequestTimeout        time.Duration    `yaml:"request_timeout"`
+	MemoryOvercommitRatio float64          `yaml:"memory_overcommit_ratio"`
+	MemoryLimitMB         int64            `yaml:"memory_limit_mb"`
+	Backend               string           `yaml:"backend"`
+	DefaultSpec           SandboxSpec      `yaml:"default_spec"`
+	CloudHypervisor       *VMMBinaryConfig `yaml:"cloud_hypervisor"`
+	Stratovirt            *VMMBinaryConfig `yaml:"stratovirt"`
 }
 
 type SandboxSpec struct {
@@ -132,10 +139,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		Sandbox: SandboxConfig{
-			VsockSignalRetry:   10 * time.Millisecond,
-			VsockSignalTimeout: 60 * time.Second,
-			RequestTimeout:     60 * time.Second,
-			Backend:            DefaultSandboxBackend,
+			VsockSignalRetry:      10 * time.Millisecond,
+			VsockSignalTimeout:    60 * time.Second,
+			RequestTimeout:        60 * time.Second,
+			MemoryOvercommitRatio: defaultMemoryOvercommit,
+			MemoryLimitMB:         defaultMemoryLimitMB,
+			Backend:               DefaultSandboxBackend,
 			DefaultSpec: SandboxSpec{
 				VCPUNum: 2,
 				VCPUMax: 2,
@@ -229,6 +238,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Sandbox.RequestTimeout == 0 {
 		cfg.Sandbox.RequestTimeout = defaultCfg.Sandbox.RequestTimeout
 	}
+	if cfg.Sandbox.MemoryOvercommitRatio == 0 {
+		cfg.Sandbox.MemoryOvercommitRatio = defaultCfg.Sandbox.MemoryOvercommitRatio
+	}
+	if cfg.Sandbox.MemoryLimitMB == 0 {
+		cfg.Sandbox.MemoryLimitMB = defaultCfg.Sandbox.MemoryLimitMB
+	}
 	if cfg.Sandbox.Backend == "" {
 		cfg.Sandbox.Backend = defaultCfg.Sandbox.Backend
 	}
@@ -275,6 +290,12 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.Volume.MaxMounts < 0 {
 		return fmt.Errorf("invalid volume.max_mounts=%d: must be greater than or equal to 0", cfg.Volume.MaxMounts)
+	}
+	if !(cfg.Sandbox.MemoryOvercommitRatio >= minMemoryOvercommit && cfg.Sandbox.MemoryOvercommitRatio <= maxMemoryOvercommit) {
+		return fmt.Errorf("invalid sandbox.memory_overcommit_ratio=%g: must be between %g and %g", cfg.Sandbox.MemoryOvercommitRatio, minMemoryOvercommit, maxMemoryOvercommit)
+	}
+	if cfg.Sandbox.MemoryLimitMB < minMemoryLimitMB {
+		return fmt.Errorf("invalid sandbox.memory_limit_mb=%d: must be at least %d", cfg.Sandbox.MemoryLimitMB, minMemoryLimitMB)
 	}
 	templateName := strings.TrimSpace(cfg.Sandbox.DefaultSpec.TemplateName)
 	templateID := strings.TrimSpace(cfg.Sandbox.DefaultSpec.TemplateID)
