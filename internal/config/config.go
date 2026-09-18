@@ -53,8 +53,9 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	WarmPoolSize int       `yaml:"warm_pool_size"`
-	CNI          CNIConfig `yaml:"cni"`
+	WarmPoolSize    int       `yaml:"warm_pool_size"`
+	RefillThreshold int       `yaml:"refill_threshold"`
+	CNI             CNIConfig `yaml:"cni"`
 }
 
 // CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
@@ -131,7 +132,8 @@ func DefaultConfig() *Config {
 			StateDir: defaultStateDir,
 		},
 		Network: NetworkConfig{
-			WarmPoolSize: netstack.DefaultWarmPoolSize,
+			WarmPoolSize:    netstack.DefaultWarmPoolSize,
+			RefillThreshold: netstack.DefaultWarmPoolSize / 2,
 			CNI: CNIConfig{
 				PluginBinDirs: []string{netstack.DefaultCNIPluginBinDir},
 				PluginConfDir: netstack.DefaultCNIPluginConfDir,
@@ -225,6 +227,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Network.WarmPoolSize == 0 {
 		cfg.Network.WarmPoolSize = defaultCfg.Network.WarmPoolSize
 	}
+	if cfg.Network.RefillThreshold == 0 {
+		cfg.Network.RefillThreshold = cfg.Network.WarmPoolSize / 2
+	}
 	if len(cfg.Network.CNI.PluginBinDirs) == 0 {
 		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
 	}
@@ -287,6 +292,9 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.Network.WarmPoolSize < 0 {
 		return fmt.Errorf("invalid network.warm_pool_size=%d: must be greater than or equal to 0", cfg.Network.WarmPoolSize)
+	}
+	if cfg.Network.RefillThreshold < 0 || cfg.Network.RefillThreshold >= cfg.Network.WarmPoolSize {
+		return fmt.Errorf("invalid network.refill_threshold=%d: must be within [0, %d)", cfg.Network.RefillThreshold, cfg.Network.WarmPoolSize)
 	}
 	if cfg.Volume.MaxMounts < 0 {
 		return fmt.Errorf("invalid volume.max_mounts=%d: must be greater than or equal to 0", cfg.Volume.MaxMounts)

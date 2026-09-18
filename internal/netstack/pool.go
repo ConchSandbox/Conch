@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	DefaultWarmPoolSize   = 250
+	DefaultWarmPoolSize   = 100
 	prefillWorkers        = 16
 	prefillCreateAttempts = 2
 	populateRetryMinDelay = time.Second
@@ -49,19 +49,21 @@ var (
 )
 
 type Pool struct {
-	warmSlots      *slotstate.Queue[*Slot]
-	refillNeeded   chan struct{}
-	populateCancel context.CancelFunc
-	populateDone   <-chan struct{}
-	cniManager     *CNIManager
-	hostInterface  string
-	slotConfig     slotConfig
-	slotIDs        *slotstate.Allocator
+	warmSlots       *slotstate.Queue[*Slot]
+	refillThreshold int
+	refillNeeded    chan struct{}
+	populateCancel  context.CancelFunc
+	populateDone    <-chan struct{}
+	cniManager      *CNIManager
+	hostInterface   string
+	slotConfig      slotConfig
+	slotIDs         *slotstate.Allocator
 }
 
 type PoolConfig struct {
-	WarmPoolSize int
-	CNI          CNIManagerConfig
+	WarmPoolSize    int
+	RefillThreshold int
+	CNI             CNIManagerConfig
 }
 
 func NewPool(cfg PoolConfig) (*Pool, error) {
@@ -71,6 +73,13 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 	if warmPoolSize < 1 || warmPoolSize > maxSlots {
 		return nil, fmt.Errorf("invalid network.warm_pool_size=%d, must be within [1, %d]", warmPoolSize, maxSlots)
+	}
+	refillThreshold := cfg.RefillThreshold
+	if refillThreshold == 0 {
+		refillThreshold = warmPoolSize / 2
+	}
+	if refillThreshold < 0 || refillThreshold >= warmPoolSize {
+		return nil, fmt.Errorf("invalid network.refill_threshold=%d, must be within [0, %d)", refillThreshold, warmPoolSize)
 	}
 
 	slotConfig := newSlotConfig()
@@ -93,12 +102,13 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 
 	p := &Pool{
-		warmSlots:     slotstate.NewQueue[*Slot](warmPoolSize),
-		refillNeeded:  make(chan struct{}, 1),
-		cniManager:    cniManager,
-		hostInterface: gateway,
-		slotConfig:    slotConfig,
-		slotIDs:       slotstate.NewAllocator(firstSlotID, maxSlots),
+		warmSlots:       slotstate.NewQueue[*Slot](warmPoolSize),
+		refillThreshold: refillThreshold,
+		refillNeeded:    make(chan struct{}, 1),
+		cniManager:      cniManager,
+		hostInterface:   gateway,
+		slotConfig:      slotConfig,
+		slotIDs:         slotstate.NewAllocator(firstSlotID, maxSlots),
 	}
 
 	return p, nil
@@ -159,12 +169,22 @@ func (p *Pool) destroyNetworkSlot(ctx context.Context, slot *Slot) error {
 	return nil
 }
 
-func (p *Pool) signalRefillNeeded() {
-	if p == nil || p.refillNeeded == nil {
+func (p *Pool) signalRefillIfNeeded() {
+	if p == nil || p.warmSlots == nil {
+		return
+	}
+	available, poolSize := p.warmSlots.Usage()
+	if available > p.refillThreshold {
 		return
 	}
 	select {
 	case p.refillNeeded <- struct{}{}:
+		ulog.GetLogger().Info(
+			"network pool refill requested",
+			ulog.F("available", available),
+			ulog.F("refill_threshold", p.refillThreshold),
+			ulog.F("warm_pool_size", poolSize),
+		)
 	default:
 	}
 }
@@ -495,7 +515,7 @@ func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, err
 	}
 	if errors.Is(err, errWarmPoolEmpty) {
-		p.signalRefillNeeded()
+		p.signalRefillIfNeeded()
 		available, capacity := p.warmSlots.Usage()
 		ulog.GetLogger().Warn(
 			"no available network slot in the pool",
@@ -508,7 +528,7 @@ func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, err
 	}
 
-	p.signalRefillNeeded()
+	p.signalRefillIfNeeded()
 	if s == nil {
 		return nil, nil
 	}
@@ -640,7 +660,7 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 		ulog.GetLogger().Error("failed to discard network slot", ulog.F("slot_id", slot.ID()), ulog.F("error", err))
 		return fmt.Errorf("failed to discard network slot %d: %w", slot.ID(), err)
 	}
-	p.signalRefillNeeded()
+	p.signalRefillIfNeeded()
 	return nil
 }
 
