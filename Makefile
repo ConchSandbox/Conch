@@ -91,20 +91,13 @@ build: ## Build all Conch binaries
 		$(GOBUILD) -ldflags "$(VERSION_LDFLAGS)" -o "$(BIN_DIR)/$$cmd" "./cmd/$$cmd"; \
 	done
 
-build-offline:
-	@echo "syncing dependency manifests from image backup..."
-	@cp /go/go.mod.backup ./go.mod
-	@cp /go/go.sum.backup ./go.sum
-	@echo "building binaries using image cache..."
-	@mkdir -p $(BIN_DIR)
-	@for cmd in $(CMDS); do \
-		echo "building static cmd/$$cmd..."; \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) \
-			$(GOBUILD) -mod=readonly -tags "netgo,osusergo" \
-			-ldflags '-s -w -extldflags "-static" $(VERSION_LDFLAGS)' \
-			-o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
-	done
-	@git checkout go.mod go.sum 2>/dev/null || true
+static:
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) \
+		$(GOBUILD) -mod=readonly -tags "netgo,osusergo" \
+		-ldflags '-s -w -extldflags "-static" $(VERSION_LDFLAGS)' \
+		-o $(BIN_DIR)/ ./cmd/...
+
 
 build-%: ## Build specific binary (e.g., make build-conchd)
 	@echo "building cmd/$*..."
@@ -166,3 +159,4 @@ cleancode: ## Clean code (remove trailing spaces/CR)
 	fi
 	@$(CLEANSCRIPT) > /dev/null 2>&1
 	@echo "code cleaning completed"
+
