@@ -347,7 +347,9 @@ func TestReleaseAfterReuseFailureReportsRemainingOwnership(t *testing.T) {
 			}
 			removeCalls := 0
 			p := &Pool{
-				slotIDs: allocator, refillNeeded: make(chan struct{}, 1),
+				warmSlots:    slotstate.NewQueue[*Slot](1),
+				slotIDs:      allocator,
+				refillNeeded: make(chan struct{}, 1),
 				cniManager: &CNIManager{backend: &fakeCNIBackend{
 					remove: func(context.Context, string, string) error {
 						removeCalls++
@@ -572,26 +574,44 @@ func TestNetworkSlotIntegrationDiscardWakesPopulateRetryAfterCapacityRelease(t *
 }
 
 func TestGetAssignsWarmSlot(t *testing.T) {
-	_, slot := allocatedTestSlot(t)
+	_, first := allocatedTestSlot(t)
+	_, second := allocatedTestSlot(t)
+	_, third := allocatedTestSlot(t)
 	p := &Pool{
-		warmSlots:    slotstate.NewQueue[*Slot](1),
-		refillNeeded: make(chan struct{}, 1),
+		warmSlots:       slotstate.NewQueue[*Slot](3),
+		refillThreshold: 1,
+		refillNeeded:    make(chan struct{}, 1),
 	}
-	if err := p.warmSlots.Push(slot); err != nil {
-		t.Fatalf("Push(): %v", err)
+	for _, slot := range []*Slot{first, second, third} {
+		if err := p.warmSlots.Push(slot); err != nil {
+			t.Fatalf("Push(): %v", err)
+		}
 	}
 
 	got, err := p.Get(context.Background(), "sandbox-a", nil)
 	if err != nil {
 		t.Fatalf("Get(): %v", err)
 	}
-	if got != slot || got.sandboxID != "sandbox-a" {
+	if got != first || got.sandboxID != "sandbox-a" {
 		t.Fatalf("Get() = %#v, sandbox ID %q", got, got.sandboxID)
 	}
 	select {
 	case <-p.refillNeeded:
+		t.Fatal("Get() signaled refill above the threshold")
 	default:
-		t.Fatal("Get() did not signal refill")
+	}
+
+	got, err = p.Get(context.Background(), "sandbox-b", nil)
+	if err != nil {
+		t.Fatalf("second Get(): %v", err)
+	}
+	if got != second || got.sandboxID != "sandbox-b" {
+		t.Fatalf("second Get() = %#v, sandbox ID %q", got, got.sandboxID)
+	}
+	select {
+	case <-p.refillNeeded:
+	default:
+		t.Fatal("Get() did not signal refill at the threshold")
 	}
 }
 

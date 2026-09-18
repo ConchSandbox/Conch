@@ -19,8 +19,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/openeuler/Conch/internal/adapters/containerd/client"
-	"github.com/openeuler/Conch/internal/adapters/containerd/host"
+	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
@@ -131,8 +131,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 		},
 		Sandbox: &conchsandbox.Config{
 			Network: netstack.PoolConfig{
-				WarmPoolSize: cfg.Network.WarmPoolSize,
-				CNI:          cfg.Network.CNI,
+				WarmPoolSize:    cfg.Network.WarmPoolSize,
+				RefillThreshold: cfg.Network.RefillThreshold,
+				CNI:             cfg.Network.CNI,
 			},
 			VMMBinaries:           cfg.Sandbox.BinaryPaths(),
 			VsockSignalRetry:      cfg.Sandbox.VsockSignalRetry,
