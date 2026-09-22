@@ -1,6 +1,7 @@
 package netstack
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net"
 	"strings"
@@ -18,6 +19,7 @@ type GuestNetworkConfig struct {
 	PrefixLength int       `json:"prefixLength"`
 	Gateway      string    `json:"gateway"`
 	DNS          DNSConfig `json:"dns"`
+	TrustedCAPEM string    `json:"trustedCAPEM,omitempty"`
 }
 
 func (c DNSConfig) Clone() DNSConfig {
@@ -55,6 +57,9 @@ func (c GuestNetworkConfig) Validate() error {
 	}
 	if _, err := NormalizeDNS(c.DNS); err != nil {
 		return fmt.Errorf("invalid DNS config: %w", err)
+	}
+	if c.TrustedCAPEM != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(c.TrustedCAPEM)) {
+		return fmt.Errorf("trustedCAPEM contains no certificates")
 	}
 	return nil
 }

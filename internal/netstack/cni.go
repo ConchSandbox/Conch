@@ -44,6 +44,7 @@ type CNIManager struct {
 	ifName            string
 	bridgeName        string
 	bridgeNetworkName string
+	dnsServers        []string
 }
 
 type CNIResult struct {
@@ -63,11 +64,20 @@ func NewCNIManager(cfg CNIManagerConfig) (*CNIManager, error) {
 		return nil, fmt.Errorf("inspect loaded CNI config: %w", err)
 	}
 
+	var dnsServers []string
+	for _, plugin := range backend.outerNetwork.config.Plugins {
+		if plugin != nil && plugin.Network != nil && plugin.Network.Type == "bridge" {
+			dnsServers = append([]string(nil), plugin.Network.DNS.Nameservers...)
+			break
+		}
+	}
+
 	return &CNIManager{
 		backend:           backend,
 		ifName:            cniOuterInterfaceName,
 		bridgeName:        bridgeName,
 		bridgeNetworkName: bridgeNetworkName,
+		dnsServers:        dnsServers,
 	}, nil
 }
 

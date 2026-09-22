@@ -1,0 +1,201 @@
+# Operator-editable Envoy bootstrap template. Conch renders a separate runtime
+# copy at startup. Blank shared settings use Conch defaults; explicit values
+# override those defaults and are also used by Conch's runtime operations.
+# Keep interception, connection ownership, and HTTP authorization filters enabled.
+admin:
+  address:
+    pipe:
+      path: # Default: <server.work_dir>/egress/envoy-admin.sock
+
+static_resources:
+  listeners:
+    - name: conch_egress
+      address:
+        socket_address:
+          address: 0.0.0.0
+          # It is recommended to keep the port_value field empty, to avoid confusion or conflict with 
+          port_value: # Default: network.egress_security.proxy_port (15001).
+      transparent: true
+      use_original_dst: true
+      listener_filters:
+        - name: envoy.filters.listener.original_dst
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+      filter_chains:
+        - filter_chain_match:
+            transport_protocol: tls
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: # Default: /etc/conch/egress-tls/envoy_tls.crt
+                    private_key:
+                      filename: # Default: /etc/conch/egress-tls/envoy_tls.key
+          filters:
+            - name: envoy.filters.network.ext_authz
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz
+                stat_prefix: conch_egress_connection
+                failure_mode_allow: false
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: conch_authz
+                  timeout: 2s
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: conch_egress_https
+                scheme_header_transformation:
+                  scheme_to_overwrite: https
+                route_config:
+                  name: conch_egress_https
+                  virtual_hosts:
+                    - name: all_https
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: conch_https_upstream }
+                http_filters:
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      inline_code: |
+                        function envoy_on_request(handle)
+                          handle:headers():remove("x-conch-egress-destination")
+                          handle:headers():remove("x-envoy-original-dst-host")
+                        end
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false
+                      validate_mutations: true
+                      metadata_context_namespaces: [envoy.filters.network.ext_authz]
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: conch_authz
+                        timeout: 2s
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      inline_code: |
+                        function envoy_on_request(handle)
+                          local address = handle:headers():get("x-conch-egress-destination")
+                          if address == nil or address == "" then
+                            handle:respond({[":status"] = "503"}, "approved egress destination missing")
+                          end
+                        end
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        - filters:
+            - name: envoy.filters.network.ext_authz
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz
+                stat_prefix: conch_egress_connection
+                failure_mode_allow: false
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: conch_authz
+                  timeout: 2s
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: conch_egress_http
+                scheme_header_transformation:
+                  scheme_to_overwrite: http
+                route_config:
+                  name: conch_egress_http
+                  virtual_hosts:
+                    - name: all_http
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: conch_http_upstream }
+                http_filters:
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      inline_code: |
+                        function envoy_on_request(handle)
+                          handle:headers():remove("x-conch-egress-destination")
+                          handle:headers():remove("x-envoy-original-dst-host")
+                        end
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false
+                      validate_mutations: true
+                      metadata_context_namespaces: [envoy.filters.network.ext_authz]
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: conch_authz
+                        timeout: 2s
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      inline_code: |
+                        function envoy_on_request(handle)
+                          local address = handle:headers():get("x-conch-egress-destination")
+                          if address == nil or address == "" then
+                            handle:respond({[":status"] = "503"}, "approved egress destination missing")
+                          end
+                        end
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: conch_authz
+      connect_timeout: 1s
+      type: STATIC
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: conch_authz
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    pipe:
+                      path: # Default: <server.work_dir>/egress/authz.sock
+    - name: conch_http_upstream
+      connect_timeout: 5s
+      type: ORIGINAL_DST
+      lb_policy: CLUSTER_PROVIDED
+      original_dst_lb_config:
+        use_http_header: true
+        http_header_name: x-conch-egress-destination
+    - name: conch_https_upstream
+      connect_timeout: 5s
+      type: ORIGINAL_DST
+      lb_policy: CLUSTER_PROVIDED
+      original_dst_lb_config:
+        use_http_header: true
+        http_header_name: x-conch-egress-destination
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          upstream_http_protocol_options:
+            auto_sni: true
+            auto_san_validation: true
+          explicit_http_config:
+            http_protocol_options: {}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            validation_context:
+              trusted_ca:
+                filename: # Default: /etc/pki/tls/certs/ca-bundle.crt

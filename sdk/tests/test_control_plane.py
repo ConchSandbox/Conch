@@ -184,7 +184,19 @@ def test_checkpoint_uses_requested_name_when_response_only_contains_id(monkeypat
     }
 
 
-def test_network_config_is_hydrated_and_updated(monkeypatch):
+@pytest.mark.parametrize("rules", [
+    None,
+    [],
+    [{
+        "action": "allow",
+        "host": "api.example.com",
+        "protocol": "https",
+        "port": 443,
+        "method": "GET",
+        "path": "/api/**",
+    }],
+])
+def test_network_config_is_hydrated_and_updated(monkeypatch, rules):
     session = FakeSession()
     monkeypatch.setattr(sandbox_module, "DEFAULT_UNIX_SOCKET", TEST_UNIX_SOCKET)
     monkeypatch.setattr(sandbox_module.requests_unixsocket, "Session", lambda: session)
@@ -195,12 +207,17 @@ def test_network_config_is_hydrated_and_updated(monkeypatch):
         allow_out=["198.51.100.10"],
         deny_in=["203.0.113.0/24"],
         allow_internet_access=False,
+        rules=rules,
     ) is True
+    expected = {
+        "allowOut": ["198.51.100.10"],
+        "denyIn": ["203.0.113.0/24"],
+        "allow_internet_access": False,
+    }
+    if rules is not None:
+        expected["rules"] = rules
     assert session.put_request == (
         TEST_CONTROL_PLANE_URL + "/api/v1/sandboxes/sandbox-1/network",
-        {
-            "allowOut": ["198.51.100.10"],
-            "denyIn": ["203.0.113.0/24"],
-            "allow_internet_access": False,
-        },
+        expected,
     )
+    assert sandbox.network == expected
