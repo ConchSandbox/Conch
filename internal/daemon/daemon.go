@@ -134,6 +134,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 				WarmPoolSize:    cfg.Network.WarmPoolSize,
 				RefillThreshold: cfg.Network.RefillThreshold,
 				CNI:             cfg.Network.CNI,
+				EgressSecurity:  cfg.Network.EgressSecurity,
 			},
 			VMMBinaries:           cfg.Sandbox.BinaryPaths(),
 			VsockSignalRetry:      cfg.Sandbox.VsockSignalRetry,
