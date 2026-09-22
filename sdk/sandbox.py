@@ -968,7 +968,12 @@ class Sandbox:
             allow_in: Optional[List[str]] = None,
             deny_in: Optional[List[str]] = None,
             allow_internet_access: Optional[bool] = None,
+            rules: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
+        """Replace network configuration; omitted fields are not preserved.
+
+        L7 rules require egress security to be enabled on conchd.
+        """
         payload: Dict[str, Any] = {}
         for value, key in (
                 (allow_out, "allowOut"),
@@ -980,6 +985,8 @@ class Sandbox:
                 payload[key] = list(value)
         if allow_internet_access is not None:
             payload["allow_internet_access"] = allow_internet_access
+        if rules is not None:
+            payload["rules"] = [dict(rule) for rule in rules]
 
         path = SANDBOX_NETWORK_PATH_TEMPLATE.format(
             sandbox_id=quote(str(self.sandbox_id), safe="")

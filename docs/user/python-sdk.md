@@ -64,7 +64,7 @@ daemon default，最终仍没有 selector 或同时得到两个 selector 时，c
 - `vcpu_num` / `vcpu_max` / `ram_mb` (int, 可选): 沙箱资源配置
 - `volume_mounts` (list, 可选): 卷挂载配置
 - `env` (dict[str, str], 可选): 创建沙箱时传入的环境变量。键不能为空且不能包含 `=` 或 NUL，值不能包含 NUL。沙箱 ID、访问令牌、协议字段、网络配置和序列化后的环境变量共同组成初始化消息，该消息按 UTF-8 字节计算不得超过 16 KiB；明显超限的环境会在虚拟机启动前拒绝，完整消息会在发送前再次校验。
-- `network` (dict, 可选): 创建时应用的 IP 级网络策略。支持 `allowOut`、`denyOut`、`allowIn`、`denyIn` 和 `allow_internet_access`。
+- `network` (dict, 可选): 创建时应用的网络策略。支持 `allowOut`、`denyOut`、`allowIn`、`denyIn`、`allow_internet_access`，以及启用 L7 出站过滤时的 `rules`。
 - `vmm_name` (str, 可选): 指定 VMM，例如 `stratovirt`、`cloud-hypervisor`；省略时使用 conchd 的 `sandbox.backend`。该名称须在 conchd 的 `sandbox` 配置段中存在，否则返回 HTTP 400。
 
 控制面请求失败时，SDK 继续抛出 `RuntimeError`（或现有子类）。当 conchd 返回结构化错误时，异常文本为 `<code>: <error>`，例如 `sandbox.invalid_environment: invalid sandbox environment`。其中 `code` 是可供自动化稳定判断的错误码；`error` 是面向用户的文案，不保证跨版本不变。旧服务端的纯文本错误响应仍会原样显示。
@@ -242,7 +242,7 @@ Sandbox.get(sandbox_id) -> Sandbox
 | `domain` | str | 沙箱当前可用的网络地址；详细 GET 响应提供 |
 | `metadata` | dict | 沙箱元数据键值映射 |
 | `lifecycle` | dict | 生命周期配置；当前包含 `autoResume` 占位字段 |
-| `network` | dict | 当前持久化的 IP 级网络策略；详细 GET 响应提供 |
+| `network` | dict | 当前持久化的网络策略，包含已配置的 IP 和 L7 规则；详细 GET 响应提供 |
 | `volumeMounts` | list[dict] | 预留的卷挂载列表；当前固定返回空列表 |
 ---
 
@@ -255,10 +255,11 @@ sandbox.update_network(
     allow_in=None,
     deny_in=None,
     allow_internet_access=None,
+    rules=None,
 ) -> bool
 ```
 
-该方法通过 `PUT /api/v1/sandboxes/{sandboxID}/network` 完整替换沙箱的网络策略。省略的列表按空列表处理，省略 `allow_internet_access` 表示不额外禁止未匹配的出站流量。`READY` 和 `SUSPENDED` 状态的沙箱均可更新。
+该方法通过 `PUT /api/v1/sandboxes/{sandboxID}/network` 完整替换沙箱的网络策略。省略的列表（包括 `rules`）会清空原有内容，省略 `allow_internet_access` 表示不额外禁止未匹配的出站流量。`READY` 和 `SUSPENDED` 状态的沙箱均可更新。
 
 | 参数 | JSON 字段 | 说明 |
 |------|-----------|------|
@@ -267,8 +268,29 @@ sandbox.update_network(
 | `allow_in` | `allowIn` | 允许进入 guest 的来源 IPv4 地址或 CIDR |
 | `deny_in` | `denyIn` | 拒绝进入 guest 的来源 IPv4 地址或 CIDR |
 | `allow_internet_access` | `allow_internet_access` | 为 `False` 时拒绝未被其他规则接受的出站流量；为 `True` 或省略时不增加该默认拒绝 |
+| `rules` | `rules` | 可选 `list[dict]`，每项支持 `action`、`host`、`protocol`、`port`、`method`、`path`；空列表清空 L7 规则 |
 
-规则语义如下：
+L7 规则需要 conchd 启用 `network.egress_security.enabled`，SDK 不会自动打开该功能。例如，仅允许对指定域名的 HTTPS API 发起 GET 请求：
+
+```python
+sandbox.update_network(
+    allow_internet_access=False,
+    rules=[{
+        "action": "allow",
+        "host": "api.example.com",
+        "protocol": "https",
+        "port": 443,
+        "method": "GET",
+        "path": "/api/**",
+    }],
+)
+```
+
+`path` 省略时不限制路径，普通路径为精确匹配；`*` 匹配仅一个非空路径段，末尾的 `**` 匹配剩余路径，例如 `/api/*/read` 和 `/api/**`。匹配区分大小写，不包含查询参数。
+
+启用 L7 时，显式域名/IP 拒绝优先，域名允许或 IP 允许均可放行请求；未匹配请求在 `allow_internet_access=False` 时拒绝，为 `True` 或省略时允许。创建时也可通过 `Sandbox.create(network={"allow_internet_access": False, "rules": [...]})` 传入相同规则。证书准备、完整处理流程及限制见 [Sandbox 域名出站策略](egress-security.md)。
+
+未启用 L7 出站过滤时，IP 规则语义如下：
 
 - 对新连接，显式拒绝规则优先于显式允许规则。更新策略前已经建立且仍由 conntrack 跟踪的连接不会被立即终止，可以继续到连接关闭或跟踪记录过期。
 - 非空允许列表启用白名单模式，拒绝该方向上未匹配的流量。
@@ -604,7 +626,7 @@ Sandbox(sandbox_id=None, template_name=None, template_id=None,
 | `ram_mb` | int | 内存大小（MB） |
 | `volume_mounts` | list | 创建沙箱时使用的卷挂载配置 |
 | `env` | dict | 创建沙箱时传入的环境变量 |
-| `network` | dict | 创建时应用的 IP 级网络策略 |
+| `network` | dict | 创建时应用的网络策略；可包含 IP 规则及启用 L7 时的 `rules` |
 | `vmm_name` | str | 指定 VMM，省略时由 conchd 决定 |
 
 **注意：** 构造函数仅初始化本地状态，不创建沙箱。请使用 `Sandbox.create()` 类方法创建沙箱。
