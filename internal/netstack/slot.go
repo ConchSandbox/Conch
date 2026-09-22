@@ -61,6 +61,7 @@ type Slot struct {
 	sandboxID string
 	cniIP     string
 	cniDNS    DNSConfig
+	trustedCA string
 
 	tapIP       net.IP
 	tapMask     net.IPMask
@@ -122,6 +123,7 @@ func (s *Slot) assignSandbox(sandboxID string) {
 
 func (s *Slot) clearSandboxAssignment() {
 	s.sandboxID = ""
+	s.trustedCA = ""
 }
 
 func (s *Slot) CNIIP() string {
@@ -135,6 +137,7 @@ func (s *Slot) GuestNetworkConfig() GuestNetworkConfig {
 		PrefixLength: prefixLength,
 		Gateway:      s.tapIP.String(),
 		DNS:          s.cniDNS.Clone(),
+		TrustedCAPEM: s.trustedCA,
 	}
 }
 

@@ -53,9 +53,10 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	WarmPoolSize    int       `yaml:"warm_pool_size"`
-	RefillThreshold int       `yaml:"refill_threshold"`
-	CNI             CNIConfig `yaml:"cni"`
+	WarmPoolSize    int                           `yaml:"warm_pool_size"`
+	RefillThreshold int                           `yaml:"refill_threshold"`
+	CNI             CNIConfig                     `yaml:"cni"`
+	EgressSecurity  netstack.EgressSecurityConfig `yaml:"egress_security"`
 }
 
 // CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
