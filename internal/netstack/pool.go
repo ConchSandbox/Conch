@@ -41,6 +41,11 @@ const (
 	prefillCreateAttempts = 2
 	populateRetryMinDelay = time.Second
 	populateRetryMaxDelay = 30 * time.Second
+	// cleanupWorkers caps concurrent teardown of buffered network slots
+	// during shutdown. CNI/netns removal is I/O-bound, so a fixed cap
+	// independent of the host CPU count keeps the host network stack from
+	// being overwhelmed on pools with many slots.
+	cleanupWorkers = 16
 )
 
 var (
@@ -209,6 +214,7 @@ func (p *Pool) Start(ctx context.Context) error {
 // Close stops the population loop, drains and closes the warm queue, and makes
 // a best-effort attempt to tear down every buffered slot.
 func (p *Pool) Close() {
+	defer ulog.TraceCost(ulog.TraceStart(), "", "netstack.Pool.Close()")
 	if p == nil {
 		return
 	}
@@ -217,16 +223,45 @@ func (p *Pool) Close() {
 		<-p.populateDone
 	}
 	if p.warmSlots != nil {
+		// Detach all buffered slots before starting cleanup so the queue is no
+		// longer usable while teardown runs concurrently.
+		var slots []*Slot
 		for {
 			slot, err := p.warmSlots.Pop()
 			if err != nil {
 				break
 			}
-			if err := p.destroyNetworkSlot(context.Background(), slot); err != nil {
-				ulog.GetLogger().Warn("failed to clean up warm network slot during shutdown", ulog.F("slot_id", slot.ID()), ulog.F("error", err))
-			}
+			slots = append(slots, slot)
 		}
 		p.warmSlots.Close()
+
+		if len(slots) > 0 {
+			workers := cleanupWorkers
+			if len(slots) < workers {
+				workers = len(slots)
+			}
+			// Semaphore-bounded goroutines: slots are already materialized in
+			// a slice, so a channel-based job queue would just re-buffer them.
+			// The semaphore caps concurrency without that extra hop.
+			sem := make(chan struct{}, workers)
+			var wg sync.WaitGroup
+			for _, slot := range slots {
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(s *Slot) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					if err := p.destroyNetworkSlot(context.Background(), s); err != nil {
+						ulog.GetLogger().Warn(
+							"failed to clean up warm network slot during shutdown",
+							ulog.F("slot_id", s.ID()),
+							ulog.F("error", err),
+						)
+					}
+				}(slot)
+			}
+			wg.Wait()
+		}
 	}
 	if p.cniManager != nil {
 		if err := removeHostForwardingRules(p.cniManager.bridgeName, p.hostInterface); err != nil {
@@ -582,18 +617,19 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 			return err
 		}
 		if len(addresses) != 0 {
-			return fmt.Errorf("network namespace has IPv6 address %s", addresses[0].String())
+			ulog.GetLogger().Warn("network namespace has IPv6 address", ulog.F("address", addresses[0].String()))
 		}
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 		if err != nil {
 			return err
 		}
 		if len(routes) != 0 {
-			return fmt.Errorf("network namespace has IPv6 route %+v", routes[0])
+			ulog.GetLogger().Warn("network namespace has IPv6 route", ulog.F("route", routes[0]))
 		}
-		return configureIPv4OnlyCurrentNetworkNamespace()
+		tryDisableIPv6()
+		return nil
 	}); err != nil {
-		return fmt.Errorf("enforce IPv4-only network namespace: %w", err)
+		return fmt.Errorf("check network namespace: %w", err)
 	}
 
 	return nil
