@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -17,38 +18,146 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
 
+// fakeSandboxOps stands in for sandbox.Manager. When store is set it mimics
+// Manager's record ownership: Create persists CREATING then READY, a failed
+// Create with retained cleanup keeps the record, and Delete removes it.
 type fakeSandboxOps struct {
-	req           sandbox.CreateRequest
-	createResult  runtimeapi.SandboxCreateResult
-	createErr     error
-	createCalls   int
-	checkpoint    sandbox.CheckpointResult
-	checkpointErr error
+	req          sandbox.CreateRequest
+	createResult runtimeapi.SandboxCreateResult
+	createErr    error
+	createCalls  int
+	deleteErr    error
+	deleteCalls  int
+	createHook   func(context.Context)
+	store        sandbox.Store
+	// retainOnCreateFailure keeps the CREATING record when Create fails,
+	// mimicking a Manager cleanup that could not confirm resource release.
+	retainOnCreateFailure bool
+	checkpoint            sandbox.CheckpointResult
+	checkpointErr         error
+	updateReq             sandbox.NetworkUpdateRequest
+	updateErr             error
 }
 
-func (f *fakeSandboxOps) Create(_ context.Context, req sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error) {
+func (f *fakeSandboxOps) Create(ctx context.Context, req sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error) {
 	f.req = req
 	f.createCalls++
+	if f.createHook != nil {
+		f.createHook(ctx)
+	}
 	result := f.createResult
 	if result.SandboxID == "" {
 		result.SandboxID = req.SandboxID
 	}
+	if result.AgentToken == "" {
+		result.AgentToken = req.AgentToken
+	}
+	head := result.TemplateID
+	if head == "" {
+		head = req.TemplateID
+	}
+	if f.store != nil {
+		rec := sandbox.Record{
+			ID: req.SandboxID, RuntimeID: req.RuntimeID, State: sandbox.StateReady,
+			CreatedAt:          time.Now().UnixNano(),
+			SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
+			CheckpointHeadTemplateID: head, IP: result.IP,
+			VCPUNum: req.VCPUNum, RamMB: req.RAMMB,
+		}
+		if f.createErr != nil {
+			if !f.retainOnCreateFailure {
+				return result, f.createErr
+			}
+			rec.State = sandbox.StateUnknown
+			rec.LastError = f.createErr.Error()
+			if _, err := f.store.Create(ctx, rec); err != nil {
+				return runtimeapi.SandboxCreateResult{}, err
+			}
+			return result, f.createErr
+		}
+		if _, err := f.store.Create(ctx, rec); err != nil {
+			return runtimeapi.SandboxCreateResult{}, err
+		}
+	}
 	return result, f.createErr
 }
-func (f *fakeSandboxOps) Delete(context.Context, string) error  { return nil }
+
+func (f *fakeSandboxOps) Delete(ctx context.Context, sandboxID string) error {
+	f.deleteCalls++
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if f.store != nil {
+		return f.store.Delete(ctx, sandboxID)
+	}
+	return nil
+}
+
 func (f *fakeSandboxOps) Suspend(context.Context, string) error { return nil }
 func (f *fakeSandboxOps) Resume(context.Context, string) error  { return nil }
-func (f *fakeSandboxOps) UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error {
-	return nil
+func (f *fakeSandboxOps) UpdateNetwork(_ context.Context, req sandbox.NetworkUpdateRequest) error {
+	f.updateReq = req
+	return f.updateErr
 }
 func (f *fakeSandboxOps) Checkpoint(ctx context.Context, _ string, register func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error) {
 	if f.checkpointErr != nil {
 		return sandbox.CheckpointResult{}, f.checkpointErr
 	}
 	return f.checkpoint, register(ctx, f.checkpoint)
+}
+
+func TestNativeCreateDoesNotReserveE2BCapacity(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	templateID := digest.FromString("native-capacity-template").String()
+	ops := &fakeSandboxOps{store: store}
+	svc := New(ops, nil)
+	svc.Store = store
+	setFakeTemplate(svc, testTemplateName, templateID, conchtemplate.BootModeCold)
+	var err error
+	svc.Capacity, err = NewCapacity(CapacityLimits{MaxSandboxes: 1, MaxCPUs: 2, MaxMemoryMB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{
+		SandboxID: "native-capacity", TemplateName: testTemplateName, VCPUNum: 2, VCPUMax: 2, RamMB: 512,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Capacity.reserve("e2b-capacity", 2, 512); err != nil {
+		t.Fatalf("native create consumed E2B capacity: %v", err)
+	}
+}
+
+
+func TestPauseKeepsProxyRouteWhenRuntimeTeardownFails(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{store: store, deleteErr: errors.New("runtime teardown failed")}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "pause-route", RuntimeID: "runtime-pause", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("pause-route-template").String(), VCPUNum: 1, RamMB: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := svc.ProxyRoutes.Begin(record.ID)
+	if err := svc.ProxyRoutes.Publish(record.ID, generation, "192.0.2.11"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PauseSandbox(ctx, record.ID); err == nil {
+		t.Fatal("PauseSandbox succeeded after teardown failure")
+	}
+	if _, ok := svc.ProxyRoutes.Lookup(record.ID); !ok {
+		t.Fatal("pause teardown failure removed the live proxy route")
+	}
 }
 
 type fakeTemplateStore struct {
@@ -237,7 +346,7 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		RamMB:      4096,
 	})
 	svc.Templates = &fakeTemplateStore{entries: map[string]conchtemplate.Entry{
-		explicitName: {Name: explicitName, Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume, BootIndexDigest: explicitDigest},
+		explicitName: {Name: explicitName, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: explicitDigest},
 	}}
 
 	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
@@ -425,17 +534,19 @@ func TestCreateResolvesTemplateWithoutContentAccess(t *testing.T) {
 	for _, byName := range []bool{true, false} {
 		t.Run(map[bool]string{true: "name", false: "digest"}[byName], func(t *testing.T) {
 			want := digest.FromString("template").String()
-			result := runtimeapi.SandboxCreateResult{SandboxID: "created", TemplateID: want, AgentToken: "runtime-token"}
-			ops := &fakeSandboxOps{createResult: result}
+			ops := &fakeSandboxOps{createResult: runtimeapi.SandboxCreateResult{
+				IP: "192.0.2.10", AgentToken: "runtime-token", TemplateID: want,
+			}}
 			svc := New(ops, nil)
 			setFakeTemplate(svc, testTemplateName, want, conchtemplate.BootModeCold)
-			opts := SandboxCreateOptions{TemplateID: want}
+			opts := SandboxCreateOptions{TemplateID: want, VCPUNum: 2, VCPUMax: 2, RamMB: 512}
 			if byName {
 				opts.TemplateID = ""
 				opts.TemplateName = testTemplateName
 			}
 			got, err := svc.CreateSandbox(context.Background(), opts)
-			if err != nil || got != result || ops.req.TemplateID != want || ops.createCalls != 1 {
+			if err != nil || got.SandboxID != ops.req.SandboxID || got.AgentToken != "runtime-token" ||
+				got.IP != "192.0.2.10" || ops.req.TemplateID != want || ops.createCalls != 1 {
 				t.Fatalf("Create=%#v, %v, req=%#v", got, err, ops.req)
 			}
 		})
@@ -456,5 +567,49 @@ func TestCheckpointRegistersPublishedArtifact(t *testing.T) {
 	entry := templates.entries["snapshot:latest"]
 	if entry.ParentBootIndexDigest != result.ParentBootIndexDigest || entry.SourceSandboxID != "sandbox-a" || entry.BootMode != conchtemplate.BootModeResume {
 		t.Fatalf("registered=%#v", entry)
+	}
+}
+
+func TestResumeTemplateCapturedResourcesOverrideRequest(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	cold := buildColdBootIndex(t, host, "capacity-cold")
+	published, err := conchimage.PublishCheckpointBootIndex(ctx, host.Client(), conchimage.PublishCheckpointBootIndexOptions{
+		SourceBootIndexDigest: cold, MemRoot: t.TempDir(), VMMName: "cloud-hypervisor", MemorySizeMB: 512, CPUCount: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "capacity-resume"
+	seedTemplate(t, ctx, host, name, published.BootIndexDigest, conchtemplate.BootModeResume)
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.Templates = host.TemplateStore()
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateName: name}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 8 || ops.req.VCPUMax < 8 || ops.req.RAMMB != 512 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
+	}
+}
+
+func TestColdTemplateKeepsRequestResources(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	digest := buildColdBootIndex(t, host, "capacity-keep-cold")
+	const name = "capacity-keep"
+	seedTemplate(t, ctx, host, name, digest, conchtemplate.BootModeCold)
+	ops := &fakeSandboxOps{}
+	svc := New(ops, host.Client())
+	svc.Templates = host.TemplateStore()
+	svc.SetSandboxDefaults(SandboxDefaults{VMMName: "cloud-hypervisor", VCPUNum: 2, VCPUMax: 2, RamMB: 128})
+
+	if _, err := svc.CreateSandbox(ctx, SandboxCreateOptions{TemplateName: name, VCPUNum: 4, VCPUMax: 4, RamMB: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.req.VCPUNum != 4 || ops.req.RAMMB != 4096 {
+		t.Fatalf("runtime allocation=%+v", ops.req)
 	}
 }

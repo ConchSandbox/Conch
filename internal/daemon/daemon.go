@@ -19,9 +19,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/openeuler/Conch/internal/adapters/bolt/volumestore"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
+	"github.com/openeuler/Conch/internal/cluster"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	conchimage "github.com/openeuler/Conch/internal/image"
@@ -56,6 +58,14 @@ type Daemon struct {
 	daemonClient      *containerdclient.Client
 	httpServer        *http.Server
 	cleanupOnce       sync.Once
+	e2bServer         *http.Server
+	e2bListenAddr     string
+	volumeStore       *volumestore.Store
+	reporter          *cluster.Reporter
+	e2bLifecycleMu    sync.Mutex
+	e2bStopping       bool
+	e2bCancel         context.CancelFunc
+	e2bWorkers        sync.WaitGroup
 
 	// TODO: need ListCachedBuilds()
 }
@@ -170,6 +180,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	manager := host.SandboxManager()
 	if manager != nil {
+		manager.UnexpectedExitHandler = s.runtimeService.HandleSandboxUnexpectedExit
+		manager.BeforeRuntimeRelease = s.runtimeService.HandleSandboxRuntimeExiting
 		records, err := s.sandboxStore.List(ctx, conchsandbox.Filter{})
 		if err != nil {
 			cleanupErr := host.Close()
@@ -201,6 +213,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}
 	}
 
+	if err := s.initE2B(cfg); err != nil {
+		cleanupErr := host.Close()
+		cancel()
+		return nil, errors.Join(err, cleanupErr)
+	}
 	handleSignals(ctx, cancel, s)
 
 	logger.Info("Server initialized successfully")
@@ -283,6 +300,9 @@ func (s *Daemon) Start(unixSocket string) error {
 	}
 
 	logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
+	if s.e2bServer != nil {
+		return s.serveE2B(ln)
+	}
 
 	// Listener is bound, so clients can connect before Serve accepts.
 	util.NotifyReady()
@@ -308,6 +328,7 @@ func (s *Daemon) Shutdown() {
 
 		// Report deactivating while cleanup runs; TimeoutStopSec still applies.
 		util.NotifyStopping()
+		s.shutdownE2B()
 
 		// Stops a Serve that has not started yet, and unlinks the socket.
 		if s.httpServer != nil {
@@ -412,6 +433,10 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
+	volumeMounts := make([]runtimeapi.VolumeMountSpec, 0, len(req.VolumeMounts))
+	for _, mount := range req.VolumeMounts {
+		volumeMounts = append(volumeMounts, runtimeapi.VolumeMountSpec{Source: mount.Source, Path: mount.Path})
+	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
 		SandboxID:    req.SandboxID,
 		TemplateName: req.TemplateName,
@@ -420,7 +445,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUNum:      req.VCPUNum,
 		VCPUMax:      req.VCPUMax,
 		RamMB:        req.RAMMB,
-		VolumeMounts: req.VolumeMounts,
+		VolumeMounts: volumeMounts,
 		Env:          req.Env,
 		Network:      req.Network,
 	})

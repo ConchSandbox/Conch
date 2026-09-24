@@ -23,6 +23,7 @@ const (
 )
 
 type metadataV1 struct {
+	RuntimeID                string                           `json:"runtime_id,omitempty"`
 	VMMPID                   int                              `json:"vmm_pid,omitempty"`
 	State                    string                           `json:"state"`
 	SourceTemplateName       string                           `json:"source_template_name,omitempty"`
@@ -33,6 +34,13 @@ type metadataV1 struct {
 	RamMB                    int64                            `json:"ram_mb,omitempty"`
 	Network                  *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
+	E2B                      bool                             `json:"e2b,omitempty"`
+	EnvdVersion              string                           `json:"envd_version,omitempty"`
+	Metadata                 map[string]string                `json:"metadata,omitempty"`
+	ExpiresAt                int64                            `json:"expires_at,omitempty"`
+	TimeoutAction            string                           `json:"timeout_action,omitempty"`
+	MaskRequestHost          string                           `json:"mask_request_host,omitempty"`
+	VolumeMounts             []conchsandbox.VolumeMountRecord `json:"volume_mounts,omitempty"`
 }
 
 func init() {
@@ -188,7 +196,7 @@ func (s *Store) validate(record conchsandbox.Record) error {
 
 func validState(state conchsandbox.State) bool {
 	switch state {
-	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StateUnknown:
+	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StatePaused, conchsandbox.StateUnknown:
 		return true
 	default:
 		return false
@@ -204,10 +212,18 @@ func currentBootIndexID(record conchsandbox.Record) string {
 
 func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
 	return &metadataV1{
-		VMMPID: record.VMMPID, State: string(record.State), SourceTemplateName: record.SourceTemplateName,
+		RuntimeID: record.RuntimeID,
+		VMMPID:    record.VMMPID, State: string(record.State), SourceTemplateName: record.SourceTemplateName,
 		SourceTemplateID:         record.SourceTemplateID,
 		CheckpointHeadTemplateID: record.CheckpointHeadTemplateID, IP: record.IP, VCPUNum: record.VCPUNum,
 		RamMB: record.RamMB, Network: record.Network, LastError: record.LastError,
+		E2B:             record.E2B,
+		EnvdVersion:     record.EnvdVersion,
+		Metadata:        record.Metadata,
+		ExpiresAt:       record.ExpiresAt,
+		TimeoutAction:   record.TimeoutAction,
+		MaskRequestHost: record.MaskRequestHost,
+		VolumeMounts:    record.VolumeMounts,
 	}
 }
 
@@ -229,11 +245,18 @@ func recordFromNative(native cdsandbox.Sandbox) (conchsandbox.Record, error) {
 		return conchsandbox.Record{}, conchsandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("decode Sandbox %s snapshot references: %w", native.ID, err))
 	}
 	return conchsandbox.Record{
-		ID: native.ID, VMMPID: metadata.VMMPID, State: state, CreatedAt: native.CreatedAt.UnixNano(),
+		ID: native.ID, RuntimeID: metadata.RuntimeID, VMMPID: metadata.VMMPID, State: state, CreatedAt: native.CreatedAt.UnixNano(),
 		SourceTemplateName: metadata.SourceTemplateName, SourceTemplateID: metadata.SourceTemplateID,
 		CheckpointHeadTemplateID: metadata.CheckpointHeadTemplateID,
 		IP:                       metadata.IP, VCPUNum: metadata.VCPUNum, RamMB: metadata.RamMB, Network: metadata.Network,
 		LastError: metadata.LastError, RuntimeSnapshots: refs,
+		E2B:             metadata.E2B,
+		EnvdVersion:     metadata.EnvdVersion,
+		Metadata:        metadata.Metadata,
+		ExpiresAt:       metadata.ExpiresAt,
+		TimeoutAction:   metadata.TimeoutAction,
+		MaskRequestHost: metadata.MaskRequestHost,
+		VolumeMounts:    metadata.VolumeMounts,
 	}, nil
 }
 
