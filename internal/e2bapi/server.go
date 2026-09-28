@@ -101,6 +101,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.setTimeout(w, r, parts[0])
 			case "refreshes POST":
 				s.refresh(w, r, parts[0])
+			case "network PUT":
+				s.updateNetwork(w, r, parts[0])
 			case "metrics GET":
 				unimplemented(w, "sandbox metrics")
 			default:
@@ -117,10 +119,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type networkRequest struct {
-	AllowPublicTraffic *bool    `json:"allowPublicTraffic"`
-	AllowOut           []string `json:"allowOut"`
-	DenyOut            []string `json:"denyOut"`
-	MaskRequestHost    string   `json:"maskRequestHost"`
+	AllowPublicTraffic *bool             `json:"allowPublicTraffic"`
+	AllowOut           []string          `json:"allowOut"`
+	DenyOut            []string          `json:"denyOut"`
+	EgressProxy        json.RawMessage   `json:"egressProxy"`
+	Rules              []json.RawMessage `json:"rules"`
+	MaskRequestHost    string            `json:"maskRequestHost"`
 }
 
 type createRequest struct {
@@ -216,10 +220,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			unimplemented(w, "private traffic")
 			return
 		}
-		if (request.Network.AllowPublicTraffic != nil && !*request.Network.AllowPublicTraffic) || request.Network.MaskRequestHost != "" {
-			unimplemented(w, "private traffic and maskRequestHost")
+		if nonemptyJSON(request.Network.EgressProxy) || len(request.Network.Rules) > 0 {
+			unimplemented(w, "network egressProxy and rules")
 			return
 		}
+		opts.MaskRequestHost = request.Network.MaskRequestHost
 		opts.Network = &runtimeapi.SandboxNetworkConfig{AllowOut: request.Network.AllowOut, DenyOut: request.Network.DenyOut, AllowInternetAccess: request.AllowInternetAccess}
 	} else if request.AllowInternetAccess != nil {
 		opts.Network = &runtimeapi.SandboxNetworkConfig{AllowInternetAccess: request.AllowInternetAccess}
