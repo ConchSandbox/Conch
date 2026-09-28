@@ -1,0 +1,8 @@
+# Incremental configuration; see conch-node-a.yaml and docs/user/agentenv.md.
+e2b:
+  listen_addr: "0.0.0.0:8000"
+  sandbox_proxy_domains: []
+cluster:
+  scheduler_addr: "10.0.0.10:9090"
+  node_id: conch-node-b
+  cluster_id: conch-agentenv-demo

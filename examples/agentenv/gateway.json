@@ -1,0 +1,10 @@
+{
+  "log_level": "info",
+  "gateway": {
+    "http_listen_addr": ":8080",
+    "metrics_listen_addr": ":9102",
+    "scheduler_addr": "10.0.0.10:9090",
+    "request_timeout": "90s",
+    "sandbox_proxy_domains": []
+  }
+}
