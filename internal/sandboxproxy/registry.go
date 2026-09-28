@@ -76,9 +76,9 @@ func (r *Registry) PublishWithHostMask(sandboxID string, generation uint64, ip, 
 	if err != nil || addr.Zone() != "" || addr.IsUnspecified() || addr.IsMulticast() {
 		return fmt.Errorf("invalid sandbox interaction IP %q", ip)
 	}
-	maskRequestHost = strings.TrimSpace(maskRequestHost)
-	if maskRequestHost != "" && strings.ContainsAny(maskRequestHost, " \t\r\n/") {
-		return fmt.Errorf("invalid masked request host %q", maskRequestHost)
+	maskRequestHost, err = ValidateMaskRequestHost(maskRequestHost)
+	if err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -96,6 +96,14 @@ func (r *Registry) PublishWithHostMask(sandboxID string, generation uint64, ip, 
 	current.route.MaskRequestHost = maskRequestHost
 	r.entries[sandboxID] = current
 	return nil
+}
+
+func ValidateMaskRequestHost(maskRequestHost string) (string, error) {
+	maskRequestHost = strings.TrimSpace(maskRequestHost)
+	if maskRequestHost != "" && strings.ContainsAny(maskRequestHost, " \t\r\n/") {
+		return "", fmt.Errorf("invalid masked request host %q", maskRequestHost)
+	}
+	return maskRequestHost, nil
 }
 
 // Remove also invalidates an unpublished generation. Stale cleanup is a no-op.

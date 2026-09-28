@@ -225,6 +225,51 @@ func TestPauseKeepsProxyRouteWhenRuntimeTeardownFails(t *testing.T) {
 	}
 }
 
+// TestUpdateNetworkKeepsCreateTimeHostMask proves an egress-policy update
+// cannot clear the maskRequestHost captured at create time: the E2B update
+// contract carries no mask field, so the record and the republished route
+// keep the original mask.
+func TestUpdateNetworkKeepsCreateTimeHostMask(t *testing.T) {
+	ctx := context.Background()
+	store := newMemorySandboxStore()
+	ops := &fakeSandboxOps{store: store}
+	svc := New(ops, nil)
+	svc.Store = store
+	svc.ProxyRoutes = sandboxproxy.NewRegistry()
+	record, err := store.Create(ctx, sandbox.Record{
+		ID: "update-mask", RuntimeID: "runtime-update", State: sandbox.StateReady, E2B: true,
+		CheckpointHeadTemplateID: digest.FromString("update-mask-template").String(),
+		VCPUNum:                  1, RamMB: 128, MaskRequestHost: "api.example.com:443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := svc.ProxyRoutes.Begin(record.ID)
+	if err := svc.ProxyRoutes.PublishWithHostMask(record.ID, generation, "192.0.2.12", "api.example.com:443"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateSandboxNetworkConfig(ctx, SandboxNetworkUpdateOptions{
+		SandboxID: record.ID,
+		Network:   &runtimeapi.SandboxNetworkConfig{DenyOut: []string{"0.0.0.0/0"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.MaskRequestHost != "api.example.com:443" {
+		t.Fatalf("record mask = %q, want the create-time mask", updated.MaskRequestHost)
+	}
+	route, ok := svc.ProxyRoutes.Lookup(record.ID)
+	if !ok {
+		t.Fatal("update removed the proxy route")
+	}
+	if route.MaskRequestHost != "api.example.com:443" {
+		t.Fatalf("route mask = %q, want the create-time mask", route.MaskRequestHost)
+	}
+}
+
 // TestExpiryPauseRevalidatesDeadline proves the expiredBefore guard: a TTL
 // extension that landed after the expiry tick must stop the auto-pause, while
 // a deadline still due at that instant pauses normally.
