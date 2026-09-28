@@ -2,10 +2,13 @@ ARG BASE_IMAGE=hub.oepkgs.net/openeuler/openeuler:24.03-lts-sp3
 
 FROM ${BASE_IMAGE} AS envd-builder
 
-ARG ENVD_ARCHIVE_URL=https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22
-ARG ENVD_COMMIT=56ac6105
+# Pin the latest stable infra tag for reproducible builds. X-Envd-Version was
+# introduced by 47a7cc8f3 (envd 0.6.12); tag 2026.30 ships envd 0.8.0 and
+# its /init handler sets the required header on every response.
+ARG ENVD_ARCHIVE_URL=https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.30
+ARG ENVD_COMMIT=2026.30
 ARG TARGETARCH
-ARG GO_VERSION=1.26.3
+ARG GO_VERSION=1.26.6
 ARG GO_DOWNLOAD_BASE=https://golang.google.cn/dl
 ARG GOPROXY=https://goproxy.cn,direct
 

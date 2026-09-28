@@ -1,0 +1,16 @@
+{
+  "log_level": "info",
+  "scheduler": {
+    "grpc_listen_addr": ":9090",
+    "metrics_listen_addr": ":9101",
+    "strategy": "round_robin",
+    "report_ttl": "30s",
+    "binding_ttl": "30s",
+    "redis_addr": "",
+    "discovery": {"mode": "static"},
+    "nodes": [
+      {"id": "conch-node-a", "endpoint": "http://10.0.0.11:8000"},
+      {"id": "conch-node-b", "endpoint": "http://10.0.0.12:8000"}
+    ]
+  }
+}

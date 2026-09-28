@@ -1,0 +1,10 @@
+# Incremental configuration: replace the e2b/cluster sections of this host's
+# Conch config with these sections. Other runtime settings remain host-specific.
+# Can also be loaded directly when all other Conch built-in defaults are suitable.
+e2b:
+  listen_addr: "0.0.0.0:8000"
+  sandbox_proxy_domains: []
+cluster:
+  scheduler_addr: "10.0.0.10:9090"
+  node_id: conch-node-a
+  cluster_id: conch-agentenv-demo
