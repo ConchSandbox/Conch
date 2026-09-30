@@ -7,11 +7,26 @@ import (
 )
 
 type SandboxNetworkConfig struct {
-	AllowOut            []string `json:"allowOut,omitempty"`
-	DenyOut             []string `json:"denyOut,omitempty"`
-	AllowIn             []string `json:"allowIn,omitempty"`
-	DenyIn              []string `json:"denyIn,omitempty"`
-	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
+	AllowOut            []string            `json:"allowOut,omitempty"`
+	DenyOut             []string            `json:"denyOut,omitempty"`
+	AllowIn             []string            `json:"allowIn,omitempty"`
+	DenyIn              []string            `json:"denyIn,omitempty"`
+	AllowInternetAccess *bool               `json:"allow_internet_access,omitempty"`
+	Rules               []SandboxEgressRule `json:"rules,omitempty"`
+	EgressProxy         *SandboxEgressProxy `json:"egress_proxy,omitempty"`
+}
+
+type SandboxEgressProxy struct {
+	Enabled bool `json:"enabled"`
+}
+
+type SandboxEgressRule struct {
+	Action     string `json:"action"`
+	Protocol   string `json:"protocol,omitempty"`
+	Host       string `json:"host"`
+	Port       uint16 `json:"port,omitempty"`
+	Method     string `json:"method,omitempty"`
+	PathPrefix string `json:"path_prefix,omitempty"`
 }
 
 type SandboxNetworkUpdateOptions struct {

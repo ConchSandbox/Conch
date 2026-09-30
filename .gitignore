@@ -32,7 +32,7 @@ Thumbs.db
 # Build artifacts
 bin/
 dist/
-build/
+build*/
 
 # Logs
 *.log

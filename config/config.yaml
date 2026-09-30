@@ -40,6 +40,17 @@ network:
   warm_pool_size: 100
   # Refill starts when the number of available warm slots drop below this value. Zero uses half of warm_pool_size.
   refill_threshold: 50
+  egress_security:
+    enabled: false
+    proxy_port: 15001
+    authz_socket: /run/conch/egress-authz.sock
+    admin_socket: /run/conch/envoy-admin.sock
+    tls_cert_file: /etc/conch/egress-tls/envoy_tls.crt
+    tls_key_file: /etc/conch/egress-tls/envoy_tls.key
+    guest_ca_file: /etc/conch/egress-tls/ca.crt
+    upstream_ca_file: /etc/pki/tls/certs/ca-bundle.crt
+    proxy_binary: /usr/bin/envoy
+    bootstrap_path: /run/conch/envoy-egress.yaml
   cni:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; libcni does not install them.
