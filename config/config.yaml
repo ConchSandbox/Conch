@@ -12,11 +12,29 @@ server:
   work_dir: /var/run/conch
   state_dir: /var/lib/conch
 
+# Private E2B Node API consumed by AgentENV Gateway. Empty listen_addr
+# disables it. SDK setup and multi-node prerequisites: docs/user/agentenv.md.
+e2b:
+  listen_addr: ""
+  # Authentication reads AENV_API_KEY, shared with AgentENV Gateway.
+  # Bare Gateway DNS suffixes without scheme/port, matching Gateway's
+  # sandbox_proxy_domains; the first is returned to the SDK. Empty keeps
+  # commands/files on E2B_SANDBOX_URL header routing.
+  sandbox_proxy_domains: []
+
+cluster:
+  # Empty disables reporting for a standalone E2B Node. Example: scheduler:9090.
+  scheduler_addr: ""
+  # Stable ID must exactly match this Node's ID in Scheduler discovery.
+  node_id: ""
+  # Use the same cluster_id on all nodes.
+  cluster_id: ""
+
 sandbox:
   backend: stratovirt
   vsock_signal_retry: 10ms
   vsock_signal_timeout: 60s
-  request_timeout: 60s
+  request_timeout: 120s
   # Valid range: 1.0-5.0. Values above 2.0 are risky and not recommended.
   memory_overcommit_ratio: 1.0
   # Total RAM budget for active and creating sandboxes. Minimum: 128 MiB.

@@ -13,6 +13,7 @@ const (
 	StateCreating  State = "CREATING"
 	StateReady     State = "READY"
 	StateSuspended State = "SUSPENDED"
+	StatePaused    State = "PAUSED"
 	StateUnknown   State = "UNKNOWN"
 )
 
@@ -20,6 +21,7 @@ type SnapshotRef = snapshot.RuntimeSnapshotRef
 
 type Record struct {
 	ID                       string
+	RuntimeID                string
 	VMMPID                   int
 	State                    State
 	CreatedAt                int64
@@ -32,6 +34,12 @@ type Record struct {
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef
+	E2B                      bool
+	EnvdVersion              string
+	Metadata                 map[string]string
+	ExpiresAt                int64
+	TimeoutAction            string
+	MaskRequestHost          string
 }
 
 type Filter struct {

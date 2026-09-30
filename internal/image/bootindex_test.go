@@ -104,6 +104,7 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 		SandboxDescriptor: sandboxDesc,
 		VMMName:           "cloud-hypervisor",
 		MemorySizeMB:      512,
+		CPUCount:          8,
 	})
 	if err != nil {
 		t.Fatalf("BuildBootIndexInContent: %v", err)
@@ -143,6 +144,9 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	if got := index.Manifests[1].Annotations[AnnotationMemorySizeMB]; got != "512" {
 		t.Fatalf("mem component memory size = %q", got)
 	}
+	if index.Annotations[AnnotationCPUCount] != "8" || index.Manifests[1].Annotations[AnnotationCPUCount] != "8" {
+		t.Fatalf("captured CPU metadata: index=%v mem=%v", index.Annotations, index.Manifests[1].Annotations)
+	}
 
 	resolved, info, err := inspectBootIndexByDigest(ctx, store, indexDesc.Digest.String())
 	if err != nil {
@@ -151,7 +155,7 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	if resolved.Digest != indexDesc.Digest || resolved.Size != indexDesc.Size || resolved.MediaType != indexDesc.MediaType {
 		t.Fatalf("resolved descriptor = %#v, want %#v", resolved, indexDesc)
 	}
-	if !info.Resume || info.VMMName != "cloud-hypervisor" || info.MemorySizeMB != 512 {
+	if !info.Resume || info.VMMName != "cloud-hypervisor" || info.MemorySizeMB != 512 || info.CPUCount != 8 {
 		t.Fatalf("boot index info = %#v", info)
 	}
 	if info.RootfsDescriptor.Digest != rootfsDesc.Digest {
@@ -203,6 +207,16 @@ func TestBuildBootIndexInContentRejectsInvalidSandboxAndVMMCombinations(t *testi
 			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, VMMName: "stratovirt"},
 			want: "requires a mem-snapshot",
 		},
+		{
+			name: "captured CPUs without mem",
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, SandboxDescriptor: valid, CPUCount: 4},
+			want: "CPU count",
+		},
+		{
+			name: "negative captured CPU count",
+			opts: BootIndexContentOptions{RootfsDescriptor: valid, MemDescriptor: valid, SandboxDescriptor: valid, VMMName: "cloud-hypervisor", MemorySizeMB: 512, CPUCount: -1},
+			want: "CPU count",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,6 +227,62 @@ func TestBuildBootIndexInContentRejectsInvalidSandboxAndVMMCombinations(t *testi
 			_, err = BuildBootIndexInContent(context.Background(), store, tc.opts)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("BuildBootIndexInContent() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestInspectBootIndexCPUCountMetadata(t *testing.T) {
+	descriptor := func(kind string) ocispec.Descriptor {
+		return ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageManifest,
+			Digest:    digest.FromString(kind), Size: 1,
+			Annotations: map[string]string{"io.conch.kind": kind},
+		}
+	}
+	for _, test := range []struct {
+		name, indexCPU, memCPU string
+		cold                   bool
+		want                   int64
+		wantError              bool
+	}{
+		{name: "captured CPUs", indexCPU: "8", memCPU: "8", want: 8},
+		{name: "legacy unknown remains zero", want: 0},
+		{name: "missing memory annotation", indexCPU: "8", wantError: true},
+		{name: "missing index annotation", memCPU: "8", wantError: true},
+		{name: "mismatched component", indexCPU: "8", memCPU: "2", wantError: true},
+		{name: "zero is not an allocation", indexCPU: "0", memCPU: "0", wantError: true},
+		{name: "negative allocation", indexCPU: "-1", memCPU: "-1", wantError: true},
+		{name: "fractional allocation", indexCPU: "1.5", memCPU: "1.5", wantError: true},
+		{name: "integer overflow", indexCPU: "9223372036854775808", memCPU: "9223372036854775808", wantError: true},
+		{name: "cold cannot claim captured allocation", cold: true, indexCPU: "8", wantError: true},
+		{name: "cold uses request allocation", cold: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index := ocispec.Index{Manifests: []ocispec.Descriptor{descriptor(KindRootfs), descriptor(KindSandbox)}, Annotations: map[string]string{}}
+			if test.indexCPU != "" {
+				index.Annotations[AnnotationCPUCount] = test.indexCPU
+			}
+			if !test.cold {
+				mem := descriptor(KindMemSnapshot)
+				mem.Annotations[AnnotationVMM] = "cloud-hypervisor"
+				mem.Annotations[AnnotationMemorySizeMB] = "512"
+				if test.memCPU != "" {
+					mem.Annotations[AnnotationCPUCount] = test.memCPU
+				}
+				index.Manifests = append(index.Manifests, mem)
+				index.Annotations[AnnotationVMM] = "cloud-hypervisor"
+				index.Annotations[AnnotationMemorySizeMB] = "512"
+			}
+			info, err := inspectBootIndexMetadata(descriptor("index"), index)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("accepted invalid CPU metadata: %+v", info)
+				}
+				return
+			}
+			if err != nil || info.CPUCount != test.want {
+				t.Fatalf("CPUCount=%d want=%d error=%v", info.CPUCount, test.want, err)
 			}
 		})
 	}

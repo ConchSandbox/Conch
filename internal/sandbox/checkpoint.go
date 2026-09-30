@@ -80,6 +80,7 @@ func (m *Manager) Checkpoint(parent context.Context, sandboxID string, register 
 		MemRoot:               captured.MemRootPath,
 		VMMName:               captured.VMMName,
 		MemorySizeMB:          captured.MemorySizeMB,
+		CPUCount:              rec.VCPUNum,
 	})
 	if err != nil {
 		return CheckpointResult{}, err

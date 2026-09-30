@@ -15,8 +15,9 @@ type SandboxNetworkConfig struct {
 }
 
 type SandboxNetworkUpdateOptions struct {
-	SandboxID string
-	Network   *SandboxNetworkConfig
+	SandboxID       string
+	Network         *SandboxNetworkConfig
+	MaskRequestHost string
 }
 
 // WebhookCreateOptions describes a Webhook registration for this conchd instance.
@@ -48,17 +49,27 @@ const (
 )
 
 type SandboxCreateOptions struct {
-	SandboxID    string
-	TemplateName string
-	TemplateID   string
-	VMMName      string
-	VCPUNum      int64
-	VCPUMax      int64
-	RamMB        int64
-	VolumeMounts []volume.Mount
-	Env          map[string]string
-	Network      *SandboxNetworkConfig
+	SandboxID       string
+	TemplateName    string
+	TemplateID      string
+	VMMName         string
+	VCPUNum         int64
+	VCPUMax         int64
+	RamMB           int64
+	VolumeMounts    []volume.Mount
+	Env             map[string]string
+	Network         *SandboxNetworkConfig
+	E2B             bool
+	TimeoutAction   string
+	MaskRequestHost string
+	Metadata        map[string]string
+	Timeout         time.Duration
 }
+
+const (
+	TimeoutActionPause  = "pause"
+	TimeoutActionDelete = "delete"
+)
 
 type SandboxDefaults struct {
 	TemplateName string
@@ -85,6 +96,7 @@ type SandboxCreateResult struct {
 	VCPUNum      int64
 	RamMB        int64
 	CreatedAt    int64
+	EnvdVersion  string
 }
 
 type SandboxCheckpointOptions struct {
