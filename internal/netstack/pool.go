@@ -140,7 +140,7 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 	}
 
 	handleCreationFailure := func(cause error) error {
-		if cleanupErr := p.destroyNetworkSlot(context.Background(), slot); cleanupErr != nil {
+		if cleanupErr := p.destroyNetworkSlot(context.WithoutCancel(ctx), slot); cleanupErr != nil {
 			return errors.Join(
 				cause,
 				fmt.Errorf("clean up network slot %d: %w", slot.ID(), cleanupErr),
@@ -552,7 +552,7 @@ func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 	if errors.Is(err, errWarmPoolEmpty) {
 		p.signalRefillIfNeeded()
 		available, capacity := p.warmSlots.Usage()
-		ulog.GetLogger().Warn(
+		ulog.WithContext(ctx).Warn(
 			"no available network slot in the pool",
 			ulog.F("capacity", capacity),
 			ulog.F("available", available),
@@ -617,14 +617,14 @@ func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
 			return err
 		}
 		if len(addresses) != 0 {
-			ulog.GetLogger().Warn("network namespace has IPv6 address", ulog.F("address", addresses[0].String()))
+			ulog.WithContext(ctx).Warn("network namespace has IPv6 address", ulog.F("address", addresses[0].String()))
 		}
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 		if err != nil {
 			return err
 		}
 		if len(routes) != 0 {
-			ulog.GetLogger().Warn("network namespace has IPv6 route", ulog.F("route", routes[0]))
+			ulog.WithContext(ctx).Warn("network namespace has IPv6 route", ulog.F("route", routes[0]))
 		}
 		tryDisableIPv6()
 		return nil
@@ -647,24 +647,24 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 					return errors.Join(err, discardErr)
 				}
 				// Discard relinquished ownership, so callers must not retry this slot.
-				ulog.GetLogger().Warn("discarded released slot because reuse preparation failed", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
+				ulog.WithContext(ctx).Warn("discarded released slot because reuse preparation failed", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
 				return nil
 			}
 			slotHealthErr := p.slotHealth(ctx, slot)
 			if slotHealthErr == nil {
 				if err := p.warmSlots.Push(slot); err != nil {
-					if destroyErr := p.destroyNetworkSlot(context.Background(), slot); destroyErr != nil {
+					if destroyErr := p.destroyNetworkSlot(context.WithoutCancel(ctx), slot); destroyErr != nil {
 						return errors.Join(
 							fmt.Errorf("failed to enqueue released network slot: %w", err),
 							fmt.Errorf("failed to destroy unqueued released network slot: %w", destroyErr),
 						)
 					}
-					ulog.GetLogger().Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
+					ulog.WithContext(ctx).Info("discarded released slot because it could not return to the warm pool", ulog.F("slot_id", slot.ID()), ulog.F("reason", err))
 					return nil
 				}
-				ulog.GetLogger().Info("slot released back to pool", ulog.F("slot_id", slot.ID()))
+				ulog.WithContext(ctx).Info("slot released back to pool", ulog.F("slot_id", slot.ID()))
 			} else {
-				ulog.GetLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID()), ulog.F("error", slotHealthErr))
+				ulog.WithContext(ctx).Warn("slot unhealthy, dropping from the pool", ulog.F("slot_id", slot.ID()), ulog.F("error", slotHealthErr))
 				if err := p.Discard(ctx, slot); err != nil {
 					return fmt.Errorf("failed to discard unhealthy network slot %d: %w", slot.ID(), err)
 				}
@@ -693,7 +693,7 @@ func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
 		return nil
 	}
 	if err := p.destroyNetworkSlot(ctx, slot); err != nil {
-		ulog.GetLogger().Error("failed to discard network slot", ulog.F("slot_id", slot.ID()), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("failed to discard network slot", ulog.F("slot_id", slot.ID()), ulog.F("error", err))
 		return fmt.Errorf("failed to discard network slot %d: %w", slot.ID(), err)
 	}
 	p.signalRefillIfNeeded()

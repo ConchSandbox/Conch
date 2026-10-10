@@ -11,6 +11,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/webhook"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -89,7 +90,7 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	m.sandboxes.Delete(sandboxID)
 
 	if recordExists && (entry == nil || !entry.exitNotified) {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
+		m.publishLifecycleEvent(ctx, webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
 }
@@ -209,13 +210,13 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	if !ok || current != entry || entry.state == StateUnknown {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
+	ctx, cancel := context.WithTimeout(requestid.With(context.Background(), entry.sourceRequestID), createCleanupTimeout)
 	defer cancel()
 	entry.state = StateUnknown
 	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
-		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
 	alreadyExited := rec.State == StateUnknown
@@ -227,16 +228,16 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 		rec.RuntimeSnapshots = nil
 	}
 	if _, err := m.store.Update(ctx, rec); err != nil {
-		ulog.GetLogger().Error("persist exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("persist exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
 	if !alreadyExited {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+		m.publishLifecycleEvent(ctx, webhook.EventSandboxKilled, rec, "orphaned")
 		entry.exitNotified = true
 	}
 }
 
-func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason string) {
+func (m *Manager) publishLifecycleEvent(ctx context.Context, eventType string, rec Record, killReason string) {
 	if m.WebhookDispatcher == nil {
 		return
 	}
@@ -244,10 +245,10 @@ func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason
 		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339), VCPUNum: rec.VCPUNum, RamMB: rec.RamMB,
 	})
 	if err != nil {
-		ulog.GetLogger().Error("create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
 		return
 	}
-	m.WebhookDispatcher.Publish(event)
+	m.WebhookDispatcher.PublishContext(ctx, event)
 }
 
 // cleanupSandbox runs under the lifecycle lock. ID-based cleanup is idempotent;

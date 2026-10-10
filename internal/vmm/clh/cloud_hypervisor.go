@@ -227,7 +227,7 @@ func (c *CLHClient) waitForSourceEvent(ctx context.Context, source, eventName st
 		return nil
 	}
 
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(ctx)
 	logger.Info("Waiting for VM event", ulog.F("event_fd", c.fds.conchEventFd), ulog.F("source", source), ulog.F("event", eventName))
 	if err := waitVmReadyFd(ctx, c.fds.conchEventFd, source, eventName); err != nil {
 		return fmt.Errorf("error waiting for %s/%s event: %w", source, eventName, err)
