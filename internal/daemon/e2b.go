@@ -45,6 +45,7 @@ func (s *Daemon) initE2B(cfg *config.Config, manager *conchsandbox.Manager) erro
 	if err != nil {
 		return err
 	}
+	s.e2bHandler = handler
 	s.e2bServer = newHTTPServer(handler)
 	s.e2bListenAddr = cfg.E2B.ListenAddr
 	if cfg.Cluster.SchedulerAddr != "" {
@@ -85,7 +86,8 @@ func (s *Daemon) serveE2B(unixListener net.Listener) error {
 			return err
 		}
 	}
-	handler := s.e2bServer.Handler.(*e2bapi.Server)
+	// Keep the lifecycle handle separate from the wrapped HTTP handler.
+	handler := s.e2bHandler
 	s.e2bWorkers.Add(1)
 	go func() { defer s.e2bWorkers.Done(); handler.RunExpiry(ctx) }()
 	results := make(chan error, 2)

@@ -12,6 +12,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/vmm"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 type SnapshotBackend interface {
@@ -120,7 +121,7 @@ func (p *bootPreparer) resolveTemplate(
 				err = fmt.Errorf("boot resolver panicked: %v", recovered)
 			}
 		}()
-		resolveCtx, cancel := context.WithTimeout(p.resolveContext, p.resolveTimeout)
+		resolveCtx, cancel := context.WithTimeout(requestid.With(p.resolveContext, requestid.FromContext(ctx)), p.resolveTimeout)
 		defer cancel()
 		return p.resolveBoot(resolveCtx, id)
 	})

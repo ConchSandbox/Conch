@@ -14,6 +14,8 @@ conch-init-token: <agent_token>
 
 `conch-init-token` 是 sandbox 内 Agent API 的访问凭证。缺失、未初始化或错误时返回 Connect `Unauthenticated`。`GET /health` 是普通 HTTP 健康检查，不要求该 header。
 
+所有接口支持可选 `X-Request-ID`，成功、错误及流式响应均返回该 header，用于查找关联日志。校验、生成及传播规则见[请求 ID 与日志关联](request-id.md)。
+
 ```bash
 curl --request GET \
   --url "${AGENT_URL}/health"

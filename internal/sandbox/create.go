@@ -24,6 +24,7 @@ import (
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/webhook"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -81,7 +82,7 @@ func (m *Manager) Create(parent context.Context, req CreateRequest) (_ runtimeap
 // passes the existing record and keeps its checkpoint head as the boot
 // source. The lock is held for the whole transition, bootstrap included.
 func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx context.Context, resumeRec *Record) (_ runtimeapi.SandboxCreateResult, err error) {
-	entry := &sandboxEntry{state: StateCreating}
+	entry := &sandboxEntry{state: StateCreating, sourceRequestID: requestid.FromContext(ctx)}
 	m.sandboxes.Store(req.SandboxID, entry)
 	var rec Record
 	ownsRecord := false
@@ -94,7 +95,7 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx 
 				if releaseErr := m.releaseCreateLease(cleanupCtx, req.SandboxID); releaseErr != nil {
 					// READY already owns the snapshots. A failed lease deletion is also
 					// retried on sandbox deletion/recovery using the deterministic lease ID.
-					ulog.GetLogger().Warn("failed to release sandbox create lease", ulog.F("sandbox_id", req.SandboxID), ulog.F("error", releaseErr))
+					ulog.WithContext(cleanupCtx).Warn("failed to release sandbox create lease", ulog.F("sandbox_id", req.SandboxID), ulog.F("error", releaseErr))
 				}
 			}
 			return
@@ -162,6 +163,7 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx 
 	vmSpec := boot.Spec
 	if m.memOvercommitRatio > 0 {
 		if err = m.reserveRAM(vmSpec.MemorySizeMB); err != nil {
+			ulog.WithContext(ctx).Warn("sandbox create rejected by memory admission", ulog.F("sandbox_id", req.SandboxID), ulog.F("error", err))
 			return runtimeapi.SandboxCreateResult{}, err
 		}
 		entry.ramMB = vmSpec.MemorySizeMB
@@ -214,7 +216,7 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx 
 	}
 	entry.state = StateReady
 	m.trackSandbox(req.SandboxID, entry, volumeExit)
-	m.publishLifecycleEvent(webhook.EventSandboxCreated, rec, "")
+	m.publishLifecycleEvent(ctx, webhook.EventSandboxCreated, rec, "")
 	return runtimeapi.SandboxCreateResult{
 		SandboxID: req.SandboxID, IP: rec.IP, AgentToken: req.AgentToken,
 		TemplateName: req.TemplateName, TemplateID: req.TemplateID,
@@ -299,7 +301,6 @@ func (m *Manager) reserveRAM(requestedMB int64) error {
 				"sandbox memory limit exceeded: requested=%dMiB used=%dMiB limit=%dMiB overcommit_ratio=%g effective_limit=%gMiB",
 				requestedMB, usedMB, m.memLimitMB, m.memOvercommitRatio, limitMB,
 			)
-			ulog.GetLogger().Warn("sandbox create rejected by memory admission", ulog.F("error", err))
 			return ErrResourceExhausted.WrapMessage(err, "sandbox memory limit exceeded")
 		}
 		if m.usedRAM.CompareAndSwap(usedMB, usedMB+requestedMB) {

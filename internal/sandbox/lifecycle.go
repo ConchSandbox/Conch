@@ -11,6 +11,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/webhook"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -93,7 +94,7 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	m.releaseCapacity(rec)
 
 	if recordExists {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
+		m.publishLifecycleEvent(ctx, webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
 }
@@ -231,11 +232,11 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	if !ok || current != entry || entry.state == StateUnknown {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
+	ctx, cancel := context.WithTimeout(requestid.With(context.Background(), entry.sourceRequestID), createCleanupTimeout)
 	defer cancel()
 	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
 	if cleanupErr != nil {
-		ulog.GetLogger().Warn("cleanup exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
+		ulog.WithContext(ctx).Warn("cleanup exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
 	}
 	m.finalizeDeath(ctx, sandboxID, entry, cleanupErr)
 }
@@ -275,7 +276,7 @@ func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finaliz
 	m.sandboxes.Delete(rec.ID)
 	m.releaseCapacity(rec)
 	if opts.killReason != "" {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, opts.killReason)
+		m.publishLifecycleEvent(ctx, webhook.EventSandboxKilled, rec, opts.killReason)
 	}
 	return nil
 }
@@ -297,7 +298,7 @@ func (m *Manager) finalizeTerminalFailure(ctx context.Context, rec Record, err e
 	rec.ExpiresAt = 0
 	rec.RuntimeSnapshots = nil
 	if _, saveErr := m.store.Update(ctx, rec); saveErr != nil {
-		ulog.GetLogger().Error("persist unknown after released terminal failure", ulog.F("sandbox_id", rec.ID), ulog.F("error", saveErr))
+		ulog.WithContext(ctx).Error("persist unknown after released terminal failure", ulog.F("sandbox_id", rec.ID), ulog.F("error", saveErr))
 	}
 	m.sandboxes.Delete(rec.ID)
 	m.releaseCapacity(rec)
@@ -318,13 +319,13 @@ func (m *Manager) finalizeDeath(ctx context.Context, sandboxID string, entry *sa
 	entry.state = StateUnknown
 	// The natural exit must not wait for a later delete or the lease's expiry to drop the spent create lease.
 	if err := m.releaseCreateLease(ctx, sandboxID); err != nil {
-		ulog.GetLogger().Warn("release create lease of exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("release create lease of exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 	}
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
 		// The on-disk record keeps its own deadline or startup recovery to
 		// finish the transition; the quota stays with the still-READY record.
-		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
 	if !rec.E2B {
@@ -337,7 +338,7 @@ func (m *Manager) finalizeDeath(ctx context.Context, sandboxID string, entry *sa
 		// reruns the cleanup through the entry.
 		rec.LastError = cleanupErr.Error()
 		if _, err := m.store.Update(ctx, rec); err != nil {
-			ulog.GetLogger().Error("persist crashed E2B sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+			ulog.WithContext(ctx).Error("persist crashed E2B sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		}
 		return
 	}
@@ -346,7 +347,7 @@ func (m *Manager) finalizeDeath(ctx context.Context, sandboxID string, entry *sa
 	rec.IP, rec.VMMPID = "", 0
 	rec.RuntimeSnapshots = nil
 	if _, err := m.store.Update(ctx, rec); err != nil {
-		ulog.GetLogger().Error("persist crashed E2B sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("persist crashed E2B sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
 	m.sandboxes.Delete(sandboxID)
@@ -365,10 +366,10 @@ func (m *Manager) finalizeNativeDeath(ctx context.Context, rec Record, cleanupEr
 		rec.LastError = cleanupErr.Error()
 	}
 	if _, err := m.store.Update(ctx, rec); err != nil {
-		ulog.GetLogger().Error("persist exited native sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("persist exited native sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
 		return
 	}
-	m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+	m.publishLifecycleEvent(ctx, webhook.EventSandboxKilled, rec, "orphaned")
 }
 
 // recoverableLineage reports whether a released runtime leaves a resumable
@@ -403,7 +404,7 @@ func (m *Manager) releaseCapacity(rec Record) {
 	}
 }
 
-func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason string) {
+func (m *Manager) publishLifecycleEvent(ctx context.Context, eventType string, rec Record, killReason string) {
 	if m.WebhookDispatcher == nil {
 		return
 	}
@@ -411,10 +412,10 @@ func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason
 		CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339), VCPUNum: rec.VCPUNum, RamMB: rec.RamMB,
 	})
 	if err != nil {
-		ulog.GetLogger().Error("create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("create sandbox lifecycle event", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
 		return
 	}
-	m.WebhookDispatcher.Publish(event)
+	m.WebhookDispatcher.PublishContext(ctx, event)
 }
 
 // cleanupSandbox runs under the lifecycle lock. ID-based cleanup is idempotent;

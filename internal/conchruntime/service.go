@@ -536,7 +536,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 		if err := conchimage.Remove(cleanupCtx, s.Containerd, runtimeapi.RemoveImageOptions{
 			ImageName: converted.ImageName,
 		}); err != nil {
-			ulog.GetLogger().Warn("failed to remove temporary converted rootfs image",
+			ulog.WithContext(ctx).Warn("failed to remove temporary converted rootfs image",
 				ulog.F("image", converted.ImageName),
 				ulog.F("error", err))
 		}

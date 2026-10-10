@@ -13,6 +13,7 @@
 
 ## Conch 开发
 
+- [请求 ID 与日志关联](developer/request-id.md)：HTTP 请求头约定、跨组件传播和异步任务关联。
 - [Template 模块接口](developer/template-interface.md)：Template 数据模型和 Store 接口。
 - [Network 模块设计](developer/network.md)：Network Slot、CNI、guest tap 和网络生命周期。
 - [Volume 设计](developer/volume.md)：virtiofs、VMM 与 guest agent 的卷架构。
