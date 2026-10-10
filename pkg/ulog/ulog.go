@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 const (
@@ -397,6 +399,19 @@ func TraceCost(start time.Time, traceid string, msg string) time.Time {
 	return time.Now()
 }
 
+// TraceCostContext records request and sandbox identity for operation timings.
+func TraceCostContext(ctx context.Context, start time.Time, sandboxID, msg string) time.Time {
+	if !debugEnabled() {
+		return time.Time{}
+	}
+	ms := float64(time.Since(start).Microseconds()) / 1000.0
+	WithContext(ctx).Debug(msg,
+		F("traceid", sandboxID),
+		F("from", start.Format("05.000")),
+		F("cost", fmt.Sprintf("%.3fms", ms)))
+	return time.Now()
+}
+
 // WithContext returns a new logger with context fields
 func WithContext(ctx context.Context) Logger {
 	return GetLogger().WithContext(ctx)
@@ -594,8 +609,42 @@ func (l *ulog) ReplaceField(key string, value interface{}) Logger {
 	return newLogger
 }
 
-// WithContext returns a new logger with context fields
+// WithContext adds context fields without mutating l, reusing l when unchanged.
 func (l *ulog) WithContext(ctx context.Context) Logger {
+	if ctx == nil {
+		return l
+	}
+	userID := ctx.Value("user_id")
+	traceID := ctx.Value("trace_id")
+	requestID := requestid.FromContext(ctx)
+	if userID == nil && traceID == nil {
+		if requestID == "" {
+			return l
+		}
+		// Fields are immutable. Rebinding the same ID can reuse this logger.
+		found, same := false, true
+		for _, field := range l.fields {
+			if field.Key == "request_id" {
+				found = true
+				id, ok := field.Value.(string)
+				same = same && ok && id == requestID
+			}
+		}
+		if found && same {
+			return l
+		}
+	}
+
+	extra := 0
+	if userID != nil {
+		extra++
+	}
+	if traceID != nil {
+		extra++
+	}
+	if requestID != "" {
+		extra++
+	}
 	newLogger := &ulog{
 		level:     l.level,
 		output:    l.output,
@@ -603,17 +652,26 @@ func (l *ulog) WithContext(ctx context.Context) Logger {
 		writer:    l.writer,
 		sandboxId: l.sandboxId,
 	}
-	newLogger.fields = append([]Field{}, l.fields...)
-
-	// Add common context fields
-	if requestID := ctx.Value("request_id"); requestID != nil {
-		newLogger.fields = append(newLogger.fields, F("request_id", requestID))
-	}
-	if userID := ctx.Value("user_id"); userID != nil {
+	newLogger.fields = make([]Field, len(l.fields), len(l.fields)+extra)
+	copy(newLogger.fields, l.fields)
+	if userID != nil {
 		newLogger.fields = append(newLogger.fields, F("user_id", userID))
 	}
-	if traceID := ctx.Value("trace_id"); traceID != nil {
+	if traceID != nil {
 		newLogger.fields = append(newLogger.fields, F("trace_id", traceID))
+	}
+	if requestID != "" {
+		field := F("request_id", requestID)
+		found := false
+		for i := range newLogger.fields {
+			if newLogger.fields[i].Key == "request_id" {
+				newLogger.fields[i] = field
+				found = true
+			}
+		}
+		if !found {
+			newLogger.fields = append(newLogger.fields, field)
+		}
 	}
 
 	return newLogger

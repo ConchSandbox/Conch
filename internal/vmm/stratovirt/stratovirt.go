@@ -132,7 +132,7 @@ func (s *StratovirtClient) WaitForRestoreReady(ctx context.Context, processExite
 }
 
 func waitForVmmSocket(ctx context.Context, socketPath string, processExited driver.ProcessExit) error {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(ctx)
 	var exitDone <-chan struct{}
 	if processExited != nil {
 		exitDone = processExited.Done()
@@ -462,7 +462,7 @@ func waitForAgentRetry(ctx context.Context, processExited driver.ProcessExit, de
 }
 
 func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited driver.ProcessExit) error {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(ctx)
 
 	for i := 0; i < 60; i++ {
 		if err := waitForAgentRetry(ctx, processExited, 0); err != nil {

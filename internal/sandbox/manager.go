@@ -15,6 +15,7 @@ import (
 	"github.com/openeuler/Conch/internal/vmm/driver"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/internal/webhook"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -54,11 +55,13 @@ type Manager struct {
 const createCleanupTimeout = 10 * time.Second
 
 type sandboxEntry struct {
-	state        State
-	sbx          *Sandbox
-	volumes      []volume.Device
-	exitNotified bool
-	ramMB        int64
+	// Only retain source identity, not the originating HTTP request context.
+	sourceRequestID string
+	state           State
+	sbx             *Sandbox
+	volumes         []volume.Device
+	exitNotified    bool
+	ramMB           int64
 }
 
 func New(
@@ -256,11 +259,11 @@ func (m *Manager) allocateCreateRuntimeIDs(req CreateRequest) (createRuntimeIDs,
 }
 
 func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest) (PreparedBoot, error) {
-	defer ulog.TraceCost(ulog.TraceStart(), req.SandboxID, "prepareSandboxBoot()")
+	defer ulog.TraceCostContext(ctx, ulog.TraceStart(), req.SandboxID, "prepareSandboxBoot()")
 	if m.boot == nil {
 		return PreparedBoot{}, fmt.Errorf("sandbox boot preparer is not configured")
 	}
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(ctx)
 	logger.Debug("preparing sandbox template", ulog.F("template_id", req.TemplateID))
 	return m.boot.Prepare(ctx, PrepareBootRequest{
 		TemplateID: req.TemplateID,
@@ -271,8 +274,9 @@ func (m *Manager) prepareSandboxBoot(ctx context.Context, req CreateRequest) (Pr
 }
 
 func (m *Manager) startSandbox(ctx context.Context, req CreateRequest, vmStartSpec VMStartSpec, runtimeIDs createRuntimeIDs, restore bool) (*Sandbox, error) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(ctx)
 	readyOpts := hostconn.ReadyOptions{
+		RequestID:       requestid.FromContext(ctx),
 		SandboxID:       req.SandboxID,
 		AgentToken:      req.AgentToken,
 		Env:             req.Env,

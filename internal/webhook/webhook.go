@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/id"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -111,28 +113,38 @@ func (d *Dispatcher) Delete(webhookID string) bool {
 }
 
 func (d *Dispatcher) Publish(event Event) {
+	d.PublishContext(context.Background(), event)
+}
+
+// PublishContext keeps source identity across delivery and retries, without
+// coupling delivery lifetime to the API caller's cancellation or deadline.
+func (d *Dispatcher) PublishContext(ctx context.Context, event Event) {
 	if d == nil || !isSupportedEvent(event.Type) {
 		return
 	}
+	ctx = requestid.With(context.Background(), requestid.FromContext(ctx))
 	d.mu.RLock()
 	for _, hook := range d.webhooks {
 		if subscribesTo(hook, event.Type) {
-			go d.deliver(hook, event)
+			go d.deliver(ctx, hook, event)
 		}
 	}
 	d.mu.RUnlock()
 }
 
-func (d *Dispatcher) deliver(hook runtimeapi.WebhookRecord, event Event) {
+func (d *Dispatcher) deliver(ctx context.Context, hook runtimeapi.WebhookRecord, event Event) {
 	body, err := json.Marshal(event)
 	if err != nil {
-		ulog.GetLogger().Error("failed to marshal webhook event", ulog.F("event_id", event.EventID), ulog.F("webhook_id", hook.WebhookID), ulog.F("error", err))
+		ulog.WithContext(ctx).Error("failed to marshal webhook event", ulog.F("event_id", event.EventID), ulog.F("webhook_id", hook.WebhookID), ulog.F("error", err))
 		return
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, hook.URL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, hook.URL, bytes.NewReader(body))
 		if err == nil {
+			if id := requestid.FromContext(ctx); id != "" {
+				req.Header.Set(requestid.Header, id)
+			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("conch-webhook-id", hook.WebhookID)
 			resp, doErr := d.client.Do(req)
@@ -149,7 +161,7 @@ func (d *Dispatcher) deliver(hook runtimeapi.WebhookRecord, event Event) {
 			lastErr = err
 		}
 	}
-	ulog.GetLogger().Error("webhook delivery failed after retries", ulog.F("event_id", event.EventID), ulog.F("webhook_id", hook.WebhookID), ulog.F("url", hook.URL), ulog.F("error", lastErr))
+	ulog.WithContext(ctx).Error("webhook delivery failed after retries", ulog.F("event_id", event.EventID), ulog.F("webhook_id", hook.WebhookID), ulog.F("url", hook.URL), ulog.F("error", lastErr))
 }
 
 func NewEvent(eventType, sandboxID, killReason string, execution Execution) (Event, error) {

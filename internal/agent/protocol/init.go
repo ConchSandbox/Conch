@@ -18,6 +18,7 @@ const (
 var ErrInvalidEnvironment = errors.New("invalid sandbox environment")
 
 type InitRequest struct {
+	RequestID  string                      `json:"request_id,omitempty"`
 	Version    int                         `json:"version"`
 	SandboxID  string                      `json:"sandboxID"`
 	AgentToken string                      `json:"agentToken"`
@@ -26,6 +27,7 @@ type InitRequest struct {
 }
 
 type InitResponse struct {
+	RequestID string `json:"request_id,omitempty"`
 	Version   int    `json:"version"`
 	Status    string `json:"status"`
 	Retryable bool   `json:"retryable"`
