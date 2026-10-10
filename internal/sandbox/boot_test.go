@@ -13,6 +13,7 @@ import (
 
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/snapshot"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 func TestBootPreparerReturnsSnapshotRefsFromBackend(t *testing.T) {
@@ -70,13 +71,16 @@ func TestBootPreparerCallerCancellationDoesNotCancelSharedResolution(t *testing.
 		},
 	}
 
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	requestCtx, cancelRequest := context.WithCancel(requestid.With(context.Background(), "resolve-request-206"))
 	done := make(chan error, 1)
 	go func() {
 		_, err := preparer.resolveTemplate(requestCtx, bootDigest)
 		done <- err
 	}()
 	sharedCtx := <-resolverContext
+	if requestid.FromContext(sharedCtx) != "resolve-request-206" {
+		t.Fatal("shared resolver lost source request ID")
+	}
 	cancelRequest()
 	select {
 	case err := <-done:
