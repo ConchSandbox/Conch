@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -18,6 +19,14 @@ import (
 )
 
 var resolverTargetPath = "/etc/resolv.conf"
+
+const guestEgressCAPath = "/etc/conch/egress-ca.crt"
+
+var guestTrustBundlePaths = []string{
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/certs/ca-certificates.crt",
+}
 
 // applyGuestNetworkConfig configures a cold guest or validates restored state.
 // Once the sandbox is ready, address and route identity are never changed.
@@ -40,6 +49,9 @@ func applyGuestNetworkConfig(cfg netstack.GuestNetworkConfig, revalidate bool) e
 	}
 	if err := installResolverConfig(cfg.DNS); err != nil {
 		return fmt.Errorf("install resolver config: %w", err)
+	}
+	if err := installGuestTrustedCA(cfg.TrustedCAPEM); err != nil {
+		return fmt.Errorf("install trusted CA: %w", err)
 	}
 	return nil
 }
@@ -234,4 +246,42 @@ func installResolverConfig(cfg netstack.DNSConfig) error {
 		return fmt.Errorf("remove existing resolver config: %w", err)
 	}
 	return os.WriteFile(resolverTargetPath, out.Bytes(), 0o644)
+}
+
+func installGuestTrustedCA(caPEM string) error {
+	if strings.TrimSpace(caPEM) == "" {
+		return nil
+	}
+	ca := bytes.TrimSpace([]byte(caPEM))
+	if err := os.MkdirAll(filepath.Dir(guestEgressCAPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(guestEgressCAPath, append(ca, '\n'), 0o644); err != nil {
+		return err
+	}
+	selectedBundle := ""
+	for _, path := range guestTrustBundlePaths {
+		contents, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Contains(contents, ca) {
+			contents = append(bytes.TrimRight(contents, "\n"), '\n')
+			contents = append(contents, ca...)
+			contents = append(contents, '\n')
+			if err := os.WriteFile(path, contents, 0o644); err != nil {
+				return err
+			}
+		}
+		if selectedBundle == "" {
+			selectedBundle = path
+		}
+	}
+	if selectedBundle == "" {
+		selectedBundle = guestEgressCAPath
+	}
+	return os.Setenv("SSL_CERT_FILE", selectedBundle)
 }

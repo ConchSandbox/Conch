@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -63,12 +64,14 @@ type Pool struct {
 	hostInterface   string
 	slotConfig      slotConfig
 	slotIDs         *slotstate.Allocator
+	egressSecurity  *egressSecurityController
 }
 
 type PoolConfig struct {
 	WarmPoolSize    int
 	RefillThreshold int
 	CNI             CNIManagerConfig
+	EgressSecurity  EgressSecurityConfig
 }
 
 func NewPool(cfg PoolConfig) (*Pool, error) {
@@ -102,6 +105,19 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
+	egressSecurity, err := newEgressSecurityController(cfg.EgressSecurity, cniManager.bridgeName)
+	if err != nil {
+		return nil, err
+	}
+	if egressSecurity != nil {
+		for _, server := range cniManager.dnsServers {
+			ip := net.ParseIP(server)
+			if ip == nil || ip.To4() == nil {
+				return nil, fmt.Errorf("invalid IPv4 CNI DNS server %q", server)
+			}
+			egressSecurity.dnsServers = append(egressSecurity.dnsServers, ip.String())
+		}
+	}
 	if err := ensureHostForwardingRules(cniManager.bridgeName, gateway); err != nil {
 		return nil, fmt.Errorf("configure host forwarding for CNI bridge %s: %w", cniManager.bridgeName, err)
 	}
@@ -114,6 +130,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		hostInterface:   gateway,
 		slotConfig:      slotConfig,
 		slotIDs:         slotstate.NewAllocator(firstSlotID, maxSlots),
+		egressSecurity:  egressSecurity,
 	}
 
 	return p, nil
@@ -162,6 +179,11 @@ func (p *Pool) destroyNetworkSlot(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return nil
 	}
+	if p.egressSecurity != nil {
+		if err := p.egressSecurity.Clear(ctx, slot); err != nil {
+			ulog.GetLogger().Warn("failed to detach egress security before destroying slot", ulog.F("slot_id", slot.ID()), ulog.F("error", err))
+		}
+	}
 	if err := p.teardownSlotNetwork(ctx, slot); err != nil {
 		return fmt.Errorf("teardown network slot: %w", err)
 	}
@@ -197,7 +219,15 @@ func (p *Pool) signalRefillIfNeeded() {
 // Start launches the pool's population loop. It must be called exactly once.
 
 func (p *Pool) Start(ctx context.Context) error {
+	if p.egressSecurity != nil {
+		if err := p.egressSecurity.Start(); err != nil {
+			return fmt.Errorf("start egress security controller: %w", err)
+		}
+	}
 	if err := p.prefill(ctx); err != nil {
+		if p.egressSecurity != nil {
+			_ = p.egressSecurity.Close()
+		}
 		return err
 	}
 	populateCtx, populateCancel := context.WithCancel(ctx)
@@ -266,6 +296,11 @@ func (p *Pool) Close() {
 	if p.cniManager != nil {
 		if err := removeHostForwardingRules(p.cniManager.bridgeName, p.hostInterface); err != nil {
 			ulog.GetLogger().Warn("failed to remove host forwarding rules during shutdown", ulog.F("bridge", p.cniManager.bridgeName), ulog.F("error", err))
+		}
+	}
+	if p.egressSecurity != nil {
+		if err := p.egressSecurity.Close(); err != nil {
+			ulog.GetLogger().Warn("failed to close egress security controller", ulog.F("error", err))
 		}
 	}
 }
@@ -525,12 +560,18 @@ func (p *Pool) Get(ctx context.Context, sandboxID string, policy *SandboxNetwork
 		)
 	}
 	if isNetworkConfigNonEmpty(policy) {
-		if err := writeSandboxNetworkPolicyRules(ctx, slot, policy); err != nil {
+		if err := p.writeNetworkPolicy(ctx, slot, policy); err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("failed to apply initial sandbox network policy: %w", err),
 				p.Discard(context.WithoutCancel(ctx), slot),
 			)
 		}
+	}
+	if err := p.applyEgressSecurity(ctx, slot, sandboxID, policy); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("failed to apply initial sandbox egress security policy: %w", err),
+			p.Discard(context.WithoutCancel(ctx), slot),
+		)
 	}
 	return slot, nil
 }
@@ -568,6 +609,9 @@ func (p *Pool) get(ctx context.Context, sandboxID string) (*Slot, error) {
 		return nil, nil
 	}
 	s.assignSandbox(sandboxID)
+	if p.egressSecurity != nil {
+		s.trustedCA = p.egressSecurity.guestCAPEM
+	}
 	return s, nil
 }
 
@@ -584,7 +628,10 @@ func (p *Pool) SetSandboxNetworkPolicy(ctx context.Context, slot *Slot, sandboxI
 	if err := ValidateSandboxNetworkInputConfig(ctx, policy); err != nil {
 		return err
 	}
-	return writeSandboxNetworkPolicyRules(ctx, slot, policy)
+	if err := p.writeNetworkPolicy(ctx, slot, policy); err != nil {
+		return err
+	}
+	return p.applyEgressSecurity(ctx, slot, sandboxID, policy)
 }
 
 func (p *Pool) provisionSlotNetwork(ctx context.Context, slot *Slot) error {
@@ -642,7 +689,7 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 	default:
 		if slot != nil {
 			cleanupCtx := context.WithoutCancel(ctx)
-			if err := prepareSlotForReuse(cleanupCtx, slot); err != nil {
+			if err := p.prepareSlotForReuse(cleanupCtx, slot); err != nil {
 				if discardErr := p.Discard(cleanupCtx, slot); discardErr != nil {
 					return errors.Join(err, discardErr)
 				}
@@ -674,9 +721,14 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 	}
 }
 
-func prepareSlotForReuse(ctx context.Context, slot *Slot) error {
+func (p *Pool) prepareSlotForReuse(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return nil
+	}
+	if p.egressSecurity != nil {
+		if err := p.egressSecurity.Clear(ctx, slot); err != nil {
+			return fmt.Errorf("failed to clear sandbox egress security policy: %w", err)
+		}
 	}
 	if err := clearSandboxNetworkPolicyRules(ctx, slot); err != nil {
 		return fmt.Errorf("failed to clear sandbox network policy: %w", err)
@@ -686,6 +738,29 @@ func prepareSlotForReuse(ctx context.Context, slot *Slot) error {
 	}
 	slot.clearSandboxAssignment()
 	return nil
+}
+
+func (p *Pool) writeNetworkPolicy(ctx context.Context, slot *Slot, policy *SandboxNetworkConfig) error {
+	if p.egressSecurity != nil && policy != nil {
+		// Envoy authorization checks the resolved destination; keep only ingress
+		// restrictions here so the original destination cannot veto a domain allow.
+		copy := *policy
+		copy.AllowOut = nil
+		copy.DenyOut = nil
+		copy.AllowInternetAccess = nil
+		policy = &copy
+	}
+	return writeSandboxNetworkPolicyRules(ctx, slot, policy)
+}
+
+func (p *Pool) applyEgressSecurity(ctx context.Context, slot *Slot, sandboxID string, policy *SandboxNetworkConfig) error {
+	if p.egressSecurity == nil {
+		if hasL7EgressPolicy(policy) {
+			return fmt.Errorf("%w: network egress security is not enabled", ErrInvalidPolicy)
+		}
+		return nil
+	}
+	return p.egressSecurity.Apply(ctx, slot, sandboxID, policy)
 }
 
 func (p *Pool) Discard(ctx context.Context, slot *Slot) error {
