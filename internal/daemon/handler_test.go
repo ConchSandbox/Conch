@@ -138,6 +138,7 @@ func (f *fakeSandboxOps) Delete(ctx context.Context, sandboxID string) error {
 	}
 	return nil
 }
+func (f *fakeSandboxOps) ReleaseRuntime(context.Context, string) error { return nil }
 func (f *fakeSandboxOps) Suspend(ctx context.Context, sandboxID string) error {
 	f.suspendReq = sandboxID
 	return f.setState(ctx, sandboxID, sandbox.StateSuspended)

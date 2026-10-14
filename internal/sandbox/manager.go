@@ -30,30 +30,35 @@ type Config struct {
 }
 
 type Manager struct {
-	context            context.Context
-	sandboxes          sync.Map // map[string]*sandboxEntry
-	pool               *netstack.Pool
-	boot               BootPreparer
-	checkpointCapture  CheckpointCapture
-	vsockSignalRetry   time.Duration
-	vsockSignalTimeout time.Duration
-	requestTimeout     time.Duration
-	memOvercommitRatio float64
-	memLimitMB         int64
-	usedRAM            atomic.Int64
-	cidAllocator       *CIDAllocator
-	volumeManager      *volume.Manager
-	vmmBinaries        map[string]string
-	store              Store
-	client             *containerdclient.Client
-	WebhookDispatcher  *webhook.Dispatcher
-	lifecycleLocks     sandboxLifecycleLocks
-	launch             func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error)
+	context               context.Context
+	sandboxes             sync.Map // map[string]*sandboxEntry
+	pool                  *netstack.Pool
+	boot                  BootPreparer
+	checkpointCapture     CheckpointCapture
+	vsockSignalRetry      time.Duration
+	vsockSignalTimeout    time.Duration
+	requestTimeout        time.Duration
+	memOvercommitRatio    float64
+	memLimitMB            int64
+	usedRAM               atomic.Int64
+	cidAllocator          *CIDAllocator
+	volumeManager         *volume.Manager
+	vmmBinaries           map[string]string
+	store                 Store
+	client                *containerdclient.Client
+	WebhookDispatcher     *webhook.Dispatcher
+	lifecycleLocks        sandboxLifecycleLocks
+	launch                func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error)
+	UnexpectedExitHandler UnexpectedExitHandler
+	BeforeRuntimeRelease  func(sandboxID string)
 }
 
 const createCleanupTimeout = 10 * time.Second
 
+type UnexpectedExitHandler func(sandboxID, runtimeID string, cleanupErr error)
+
 type sandboxEntry struct {
+	runtimeID    string
 	state        State
 	sbx          *Sandbox
 	volumes      []volume.Device
@@ -182,6 +187,7 @@ type CreateRequest struct {
 	TemplateName string
 	VMMName      string
 	SandboxID    string
+	RuntimeID    string
 	VCPUNum      int64
 	VCPUMax      int64
 	RAMMB        int64

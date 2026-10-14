@@ -49,12 +49,36 @@ func (l *sandboxLifecycleLocks) lock(id string) func() {
 	}
 }
 
-// Delete retains the record and its GC references until resource cleanup has
+// Delete removes the sandbox's runtime resources and its persistent record.
+// The record and its GC references are retained until resource cleanup has
 // succeeded. It also handles persisted sandboxes without a live runtime entry.
 func (m *Manager) Delete(parent context.Context, sandboxID string) error {
+	rec, recordExists, entry, err := m.teardownRuntime(parent, sandboxID, true)
+	if err != nil {
+		return err
+	}
+	if recordExists && (entry == nil || !entry.exitNotified) {
+		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
+	}
+	return nil
+}
+
+// ReleaseRuntime removes the sandbox's runtime resources while keeping the
+// persistent record: the caller rewrites it afterwards (e.g. E2B pause
+// persists a PAUSED record pointing at the captured checkpoint head).
+func (m *Manager) ReleaseRuntime(parent context.Context, sandboxID string) error {
+	_, _, _, err := m.teardownRuntime(parent, sandboxID, false)
+	return err
+}
+
+// teardownRuntime releases the sandbox's runtime entry, create lease and GC
+// references. removeRecord also deletes the persistent record; without it the
+// record survives so the caller can rewrite it. Failures retain the record as
+// UNKNOWN with the error for the reconciliation retry.
+func (m *Manager) teardownRuntime(parent context.Context, sandboxID string, removeRecord bool) (Record, bool, *sandboxEntry, error) {
 	sandboxID = strings.TrimSpace(sandboxID)
 	if sandboxID == "" {
-		return ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+		return Record{}, false, nil, ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
 	}
 	ctx, cancel := context.WithTimeout(parent, m.requestTimeout)
 	defer cancel()
@@ -62,10 +86,10 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	defer unlock()
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
+		return Record{}, false, nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return Record{}, false, nil, err
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
@@ -77,21 +101,19 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	}
 	if entry != nil {
 		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
-			return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+			return rec, recordExists, entry, m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
 		}
 	}
 	if err := m.releaseCreateLease(cleanupCtx, sandboxID); err != nil {
-		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+		return rec, recordExists, entry, m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
 	}
-	if err := m.store.Delete(cleanupCtx, sandboxID); err != nil {
-		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+	if removeRecord {
+		if err := m.store.Delete(cleanupCtx, sandboxID); err != nil {
+			return rec, recordExists, entry, m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+		}
 	}
 	m.sandboxes.Delete(sandboxID)
-
-	if recordExists && (entry == nil || !entry.exitNotified) {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
-	}
-	return nil
+	return rec, recordExists, entry, nil
 }
 
 func (m *Manager) persistSandboxFailure(ctx context.Context, rec Record, exists bool, err error) error {
@@ -203,20 +225,34 @@ func (m *Manager) UpdateNetwork(parent context.Context, req NetworkUpdateRequest
 }
 
 func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
+	handled, runtimeID, cleanupErr := m.cleanupExitedSandbox(sandboxID, entry)
+	if !handled {
+		return
+	}
+	// Invoke the exit observer after the lifecycle lock is released: the
+	// handler takes the runtime service's own lifecycle locks, while Remove
+	// calls Manager.Delete while holding them.
+	if m.UnexpectedExitHandler != nil {
+		m.UnexpectedExitHandler(sandboxID, runtimeID, cleanupErr)
+	}
+}
+
+func (m *Manager) cleanupExitedSandbox(sandboxID string, entry *sandboxEntry) (handled bool, runtimeID string, cleanupErr error) {
 	unlock := m.lifecycleLocks.lock(sandboxID)
 	defer unlock()
 	current, ok := m.sandboxes.Load(sandboxID)
 	if !ok || current != entry || entry.state == StateUnknown {
-		return
+		return false, "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
 	defer cancel()
 	entry.state = StateUnknown
-	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
+	cleanupErr = m.cleanupSandbox(ctx, sandboxID, entry)
+	runtimeID = entry.runtimeID
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
 		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
+		return true, runtimeID, cleanupErr
 	}
 	alreadyExited := rec.State == StateUnknown
 	rec.State = StateUnknown
@@ -228,12 +264,13 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	}
 	if _, err := m.store.Update(ctx, rec); err != nil {
 		ulog.GetLogger().Error("persist exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
-		return
+		return true, runtimeID, cleanupErr
 	}
 	if !alreadyExited {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
 		entry.exitNotified = true
 	}
+	return true, runtimeID, cleanupErr
 }
 
 func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason string) {
@@ -284,6 +321,11 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *s
 			sbx.process = nil
 		}
 		if sbx.slot != nil {
+			// Revoke data-plane routing before the network slot returns to the
+			// pool and its IP can be assigned to another guest.
+			if m.BeforeRuntimeRelease != nil {
+				m.BeforeRuntimeRelease(sandboxID)
+			}
 			if err := m.pool.Release(ctx, sbx.slot); err != nil {
 				return fmt.Errorf("release network: %w", err)
 			}
