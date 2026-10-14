@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	pb "github.com/openeuler/Conch/api/go_proto"
 	"github.com/openeuler/Conch/api/go_proto/pbconnect"
+	"github.com/openeuler/Conch/internal/sandbox"
 	"golang.org/x/net/websocket"
 )
 
@@ -32,7 +33,7 @@ func proxyFor(t *testing.T, upstream http.Handler) (*httptest.Server, *Registry,
 	if err := registry.Publish(id, gen, ip); err != nil {
 		t.Fatal(err)
 	}
-	proxy := httptest.NewServer(NewHandler(registry, []string{"sandbox.example.test"}))
+	proxy := httptest.NewServer(NewHandler(registry, []string{"sandbox.example.test"}, nil))
 	t.Cleanup(proxy.Close)
 	t.Cleanup(func() { registry.Remove(id, gen) })
 	return proxy, registry, id, port, gen
@@ -131,7 +132,7 @@ func TestHostMaskRewrite(t *testing.T) {
 	if err := registry.PublishWithHostMask(id, gen, ip, "app-${PORT}.internal"); err != nil {
 		t.Fatal(err)
 	}
-	proxy := httptest.NewServer(NewHandler(registry, []string{"sandbox.example.test"}))
+	proxy := httptest.NewServer(NewHandler(registry, []string{"sandbox.example.test"}, nil))
 	defer proxy.Close()
 
 	for _, test := range []struct{ name, host string }{
@@ -161,6 +162,186 @@ func TestHostMaskRewrite(t *testing.T) {
 				t.Fatalf("upstream saw %q, want %q", body, want)
 			}
 		})
+	}
+}
+
+// TestWakeServesRestoredRoute proves a miss on a wakeable sandbox restores its
+// route inside the wake callback and then serves the request, while later
+// requests use the published route without waking again.
+func TestWakeServesRestoredRoute(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "woken guest")
+	}))
+	defer guest.Close()
+	u, _ := url.Parse(guest.URL)
+	ip, port, _ := net.SplitHostPort(u.Host)
+	registry := NewRegistry()
+	defer registry.Close()
+	id := uuid.NewString()
+	wakes := 0
+	wake := func(_ context.Context, sandboxID string) error {
+		wakes++
+		if sandboxID != id {
+			return sandbox.ErrNotFound.New()
+		}
+		return registry.Publish(id, registry.Begin(id), ip)
+	}
+	proxy := httptest.NewServer(NewHandler(registry, nil, wake))
+	defer proxy.Close()
+
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/proxy/health", nil)
+		req.Header.Set(SandboxIDHeader, id)
+		req.Header.Set(TargetPortHeader, port)
+		resp, err := proxy.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != "woken guest" {
+			t.Fatalf("request %d = %d %q", i, resp.StatusCode, body)
+		}
+	}
+	if wakes != 1 {
+		t.Fatalf("wakes = %d, want 1", wakes)
+	}
+}
+
+// TestWakeErrorClassification covers the miss-path status mapping for wake
+// failures and for a wake that succeeds without producing a route.
+func TestWakeErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		wake   func(context.Context, string) error
+		status int
+	}{
+		{"not found", func(context.Context, string) error { return sandbox.ErrNotFound.New() }, http.StatusNotFound},
+		{"not resumable", func(context.Context, string) error { return sandbox.ErrFailedPrecondition.New() }, http.StatusServiceUnavailable},
+		{"wake deadline", func(ctx context.Context, _ string) error { return context.DeadlineExceeded }, http.StatusGatewayTimeout},
+		{"no route appears", func(context.Context, string) error { return nil }, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewRegistry()
+			defer registry.Close()
+			proxy := httptest.NewServer(NewHandler(registry, nil, tc.wake))
+			defer proxy.Close()
+			req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/proxy/health", nil)
+			req.Header.Set(SandboxIDHeader, uuid.NewString())
+			req.Header.Set(TargetPortHeader, "80")
+			resp, err := proxy.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("wake = %d, want %d", resp.StatusCode, tc.status)
+			}
+		})
+	}
+}
+
+// TestBootstrapWaitServesRoute proves a request arriving while a bootstrap
+// generation exists (route not yet published) waits for the route instead of
+// failing, without triggering a second wake.
+func TestBootstrapWaitServesRoute(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "bootstrapped guest")
+	}))
+	defer guest.Close()
+	u, _ := url.Parse(guest.URL)
+	ip, port, _ := net.SplitHostPort(u.Host)
+	registry := NewRegistry()
+	defer registry.Close()
+	id := uuid.NewString()
+	gen := registry.Begin(id)
+	published := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if err := registry.Publish(id, gen, ip); err != nil {
+			t.Error(err)
+		}
+		close(published)
+	}()
+	proxy := httptest.NewServer(NewHandler(registry, nil, func(context.Context, string) error {
+		t.Error("bootstrap wait must not call wake")
+		return sandbox.ErrFailedPrecondition.New()
+	}))
+	defer proxy.Close()
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/proxy/health", nil)
+	req.Header.Set(SandboxIDHeader, id)
+	req.Header.Set(TargetPortHeader, port)
+	resp, err := proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	<-published
+	if resp.StatusCode != http.StatusOK || string(body) != "bootstrapped guest" {
+		t.Fatalf("bootstrap wait = %d %q", resp.StatusCode, body)
+	}
+}
+
+// TestBootstrapWaitRollbackAnswersBadGateway proves a generation that
+// disappears without a route (rolled-back restore) answers 502.
+func TestBootstrapWaitRollbackAnswersBadGateway(t *testing.T) {
+	registry := NewRegistry()
+	defer registry.Close()
+	id := uuid.NewString()
+	gen := registry.Begin(id)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		registry.Remove(id, gen)
+	}()
+	proxy := httptest.NewServer(NewHandler(registry, nil, nil))
+	defer proxy.Close()
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/proxy/health", nil)
+	req.Header.Set(SandboxIDHeader, id)
+	req.Header.Set(TargetPortHeader, "80")
+	resp, err := proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("rolled-back bootstrap = %d, want 502", resp.StatusCode)
+	}
+}
+
+// TestBootstrapWaitBudgetAnswersGatewayTimeout proves an exhausted wait
+// budget answers 504, not 410, and a canceled request answers 410.
+func TestBootstrapWaitBudgetAnswersGatewayTimeout(t *testing.T) {
+	orig := wakeTimeout
+	wakeTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { wakeTimeout = orig })
+	registry := NewRegistry()
+	defer registry.Close()
+	id := uuid.NewString()
+	registry.Begin(id)
+	proxy := httptest.NewServer(NewHandler(registry, nil, nil))
+	defer proxy.Close()
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/proxy/health", nil)
+	req.Header.Set(SandboxIDHeader, id)
+	req.Header.Set(TargetPortHeader, "80")
+	resp, err := proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("exhausted bootstrap wait = %d, want 504", resp.StatusCode)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/proxy/health", nil)
+	cancel()
+	rec := httptest.NewRecorder()
+	NewHandler(registry, nil, nil).awaitRoute(rec, canceled, time.Now().Add(time.Hour), id)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("canceled bootstrap wait = %d, want 410", rec.Code)
 	}
 }
 

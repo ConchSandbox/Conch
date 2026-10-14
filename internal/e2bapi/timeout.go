@@ -17,6 +17,9 @@ type refreshRequest struct {
 const (
 	refreshMinSeconds = 15
 	refreshMaxSeconds = 3600
+	// autoResumeMinTTL is the TTL floor granted to a sandbox restored by
+	// wake-on-traffic, matching the upstream minimum sandbox timeout.
+	autoResumeMinTTL = 300 * time.Second
 )
 
 // set_timeout resets the E2B TTL deadline to now+timeout. Unlike refreshes it

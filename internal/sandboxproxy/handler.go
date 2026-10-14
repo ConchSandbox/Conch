@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openeuler/Conch/internal/apperror"
+	"github.com/openeuler/Conch/internal/sandbox"
 )
 
 const (
@@ -22,13 +24,24 @@ const (
 	E2BTargetPortHeader = "E2b-Sandbox-Port"
 )
 
+const routeWaitInterval = 100 * time.Millisecond
+
+// wakeTimeout bounds every route-miss resolution: the request that drives the
+// restore (VMM boot plus envd initialization) must fit inside it, and requests
+// arriving during that bootstrap wait the same budget for the route to appear.
+// It is a variable so tests can shorten it.
+var wakeTimeout = 60 * time.Second
+
 type Handler struct {
 	registry  *Registry
 	domains   []string
 	transport *http.Transport
+	// wake restores a paused auto-resume sandbox so its traffic can be served.
+	// A nil wake keeps the miss path answering 404.
+	wake func(context.Context, string) error
 }
 
-func NewHandler(registry *Registry, domains []string) *Handler {
+func NewHandler(registry *Registry, domains []string, wake func(context.Context, string) error) *Handler {
 	normalized := make([]string, 0, len(domains))
 	for _, domain := range domains {
 		if domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), "."); domain != "" {
@@ -38,6 +51,7 @@ func NewHandler(registry *Registry, domains []string) *Handler {
 	return &Handler{
 		registry: registry,
 		domains:  normalized,
+		wake:     wake,
 		transport: &http.Transport{
 			// No environment proxy, DNS, or cross-generation idle pool: the
 			// registry's interaction IP is the sole source of upstream hosts.
@@ -136,12 +150,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	route, ok := h.registry.Lookup(target.id)
 	if !ok {
+		// A live generation without a route is a bootstrap in progress; the
+		// request that started it drives the restore, later ones only wait.
 		if _, exists := h.registry.CurrentGeneration(target.id); exists {
-			writeError(w, http.StatusBadGateway, "sandbox route is temporarily unavailable")
+			route, ok = h.awaitRoute(w, r, time.Now().Add(wakeTimeout), target.id)
 		} else {
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			route, ok = h.wakeSandbox(w, r, target.id)
 		}
-		return
+		if !ok {
+			return
+		}
 	}
 	ctx, cancel := route.requestContext(r.Context())
 	defer cancel()
@@ -219,6 +237,68 @@ func (route Route) requestContext(request context.Context) (context.Context, con
 	return ctx, func() {
 		stop()
 		cancel()
+	}
+}
+
+// wakeSandbox asks the control plane to make a route-missing sandbox serve
+// traffic again and waits for its route to appear. The bool result reports
+// whether a route is available; every failure path has already answered.
+func (h *Handler) wakeSandbox(w http.ResponseWriter, r *http.Request, sandboxID string) (Route, bool) {
+	if h.wake == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return Route{}, false
+	}
+	deadline := time.Now().Add(wakeTimeout)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	if err := h.wake(ctx, sandboxID); err != nil {
+		writeWakeError(w, err)
+		return Route{}, false
+	}
+	return h.awaitRoute(w, r, deadline, sandboxID)
+}
+
+// awaitRoute waits for a sandbox route to appear while its bootstrap
+// generation is live. A generation that disappears without a route means the
+// sandbox was paused again or its restore rolled back; an exhausted deadline
+// is a timeout, and only a canceled request answers 410.
+func (h *Handler) awaitRoute(w http.ResponseWriter, r *http.Request, deadline time.Time, sandboxID string) (Route, bool) {
+	for {
+		if route, ok := h.registry.Lookup(sandboxID); ok {
+			return route, true
+		}
+		if _, exists := h.registry.CurrentGeneration(sandboxID); !exists {
+			writeError(w, http.StatusBadGateway, "sandbox route is temporarily unavailable")
+			return Route{}, false
+		}
+		if time.Now().After(deadline) {
+			writeError(w, http.StatusGatewayTimeout, "sandbox resume timed out")
+			return Route{}, false
+		}
+		select {
+		case <-r.Context().Done():
+			writeError(w, http.StatusGone, "sandbox request was canceled")
+			return Route{}, false
+		case <-time.After(routeWaitInterval):
+		}
+	}
+}
+
+func writeWakeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, "sandbox resume timed out")
+	case errors.Is(err, context.Canceled):
+		writeError(w, http.StatusGone, "sandbox request was canceled")
+	case errors.Is(err, sandbox.ErrNotFound):
+		writeError(w, http.StatusNotFound, "sandbox not found")
+	default:
+		message := "sandbox is not available"
+		var app *apperror.Error
+		if errors.As(err, &app) {
+			message = app.PublicMessage()
+		}
+		writeError(w, http.StatusServiceUnavailable, message)
 	}
 }
 

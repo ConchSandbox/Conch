@@ -180,6 +180,7 @@ func (s *Service) ResumePausedSandbox(ctx context.Context, sandboxID string, tim
 		Network:         paused.Network,
 		E2B:             true,
 		TimeoutAction:   paused.TimeoutAction,
+		AutoResume:      paused.AutoResume,
 		MaskRequestHost: paused.MaskRequestHost,
 		VCPUNum:         vcpuNum,
 		VCPUMax:         max(s.SandboxDefaults.VCPUMax, vcpuNum),
@@ -203,6 +204,60 @@ func (s *Service) ResumePausedSandbox(ctx context.Context, sandboxID string, tim
 		return SandboxCreateResult{}, err
 	}
 	return result, nil
+}
+
+// EnsureSandboxRunning makes an E2B sandbox serve data-plane traffic. A
+// running sandbox is a no-op that never touches its TTL; a paused sandbox is
+// restored from its checkpoint only when it was created with autoResume,
+// granted the given TTL. This backs wake-on-traffic: the proxy calls it on a
+// route miss before giving up on the sandbox.
+func (s *Service) EnsureSandboxRunning(ctx context.Context, sandboxID string, ttl time.Duration) error {
+	if s == nil || s.Store == nil {
+		return fmt.Errorf("sandbox state store is not configured")
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
+	unlock := s.lifecycleLocks.lock(sandboxID)
+	rec, err := s.getSandbox(ctx, sandboxID)
+	if err != nil {
+		unlock()
+		return err
+	}
+	if !rec.E2B {
+		unlock()
+		return sandbox.ErrNotFound.Wrap(fmt.Errorf("sandbox %s is not an E2B sandbox", sandboxID))
+	}
+	switch rec.State {
+	case sandbox.StateReady:
+		unlock()
+		return nil
+	case sandbox.StatePaused:
+		if !rec.AutoResume {
+			unlock()
+			return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is paused without automatic resume", sandboxID))
+		}
+	default:
+		unlock()
+		return sandbox.ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", sandboxID, rec.State))
+	}
+	// ResumePausedSandbox takes the same lifecycle lock, so it must run
+	// unlocked, matching the connect path.
+	unlock()
+	if _, err := s.ResumePausedSandbox(ctx, sandboxID, ttl); err != nil {
+		// A concurrent waker may have restored the sandbox between our unlock
+		// and its own lock: a failure whose record is READY now is a success.
+		// Probe with a detached context so a canceled request context cannot
+		// misclassify a restored sandbox.
+		probeCtx, probeCancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeCleanupTimeout)
+		defer probeCancel()
+		if current, getErr := s.getSandbox(probeCtx, sandboxID); getErr == nil && current.State == sandbox.StateReady {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // ApplySandboxTTL updates the E2B expiry deadline of a running sandbox under

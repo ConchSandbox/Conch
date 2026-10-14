@@ -60,6 +60,7 @@ type SandboxCreateOptions struct {
 	Network         *SandboxNetworkConfig
 	E2B             bool
 	TimeoutAction   string
+	AutoResume      bool
 	MaskRequestHost string
 	Metadata        map[string]string
 	Timeout         time.Duration

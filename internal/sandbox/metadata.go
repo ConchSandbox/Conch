@@ -39,7 +39,10 @@ type Record struct {
 	Metadata                 map[string]string
 	ExpiresAt                int64
 	TimeoutAction            string
-	MaskRequestHost          string
+	// AutoResume lets data-plane traffic restore the sandbox from its paused
+	// checkpoint without a control-plane connect call.
+	AutoResume      bool
+	MaskRequestHost string
 }
 
 type Filter struct {

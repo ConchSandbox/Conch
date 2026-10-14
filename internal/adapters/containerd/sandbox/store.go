@@ -39,6 +39,7 @@ type metadataV1 struct {
 	Metadata                 map[string]string                `json:"metadata,omitempty"`
 	ExpiresAt                int64                            `json:"expires_at,omitempty"`
 	TimeoutAction            string                           `json:"timeout_action,omitempty"`
+	AutoResume               bool                             `json:"auto_resume,omitempty"`
 	MaskRequestHost          string                           `json:"mask_request_host,omitempty"`
 }
 
@@ -221,6 +222,7 @@ func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
 		Metadata:        record.Metadata,
 		ExpiresAt:       record.ExpiresAt,
 		TimeoutAction:   record.TimeoutAction,
+		AutoResume:      record.AutoResume,
 		MaskRequestHost: record.MaskRequestHost,
 	}
 }
@@ -253,6 +255,7 @@ func recordFromNative(native cdsandbox.Sandbox) (conchsandbox.Record, error) {
 		Metadata:        metadata.Metadata,
 		ExpiresAt:       metadata.ExpiresAt,
 		TimeoutAction:   metadata.TimeoutAction,
+		AutoResume:      metadata.AutoResume,
 		MaskRequestHost: metadata.MaskRequestHost,
 	}, nil
 }

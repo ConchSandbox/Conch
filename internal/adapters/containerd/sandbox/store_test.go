@@ -322,6 +322,7 @@ func TestStoreRoundTripE2BFieldsAndPausedState(t *testing.T) {
 		Metadata:                 map[string]string{"team": "infra"},
 		ExpiresAt:                1758000000000000000,
 		TimeoutAction:            runtimeapi.TimeoutActionPause,
+		AutoResume:               true,
 		MaskRequestHost:          "app.example.com",
 	}
 	created, err := store.Create(ctx, want)

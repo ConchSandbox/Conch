@@ -218,7 +218,6 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	for _, body := range []string{
 		`{"templateID":"base","secure":true}`,
 		`{"templateID":"base"}`,
-		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
 	} {
 		resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
@@ -648,5 +647,64 @@ func TestCreateWaitsForEnvdAndInitializesThenDelete(t *testing.T) {
 	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("cleanup retry stranded capacity: %d %s", resp.StatusCode, data)
+	}
+}
+
+// TestAutoResumeCreateLifecycleDetail proves the create-time autoResume flag
+// reaches the record and the detail responses report the E2B lifecycle
+// (autoResume plus the kill/pause onTimeout mapping).
+func TestAutoResumeCreateLifecycleDetail(t *testing.T) {
+	service, routes := testRuntime(t)
+	guest := &localGuest{ip: "127.0.0.38", t: t, store: service.Store}
+	service.Sandbox = guest
+	service.Templates = coldTemplate{}
+	service.SetSandboxDefaults(conchruntime.SandboxDefaults{VCPUNum: 2, VCPUMax: 2, RamMB: 512})
+	service.Envd = envd.NewClient()
+	listenGuest(t, guest.ip, envd.DefaultPort, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Envd-Version", "0.8.3")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server := testServer(t, service, routes)
+
+	resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"base","secure":false,"timeout":60,"autoResume":{"enabled":true}}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("autoResume create = %d %s", resp.StatusCode, data)
+	}
+	var created sandboxModel
+	if err := json.Unmarshal(data, &created); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := service.Store.Get(t.Context(), created.SandboxID)
+	if err != nil || !rec.AutoResume {
+		t.Fatalf("autoResume record = %+v (%v)", rec, err)
+	}
+	resp, data = doRequest(t, server, http.MethodGet, "/sandboxes/"+created.SandboxID, "", true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("detail = %d %s", resp.StatusCode, data)
+	}
+	var detail sandboxDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Lifecycle == nil || !detail.Lifecycle.AutoResume || detail.Lifecycle.OnTimeout != "kill" {
+		t.Fatalf("autoResume lifecycle = %#v", detail.Lifecycle)
+	}
+	doRequest(t, server, http.MethodDelete, "/sandboxes/"+created.SandboxID, "", true)
+
+	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"base","secure":false,"timeout":60,"autoPause":true}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("autoPause create = %d %s", resp.StatusCode, data)
+	}
+	created = sandboxModel{}
+	if err := json.Unmarshal(data, &created); err != nil {
+		t.Fatal(err)
+	}
+	resp, data = doRequest(t, server, http.MethodGet, "/sandboxes/"+created.SandboxID, "", true)
+	var pauseDetail sandboxDetail
+	if err := json.Unmarshal(data, &pauseDetail); err != nil {
+		t.Fatal(err)
+	}
+	if pauseDetail.Lifecycle == nil || pauseDetail.Lifecycle.AutoResume || pauseDetail.Lifecycle.OnTimeout != "pause" {
+		t.Fatalf("autoPause lifecycle = %#v", pauseDetail.Lifecycle)
 	}
 }
