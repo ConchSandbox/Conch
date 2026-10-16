@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -35,13 +36,17 @@ type SnapshotOps interface {
 }
 
 // Service adapts API requests and resolves Template names. Sandbox lifecycle
-// state, leases and resource ownership belong to sandbox.Manager.
+// state, leases and resource ownership belong to sandbox.Manager, which runs
+// the whole E2B bootstrap under one lock hold.
 type Service struct {
 	Sandbox         SandboxOps
 	Containerd      *containerdclient.Client
 	Snapshot        SnapshotOps
+	Store           sandbox.Store
 	Templates       conchtemplate.Store
 	SandboxDefaults SandboxDefaults
+	createSuccesses atomic.Uint64
+	createFailures  atomic.Uint64
 }
 
 func New(sandboxOps SandboxOps, client *containerdclient.Client) *Service {
@@ -55,9 +60,24 @@ func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
 	s.SandboxDefaults = defaults
 }
 
-func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (SandboxCreateResult, error) {
+func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (result SandboxCreateResult, err error) {
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
+	}
+	opts.SandboxID = strings.TrimSpace(opts.SandboxID)
+	if opts.SandboxID == "" {
+		generated, err := id.New()
+		if err != nil {
+			return SandboxCreateResult{}, err
+		}
+		opts.SandboxID = generated
+	} else if err := id.Validate(opts.SandboxID); err != nil {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox_id: %w", err))
+	}
+	if opts.E2B && opts.Timeout <= 0 {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(
+			fmt.Errorf("timeout must be positive for E2B sandboxes"),
+		)
 	}
 	s.applySandboxDefaults(&opts)
 	selection, err := s.resolveSandboxTemplate(ctx, opts.TemplateName, opts.TemplateID)
@@ -77,16 +97,64 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if selection.MemorySizeMB > 0 {
 		opts.RamMB = selection.MemorySizeMB
 	}
-	return s.Sandbox.Create(ctx, sandbox.CreateRequest{
+	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
+	}
+	if opts.RamMB < 1 {
+		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("ram_mb must be positive"))
+	}
+	if err := s.validateSandboxLimits(opts); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	// Count create outcomes only past request validation: invalid requests
+	// say nothing about node health.
+	defer func() {
+		if err != nil {
+			s.createFailures.Add(1)
+		} else {
+			s.createSuccesses.Add(1)
+		}
+	}()
+	// Manager owns the whole transition under one lock hold: capacity
+	// reservation, route slot, record, bootstrap and publication.
+	createResult, err := s.Sandbox.Create(ctx, sandbox.CreateRequest{
 		TemplateID: selection.ID, TemplateName: selection.Name,
 		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
 		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
 		Env: copyMap(opts.Env), VolumeMounts: opts.VolumeMounts, Network: opts.Network,
+		E2B: opts.E2B, Timeout: opts.Timeout, TimeoutAction: opts.TimeoutAction,
+		MaskRequestHost: opts.MaskRequestHost, Metadata: copyMap(opts.Metadata),
 	})
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
+	return SandboxCreateResult{
+		SandboxID:    opts.SandboxID,
+		IP:           createResult.IP,
+		AgentToken:   createResult.AgentToken,
+		TemplateName: selection.Name,
+		TemplateID:   selection.ID,
+		VCPUNum:      opts.VCPUNum,
+		RamMB:        opts.RamMB,
+		CreatedAt:    createResult.CreatedAt,
+		EnvdVersion:  createResult.EnvdVersion,
+	}, nil
 }
 
-func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
-	return s.Sandbox.Delete(ctx, sandboxID)
+func (s *Service) validateSandboxLimits(opts SandboxCreateOptions) error {
+	if opts.VCPUNum > runtimeapi.SandboxMaxVCPU || opts.VCPUMax > runtimeapi.SandboxMaxVCPU {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested vcpu_num=%d and vcpu_max=%d exceed maximum %d",
+			opts.VCPUNum, opts.VCPUMax, runtimeapi.SandboxMaxVCPU,
+		))
+	}
+	if opts.RamMB > runtimeapi.SandboxMaxRAMMB {
+		return sandbox.ErrResourceExhausted.Wrap(fmt.Errorf(
+			"requested ram_mb=%d exceeds maximum %d",
+			opts.RamMB, runtimeapi.SandboxMaxRAMMB,
+		))
+	}
+	return nil
 }
 
 func (s *Service) SuspendSandbox(ctx context.Context, sandboxID string) error {

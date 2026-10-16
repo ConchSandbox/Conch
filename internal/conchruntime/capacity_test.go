@@ -21,7 +21,7 @@ func TestCapacityConcurrentReservationsCannotOvercommit(t *testing.T) {
 		wg.Go(func() {
 			<-start
 			id := fmt.Sprintf("sandbox-%d", index)
-			if err := c.reserve(id, 2, 256); err == nil {
+			if err := c.Reserve(id, 2, 256); err == nil {
 				reserved <- id
 			} else if !errors.Is(err, sandbox.ErrResourceExhausted) {
 				t.Errorf("reserve %s: %v", id, err)
@@ -35,16 +35,16 @@ func TestCapacityConcurrentReservationsCannotOvercommit(t *testing.T) {
 		t.Fatalf("overcommitted reservations=%d used=%+v", len(c.reservations), c.used)
 	}
 	for id := range reserved {
-		if err := c.reserve(id, 2, 256); !errors.Is(err, sandbox.ErrAlreadyExists) {
+		if err := c.Reserve(id, 2, 256); !errors.Is(err, sandbox.ErrAlreadyExists) {
 			t.Errorf("duplicate reserve = %v", err)
 		}
-		c.release(id)
-		c.release(id)
+		c.Release(id)
+		c.Release(id)
 	}
 	if len(c.reservations) != 0 || c.used != (allocation{}) {
 		t.Fatalf("release leaked capacity: %+v", c.used)
 	}
-	if err := c.reserve("all", 8, 1024); err != nil {
+	if err := c.Reserve("all", 8, 1024); err != nil {
 		t.Fatalf("released capacity cannot be reused: %v", err)
 	}
 }
@@ -59,10 +59,10 @@ func TestCapacityRejectsEachResourceLimitWithoutLeaking(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := c.reserve("first", 2, 256); err != nil {
+		if err := c.Reserve("first", 2, 256); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.reserve("second", 2, 256); !errors.Is(err, sandbox.ErrResourceExhausted) {
+		if err := c.Reserve("second", 2, 256); !errors.Is(err, sandbox.ErrResourceExhausted) {
 			t.Fatalf("limits %+v allowed overcommit: %v", limits, err)
 		}
 		if len(c.reservations) != 1 || c.used != (allocation{2, 256}) {
@@ -77,11 +77,11 @@ func TestCapacityWithoutSandboxCountLimitStillEnforcesResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"one", "two", "three", "four"} {
-		if err := c.reserve(id, 1, 256); err != nil {
+		if err := c.Reserve(id, 1, 256); err != nil {
 			t.Fatalf("reserve %s: %v", id, err)
 		}
 	}
-	if err := c.reserve("five", 1, 256); !errors.Is(err, sandbox.ErrResourceExhausted) {
+	if err := c.Reserve("five", 1, 256); !errors.Is(err, sandbox.ErrResourceExhausted) {
 		t.Fatalf("resource limit ignored without sandbox count limit: %v", err)
 	}
 }

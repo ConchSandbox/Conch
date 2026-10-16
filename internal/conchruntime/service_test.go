@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -260,6 +261,93 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxPassesE2BLifecycleFields(t *testing.T) {
+	want := digest.FromString("template").String()
+	ops := &fakeSandboxOps{createResult: runtimeapi.SandboxCreateResult{
+		IP: "192.0.2.10", AgentToken: "runtime-token", EnvdVersion: "1.2.3",
+	}}
+	svc := New(ops, nil)
+	setFakeTemplate(svc, testTemplateName, want, conchtemplate.BootModeCold)
+	opts := SandboxCreateOptions{
+		TemplateName: testTemplateName, VCPUNum: 2, VCPUMax: 2, RamMB: 512,
+		E2B: true, Timeout: time.Minute, TimeoutAction: runtimeapi.TimeoutActionPause,
+		MaskRequestHost: "app-${PORT}.internal", Metadata: map[string]string{"team": "core"},
+		Env: map[string]string{"FOO": "bar"},
+	}
+
+	got, err := svc.CreateSandbox(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	req := ops.req
+	if !req.E2B || req.Timeout != time.Minute || req.TimeoutAction != runtimeapi.TimeoutActionPause ||
+		req.MaskRequestHost != opts.MaskRequestHost || req.Metadata["team"] != "core" || req.Env["FOO"] != "bar" {
+		t.Fatalf("request = %#v", req)
+	}
+	if got.EnvdVersion != "1.2.3" || got.IP != "192.0.2.10" || got.AgentToken != "runtime-token" {
+		t.Fatalf("result = %#v", got)
+	}
+	if successes, failures := svc.CreateCounts(); successes != 1 || failures != 0 {
+		t.Fatalf("counts = %d, %d", successes, failures)
+	}
+}
+
+func TestCreateSandboxRejectsInvalidRequests(t *testing.T) {
+	want := digest.FromString("template").String()
+	tests := []struct {
+		name string
+		opts SandboxCreateOptions
+		want error
+	}{
+		{"invalid sandbox id", SandboxCreateOptions{SandboxID: "x/y", TemplateID: want, VCPUNum: 2, VCPUMax: 2, RamMB: 512}, sandbox.ErrInvalidArgument},
+		{"e2b zero timeout", SandboxCreateOptions{TemplateID: want, VCPUNum: 2, VCPUMax: 2, RamMB: 512, E2B: true}, sandbox.ErrInvalidArgument},
+		{"missing cpu", SandboxCreateOptions{TemplateID: want}, sandbox.ErrInvalidArgument},
+		{"inconsistent cpu", SandboxCreateOptions{TemplateID: want, VCPUNum: 4, VCPUMax: 2, RamMB: 512}, sandbox.ErrInvalidArgument},
+		{"missing memory", SandboxCreateOptions{TemplateID: want, VCPUNum: 2, VCPUMax: 2}, sandbox.ErrInvalidArgument},
+		{"cpu over limit", SandboxCreateOptions{TemplateID: want, VCPUNum: runtimeapi.SandboxMaxVCPU + 1, VCPUMax: runtimeapi.SandboxMaxVCPU + 1, RamMB: 512}, sandbox.ErrResourceExhausted},
+		{"memory over limit", SandboxCreateOptions{TemplateID: want, VCPUNum: 2, VCPUMax: 2, RamMB: runtimeapi.SandboxMaxRAMMB + 1}, sandbox.ErrResourceExhausted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeSandboxOps{}
+			svc := New(ops, nil)
+			_, err := svc.CreateSandbox(context.Background(), tt.opts)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("CreateSandbox() error = %v, want %v", err, tt.want)
+			}
+			if ops.createCalls != 0 {
+				t.Fatalf("backend saw %d creates", ops.createCalls)
+			}
+			if successes, failures := svc.CreateCounts(); successes != 0 || failures != 0 {
+				t.Fatalf("counts = %d, %d", successes, failures)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxCountsBackendFailures(t *testing.T) {
+	ops := &fakeSandboxOps{createErr: errors.New("backend unavailable")}
+	svc := New(ops, nil)
+	setFakeTemplate(svc, testTemplateName, digest.FromString("template").String(), conchtemplate.BootModeCold)
+	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{
+		TemplateName: testTemplateName, VCPUNum: 2, VCPUMax: 2, RamMB: 512,
+	})
+	if err == nil {
+		t.Fatal("CreateSandbox() succeeded")
+	}
+	if successes, failures := svc.CreateCounts(); successes != 0 || failures != 1 {
+		t.Fatalf("counts = %d, %d", successes, failures)
+	}
+}
+
+func TestRemoveSandboxRejectsEmptyID(t *testing.T) {
+	ops := &fakeSandboxOps{}
+	svc := New(ops, nil)
+	if err := svc.RemoveSandbox(context.Background(), " "); !errors.Is(err, sandbox.ErrInvalidArgument) {
+		t.Fatalf("RemoveSandbox() error = %v", err)
+	}
+}
+
 func TestCreateTemplateRequiresContainerdClient(t *testing.T) {
 	svc := New(nil, nil)
 
@@ -425,17 +513,19 @@ func TestCreateResolvesTemplateWithoutContentAccess(t *testing.T) {
 	for _, byName := range []bool{true, false} {
 		t.Run(map[bool]string{true: "name", false: "digest"}[byName], func(t *testing.T) {
 			want := digest.FromString("template").String()
-			result := runtimeapi.SandboxCreateResult{SandboxID: "created", TemplateID: want, AgentToken: "runtime-token"}
-			ops := &fakeSandboxOps{createResult: result}
+			ops := &fakeSandboxOps{createResult: runtimeapi.SandboxCreateResult{
+				IP: "192.0.2.10", AgentToken: "runtime-token", TemplateID: want,
+			}}
 			svc := New(ops, nil)
 			setFakeTemplate(svc, testTemplateName, want, conchtemplate.BootModeCold)
-			opts := SandboxCreateOptions{TemplateID: want}
+			opts := SandboxCreateOptions{TemplateID: want, VCPUNum: 2, VCPUMax: 2, RamMB: 512}
 			if byName {
 				opts.TemplateID = ""
 				opts.TemplateName = testTemplateName
 			}
 			got, err := svc.CreateSandbox(context.Background(), opts)
-			if err != nil || got != result || ops.req.TemplateID != want || ops.createCalls != 1 {
+			if err != nil || got.SandboxID != ops.req.SandboxID || got.AgentToken != "runtime-token" ||
+				got.IP != "192.0.2.10" || ops.req.TemplateID != want || ops.createCalls != 1 {
 				t.Fatalf("Create=%#v, %v, req=%#v", got, err, ops.req)
 			}
 		})
