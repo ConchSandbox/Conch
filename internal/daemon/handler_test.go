@@ -185,6 +185,9 @@ func (f *fakeSandboxOps) Pause(context.Context, string, time.Time) error { retur
 func (f *fakeSandboxOps) ResumePaused(context.Context, string, sandbox.ResumePausedOptions) (runtimeapi.SandboxCreateResult, error) {
 	return runtimeapi.SandboxCreateResult{}, nil
 }
+func (f *fakeSandboxOps) EnsureRunning(context.Context, string, sandbox.ResumePausedOptions) error {
+	return nil
+}
 func (f *fakeSandboxOps) ApplyTTL(ctx context.Context, sandboxID string, req sandbox.TTLRequest) (sandbox.Record, error) {
 	if f.store == nil {
 		return sandbox.Record{}, sandbox.ErrNotFound.New()

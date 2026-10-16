@@ -215,7 +215,6 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	for _, body := range []string{
 		`{"templateID":"base","secure":true}`,
 		`{"templateID":"base"}`,
-		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
 		`{"templateID":"base","secure":false,"network":{"egressProxy":{"url":"http://proxy"}}}`,
 		`{"templateID":"base","secure":false,"network":{"rules":[{"port":80}]}}`,
@@ -371,10 +370,19 @@ type fakeSandboxRuntime struct {
 	pauseErrs      map[string]error
 	paused         []string
 	resumed        []string
+	ensureRuns     []ensureRun
 	expired        []string
 	ttlReqs        []sandbox.TTLRequest
 	networkUpdates []sandbox.NetworkUpdateRequest
 	store          sandbox.Store
+	routes         *sandboxproxy.Registry
+	wakeIP         string
+}
+
+type ensureRun struct {
+	id      string
+	ttl     time.Duration
+	vmmName string
 }
 
 func (f *fakeSandboxRuntime) Create(ctx context.Context, req sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error) {
@@ -392,6 +400,7 @@ func (f *fakeSandboxRuntime) Create(ctx context.Context, req sandbox.CreateReque
 			SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
 			CheckpointHeadTemplateID: req.TemplateID, IP: "192.0.2.10",
 			VCPUNum: req.VCPUNum, RamMB: req.RAMMB, E2B: req.E2B, EnvdVersion: "0.8.3",
+			TimeoutAction: req.TimeoutAction, AutoResume: req.AutoResume,
 			Metadata: req.Metadata, ExpiresAt: time.Now().Add(5 * time.Minute).UnixNano(),
 		}); err != nil {
 			return runtimeapi.SandboxCreateResult{}, err
@@ -504,6 +513,45 @@ func (f *fakeSandboxRuntime) ResumePaused(ctx context.Context, sandboxID string,
 		return runtimeapi.SandboxCreateResult{}, err
 	}
 	return runtimeapi.SandboxCreateResult{SandboxID: rec.ID, IP: rec.IP, VCPUNum: rec.VCPUNum, RamMB: rec.RamMB}, nil
+}
+
+func (f *fakeSandboxRuntime) EnsureRunning(ctx context.Context, sandboxID string, opts sandbox.ResumePausedOptions) error {
+	f.mu.Lock()
+	f.ensureRuns = append(f.ensureRuns, ensureRun{id: sandboxID, ttl: opts.Timeout, vmmName: opts.VMMName})
+	f.mu.Unlock()
+	rec, err := f.store.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !rec.E2B {
+		return sandbox.ErrNotFound.New()
+	}
+	if rec.State == sandbox.StateReady {
+		return nil
+	}
+	if rec.State != sandbox.StatePaused || !rec.AutoResume {
+		return sandbox.ErrFailedPrecondition.Wrap(errors.New("sandbox is not resumable"))
+	}
+	if f.routes == nil || f.wakeIP == "" {
+		return sandbox.ErrFailedPrecondition.Wrap(errors.New("wake runtime is not configured"))
+	}
+	rec.State = sandbox.StateReady
+	rec.IP = f.wakeIP
+	rec.StartedAt = time.Now().UnixNano()
+	rec.ExpiresAt = time.Now().Add(opts.Timeout).UnixNano()
+	if _, err := f.store.Update(ctx, rec); err != nil {
+		return err
+	}
+	if f.routes.Insert(rec.ID) == nil {
+		return sandbox.ErrFailedPrecondition.New()
+	}
+	return f.routes.Publish(rec.ID, f.wakeIP, "")
+}
+
+func (f *fakeSandboxRuntime) wakeCalls() []ensureRun {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ensureRun(nil), f.ensureRuns...)
 }
 
 func (f *fakeSandboxRuntime) ApplyTTL(ctx context.Context, sandboxID string, req sandbox.TTLRequest) (sandbox.Record, error) {
@@ -683,6 +731,67 @@ func TestCreateAndKillContract(t *testing.T) {
 	pending, err := service.Store.Get(t.Context(), created.SandboxID)
 	if err != nil || pending.State != sandbox.StateUnknown {
 		t.Fatalf("pending record = %+v %v", pending, err)
+	}
+}
+
+// TestAutoResumeCreateLifecycleDetail covers the autoResume and autoPause
+// create knobs reaching the runtime and the record, and their projection into
+// the detail lifecycle view.
+func TestAutoResumeCreateLifecycleDetail(t *testing.T) {
+	service, routes := testRuntime(t)
+	runtime := &fakeSandboxRuntime{store: service.Store}
+	service.Sandbox = runtime
+	service.Templates = coldTemplate{}
+	service.SetSandboxDefaults(conchruntime.SandboxDefaults{VCPUNum: 2, VCPUMax: 2, RamMB: 512})
+	server := testServer(t, service, routes)
+
+	resp, data := doRequest(t, server, http.MethodPost, "/sandboxes",
+		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("autoResume create = %d %s", resp.StatusCode, data)
+	}
+	var created sandboxModel
+	if err := json.Unmarshal(data, &created); err != nil {
+		t.Fatal(err)
+	}
+	if req := runtime.createReqs[0]; !req.AutoResume || req.TimeoutAction != runtimeapi.TimeoutActionDelete {
+		t.Fatalf("autoResume create request = %#v", req)
+	}
+	rec, err := service.Store.Get(t.Context(), created.SandboxID)
+	if err != nil || !rec.AutoResume || rec.TimeoutAction != runtimeapi.TimeoutActionDelete {
+		t.Fatalf("autoResume record = %+v (%v)", rec, err)
+	}
+	resp, data = doRequest(t, server, http.MethodGet, "/sandboxes/"+created.SandboxID, "", true)
+	var detail sandboxDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || detail.Lifecycle == nil || !detail.Lifecycle.AutoResume || detail.Lifecycle.OnTimeout != "kill" {
+		t.Fatalf("autoResume detail = %d %s", resp.StatusCode, data)
+	}
+
+	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes",
+		`{"templateID":"base","secure":false,"autoPause":true}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("autoPause create = %d %s", resp.StatusCode, data)
+	}
+	if err := json.Unmarshal(data, &created); err != nil {
+		t.Fatal(err)
+	}
+	if req := runtime.createReqs[1]; req.AutoResume || req.TimeoutAction != runtimeapi.TimeoutActionPause {
+		t.Fatalf("autoPause create request = %#v", req)
+	}
+	rec, err = service.Store.Get(t.Context(), created.SandboxID)
+	if err != nil || rec.AutoResume || rec.TimeoutAction != runtimeapi.TimeoutActionPause {
+		t.Fatalf("autoPause record = %+v (%v)", rec, err)
+	}
+	resp, data = doRequest(t, server, http.MethodGet, "/sandboxes/"+created.SandboxID, "", true)
+	detail = sandboxDetail{}
+	if err := json.Unmarshal(data, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || detail.Lifecycle == nil || detail.Lifecycle.AutoResume || detail.Lifecycle.OnTimeout != "pause" {
+		t.Fatalf("autoPause detail = %d %s", resp.StatusCode, data)
 	}
 }
 

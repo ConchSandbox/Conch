@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 )
 
 func seedPausedRecord(t *testing.T, store sandbox.Store, head string) sandbox.Record {
@@ -517,5 +522,125 @@ func TestTTLHandlers(t *testing.T) {
 		if resp.StatusCode != 404 && resp.StatusCode != 409 {
 			t.Fatalf("%s %s = %d %s, want 404/409", tc.method, tc.path, resp.StatusCode, data)
 		}
+	}
+}
+
+// proxyGet sends a data-plane request through the Node server with the
+// explicit E2B routing headers.
+func proxyGet(t *testing.T, server *httptest.Server, sandboxID, port, path string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(sandboxproxy.E2BSandboxIDHeader, sandboxID)
+	req.Header.Set(sandboxproxy.E2BTargetPortHeader, port)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, data
+}
+
+// TestWakeClassification covers the wake error surface of data-plane misses:
+// unknown and native sandboxes answer 404, non-resumable states 503.
+func TestWakeClassification(t *testing.T) {
+	service, routes := testRuntime(t)
+	runtime := &fakeSandboxRuntime{store: service.Store}
+	service.Sandbox = runtime
+	server := testServer(t, service, routes)
+
+	native := seedRecord(t, service.Store, true, false, "")
+	creating := seedRecord(t, service.Store, false, true, "")
+	paused := seedPausedRecord(t, service.Store, digest.FromString("head-wake-a").String())
+	armed := seedPausedRecord(t, service.Store, digest.FromString("head-wake-b").String())
+	armed.AutoResume = true
+	if _, err := service.Store.Update(t.Context(), armed); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		id     string
+		status int
+	}{
+		{"unknown", uuid.NewString(), 404},
+		{"native", native.ID, 404},
+		{"creating", creating.ID, 503},
+		{"paused without autoResume", paused.ID, 503},
+		{"armed but wake runtime not configured", armed.ID, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, data := proxyGet(t, server, tc.id, "80", "/proxy/health")
+			if resp.StatusCode != tc.status {
+				t.Fatalf("wake %s = %d %s, want %d", tc.name, resp.StatusCode, data, tc.status)
+			}
+		})
+	}
+	if calls := runtime.wakeCalls(); len(calls) != 5 {
+		t.Fatalf("wake dispatch = %+v, want one call per miss", calls)
+	}
+}
+
+// TestAutoResumeWakeRestoresPausedSandbox covers the full data-plane wake
+// path: a proxied request to a paused auto-resume sandbox restores it with the
+// wake TTL floor, serves the guest, and later requests reuse the route.
+func TestAutoResumeWakeRestoresPausedSandbox(t *testing.T) {
+	service, routes := testRuntime(t)
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "guest:"+r.URL.Path)
+	}))
+	defer guest.Close()
+	u, _ := url.Parse(guest.URL)
+	ip, port, _ := net.SplitHostPort(u.Host)
+	runtime := &fakeSandboxRuntime{store: service.Store, routes: routes, wakeIP: ip}
+	service.Sandbox = runtime
+	server := testServer(t, service, routes)
+
+	paused := seedPausedRecord(t, service.Store, digest.FromString("head-wake").String())
+	paused.AutoResume = true
+	if _, err := service.Store.Update(t.Context(), paused); err != nil {
+		t.Fatal(err)
+	}
+	resp, data := proxyGet(t, server, paused.ID, port, "/proxy/health")
+	if resp.StatusCode != http.StatusOK || string(data) != "guest:/health" {
+		t.Fatalf("woken proxy = %d %s", resp.StatusCode, data)
+	}
+	woken, err := service.Store.Get(t.Context(), paused.ID)
+	if err != nil || woken.State != sandbox.StateReady || !woken.AutoResume || woken.IP != ip {
+		t.Fatalf("woken record = %+v (%v)", woken, err)
+	}
+	if remaining := time.Until(time.Unix(0, woken.ExpiresAt)); remaining < 290*time.Second || remaining > 300*time.Second {
+		t.Fatalf("wake TTL = %v, want the 300s autoResume floor", remaining)
+	}
+	if calls := runtime.wakeCalls(); len(calls) != 1 || calls[0].id != paused.ID || calls[0].ttl != 300*time.Second {
+		t.Fatalf("wake dispatch = %+v", calls)
+	}
+	if _, ok := routes.Lookup(paused.ID); !ok {
+		t.Fatal("woken sandbox has no published route")
+	}
+	// A second request reuses the route without another wake.
+	resp, data = proxyGet(t, server, paused.ID, port, "/proxy/files")
+	if resp.StatusCode != http.StatusOK || string(data) != "guest:/files" {
+		t.Fatalf("second proxy = %d %s", resp.StatusCode, data)
+	}
+	if calls := runtime.wakeCalls(); len(calls) != 1 {
+		t.Fatalf("second request woke again: %+v", calls)
+	}
+	// A control-plane EnsureRunning on the READY sandbox is a no-op that does
+	// not touch the wake-granted deadline.
+	if err := service.EnsureSandboxRunning(t.Context(), paused.ID, 5*time.Minute); err != nil {
+		t.Fatalf("ready EnsureRunning = %v", err)
+	}
+	after, err := service.Store.Get(t.Context(), paused.ID)
+	if err != nil || after.ExpiresAt != woken.ExpiresAt {
+		t.Fatalf("ready EnsureRunning touched the deadline: %d -> %d", woken.ExpiresAt, after.ExpiresAt)
+	}
+	if calls := runtime.wakeCalls(); len(calls) != 2 {
+		t.Fatalf("ready EnsureRunning dispatch = %+v", calls)
 	}
 }

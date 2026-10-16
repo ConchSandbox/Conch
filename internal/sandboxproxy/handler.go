@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openeuler/Conch/internal/apperror"
+	"github.com/openeuler/Conch/internal/sandbox"
 )
 
 const (
@@ -24,19 +26,20 @@ const (
 
 const routeWaitInterval = 100 * time.Millisecond
 
-// bootstrapWait bounds the proxy's wait for a booting sandbox's route: the
-// request that drives the bootstrap (VMM boot plus envd initialization) must
-// fit inside the same budget, so a waiter either sees the route appear or the
-// record rolled back. It is a variable so tests can shorten it.
+// bootstrapWait bounds every route-miss resolution: the request that drives
+// the bootstrap or the wake restore (VMM boot plus envd initialization) must
+// fit inside it, and requests arriving during that bootstrap wait the same
+// budget for the route to appear. It is a variable so tests can shorten it.
 var bootstrapWait = 60 * time.Second
 
 type Handler struct {
 	registry  *Registry
 	domains   []string
 	transport *http.Transport
+	wake      func(context.Context, string) error
 }
 
-func NewHandler(registry *Registry, domains []string) *Handler {
+func NewHandler(registry *Registry, domains []string, wake func(context.Context, string) error) *Handler {
 	normalized := make([]string, 0, len(domains))
 	for _, domain := range domains {
 		if domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), "."); domain != "" {
@@ -46,6 +49,7 @@ func NewHandler(registry *Registry, domains []string) *Handler {
 	return &Handler{
 		registry: registry,
 		domains:  normalized,
+		wake:     wake,
 		transport: &http.Transport{
 			// No environment proxy, DNS, or cross-sandbox idle pool: the
 			// registry's interaction IP is the sole source of upstream hosts.
@@ -150,8 +154,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.registry.Unpublished(target.id) {
 			route, ok = h.awaitRoute(w, r, time.Now().Add(bootstrapWait), target.id)
 		} else {
-			writeError(w, http.StatusNotFound, "sandbox not found")
-			return
+			route, ok = h.wakeSandbox(w, r, target.id)
 		}
 		if !ok {
 			return
@@ -231,6 +234,24 @@ func (route Route) requestContext(request context.Context) (context.Context, con
 	}
 }
 
+// wakeSandbox asks the control plane to make a route-missing sandbox serve
+// traffic again and waits for its route to appear. The bool result reports
+// whether a route is available; every failure path has already answered.
+func (h *Handler) wakeSandbox(w http.ResponseWriter, r *http.Request, sandboxID string) (Route, bool) {
+	if h.wake == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return Route{}, false
+	}
+	deadline := time.Now().Add(bootstrapWait)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	if err := h.wake(ctx, sandboxID); err != nil {
+		writeWakeError(w, err)
+		return Route{}, false
+	}
+	return h.awaitRoute(w, r, deadline, sandboxID)
+}
+
 // awaitRoute waits for a booting sandbox's route to appear. A slot that
 // disappears without an IP means the sandbox was paused again or its create
 // or resume rolled back; an exhausted deadline is a timeout, and only a
@@ -254,6 +275,24 @@ func (h *Handler) awaitRoute(w http.ResponseWriter, r *http.Request, deadline ti
 			return Route{}, false
 		case <-time.After(routeWaitInterval):
 		}
+	}
+}
+
+func writeWakeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, "sandbox resume timed out")
+	case errors.Is(err, context.Canceled):
+		writeError(w, http.StatusGone, "sandbox request was canceled")
+	case errors.Is(err, sandbox.ErrNotFound):
+		writeError(w, http.StatusNotFound, "sandbox not found")
+	default:
+		message := "sandbox is not available"
+		var app *apperror.Error
+		if errors.As(err, &app) {
+			message = app.PublicMessage()
+		}
+		writeError(w, http.StatusServiceUnavailable, message)
 	}
 }
 

@@ -194,6 +194,7 @@ type CreateRequest struct {
 	E2B             bool
 	Timeout         time.Duration
 	TimeoutAction   string
+	AutoResume      bool
 	MaskRequestHost string
 	Metadata        map[string]string
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,7 @@ type SandboxOps interface {
 	Checkpoint(context.Context, string, func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error)
 	Pause(context.Context, string, time.Time) error
 	ResumePaused(context.Context, string, sandbox.ResumePausedOptions) (runtimeapi.SandboxCreateResult, error)
+	EnsureRunning(context.Context, string, sandbox.ResumePausedOptions) error
 	ApplyTTL(context.Context, string, sandbox.TTLRequest) (sandbox.Record, error)
 	Expire(context.Context, string, time.Time) error
 }
@@ -127,7 +129,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
 		Env: copyMap(opts.Env), VolumeMounts: opts.VolumeMounts, Network: opts.Network,
 		E2B: opts.E2B, Timeout: opts.Timeout, TimeoutAction: opts.TimeoutAction,
-		MaskRequestHost: opts.MaskRequestHost, Metadata: copyMap(opts.Metadata),
+		AutoResume: opts.AutoResume, MaskRequestHost: opts.MaskRequestHost, Metadata: copyMap(opts.Metadata),
 	})
 	if err != nil {
 		return SandboxCreateResult{}, err
@@ -201,6 +203,65 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		return SandboxCheckpointResult{}, err
 	}
 	return SandboxCheckpointResult{TemplateID: result.BootIndexDigest}, nil
+}
+
+// SnapshotAliasLabel marks checkpoint templates captured with a client-chosen
+// name; ListSandboxSnapshots reports that name.
+const SnapshotAliasLabel = "io.conch.e2b/snapshot-alias"
+
+// SandboxSnapshot is a client-visible snapshot of an E2B sandbox.
+type SandboxSnapshot struct {
+	SnapshotID string
+	Names      []string
+	CPUCount   int64
+	MemoryMB   int64
+	CreatedAt  int64
+}
+
+// ListSandboxSnapshots lists the checkpoint templates captured through the E2B
+// snapshots API, newest first. Pause checkpoints are internal runtime state
+// and are not listed. sandboxID and name are optional filters; name matches
+// both the template name and its captured alias.
+func (s *Service) ListSandboxSnapshots(ctx context.Context, sandboxID, name string) ([]SandboxSnapshot, error) {
+	if s == nil || s.Templates == nil {
+		return nil, fmt.Errorf("template store is not configured")
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	name = strings.TrimSpace(name)
+	entries, err := s.Templates.List(ctx, conchtemplate.Filter{Origin: conchtemplate.OriginCheckpoint})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SandboxSnapshot, 0, len(entries))
+	for _, entry := range entries {
+		if sandboxID != "" && entry.SourceSandboxID != sandboxID {
+			continue
+		}
+		alias := entry.Labels[SnapshotAliasLabel]
+		if name != "" && entry.Name != name && alias != name {
+			continue
+		}
+		snapshot := SandboxSnapshot{SnapshotID: entry.Name, Names: []string{}, CreatedAt: entry.CreatedAt}
+		if alias != "" {
+			snapshot.Names = []string{alias}
+		}
+		// A snapshot whose boot index can no longer be read still lists, with
+		// zero sizing.
+		if s.Containerd != nil {
+			if info, inspectErr := conchimage.InspectBootIndex(ctx, s.Containerd, entry.BootIndexDigest); inspectErr == nil {
+				snapshot.CPUCount = info.CPUCount
+				snapshot.MemoryMB = info.MemorySizeMB
+			}
+		}
+		out = append(out, snapshot)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt > out[j].CreatedAt
+		}
+		return out[i].SnapshotID < out[j].SnapshotID
+	})
+	return out, nil
 }
 
 func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {

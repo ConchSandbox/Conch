@@ -197,6 +197,46 @@ func TestCheckpointTemplateMapping(t *testing.T) {
 	if err != nil || len(entries) != 3 {
 		t.Fatalf("same-name update created extra templates: %v, %v", entries, err)
 	}
+	// Named captures carry the alias label so the snapshot list reports the
+	// client-visible name; auto-named captures do not.
+	named, err := service.Templates.Get(ctx, "ready:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named.Labels[conchruntime.SnapshotAliasLabel] != "ready:v1" {
+		t.Fatalf("named template labels = %#v", named.Labels)
+	}
+	// The snapshot list exposes the captured templates with their sizing read
+	// back from the boot index.
+	resp, data := doRequest(t, server, http.MethodGet, "/snapshots?sandboxID="+before.ID, "", true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list snapshots = %d %s", resp.StatusCode, data)
+	}
+	var listed []snapshotModel
+	if err := json.Unmarshal(data, &listed); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]snapshotModel, len(listed))
+	for _, item := range listed {
+		byID[item.SnapshotID] = item
+	}
+	if len(byID) != 3 {
+		t.Fatalf("listed snapshots = %#v", listed)
+	}
+	if item, ok := byID["ready:v1"]; !ok {
+		t.Fatal("named snapshot missing from list")
+	} else if len(item.Names) != 1 || item.Names[0] != "ready:v1" || item.CPUCount != 2 || item.MemoryMB != 512 {
+		t.Fatalf("named snapshot = %#v", item)
+	}
+	for id := range generated {
+		item, ok := byID[id]
+		if !ok {
+			t.Fatalf("auto snapshot %s missing from list", id)
+		}
+		if len(item.Names) != 0 {
+			t.Fatalf("auto snapshot %s names = %v", id, item.Names)
+		}
+	}
 }
 
 func TestCheckpointRequestValidation(t *testing.T) {

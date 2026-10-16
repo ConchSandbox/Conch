@@ -19,6 +19,10 @@ type refreshRequest struct {
 // refreshMinSeconds is the floor native applies to refresh durations.
 const refreshMinSeconds = 15
 
+// autoResumeMinTTL is the TTL floor granted to a sandbox restored by
+// wake-on-traffic, matching the upstream minimum sandbox timeout.
+const autoResumeMinTTL = 300 * time.Second
+
 // setTimeout resets the sandbox TTL deadline to now+timeout. Unlike refreshes
 // and connect it may shorten the remaining lifetime; zero and negative values
 // expire the sandbox now. There is no request-level ceiling: the
