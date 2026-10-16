@@ -482,7 +482,7 @@ func TestCreateFailureCleanupAndRetention(t *testing.T) {
 				rec, getErr := store.Get(context.Background(), "sandbox-a")
 				remaining, _ := leaseStore.List(context.Background())
 				if cleanupFails {
-					if getErr != nil || rec.State != StateCreating || !strings.Contains(rec.LastError, cleanupErr.Error()) || len(remaining) != 1 {
+					if getErr != nil || rec.State != StateUnknown || !strings.Contains(rec.LastError, cleanupErr.Error()) || len(remaining) != 1 {
 						t.Fatalf("retained record=%#v leases=%#v err=%v", rec, remaining, getErr)
 					}
 				} else {
@@ -618,7 +618,7 @@ func TestCreateFailureKeepsRecoveryRecordWhenLeaseReleaseFails(t *testing.T) {
 		t.Fatal("Create succeeded")
 	}
 	rec, err := store.Get(context.Background(), "sandbox-a")
-	if err != nil || rec.State != StateCreating {
+	if err != nil || rec.State != StateUnknown {
 		t.Fatalf("recovery record=%#v, %v", rec, err)
 	}
 	ls.deleteErr = nil
@@ -759,21 +759,36 @@ func TestLifecycleEventsFollowPersistence(t *testing.T) {
 	value, _ := m.sandboxes.Load("sandbox-a")
 	entry := value.(*sandboxEntry)
 	m.handleSandboxExit("sandbox-a", entry)
-	m.handleSandboxExit("sandbox-a", entry)
 	select {
 	case event := <-events:
-		if event.EventData.KillReason != "orphaned" {
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" {
 			t.Fatal(event)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("missing exit event")
+		t.Fatal("missing orphaned crash event")
 	}
+	m.handleSandboxExit("sandbox-a", entry)
+	select {
+	case event := <-events:
+		t.Fatalf("second crash published an event = %#v", event)
+	default:
+	}
+	// A confirmed native crash retains the record as UNKNOWN for an explicit
+	// delete or startup recovery; the crash itself already published orphaned.
 	rec, err := store.Get(context.Background(), "sandbox-a")
-	if err != nil || rec.State != StateUnknown || len(rec.RuntimeSnapshots) != 0 {
-		t.Fatalf("exit record = %#v, %v", rec, err)
+	if err != nil || rec.State != StateUnknown || rec.LastError != "" || len(rec.RuntimeSnapshots) != 0 {
+		t.Fatalf("exited record = %#v, %v", rec, err)
 	}
 	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "request" {
+			t.Fatal(event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing delete event")
 	}
 	select {
 	case event := <-events:
@@ -888,7 +903,7 @@ func checkpointFixture(t *testing.T) (*Manager, *memorySandboxStore, *testLeases
 		t.Fatal(err)
 	}
 	req := testCreateRequest()
-	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String(), VCPUNum: req.VCPUNum})
+	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String(), VCPUNum: req.VCPUNum, StartedAt: 111, HeadStartedAt: 222, HeadCreatedAt: 333})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,6 +927,9 @@ func TestCheckpointPublishesHeadAndProtectsParentDuringRegistration(t *testing.T
 		rec, err := store.Get(ctx, "sandbox-a")
 		if err != nil || rec.CheckpointHeadTemplateID != result.BootIndexDigest {
 			t.Fatalf("checkpoint record=%#v, %v", rec, err)
+		}
+		if rec.HeadStartedAt != 111 || rec.HeadCreatedAt == 0 {
+			t.Fatalf("head run timestamps=%d, %d", rec.HeadStartedAt, rec.HeadCreatedAt)
 		}
 		if result.ParentBootIndexDigest != original.CheckpointHeadTemplateID {
 			t.Fatal(result)
@@ -953,6 +971,9 @@ func TestCheckpointRegistrationFailureRollsBackHead(t *testing.T) {
 	rec, _ := store.Get(ctx, "sandbox-a")
 	if rec.CheckpointHeadTemplateID != original.CheckpointHeadTemplateID {
 		t.Fatalf("head=%s", rec.CheckpointHeadTemplateID)
+	}
+	if rec.HeadStartedAt != 222 || rec.HeadCreatedAt != 333 {
+		t.Fatalf("rolled back head timestamps=%d, %d", rec.HeadStartedAt, rec.HeadCreatedAt)
 	}
 	if remaining, _ := ls.List(ctx); len(remaining) != 0 {
 		t.Fatal(remaining)
@@ -1046,6 +1067,7 @@ type memorySandboxStore struct {
 	beforeUpdate func()
 	updateHook   func(Record) error
 	deleteHook   func() error
+	getHook      func(string) error
 }
 
 func newMemorySandboxStore() *memorySandboxStore {
@@ -1105,6 +1127,11 @@ func validateMemorySandboxRecord(record Record) error {
 }
 
 func (s *memorySandboxStore) Get(_ context.Context, id string) (Record, error) {
+	if s.getHook != nil {
+		if err := s.getHook(id); err != nil {
+			return Record{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
@@ -1240,7 +1267,7 @@ func TestStartupRecoveryRetriesIdempotentBootCleanup(t *testing.T) {
 	}
 }
 
-func TestCreateRecordDeleteFailureRetainsEntry(t *testing.T) {
+func TestCreateRecordDeleteFailureDropsEntry(t *testing.T) {
 	b := readyBoot()
 	m, store, _ := newLifecycleTestManager(t, b)
 	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
@@ -1250,15 +1277,22 @@ func TestCreateRecordDeleteFailureRetainsEntry(t *testing.T) {
 	if _, err := m.Create(context.Background(), testCreateRequest()); err == nil {
 		t.Fatal("Create succeeded")
 	}
-	if _, ok := m.sandboxes.Load("sandbox-a"); !ok {
-		t.Fatal("lost entry")
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("entry remains")
+	}
+	rec, err := store.Get(context.Background(), "sandbox-a")
+	if err != nil || rec.State != StateUnknown || !strings.Contains(rec.LastError, "record failure") {
+		t.Fatalf("record=%#v err=%v", rec, err)
 	}
 	store.deleteHook = nil
 	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.released) != 2 {
-		t.Fatal("boot cleanup was not retried")
+	if len(b.released) != 1 {
+		t.Fatal("delete retry repeated boot cleanup")
+	}
+	if _, err := store.Get(context.Background(), "sandbox-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
 	}
 }
 

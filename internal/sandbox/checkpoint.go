@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/leases"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -113,7 +114,10 @@ func (m *Manager) Checkpoint(parent context.Context, sandboxID string, register 
 			captured.MemorySizeMB,
 		)
 	}
+	previousHeadStartedAt, previousHeadCreatedAt := rec.HeadStartedAt, rec.HeadCreatedAt
 	rec.CheckpointHeadTemplateID = info.BootIndexDigest
+	rec.HeadStartedAt = rec.StartedAt
+	rec.HeadCreatedAt = time.Now().UnixNano()
 	if _, err := m.store.Update(ctx, rec); err != nil {
 		return CheckpointResult{}, err
 	}
@@ -121,6 +125,7 @@ func (m *Manager) Checkpoint(parent context.Context, sandboxID string, register 
 	err = register(publishCtx, result)
 	if err != nil {
 		rec.CheckpointHeadTemplateID = parentID
+		rec.HeadStartedAt, rec.HeadCreatedAt = previousHeadStartedAt, previousHeadCreatedAt
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 		defer cancel()
 		_, rollbackErr := m.store.Update(rollbackCtx, rec)

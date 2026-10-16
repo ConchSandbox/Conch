@@ -15,7 +15,6 @@ type ResolvedBoot struct {
 	Resume          bool
 	VMMName         string
 	MemorySizeMB    int64
-	CPUCount        int64
 }
 
 // ResolveBoot validates a Boot Index by digest and idempotently unpacks its
@@ -37,7 +36,6 @@ func ResolveBoot(ctx context.Context, client *containerdclient.Client, bootIndex
 		Resume:          info.Resume,
 		VMMName:         info.VMMName,
 		MemorySizeMB:    info.MemorySizeMB,
-		CPUCount:        info.CPUCount,
 	}
 	if result.RootfsKey == "" || result.VMKey == "" {
 		return ResolvedBoot{}, fmt.Errorf("boot index %s unpack returned incomplete component keys", info.BootIndexDigest)
