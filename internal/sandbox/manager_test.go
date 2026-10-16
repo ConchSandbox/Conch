@@ -20,6 +20,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
@@ -57,7 +58,7 @@ func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
 			capture := &recordingCheckpointCapture{result: want}
 			m, entry, sbx := checkpointTestManager(tt.initialState, capture)
 
-			got, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+			got, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 			if err != nil {
 				t.Fatalf("Checkpoint() error = %v", err)
 			}
@@ -95,7 +96,7 @@ func TestCheckpointCaptureErrorRestoresPreviousLifecycleState(t *testing.T) {
 			capture := &recordingCheckpointCapture{err: errCapture}
 			m, entry, _ := checkpointTestManager(tt.initialState, capture)
 
-			_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+			_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 			if !errors.Is(err, errCapture) {
 				t.Fatalf("Checkpoint() error = %v, want errors.Is(capture error)", err)
 			}
@@ -111,7 +112,7 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	capture := &recordingCheckpointCapture{err: errors.Join(ErrCheckpointResume, errResume)}
 	m, entry, _ := checkpointTestManager(StateReady, capture)
 
-	_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+	_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 	if !errors.Is(err, ErrCheckpointResume) || !errors.Is(err, errResume) {
 		t.Fatalf("Checkpoint() error = %v, want joined resume failure", err)
 	}
@@ -276,7 +277,9 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 	config.WorkDir = t.TempDir()
 	t.Cleanup(func() { config.WorkDir = old })
 	leaseStore := &testLeases{items: make(map[string]leases.Lease), resources: make(map[string][]leases.Resource)}
-	contentStore, err := localcontent.NewStore(filepath.Join(t.TempDir(), "content"))
+	contentStore, err := localcontent.NewLabeledStore(filepath.Join(t.TempDir(), "content"), &memoryLabelStore{
+		labels: make(map[digest.Digest]map[string]string),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +319,55 @@ type testLeases struct {
 	onDelete  func(string)
 }
 
+// memoryLabelStore backs the test content store with mutable blob labels, so
+// label walks (gc.ref.content chains) behave like the daemon's containerd.
+type memoryLabelStore struct {
+	mu     sync.Mutex
+	labels map[digest.Digest]map[string]string
+}
+
+func (s *memoryLabelStore) Get(dgst digest.Digest) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return copyStringMap(s.labels[dgst]), nil
+}
+
+func (s *memoryLabelStore) Set(dgst digest.Digest, labels map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.labels[dgst] = copyStringMap(labels)
+	return nil
+}
+
+func (s *memoryLabelStore) Update(dgst digest.Digest, update map[string]string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	labels := copyStringMap(s.labels[dgst])
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	for key, value := range update {
+		if value == "" {
+			delete(labels, key)
+		} else {
+			labels[key] = value
+		}
+	}
+	s.labels[dgst] = labels
+	return copyStringMap(labels), nil
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *testLeases) Create(ctx context.Context, opts ...leases.Opt) (leases.Lease, error) {
 	if err := ctx.Err(); err != nil {
 		return leases.Lease{}, err
@@ -336,6 +388,10 @@ func (s *testLeases) Create(ctx context.Context, opts ...leases.Opt) (leases.Lea
 }
 func (s *testLeases) Delete(ctx context.Context, lease leases.Lease, _ ...leases.DeleteOpt) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Mirror the bolt lease store: a delete without a namespace fails.
+	if _, err := namespaces.NamespaceRequired(ctx); err != nil {
 		return err
 	}
 	if s.onDelete != nil {

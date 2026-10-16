@@ -49,10 +49,14 @@ type CheckpointArtifactCapturer interface {
 
 // RuntimeCaptureRequest describes the runtime and its lifecycle state at the
 // checkpoint boundary. PauseBefore is true for a running sandbox and false for
-// a sandbox that was already suspended by its caller.
+// a sandbox that was already suspended by its caller. LeavePaused keeps a
+// successful capture from resuming a runtime it paused — for callers that
+// release the runtime next instead of continuing the run; a failed capture
+// still resumes.
 type RuntimeCaptureRequest struct {
 	Source      RuntimeCaptureSource
 	PauseBefore bool
+	LeavePaused bool
 }
 
 // CapturedBootComponents contains the mutable component inputs for Boot Index
@@ -79,8 +83,9 @@ func NewFullCheckpointCapture() *FullCheckpointCapture {
 
 // Capture creates a self-contained memory/VMM component while the guest is
 // paused. A sandbox that was running is restored before Capture returns,
-// including every error path. A sandbox that was already suspended is never
-// resumed by this adapter.
+// including every error path; LeavePaused is the sole exception, keeping a
+// successful capture suspended for the caller that stops the runtime next.
+// A sandbox that was already suspended is never resumed by this adapter.
 func (c *FullCheckpointCapture) Capture(ctx context.Context, req RuntimeCaptureRequest) (_ CapturedBootComponents, retErr error) {
 	if req.Source == nil {
 		return CapturedBootComponents{}, fmt.Errorf("checkpoint capture source is required")
@@ -120,6 +125,11 @@ func (c *FullCheckpointCapture) Capture(ctx context.Context, req RuntimeCaptureR
 		if !resumePending || resumeAttempted {
 			return
 		}
+		// LeavePaused only covers a successful capture; a failed one still
+		// restores the runtime this adapter paused.
+		if retErr == nil && req.LeavePaused {
+			return
+		}
 		resumeAttempted = true
 		if resumeErr := req.Source.Resume(context.WithoutCancel(ctx)); resumeErr != nil {
 			retErr = errors.Join(retErr, checkpointResumeError(resumeErr))
@@ -137,7 +147,7 @@ func (c *FullCheckpointCapture) Capture(ctx context.Context, req RuntimeCaptureR
 		return CapturedBootComponents{}, fmt.Errorf("capture %s checkpoint artifacts: %w", vmmName, err)
 	}
 
-	if req.PauseBefore {
+	if req.PauseBefore && !req.LeavePaused {
 		resumeAttempted = true
 		if err := req.Source.Resume(context.WithoutCancel(ctx)); err != nil {
 			return CapturedBootComponents{}, checkpointResumeError(err)

@@ -30,13 +30,16 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	includeRunning := true
+	includePaused := true
 	if state := query.Get("state"); state != "" {
 		includeRunning = false
+		includePaused = false
 		for _, item := range strings.Split(state, ",") {
 			switch item {
 			case "running":
 				includeRunning = true
 			case "paused":
+				includePaused = true
 			default:
 				writeError(w, 400, "state must be running or paused")
 				return
@@ -91,13 +94,20 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]sandboxDetail, 0, len(records))
 	for _, rec := range records {
-		if !includeRunning || !rec.E2B || rec.State != sandbox.StateReady {
+		if !rec.E2B {
+			continue
+		}
+		// Paused records stay visible, including an in-place resume in flight
+		// whose checkpoint lineage still has a paused view to show.
+		listable := (includeRunning && rec.State == sandbox.StateReady) ||
+			(includePaused && pausedView(rec))
+		if !listable {
 			continue
 		}
 		if template := query.Get("template"); template != "" && template != rec.SourceTemplateID && template != rec.SourceTemplateName {
 			continue
 		}
-		if !after.IsZero() && time.Unix(0, rec.CreatedAt).Before(after) {
+		if !after.IsZero() && runStartedAt(rec).Before(after) {
 			continue
 		}
 		matched := true
@@ -112,7 +122,13 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if includeRunning {
-		w.Header().Set("X-Total-Running", strconv.Itoa(len(items)))
+		running := 0
+		for _, item := range items {
+			if item.State == "running" {
+				running++
+			}
+		}
+		w.Header().Set("X-Total-Running", strconv.Itoa(running))
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].StartedAt.Equal(items[j].StartedAt) {

@@ -90,7 +90,7 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	m.sandboxes.Delete(sandboxID)
 	m.releaseCapacity(rec)
 
-	if recordExists && (entry == nil || !entry.exitNotified) {
+	if recordExists {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
@@ -234,12 +234,11 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 
 // finalizationOptions carries the caller-specific parts of the unified
 // terminal rule: killReason is the killed-event reason and empty suppresses
-// the event, entry is the runtime entry whose notified exit suppresses a
-// duplicate.
+// the event; skipRecoverableLineage forces the delete branch (every expiry
+// verdict and the TTL kill).
 type finalizationOptions struct {
-	killReason string
-	entry      *sandboxEntry
-	publish    bool
+	killReason             string
+	skipRecoverableLineage bool
 }
 
 // finalizeReleased applies the unified terminal rule to a record whose
@@ -249,19 +248,23 @@ type finalizationOptions struct {
 // reservation; a failed terminal write retains the record as UNKNOWN for an
 // explicit delete or startup recovery, which finalize through the same rule.
 func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finalizationOptions) error {
-	if m.recoverableLineage(rec) {
+	if !opts.skipRecoverableLineage && m.recoverableLineage(rec) {
 		if err := m.writeBackPaused(ctx, rec); err != nil {
 			return m.persistSandboxFailure(ctx, rec, true, err)
 		}
 	} else {
 		deleteErr := m.store.Delete(ctx, rec.ID)
 		if deleteErr != nil {
+			// A forced deletion keeps its verdict: the retry must not resurrect the lineage as PAUSED.
+			if opts.skipRecoverableLineage {
+				rec.CheckpointHeadTemplateID = rec.SourceTemplateID
+			}
 			return m.persistSandboxFailure(ctx, rec, true, deleteErr)
 		}
 	}
 	m.sandboxes.Delete(rec.ID)
 	m.releaseCapacity(rec)
-	if opts.killReason != "" && opts.publish && (opts.entry == nil || !opts.entry.exitNotified) {
+	if opts.killReason != "" {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, opts.killReason)
 	}
 	return nil

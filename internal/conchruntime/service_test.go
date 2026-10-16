@@ -51,6 +51,14 @@ func (f *fakeSandboxOps) Checkpoint(ctx context.Context, _ string, register func
 	}
 	return f.checkpoint, register(ctx, f.checkpoint)
 }
+func (f *fakeSandboxOps) Pause(context.Context, string, time.Time) error { return nil }
+func (f *fakeSandboxOps) ResumePaused(context.Context, string, sandbox.ResumePausedOptions) (runtimeapi.SandboxCreateResult, error) {
+	return runtimeapi.SandboxCreateResult{}, nil
+}
+func (f *fakeSandboxOps) ApplyTTL(_ context.Context, _ string, req sandbox.TTLRequest) (sandbox.Record, error) {
+	return sandbox.Record{}, nil
+}
+func (f *fakeSandboxOps) Expire(context.Context, string, time.Time) error { return nil }
 
 type fakeTemplateStore struct {
 	entries map[string]conchtemplate.Entry

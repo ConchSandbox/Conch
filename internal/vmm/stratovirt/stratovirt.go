@@ -141,7 +141,9 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited driv
 	delay := 2 * time.Millisecond
 	const maxDelay = 100 * time.Millisecond
 	for {
-		if _, err := os.Stat(socketPath); err == nil {
+		// The socket file appears at bind, before the VMM listens: readiness is dialability, not file existence.
+		if conn, err := net.Dial("unix", socketPath); err == nil {
+			conn.Close()
 			logger.Debug("VMM socket ready", ulog.F("socket", socketPath))
 			return nil
 		}

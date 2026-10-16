@@ -3,9 +3,11 @@ package stratovirt
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -185,19 +187,36 @@ func TestBuildStratovirtPmemDevicesWithoutUsablePathsIsEmpty(t *testing.T) {
 	}
 }
 
-func TestWaitForVmmSocketWaitsUntilPathExists(t *testing.T) {
+// bind creates the socket file before listen makes it dialable: the wait must
+// span that gap, exactly like StratoVirt startup.
+func TestWaitForVmmSocketWaitsUntilDialable(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "qmp.sock")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socket() error = %v", err)
+	}
+	defer syscall.Close(fd)
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: socketPath}); err != nil {
+		t.Fatalf("bind() error = %v", err)
+	}
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = os.WriteFile(socketPath, []byte{}, 0644)
+		time.Sleep(20 * time.Millisecond)
+		if err := syscall.Listen(fd, 16); err != nil {
+			t.Errorf("listen() error = %v", err)
+		}
 	}()
 
 	if err := waitForVmmSocket(ctx, socketPath, nil); err != nil {
 		t.Fatalf("waitForVmmSocket() error = %v", err)
 	}
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("socket %s not dialable after wait: %v", socketPath, err)
+	}
+	conn.Close()
 }
 
 func TestWaitForVmmSocketReturnsProcessExitError(t *testing.T) {

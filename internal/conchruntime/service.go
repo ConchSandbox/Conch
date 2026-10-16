@@ -27,6 +27,10 @@ type SandboxOps interface {
 	Resume(context.Context, string) error
 	UpdateNetwork(context.Context, sandbox.NetworkUpdateRequest) error
 	Checkpoint(context.Context, string, func(context.Context, sandbox.CheckpointResult) error) (sandbox.CheckpointResult, error)
+	Pause(context.Context, string, time.Time) error
+	ResumePaused(context.Context, string, sandbox.ResumePausedOptions) (runtimeapi.SandboxCreateResult, error)
+	ApplyTTL(context.Context, string, sandbox.TTLRequest) (sandbox.Record, error)
+	Expire(context.Context, string, time.Time) error
 }
 
 type SnapshotOps interface {
