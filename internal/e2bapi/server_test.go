@@ -217,7 +217,8 @@ func TestUnsupportedAndMalformedRequests(t *testing.T) {
 		`{"templateID":"base"}`,
 		`{"templateID":"base","secure":false,"autoResume":{"enabled":true}}`,
 		`{"templateID":"base","secure":false,"network":{"allowPublicTraffic":false}}`,
-		`{"templateID":"base","secure":false,"network":{"maskRequestHost":"example.com"}}`,
+		`{"templateID":"base","secure":false,"network":{"egressProxy":{"url":"http://proxy"}}}`,
+		`{"templateID":"base","secure":false,"network":{"rules":[{"port":80}]}}`,
 		`{"templateID":"base","secure":false,"volumeMounts":[{}]}`,
 	} {
 		resp, data := doRequest(t, server, http.MethodPost, "/sandboxes", body, true)
@@ -362,17 +363,18 @@ func (coldTemplate) Get(_ context.Context, name string) (conchtemplate.Entry, er
 // commits.
 type fakeSandboxRuntime struct {
 	conchruntime.SandboxOps
-	mu         sync.Mutex
-	createReqs []sandbox.CreateRequest
-	createErr  error
-	deleted    []string
-	deleteErr  error
-	pauseErrs  map[string]error
-	paused     []string
-	resumed    []string
-	expired    []string
-	ttlReqs    []sandbox.TTLRequest
-	store      sandbox.Store
+	mu             sync.Mutex
+	createReqs     []sandbox.CreateRequest
+	createErr      error
+	deleted        []string
+	deleteErr      error
+	pauseErrs      map[string]error
+	paused         []string
+	resumed        []string
+	expired        []string
+	ttlReqs        []sandbox.TTLRequest
+	networkUpdates []sandbox.NetworkUpdateRequest
+	store          sandbox.Store
 }
 
 func (f *fakeSandboxRuntime) Create(ctx context.Context, req sandbox.CreateRequest) (runtimeapi.SandboxCreateResult, error) {
@@ -425,6 +427,22 @@ func (f *fakeSandboxRuntime) Delete(ctx context.Context, sandboxID string) error
 		return f.store.Delete(ctx, sandboxID)
 	}
 	return nil
+}
+
+func (f *fakeSandboxRuntime) UpdateNetwork(ctx context.Context, req sandbox.NetworkUpdateRequest) error {
+	f.mu.Lock()
+	f.networkUpdates = append(f.networkUpdates, req)
+	f.mu.Unlock()
+	if f.store == nil {
+		return nil
+	}
+	rec, err := f.store.Get(ctx, req.SandboxID)
+	if err != nil {
+		return err
+	}
+	rec.Network = req.Network
+	_, err = f.store.Update(ctx, rec)
+	return err
 }
 
 func (f *fakeSandboxRuntime) Pause(ctx context.Context, sandboxID string, expiredBefore time.Time) error {
@@ -595,6 +613,16 @@ func TestCreateAndKillContract(t *testing.T) {
 	if createdCalls, _ := runtime.calls(); createdCalls != 2 || runtime.createReqs[1].TemplateID != templateID || runtime.createReqs[1].TemplateName != "" {
 		t.Fatalf("digest create request = %#v", runtime.createReqs[1])
 	}
+	// The network block's maskRequestHost reaches the runtime as create-time
+	// state.
+	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes",
+		`{"templateID":"base","secure":false,"network":{"maskRequestHost":"app.example.com"}}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("masked create = %d %s", resp.StatusCode, data)
+	}
+	if runtime.createReqs[2].MaskRequestHost != "app.example.com" {
+		t.Fatalf("masked create request = %#v", runtime.createReqs[2])
+	}
 	// An unresolvable template name is a 404 that never reaches the runtime
 	// and does not count as a node create failure.
 	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes", `{"templateID":"missing","secure":false}`, true)
@@ -612,8 +640,8 @@ func TestCreateAndKillContract(t *testing.T) {
 	runtime.createErr = nil
 	runtime.mu.Unlock()
 	successes, failures := service.CreateCounts()
-	if successes != 2 || failures != 1 {
-		t.Fatalf("create counts = %d/%d, want 2/1", successes, failures)
+	if successes != 3 || failures != 1 {
+		t.Fatalf("create counts = %d/%d, want 3/1", successes, failures)
 	}
 	// Delete removes an E2B sandbox; native-only and unknown IDs never reach
 	// the runtime.

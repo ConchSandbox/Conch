@@ -170,6 +170,9 @@ func (s *Service) ResumeSandbox(ctx context.Context, sandboxID string) error {
 }
 
 func (s *Service) UpdateSandboxNetworkConfig(ctx context.Context, opts SandboxNetworkUpdateOptions) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
 	return s.Sandbox.UpdateNetwork(ctx, sandbox.NetworkUpdateRequest{SandboxID: opts.SandboxID, Network: opts.Network})
 }
 
