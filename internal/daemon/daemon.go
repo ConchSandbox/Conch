@@ -22,12 +22,14 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/cleanupdiag"
+	"github.com/openeuler/Conch/internal/cluster"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	conchsandbox "github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchsnapshot "github.com/openeuler/Conch/internal/snapshot"
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
@@ -56,6 +58,14 @@ type Daemon struct {
 	daemonClient      *containerdclient.Client
 	httpServer        *http.Server
 	cleanupOnce       sync.Once
+	proxyRoutes       *sandboxproxy.Registry
+	e2bServer         *http.Server
+	e2bListenAddr     string
+	reporter          *cluster.Reporter
+	e2bLifecycleMu    sync.Mutex
+	e2bStopping       bool
+	e2bCancel         context.CancelFunc
+	e2bWorkers        sync.WaitGroup
 
 	// TODO: need ListCachedBuilds()
 }
@@ -201,6 +211,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}
 	}
 
+	if err := s.initE2B(cfg, manager); err != nil {
+		cleanupErr := host.Close()
+		cancel()
+		return nil, errors.Join(err, cleanupErr)
+	}
 	handleSignals(ctx, cancel, s)
 
 	logger.Info("Server initialized successfully")
@@ -283,6 +298,9 @@ func (s *Daemon) Start(unixSocket string) error {
 	}
 
 	logger.Info("Starting HTTP server", ulog.F("network", "unix"), ulog.F("socket", unixSocket))
+	if s.e2bServer != nil {
+		return s.serveE2B(ln)
+	}
 
 	// Listener is bound, so clients can connect before Serve accepts.
 	util.NotifyReady()
@@ -308,6 +326,7 @@ func (s *Daemon) Shutdown() {
 
 		// Report deactivating while cleanup runs; TimeoutStopSec still applies.
 		util.NotifyStopping()
+		s.shutdownE2B()
 
 		// Stops a Serve that has not started yet, and unlinks the socket.
 		if s.httpServer != nil {
