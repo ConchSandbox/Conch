@@ -199,7 +199,7 @@ func TestAuthenticationAndProxyClassification(t *testing.T) {
 func TestUnsupportedAndMalformedRequests(t *testing.T) {
 	service, routes := testRuntime(t)
 	server := testServer(t, service, routes)
-	for _, operation := range []string{"pause", "resume", "connect"} {
+	for _, operation := range []string{"pause", "resume", "connect", "fork", "timeout", "refreshes"} {
 		resp, body := doRequest(t, server, http.MethodPost, "/sandboxes/"+uuid.NewString()+"/"+operation, `{}`, true)
 		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "Unimplemented") {
 			t.Errorf("%s = %d %q", operation, resp.StatusCode, body)
