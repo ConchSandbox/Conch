@@ -47,6 +47,9 @@ type Manager struct {
 	store              Store
 	client             *containerdclient.Client
 	WebhookDispatcher  *webhook.Dispatcher
+	Routes             RouteTable
+	Capacity           CapacityLedger
+	Envd               EnvdBootstrapper
 	lifecycleLocks     sandboxLifecycleLocks
 	launch             func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error)
 }
@@ -178,17 +181,22 @@ func (m *Manager) Close() error {
 }
 
 type CreateRequest struct {
-	TemplateID   string
-	TemplateName string
-	VMMName      string
-	SandboxID    string
-	VCPUNum      int64
-	VCPUMax      int64
-	RAMMB        int64
-	AgentToken   string
-	Env          map[string]string
-	VolumeMounts []volume.Mount
-	Network      *netstack.SandboxNetworkConfig
+	TemplateID      string
+	TemplateName    string
+	VMMName         string
+	SandboxID       string
+	VCPUNum         int64
+	VCPUMax         int64
+	RAMMB           int64
+	AgentToken      string
+	Env             map[string]string
+	VolumeMounts    []volume.Mount
+	Network         *netstack.SandboxNetworkConfig
+	E2B             bool
+	Timeout         time.Duration
+	TimeoutAction   string
+	MaskRequestHost string
+	Metadata        map[string]string
 }
 
 type NetworkUpdateRequest struct {

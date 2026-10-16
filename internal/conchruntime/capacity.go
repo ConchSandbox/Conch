@@ -45,7 +45,10 @@ func NewCapacity(limits CapacityLimits) (*Capacity, error) {
 	return &Capacity{limits: limits, reservations: make(map[string]allocation)}, nil
 }
 
-func (c *Capacity) reserve(id string, cpus, memoryMB int64) error {
+// Capacity is the ledger sandbox.Manager reserves E2B sandboxes against.
+var _ sandbox.CapacityLedger = (*Capacity)(nil)
+
+func (c *Capacity) Reserve(id string, cpus, memoryMB int64) error {
 	if c == nil {
 		return nil
 	}
@@ -64,7 +67,7 @@ func (c *Capacity) reserve(id string, cpus, memoryMB int64) error {
 	return nil
 }
 
-func (c *Capacity) release(id string) {
+func (c *Capacity) Release(id string) {
 	if c == nil {
 		return
 	}
