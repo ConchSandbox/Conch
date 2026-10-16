@@ -145,7 +145,7 @@ func TestReporterImmediatelyPublishesPersistentRosterAndUnregisters(t *testing.T
 	putRecord(t, store, "suspended", sandbox.StateSuspended, 1, 256)
 	putRecord(t, store, "unknown", sandbox.StateUnknown, 1, 128)
 	reporter, err := NewReporter(Config{
-		SchedulerAddr: "http://" + addr, NodeID: "node-a", ClusterID: "cluster-a",
+		SchedulerAddr: addr, NodeID: "node-a", ClusterID: "cluster-a",
 		Interval: time.Hour, RPCTimeout: 3 * time.Second,
 	}, store, &createStats{successes: 9, failures: 3})
 	if err != nil {

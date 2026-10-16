@@ -61,12 +61,14 @@ func TestCPUPercentDoesNotDoubleCountGuestTime(t *testing.T) {
 }
 
 func TestSchedulerAddressValidation(t *testing.T) {
-	for _, addr := range []string{"localhost:9090", "http://localhost:9090", "http://localhost:9090/", "[::1]:9090"} {
+	for _, addr := range []string{"localhost:9090", "[::1]:9090"} {
 		if _, err := schedulerAddress(addr); err != nil {
 			t.Errorf("valid endpoint %q rejected: %v", addr, err)
 		}
 	}
-	for _, addr := range []string{"", ":9090", "localhost", "localhost:0", "localhost:65536", "https://localhost:9090", "http://user@localhost:9090", "http://localhost:9090/path", "http://localhost:9090?q=1"} {
+	// URL forms are normalized to host:port by config load before the
+	// reporter sees them; the reporter itself takes host:port only.
+	for _, addr := range []string{"", ":9090", "localhost", "localhost:0", "localhost:65536", "http://localhost:9090", "http://localhost:9090/", "https://localhost:9090", "http://user@localhost:9090", "http://localhost:9090/path", "http://localhost:9090?q=1"} {
 		if _, err := schedulerAddress(addr); err == nil {
 			t.Errorf("invalid endpoint %q accepted", addr)
 		}

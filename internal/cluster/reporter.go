@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +22,9 @@ import (
 )
 
 // Config describes a single node's identity and its Scheduler connection.
-// SchedulerAddr is a host:port or http://host:port endpoint. The cluster MVP
-// uses the Scheduler's plaintext gRPC listener on the private node network.
+// SchedulerAddr is a host:port endpoint; config load normalizes any
+// http://host:port form to it. The cluster MVP uses the Scheduler's
+// plaintext gRPC listener on the private node network.
 type Config struct {
 	SchedulerAddr string
 	NodeID        string
@@ -93,13 +93,6 @@ func NewReporter(config Config, store sandbox.Store, stats RuntimeStatsSource) (
 
 func schedulerAddress(raw string) (string, error) {
 	addr := strings.TrimSpace(raw)
-	if strings.Contains(addr, "://") {
-		u, err := url.Parse(addr)
-		if err != nil || u.Scheme != "http" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-			return "", fmt.Errorf("invalid plaintext scheduler endpoint %q", raw)
-		}
-		addr = u.Host
-	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil || strings.TrimSpace(host) == "" {
 		return "", fmt.Errorf("scheduler endpoint must be host:port: %q", raw)
