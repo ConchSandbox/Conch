@@ -116,9 +116,11 @@ func (m *Manager) Pause(parent context.Context, sandboxID string, expiredBefore 
 	if _, err := m.store.Update(ctx, rec); err != nil {
 		return errors.Join(err, m.resumeCapturedSandbox(ctx, sandboxID, entry, ready))
 	}
-	entry.state = StateUnknown
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	// The overwritten parent head is unreachable from the record now; retire its mem component record while its digest is still known.
+	m.retireMemRecord(cleanupCtx, txn.result.ParentBootIndexDigest, rec.SourceTemplateID)
+	entry.state = StateUnknown
 	if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
 		return m.persistSandboxFailure(cleanupCtx, rec, true, err)
 	}
