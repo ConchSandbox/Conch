@@ -66,7 +66,9 @@ network:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; libcni does not install them.
     plugin_bin_dirs:
-      - /usr/libexec/cni
+      - /usr/libexec/cni  # openeuler
+      - /usr/lib/cni      # ubuntu
+      - /opt/cni/bin      # ubuntu
 
 volume:
   max_mounts: 10
