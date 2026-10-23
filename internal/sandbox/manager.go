@@ -47,6 +47,9 @@ type Manager struct {
 	store              Store
 	client             *containerdclient.Client
 	WebhookDispatcher  *webhook.Dispatcher
+	Routes             RouteTable
+	Capacity           CapacityLedger
+	Envd               EnvdBootstrapper
 	lifecycleLocks     sandboxLifecycleLocks
 	launch             func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error)
 }
@@ -54,11 +57,10 @@ type Manager struct {
 const createCleanupTimeout = 10 * time.Second
 
 type sandboxEntry struct {
-	state        State
-	sbx          *Sandbox
-	volumes      []volume.Device
-	exitNotified bool
-	ramMB        int64
+	state   State
+	sbx     *Sandbox
+	volumes []volume.Device
+	ramMB   int64
 }
 
 func New(
@@ -144,6 +146,7 @@ func (m *Manager) recoverStaleSandbox(ctx context.Context, sandboxID string) err
 	if err := m.releaseCreateLease(ctx, sandboxID); err != nil {
 		return m.persistSandboxFailure(ctx, rec, exists, err)
 	}
+	m.retireMemRecord(ctx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 	if err := m.store.Delete(ctx, sandboxID); err != nil {
 		return m.persistSandboxFailure(ctx, rec, exists, err)
 	}
@@ -178,17 +181,23 @@ func (m *Manager) Close() error {
 }
 
 type CreateRequest struct {
-	TemplateID   string
-	TemplateName string
-	VMMName      string
-	SandboxID    string
-	VCPUNum      int64
-	VCPUMax      int64
-	RAMMB        int64
-	AgentToken   string
-	Env          map[string]string
-	VolumeMounts []volume.Mount
-	Network      *netstack.SandboxNetworkConfig
+	TemplateID      string
+	TemplateName    string
+	VMMName         string
+	SandboxID       string
+	VCPUNum         int64
+	VCPUMax         int64
+	RAMMB           int64
+	AgentToken      string
+	Env             map[string]string
+	VolumeMounts    []volume.Mount
+	Network         *netstack.SandboxNetworkConfig
+	E2B             bool
+	Timeout         time.Duration
+	TimeoutAction   string
+	AutoResume      bool
+	MaskRequestHost string
+	Metadata        map[string]string
 }
 
 type NetworkUpdateRequest struct {

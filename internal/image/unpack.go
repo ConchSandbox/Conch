@@ -10,6 +10,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -38,6 +39,11 @@ type unpackLockSet struct {
 }
 
 var componentUnpackLocks = unpackLockSet{locks: make(map[string]*unpackLock)}
+
+// ComponentImageName returns the images-table record name of a Boot Index component manifest.
+func ComponentImageName(kind string, manifest digest.Digest) string {
+	return fmt.Sprintf("localhost/conch/%s-component:%s", kind, manifest.Encoded())
+}
 
 // UnpackBootIndex validates a Boot Index by its immutable digest and unpacks
 // all component manifests.
@@ -74,7 +80,7 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 
 	for _, manifestDesc := range components {
 		kind := getKind(manifestDesc)
-		subImageName := fmt.Sprintf("localhost/conch/%s-component:%s", kind, manifestDesc.Digest.Encoded())
+		subImageName := ComponentImageName(kind, manifestDesc.Digest)
 		if err := validateNativeComponentManifest(ctx, client, kind, manifestDesc); err != nil {
 			return nil, err
 		}

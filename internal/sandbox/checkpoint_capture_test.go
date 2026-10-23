@@ -71,6 +71,43 @@ func TestFullCheckpointCaptureRunningCopiesCompleteMemoryComponent(t *testing.T)
 	}
 }
 
+func TestFullCheckpointCaptureLeavePaused(t *testing.T) {
+	tempRoot := t.TempDir()
+	memoryPath, _ := writeSparseMemoryBacking(t, tempRoot)
+
+	// A successful LeavePaused capture returns with the runtime suspended.
+	source := &fakeRuntimeCaptureSource{memoryPath: memoryPath, memorySizeMB: 512, vmmName: "cloud-hypervisor"}
+	captured, err := NewFullCheckpointCapture().Capture(context.Background(), RuntimeCaptureRequest{
+		Source:      source,
+		PauseBefore: true,
+		LeavePaused: true,
+	})
+	if err != nil {
+		t.Fatalf("Capture() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(captured.MemRootPath) })
+	if got, want := strings.Join(source.events, ","), "pause,capture"; got != want {
+		t.Fatalf("capture event order = %q, want %q", got, want)
+	}
+
+	// A failed LeavePaused capture still resumes the runtime it paused.
+	errCapture := errors.New("capture failed")
+	failing := &fakeRuntimeCaptureSource{
+		memoryPath: memoryPath, memorySizeMB: 512, vmmName: "cloud-hypervisor", captureErr: errCapture,
+	}
+	_, err = NewFullCheckpointCapture().Capture(context.Background(), RuntimeCaptureRequest{
+		Source:      failing,
+		PauseBefore: true,
+		LeavePaused: true,
+	})
+	if !errors.Is(err, errCapture) {
+		t.Fatalf("Capture() error = %v, want errors.Is(capture error)", err)
+	}
+	if got, want := strings.Join(failing.events, ","), "pause,capture,resume"; got != want {
+		t.Fatalf("failed capture events = %q, want %q", got, want)
+	}
+}
+
 func TestFullCheckpointCaptureStratovirtDoesNotRequireMemoryBacking(t *testing.T) {
 	source := &fakeRuntimeCaptureSource{
 		memorySizeMB: 256,

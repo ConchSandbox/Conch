@@ -33,6 +33,16 @@ type metadataV1 struct {
 	RamMB                    int64                            `json:"ram_mb,omitempty"`
 	Network                  *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
+	E2B                      bool                             `json:"e2b,omitempty"`
+	EnvdVersion              string                           `json:"envd_version,omitempty"`
+	Metadata                 map[string]string                `json:"metadata,omitempty"`
+	ExpiresAt                int64                            `json:"expires_at,omitempty"`
+	TimeoutAction            string                           `json:"timeout_action,omitempty"`
+	AutoResume               bool                             `json:"auto_resume,omitempty"`
+	MaskRequestHost          string                           `json:"mask_request_host,omitempty"`
+	StartedAt                int64                            `json:"started_at,omitempty"`
+	HeadStartedAt            int64                            `json:"head_started_at,omitempty"`
+	HeadCreatedAt            int64                            `json:"head_created_at,omitempty"`
 }
 
 func init() {
@@ -188,18 +198,20 @@ func (s *Store) validate(record conchsandbox.Record) error {
 
 func validState(state conchsandbox.State) bool {
 	switch state {
-	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StateUnknown:
+	case conchsandbox.StateCreating, conchsandbox.StateReady, conchsandbox.StateSuspended, conchsandbox.StatePaused, conchsandbox.StateUnknown:
 		return true
 	default:
 		return false
 	}
 }
 
+// currentBootIndexID pins the head first: an in-place resume keeps its
+// checkpoint head through CREATING, and a fresh create's head equals its source.
 func currentBootIndexID(record conchsandbox.Record) string {
-	if record.State == conchsandbox.StateCreating {
-		return strings.TrimSpace(record.SourceTemplateID)
+	if head := strings.TrimSpace(record.CheckpointHeadTemplateID); head != "" {
+		return head
 	}
-	return strings.TrimSpace(record.CheckpointHeadTemplateID)
+	return strings.TrimSpace(record.SourceTemplateID)
 }
 
 func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
@@ -208,6 +220,10 @@ func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
 		SourceTemplateID:         record.SourceTemplateID,
 		CheckpointHeadTemplateID: record.CheckpointHeadTemplateID, IP: record.IP, VCPUNum: record.VCPUNum,
 		RamMB: record.RamMB, Network: record.Network, LastError: record.LastError,
+		E2B: record.E2B, EnvdVersion: record.EnvdVersion, Metadata: record.Metadata,
+		ExpiresAt: record.ExpiresAt, TimeoutAction: record.TimeoutAction, AutoResume: record.AutoResume,
+		MaskRequestHost: record.MaskRequestHost,
+		StartedAt:       record.StartedAt, HeadStartedAt: record.HeadStartedAt, HeadCreatedAt: record.HeadCreatedAt,
 	}
 }
 
@@ -234,6 +250,10 @@ func recordFromNative(native cdsandbox.Sandbox) (conchsandbox.Record, error) {
 		CheckpointHeadTemplateID: metadata.CheckpointHeadTemplateID,
 		IP:                       metadata.IP, VCPUNum: metadata.VCPUNum, RamMB: metadata.RamMB, Network: metadata.Network,
 		LastError: metadata.LastError, RuntimeSnapshots: refs,
+		E2B: metadata.E2B, EnvdVersion: metadata.EnvdVersion, Metadata: metadata.Metadata,
+		ExpiresAt: metadata.ExpiresAt, TimeoutAction: metadata.TimeoutAction, AutoResume: metadata.AutoResume,
+		MaskRequestHost: metadata.MaskRequestHost,
+		StartedAt:       metadata.StartedAt, HeadStartedAt: metadata.HeadStartedAt, HeadCreatedAt: metadata.HeadCreatedAt,
 	}, nil
 }
 

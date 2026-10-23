@@ -69,6 +69,8 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	// Retire before cleanup: persistDeleteFailure clears the checkpoint head, so a retry would no longer know it.
+	m.retireMemRecord(cleanupCtx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 	recordExists := err == nil
 	var entry *sandboxEntry
 	if value, ok := m.sandboxes.Load(sandboxID); ok {
@@ -77,18 +79,20 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	}
 	if entry != nil {
 		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
-			return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+			return m.persistDeleteFailure(cleanupCtx, rec, recordExists, err)
 		}
 	}
 	if err := m.releaseCreateLease(cleanupCtx, sandboxID); err != nil {
-		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+		return m.persistDeleteFailure(cleanupCtx, rec, recordExists, err)
 	}
-	if err := m.store.Delete(cleanupCtx, sandboxID); err != nil {
-		return m.persistSandboxFailure(cleanupCtx, rec, recordExists, err)
+	deleteErr := m.store.Delete(cleanupCtx, sandboxID)
+	if deleteErr != nil {
+		return m.persistDeleteFailure(cleanupCtx, rec, recordExists, deleteErr)
 	}
 	m.sandboxes.Delete(sandboxID)
+	m.releaseCapacity(rec)
 
-	if recordExists && (entry == nil || !entry.exitNotified) {
+	if recordExists {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
@@ -105,6 +109,18 @@ func (m *Manager) persistSandboxFailure(ctx context.Context, rec Record, exists 
 	rec.LastError = err.Error()
 	_, saveErr := m.store.Update(ctx, rec)
 	return combineOperationErrors(err, saveErr)
+}
+
+// persistDeleteFailure keeps the deletion intent across a failed terminal
+// write: the record goes UNKNOWN with its checkpoint lineage cleared, so the
+// delete retry — an explicit Delete or startup recovery — deletes it instead
+// of writing it back as PAUSED.
+func (m *Manager) persistDeleteFailure(ctx context.Context, rec Record, exists bool, err error) error {
+	if exists {
+		rec.State = StateUnknown
+		rec.CheckpointHeadTemplateID = rec.SourceTemplateID
+	}
+	return m.persistSandboxFailure(ctx, rec, exists, err)
 }
 
 func (m *Manager) Suspend(ctx context.Context, sandboxID string) error {
@@ -211,28 +227,136 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createCleanupTimeout)
 	defer cancel()
-	entry.state = StateUnknown
 	cleanupErr := m.cleanupSandbox(ctx, sandboxID, entry)
+	if cleanupErr != nil {
+		ulog.GetLogger().Warn("cleanup exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", cleanupErr))
+	}
+	m.finalizeDeath(ctx, sandboxID, entry, cleanupErr)
+}
+
+// finalizationOptions carries the caller-specific parts of the unified
+// terminal rule: killReason is the killed-event reason and empty suppresses
+// the event; skipRecoverableLineage forces the delete branch (every expiry
+// verdict and the TTL kill).
+type finalizationOptions struct {
+	killReason             string
+	skipRecoverableLineage bool
+}
+
+// finalizeReleased applies the unified terminal rule to a record whose
+// runtime resources are confirmed released: a recoverable checkpoint lineage
+// is written back as PAUSED with its head pinned, any other record is
+// deleted with its mem component record retired. Both confirmed branches
+// drop the runtime entry and the capacity reservation; a failed terminal
+// write retains the record as UNKNOWN for an explicit delete or startup
+// recovery, which finalize through the same rule — a forced deletion clears
+// the lineage on that write so its retry stays a deletion. Delete and
+// startup recovery stay outside: both always delete, and Delete retires
+// before cleanup so its failure retry still knows the head digest.
+func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finalizationOptions) error {
+	if !opts.skipRecoverableLineage && m.recoverableLineage(rec) {
+		if err := m.writeBackPaused(ctx, rec); err != nil {
+			return m.persistSandboxFailure(ctx, rec, true, err)
+		}
+	} else {
+		m.retireMemRecord(ctx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
+		deleteErr := m.store.Delete(ctx, rec.ID)
+		if deleteErr != nil {
+			// A forced deletion keeps its verdict: the retry must not resurrect the lineage as PAUSED.
+			if opts.skipRecoverableLineage {
+				rec.CheckpointHeadTemplateID = rec.SourceTemplateID
+			}
+			return m.persistSandboxFailure(ctx, rec, true, deleteErr)
+		}
+	}
+	m.sandboxes.Delete(rec.ID)
+	m.releaseCapacity(rec)
+	if opts.killReason != "" {
+		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, opts.killReason)
+	}
+	return nil
+}
+
+// finalizeDeath applies the crash rule to a runtime that exited on its own.
+// A native record becomes UNKNOWN and publishes orphaned once the state is
+// on disk; an E2B record stays READY — externally the sandbox keeps running
+// until its deadline or an explicit delete — keeping its quota and holding
+// only the cleared runtime view. Nothing retries either periodically.
+func (m *Manager) finalizeDeath(ctx context.Context, sandboxID string, entry *sandboxEntry, cleanupErr error) {
+	entry.state = StateUnknown
 	rec, err := m.store.Get(ctx, sandboxID)
 	if err != nil {
+		// The on-disk record keeps its own deadline or startup recovery to
+		// finish the transition; the quota stays with the still-READY record.
 		ulog.GetLogger().Error("read exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
-	alreadyExited := rec.State == StateUnknown
-	rec.State = StateUnknown
-	if cleanupErr != nil {
-		rec.LastError = cleanupErr.Error()
-	} else {
-		rec.LastError = ""
-		rec.RuntimeSnapshots = nil
-	}
-	if _, err := m.store.Update(ctx, rec); err != nil {
-		ulog.GetLogger().Error("persist exited sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+	if !rec.E2B {
+		m.finalizeNativeDeath(ctx, rec, cleanupErr)
 		return
 	}
-	if !alreadyExited {
-		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
-		entry.exitNotified = true
+	// The released runtime view must not linger on the READY record: the IP
+	// went back to the pool and the snapshot refs belonged to the dead run.
+	rec.IP, rec.VMMPID = "", 0
+	rec.RuntimeSnapshots = nil
+	if cleanupErr != nil {
+		rec.LastError = cleanupErr.Error()
+	}
+	if _, err := m.store.Update(ctx, rec); err != nil {
+		ulog.GetLogger().Error("persist crashed E2B sandbox", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
+		return
+	}
+	m.sandboxes.Delete(sandboxID)
+}
+
+// finalizeNativeDeath persists a crashed native sandbox as UNKNOWN and
+// publishes one orphaned event after the write: the ID and the cleanup
+// outcome stay inspectable until the client deletes it or startup recovery
+// collects it.
+func (m *Manager) finalizeNativeDeath(ctx context.Context, rec Record, cleanupErr error) {
+	rec.State = StateUnknown
+	if cleanupErr == nil {
+		rec.LastError = ""
+		rec.RuntimeSnapshots = nil
+	} else {
+		rec.LastError = cleanupErr.Error()
+	}
+	if _, err := m.store.Update(ctx, rec); err != nil {
+		ulog.GetLogger().Error("persist exited native sandbox", ulog.F("sandbox_id", rec.ID), ulog.F("error", err))
+		return
+	}
+	m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+}
+
+// recoverableLineage reports whether a released runtime leaves a resumable
+// record behind: an E2B sandbox whose checkpoint head moved past its source.
+func (m *Manager) recoverableLineage(rec Record) bool {
+	return rec.E2B && strings.TrimSpace(rec.CheckpointHeadTemplateID) != "" &&
+		rec.CheckpointHeadTemplateID != rec.SourceTemplateID
+}
+
+// writeBackPaused persists the terminal PAUSED state of a released runtime.
+// The checkpoint head is untouched; StartedAt rewinds to the run that
+// produced it. The runtime snapshot refs are dropped: they were the released
+// run's active/view keys, not checkpoint content, and the resume path
+// rebuilds them instead of reading the old ones.
+func (m *Manager) writeBackPaused(ctx context.Context, rec Record) error {
+	rec.State = StatePaused
+	rec.IP, rec.VMMPID = "", 0
+	rec.LastError = ""
+	rec.ExpiresAt = 0
+	rec.RuntimeSnapshots = nil
+	if rec.HeadStartedAt > 0 {
+		rec.StartedAt = rec.HeadStartedAt
+	}
+	_, err := m.store.Update(ctx, rec)
+	return err
+}
+
+// releaseCapacity drops the capacity reservation of a finalized E2B record.
+func (m *Manager) releaseCapacity(rec Record) {
+	if m.Capacity != nil && rec.E2B {
+		m.Capacity.Release(rec.ID)
 	}
 }
 
@@ -251,10 +375,14 @@ func (m *Manager) publishLifecycleEvent(eventType string, rec Record, killReason
 }
 
 // cleanupSandbox runs under the lifecycle lock. ID-based cleanup is idempotent;
-// failures stop before releasing dependent resources.
+// failures stop before releasing dependent resources. The route slot goes
+// first: in-flight proxy requests must stop before the IP returns to the pool.
 func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *sandboxEntry) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if m.Routes != nil {
+		m.Routes.Release(sandboxID)
 	}
 	if entry.sbx == nil || entry.sbx.process == nil {
 		m.releaseRAM(entry)
