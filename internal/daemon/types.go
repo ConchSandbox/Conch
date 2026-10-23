@@ -140,15 +140,18 @@ type sandboxCheckpointRequest struct {
 }
 
 type templateListRequest struct {
+	Platform string `json:"platform,omitempty"`
 	Origin   string `json:"origin,omitempty"`
 	BootMode string `json:"boot_mode,omitempty"`
 }
 
 type templateNameRequest struct {
-	Name string `json:"name"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name"`
 }
 
 type templateCreateRequest struct {
+	Platform  string            `json:"platform,omitempty"`
 	Name      string            `json:"name"`
 	Source    string            `json:"source"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
@@ -158,6 +161,7 @@ type templateCreateRequest struct {
 }
 
 type templatePullRequest struct {
+	Platform  string            `json:"platform,omitempty"`
 	Reference string            `json:"reference"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
@@ -166,6 +170,7 @@ type templatePullRequest struct {
 }
 
 type templatePushRequest struct {
+	Platform        string `json:"platform,omitempty"`
 	Name            string `json:"name"`
 	RemoteReference string `json:"remote_reference"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
@@ -174,7 +179,8 @@ type templatePushRequest struct {
 }
 
 type templateUnpackRequest struct {
-	Name string `json:"name"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name"`
 }
 
 type templateRecordResponse = runtimeapi.TemplateRecord

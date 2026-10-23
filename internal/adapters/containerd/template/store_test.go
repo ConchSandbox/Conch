@@ -7,6 +7,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	ispec "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -32,7 +34,7 @@ func TestStoreCRUDUsesNamedImageRecord(t *testing.T) {
 	imageStore := newMemoryImageStore()
 	store := &Store{images: imageStore, content: contentStore}
 	const name = "registry.example:5000/team/busybox:latest"
-	recordName := conchimage.TemplateRecordName(name)
+	recordName := conchimage.TemplateRecordName(name, platforms.DefaultString())
 
 	entry, err := store.Put(ctx, conchtemplate.Entry{
 		Name:            name,
@@ -53,7 +55,7 @@ func TestStoreCRUDUsesNamedImageRecord(t *testing.T) {
 	if !reflect.DeepEqual(record.Target, target) {
 		t.Fatalf("record target = %#v, want %#v", record.Target, target)
 	}
-	if record.Name != "io.conch.template/registry.example:5000/team/busybox:latest" {
+	if record.Name != "io.conch.template/registry.example:5000/team/busybox:latest#"+platforms.DefaultString() {
 		t.Fatalf("internal record name = %q", record.Name)
 	}
 	if got := record.Labels[schemaLabel]; got != schemaVersion {
@@ -149,7 +151,7 @@ func TestStorePutRetargetsExistingName(t *testing.T) {
 	if len(imageStore.records) != 1 {
 		t.Fatalf("image records = %#v, want one mutable Name", imageStore.records)
 	}
-	if _, ok := imageStore.records[conchimage.TemplateRecordName(first.Name)]; !ok {
+	if _, ok := imageStore.records[conchimage.TemplateRecordName(first.Name, platforms.DefaultString())]; !ok {
 		t.Fatalf("internal Template record is missing: %#v", imageStore.records)
 	}
 }
@@ -202,7 +204,7 @@ func TestStorePutDoesNotCollideWithOrdinaryImageLogicalName(t *testing.T) {
 	if got := imageStore.records[name]; got.Labels[conchimage.ImageKindLabel] != conchimage.ImageKindOCIImage || got.Labels[schemaLabel] != "" {
 		t.Fatalf("ordinary image record was changed: %#v", got)
 	}
-	if got := imageStore.records[conchimage.TemplateRecordName(name)]; got.Labels[schemaLabel] != schemaVersion {
+	if got := imageStore.records[conchimage.TemplateRecordName(name, platforms.DefaultString())]; got.Labels[schemaLabel] != schemaVersion {
 		t.Fatalf("internal Template record = %#v", got)
 	}
 }
@@ -213,7 +215,7 @@ func TestStorePutRejectsNonTemplateRecordInReservedKeyspace(t *testing.T) {
 	target := buildTestBootIndex(t, ctx, contentStore, false)
 	imageStore := newMemoryImageStore()
 	const name = "registry.example/ordinary:latest"
-	recordName := conchimage.TemplateRecordName(name)
+	recordName := conchimage.TemplateRecordName(name, platforms.DefaultString())
 	original := images.Image{
 		Name:   recordName,
 		Target: target,
@@ -249,7 +251,7 @@ func TestStoreDeleteRejectsNonTemplateRecordInReservedKeyspace(t *testing.T) {
 	imageStore := newMemoryImageStore()
 	store := &Store{images: imageStore, content: contentStore}
 	const name = "registry.example/ordinary:latest"
-	recordName := conchimage.TemplateRecordName(name)
+	recordName := conchimage.TemplateRecordName(name, platforms.DefaultString())
 	imageStore.records[recordName] = images.Image{Name: recordName, Target: target}
 
 	if err := store.Delete(ctx, name); !errors.Is(err, conchtemplate.ErrNotFound) {
@@ -366,16 +368,17 @@ func newTestContentStore(t *testing.T) content.Store {
 	return store
 }
 
-func buildTestBootIndex(t *testing.T, ctx context.Context, store content.Store, resume bool) ocispec.Descriptor {
+func buildTestBootIndex(t *testing.T, ctx context.Context, store content.Store, resume bool, platform ...string) ocispec.Descriptor {
 	t.Helper()
-	rootfs := writeTestComponent(t, ctx, store, conchimage.KindRootfs)
-	sandbox := writeTestComponent(t, ctx, store, conchimage.KindSandbox)
+	rootfs := writeTestComponent(t, ctx, store, conchimage.KindRootfs, platform...)
+	sandbox := writeTestComponent(t, ctx, store, conchimage.KindSandbox, platform...)
 	opts := conchimage.BootIndexContentOptions{
 		RootfsDescriptor:  rootfs,
+		Platform:          testPlatform(platform),
 		SandboxDescriptor: sandbox,
 	}
 	if resume {
-		opts.MemDescriptor = writeTestComponent(t, ctx, store, conchimage.KindMemSnapshot)
+		opts.MemDescriptor = writeTestComponent(t, ctx, store, conchimage.KindMemSnapshot, platform...)
 		opts.VMMName = "cloud-hypervisor"
 		opts.MemorySizeMB = 128
 	}
@@ -386,11 +389,11 @@ func buildTestBootIndex(t *testing.T, ctx context.Context, store content.Store, 
 	return target
 }
 
-func writeTestComponent(t *testing.T, ctx context.Context, store content.Store, kind string) ocispec.Descriptor {
+func writeTestComponent(t *testing.T, ctx context.Context, store content.Store, kind string, platform ...string) ocispec.Descriptor {
 	t.Helper()
 	layer := writeTestBlob(t, ctx, store, []byte("layer-"+kind), erofsconvert.NativeLayerMediaType)
 	config := writeTestJSON(t, ctx, store, ocispec.Image{
-		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Platform: ocispec.Platform{OS: "linux", Architecture: strings.TrimPrefix(testPlatform(platform), "linux/")},
 		RootFS:   ocispec.RootFS{Type: "layers", DiffIDs: []digest.Digest{layer.Digest}},
 	}, ocispec.MediaTypeImageConfig)
 	manifest := writeTestJSON(t, ctx, store, ocispec.Manifest{
@@ -464,4 +467,11 @@ func TestGetAndListDoNotInspectBootIndexContent(t *testing.T) {
 	if _, err := conchimage.InspectBootIndexContent(ctx, cs, target); err == nil {
 		t.Fatal("explicit content validation accepted a missing index")
 	}
+}
+
+func testPlatform(values []string) string {
+	if len(values) > 0 {
+		return values[0]
+	}
+	return platforms.DefaultString()
 }

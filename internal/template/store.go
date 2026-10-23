@@ -7,15 +7,16 @@ import (
 )
 
 type Filter struct {
+	Platform string
 	Origin   Origin
 	BootMode BootMode
 }
 
 type Store interface {
 	Put(context.Context, Entry, ocispec.Descriptor) (Entry, error)
-	Get(context.Context, string) (Entry, error)
+	Get(context.Context, string, ...string) (Entry, error)
 	List(context.Context, Filter) ([]Entry, error)
-	Delete(context.Context, string) error
+	Delete(context.Context, string, ...string) error
 }
 
 func copyMap(in map[string]string) map[string]string {

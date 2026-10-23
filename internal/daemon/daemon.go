@@ -882,6 +882,7 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
 		Name:       req.Name,
+		Platform:   req.Platform,
 		Source:     req.Source,
 		KernelPath: kernelPath,
 		InitrdPath: initrdPath,
@@ -903,6 +904,7 @@ func (s *Daemon) handlePullTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.runtimeService.PullTemplate(r.Context(), runtimeapi.TemplatePullOptions{
 		Reference: req.Reference,
+		Platform:  req.Platform,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
 		Password:  req.Password,
@@ -930,6 +932,7 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.runtimeService.PushTemplate(r.Context(), runtimeapi.TemplatePushOptions{
 		Name:            req.Name,
+		Platform:        req.Platform,
 		RemoteReference: req.RemoteReference,
 		PlainHTTP:       req.PlainHTTP,
 		Username:        req.Username,
@@ -951,7 +954,8 @@ func (s *Daemon) handleUnpackTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtimeService.UnpackTemplate(r.Context(), runtimeapi.TemplateUnpackOptions{
-		Name: req.Name,
+		Name:     req.Name,
+		Platform: req.Platform,
 	}); err != nil {
 		writeAPIError(w, err)
 		return
@@ -970,6 +974,7 @@ func (s *Daemon) handleListTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.runtimeService.ListTemplates(r.Context(), runtimeapi.TemplateListOptions{
 		Origin:   req.Origin,
+		Platform: req.Platform,
 		BootMode: req.BootMode,
 	})
 	if err != nil {
@@ -988,7 +993,7 @@ func (s *Daemon) handleInspectTemplate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
-	item, err := s.runtimeService.GetTemplate(r.Context(), req.Name)
+	item, err := s.runtimeService.GetTemplate(r.Context(), req.Name, req.Platform)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -1005,7 +1010,7 @@ func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errServiceUnavailable.New())
 		return
 	}
-	if err := s.runtimeService.RemoveTemplate(r.Context(), req.Name); err != nil {
+	if err := s.runtimeService.RemoveTemplate(r.Context(), req.Name, req.Platform); err != nil {
 		writeAPIError(w, err)
 		return
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -73,7 +74,7 @@ func (f *fakeTemplateStore) Put(ctx context.Context, entry conchtemplate.Entry, 
 	return entry, nil
 }
 
-func (f *fakeTemplateStore) Get(_ context.Context, name string) (conchtemplate.Entry, error) {
+func (f *fakeTemplateStore) Get(_ context.Context, name string, _ ...string) (conchtemplate.Entry, error) {
 	entry, ok := f.entries[name]
 	if !ok {
 		return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
@@ -89,7 +90,7 @@ func (f *fakeTemplateStore) List(context.Context, conchtemplate.Filter) ([]conch
 	return out, nil
 }
 
-func (f *fakeTemplateStore) Delete(_ context.Context, name string) error {
+func (f *fakeTemplateStore) Delete(_ context.Context, name string, _ ...string) error {
 	delete(f.entries, name)
 	return nil
 }
@@ -279,7 +280,7 @@ func TestCreateTemplateRejectsTemplateSource(t *testing.T) {
 	svc.Templates = host.TemplateStore()
 	_, err := svc.CreateTemplate(ctx, TemplateCreateOptions{
 		Name:       "registry.example/conch/template-output:latest",
-		Source:     conchimage.TemplateRecordName(sourceName),
+		Source:     conchimage.TemplateRecordName(sourceName, platforms.DefaultString()),
 		KernelPath: "unused-kernel",
 		InitrdPath: "unused-initrd",
 	})
@@ -287,7 +288,7 @@ func TestCreateTemplateRejectsTemplateSource(t *testing.T) {
 		t.Fatalf("CreateTemplate() error = %v, want ErrInvalidArgument", err)
 	}
 
-	record, err := host.Client().ImageService().Get(containerdclient.NewNamespaceContext(ctx), conchimage.TemplateRecordName(sourceName))
+	record, err := host.Client().ImageService().Get(containerdclient.NewNamespaceContext(ctx), conchimage.TemplateRecordName(sourceName, platforms.DefaultString()))
 	if err != nil {
 		t.Fatalf("get named Template image: %v", err)
 	}

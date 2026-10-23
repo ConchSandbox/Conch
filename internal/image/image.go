@@ -10,8 +10,10 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	digestpkg "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/openeuler/Conch/internal/platformutil"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -23,9 +25,14 @@ import (
 const TemplateRecordNamePrefix = "io.conch.template/"
 
 // TemplateRecordName deterministically maps a user-visible logical Template
-// Name to its internal containerd image-record name.
-func TemplateRecordName(logicalName string) string {
-	return TemplateRecordNamePrefix + strings.TrimSpace(logicalName)
+// Name and optional canonical platform to their internal containerd record
+// key. Omitting the platform constructs the legacy key for compatibility.
+func TemplateRecordName(logicalName string, platform ...string) string {
+	name := TemplateRecordNamePrefix + strings.TrimSpace(logicalName)
+	if len(platform) > 0 && platform[0] != "" {
+		name += "#" + platform[0]
+	}
+	return name
 }
 
 // TemplateNameFromRecordName reverses TemplateRecordName for a well-formed
@@ -35,6 +42,9 @@ func TemplateNameFromRecordName(recordName string) (string, bool) {
 		return "", false
 	}
 	name := strings.TrimPrefix(recordName, TemplateRecordNamePrefix)
+	if logical, _, ok := strings.Cut(name, "#"); ok {
+		name = logical
+	}
 	if name == "" || strings.TrimSpace(name) != name {
 		return "", false
 	}
@@ -59,6 +69,7 @@ func Pull(ctx context.Context, client *containerdclient.Client, req runtimeapi.P
 	}
 	_, _, err := pullRegistryContent(pullCtx, client, RegistryPullOptions{
 		Reference: req.ImageName,
+		Platform:  req.Platform,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
 		Password:  req.Password,
@@ -75,6 +86,16 @@ func pullRegistryContent(
 	req RegistryPullOptions,
 	bootIndexOnly bool,
 ) (images.Image, string, error) {
+	// Preserve ordinary image pulls' existing all-platform behavior unless
+	// the template builder explicitly requests a source platform.
+	matcher := platforms.All
+	if req.Platform != "" {
+		platform, err := platformutil.Parse(req.Platform)
+		if err != nil {
+			return images.Image{}, "", ErrInvalidArgument.Wrap(err)
+		}
+		matcher = platforms.OnlyStrict(platform)
+	}
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		PlainHTTP: req.PlainHTTP,
 		Credentials: func(string) (string, string, error) {
@@ -112,6 +133,7 @@ func pullRegistryContent(
 		ctx,
 		req.Reference,
 		containerd.WithResolver(resolver),
+		containerd.WithPlatformMatcher(matcher),
 		containerd.WithImageHandlerWrapper(gateRoot),
 	)
 	if err != nil {

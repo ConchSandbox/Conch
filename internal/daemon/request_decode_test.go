@@ -162,6 +162,7 @@ func TestTemplateCreateRejectsUnknownMetadataField(t *testing.T) {
 func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	metadata := `{
 		"source":"example.invalid/image:latest",
+		"platform":"linux/arm64",
 		"plain_http":true,
 		"username":"tester",
 		"password":"secret",
@@ -172,7 +173,7 @@ func TestTemplateCreateAcceptsAllMetadataFields(t *testing.T) {
 	if err := decodeStrictJSON(strings.NewReader(metadata), &req); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if req.Source != "example.invalid/image:latest" || !req.PlainHTTP ||
+	if req.Platform != "linux/arm64" || req.Source != "example.invalid/image:latest" || !req.PlainHTTP ||
 		req.Username != "tester" || req.Password != "secret" ||
 		req.Labels["purpose"] != "strict-json-test" {
 		t.Fatalf("decoded metadata = %#v", req)

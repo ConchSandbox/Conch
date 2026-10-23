@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/openeuler/Conch/internal/platformutil"
 )
 
 type Origin string
@@ -21,9 +22,10 @@ const (
 	BootModeResume BootMode = "resume"
 )
 
-// Entry is the metadata of a named Template. Name maps to one image record;
+// Entry is the metadata of a Template identified by (Name, Platform).
 // BootIndexDigest identifies its immutable content.
 type Entry struct {
+	Platform              string
 	Name                  string
 	Origin                Origin
 	BootMode              BootMode
@@ -42,6 +44,17 @@ func NormalizeEntry(entry Entry) (Entry, error) {
 	if entry.Name == "" {
 		return Entry{}, ErrInvalidArtifact.Wrap(fmt.Errorf("template name is required"))
 	}
+	if strings.Contains(entry.Name, "#") {
+		return Entry{}, ErrInvalidArgument.Wrap(fmt.Errorf("template name cannot contain #"))
+	}
+	if entry.Platform != "" {
+		var err error
+		entry.Platform, err = platformutil.Normalize(entry.Platform)
+		if err != nil {
+			return Entry{}, ErrInvalidArgument.Wrap(err)
+		}
+	}
+
 	switch entry.Origin {
 	case OriginImage, OriginCheckpoint:
 	default:

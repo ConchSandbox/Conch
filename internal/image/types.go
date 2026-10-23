@@ -6,6 +6,7 @@ import ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 // Boot Index pull workflows. Command-specific kind policy is applied by the
 // caller before child manifests and layers are fetched.
 type RegistryPullOptions struct {
+	Platform  string
 	Reference string
 	PlainHTTP bool
 	Username  string
@@ -13,6 +14,7 @@ type RegistryPullOptions struct {
 }
 
 type PublishBootIndexOptions struct {
+	Platform        string `json:"platform,omitempty"`
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`
 	InitrdPath      string `json:"initrd_path"`
@@ -33,6 +35,7 @@ type PulledBootIndex struct {
 // Index. MemDescriptor is empty for a cold-boot index. VMMName is present for
 // resume indexes and records the VMM that produced the captured state.
 type BootIndexInfo struct {
+	Platform          string             `json:"platform,omitempty"`
 	BootIndexDigest   string             `json:"boot_index_digest"`
 	RootfsDescriptor  ocispec.Descriptor `json:"rootfs_descriptor"`
 	MemDescriptor     ocispec.Descriptor `json:"mem_descriptor,omitempty"`

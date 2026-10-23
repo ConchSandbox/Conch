@@ -18,6 +18,8 @@ func PrintTemplateUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "  Unpack every component in a local Template's Boot Index.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --platform string")
+	fmt.Fprintln(out, "        select template platform (default: daemon platform)")
 	fmt.Fprintln(out, "  -api-url string")
 	fmt.Fprintln(out, "        conchd API base URL (default: conchd unix socket from config)")
 	fmt.Fprintln(out, "  -address string")
@@ -35,6 +37,7 @@ func runTemplateUnpack(ctx context.Context, args []string) error {
 	apiURL := fs.String("api-url", "", "conchd API base URL")
 	addr := fs.String("address", "", "deprecated alias for -api-url")
 	configPath := fs.String("config", "", "config file path")
+	platform := fs.String("platform", "", "select platform: linux/amd64 or linux/arm64")
 	fs.Usage = func() { PrintTemplateUnpackHelp(os.Stderr) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -53,7 +56,8 @@ func runTemplateUnpack(ctx context.Context, args []string) error {
 		return fmt.Errorf("conch template unpack: create API client: %w", err)
 	}
 	if err := conchClient.UnpackTemplate(ctx, client.TemplateUnpackRequest{
-		Name: name,
+		Name:     name,
+		Platform: *platform,
 	}); err != nil {
 		return fmt.Errorf("conch template unpack: %w", err)
 	}

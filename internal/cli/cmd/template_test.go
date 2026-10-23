@@ -37,14 +37,14 @@ func TestTemplateRegistryFlags(t *testing.T) {
 	var pull templateRegistryOptions
 	pullFlags := flag.NewFlagSet("template pull", flag.ContinueOnError)
 	registerTemplateRegistryFlags(pullFlags, &pull, false)
-	if err := pullFlags.Parse([]string{"--plain-http", "--user", "alice:secret", "registry.example/template:latest"}); err != nil {
+	if err := pullFlags.Parse([]string{"--platform", "linux/arm64", "--plain-http", "--user", "alice:secret", "registry.example/template:latest"}); err != nil {
 		t.Fatalf("parse pull flags: %v", err)
 	}
 	username, password, err := templateRegistryCredentials(pull)
 	if err != nil {
 		t.Fatalf("templateRegistryCredentials() error = %v", err)
 	}
-	if !pull.plainHTTP || username != "alice" || password != "secret" || pullFlags.Arg(0) != "registry.example/template:latest" {
+	if pull.platform != "linux/arm64" || !pull.plainHTTP || username != "alice" || password != "secret" || pullFlags.Arg(0) != "registry.example/template:latest" {
 		t.Fatalf("pull options = %#v, args = %#v", pull, pullFlags.Args())
 	}
 
@@ -88,7 +88,7 @@ func TestPrintTemplatesAlignsRowsAndShowsEmptyFields(t *testing.T) {
 		}
 	}
 	fields := strings.Fields(row)
-	if len(fields) != 6 || fields[4] != "-" || fields[5] != "-" {
+	if len(fields) != 7 || fields[1] != "-" || fields[5] != "-" || fields[6] != "-" {
 		t.Fatalf("template row fields = %#v, want two visible empty placeholders", fields)
 	}
 }

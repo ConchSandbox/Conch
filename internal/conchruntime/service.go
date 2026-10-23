@@ -7,12 +7,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/platformutil"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
@@ -184,10 +187,15 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 	if reference == "" {
 		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template reference is required"))
 	}
+	platform, err := platformutil.Normalize(opts.Platform)
+	if err != nil {
+		return TemplatePullResult{}, conchtemplate.ErrInvalidArgument.Wrap(err)
+	}
 	var entry conchtemplate.Entry
 	consumed := false
-	err := conchimage.WithPulledBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
+	err = conchimage.WithPulledBootIndex(ctx, s.Containerd, conchimage.RegistryPullOptions{
 		Reference: reference,
+		Platform:  platform,
 		PlainHTTP: opts.PlainHTTP,
 		Username:  opts.Username,
 		Password:  opts.Password,
@@ -203,6 +211,7 @@ func (s *Service) PullTemplate(ctx context.Context, opts TemplatePullOptions) (T
 		var err error
 		entry, err = s.Templates.Put(pullCtx, conchtemplate.Entry{
 			Name:            pulled.SourceImageName,
+			Platform:        info.Platform,
 			Origin:          origin,
 			BootMode:        bootMode,
 			BootIndexDigest: info.BootIndexDigest,
@@ -240,7 +249,7 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 	if remoteReference == "" {
 		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("remote template reference is required"))
 	}
-	rec, err := s.Templates.Get(ctx, name)
+	rec, err := s.Templates.Get(ctx, name, opts.Platform)
 	if err != nil {
 		return err
 	}
@@ -268,7 +277,7 @@ func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions
 	if name == "" {
 		return conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template name is required"))
 	}
-	rec, err := s.Templates.Get(ctx, name)
+	rec, err := s.Templates.Get(ctx, name, opts.Platform)
 	if err != nil {
 		return fmt.Errorf("get template %s: %w", name, err)
 	}
@@ -293,9 +302,17 @@ func (s *Service) CreateTemplate(ctx context.Context, opts TemplateCreateOptions
 	if source == "" {
 		return TemplateCreateResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("template source is required"))
 	}
+	if _, internalTemplate := conchimage.TemplateNameFromRecordName(source); internalTemplate {
+		return TemplateCreateResult{}, conchtemplate.ErrInvalidArgument.Wrap(fmt.Errorf("Template image %s cannot be used as a rootfs source", source))
+	}
 	if strings.TrimSpace(opts.KernelPath) == "" || strings.TrimSpace(opts.InitrdPath) == "" {
 		return TemplateCreateResult{}, conchtemplate.ErrInvalidArtifact.Wrap(fmt.Errorf("kernel and initrd are required"))
 	}
+	platform, err := platformutil.Normalize(opts.Platform)
+	if err != nil {
+		return TemplateCreateResult{}, conchtemplate.ErrInvalidArgument.Wrap(err)
+	}
+	opts.Platform = platform
 	opts.Source = source
 	result, err := s.createTemplateFromSource(ctx, opts)
 	if err != nil {
@@ -317,12 +334,38 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 		return templateBuildResult{}, fmt.Errorf("prepare rootfs source namespace: %w", err)
 	}
 	sourceImage, err := s.Containerd.GetImage(sourceCtx, opts.Source)
+	if err == nil {
+		p, _ := platformutil.Parse(opts.Platform)
+		config, configErr := images.Config(sourceCtx, s.Containerd.ContentStore(), sourceImage.Target(), platforms.OnlyStrict(p))
+		if configErr == nil {
+			actual, readErr := images.ConfigPlatform(sourceCtx, s.Containerd.ContentStore(), config)
+			if readErr != nil || !platforms.OnlyStrict(p).Match(actual) {
+				configErr = errdefs.ErrNotFound
+			}
+		}
+		if configErr == nil {
+			manifest, manifestErr := images.Manifest(sourceCtx, s.Containerd.ContentStore(), sourceImage.Target(), platforms.OnlyStrict(p))
+			configErr = manifestErr
+			if manifestErr == nil {
+				for _, layer := range manifest.Layers {
+					if _, layerErr := s.Containerd.ContentStore().Info(sourceCtx, layer.Digest); layerErr != nil {
+						configErr = layerErr
+						break
+					}
+				}
+			}
+		}
+		if configErr != nil {
+			err = errdefs.ErrNotFound
+		}
+	}
 	if err != nil {
 		if !errdefs.IsNotFound(err) {
 			return templateBuildResult{}, fmt.Errorf("lookup rootfs source image %s: %w", opts.Source, err)
 		}
 		if err := conchimage.Pull(ctx, s.Containerd, runtimeapi.PullImageOptions{
 			ImageName: opts.Source,
+			Platform:  opts.Platform,
 			PlainHTTP: opts.PlainHTTP,
 			Username:  opts.Username,
 			Password:  opts.Password,
@@ -351,6 +394,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	convertTarget := fmt.Sprintf("conch-erofs-rootfs:%s", buildID)
 	converted, err := erofsconvert.ConvertRootfs(ctx, s.Containerd, erofsconvert.ConvertRootfsRequest{
 		SourceImage: sourceImage.Name(),
+		Platform:    opts.Platform,
 		TargetImage: convertTarget,
 		MkfsOptions: []string{erofsconvert.DefaultMkfsOption},
 		AlignBytes:  erofsconvert.DefaultAlignBytes,
@@ -377,6 +421,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	defer done(publishCtx)
 	published, err := conchimage.PublishBootIndex(publishCtx, s.Containerd, conchimage.PublishBootIndexOptions{
 		RootfsImageName: converted.ImageName,
+		Platform:        opts.Platform,
 		KernelPath:      opts.KernelPath,
 		InitrdPath:      opts.InitrdPath,
 	})
@@ -385,6 +430,7 @@ func (s *Service) createTemplateFromSource(ctx context.Context, opts TemplateCre
 	}
 	entry, err := s.Templates.Put(publishCtx, conchtemplate.Entry{
 		Name:            opts.Name,
+		Platform:        opts.Platform,
 		Origin:          conchtemplate.OriginImage,
 		BootMode:        conchtemplate.BootModeCold,
 		BootIndexDigest: published.BootIndexDigest,
@@ -406,6 +452,7 @@ func (s *Service) ListTemplates(ctx context.Context, opts runtimeapi.TemplateLis
 	}
 	items, err := s.Templates.List(ctx, conchtemplate.Filter{
 		Origin:   conchtemplate.Origin(strings.TrimSpace(opts.Origin)),
+		Platform: opts.Platform,
 		BootMode: conchtemplate.BootMode(strings.TrimSpace(opts.BootMode)),
 	})
 	if err != nil {
@@ -418,27 +465,28 @@ func (s *Service) ListTemplates(ctx context.Context, opts runtimeapi.TemplateLis
 	return out, nil
 }
 
-func (s *Service) GetTemplate(ctx context.Context, name string) (runtimeapi.TemplateRecord, error) {
+func (s *Service) GetTemplate(ctx context.Context, name string, platform ...string) (runtimeapi.TemplateRecord, error) {
 	if s == nil || s.Templates == nil {
 		return runtimeapi.TemplateRecord{}, fmt.Errorf("template store is not configured")
 	}
-	rec, err := s.Templates.Get(ctx, name)
+	rec, err := s.Templates.Get(ctx, name, platform...)
 	if err != nil {
 		return runtimeapi.TemplateRecord{}, err
 	}
 	return publicTemplateRecord(rec), nil
 }
 
-func (s *Service) RemoveTemplate(ctx context.Context, name string) error {
+func (s *Service) RemoveTemplate(ctx context.Context, name string, platform ...string) error {
 	if s == nil || s.Templates == nil {
 		return fmt.Errorf("template store is not configured")
 	}
-	return s.Templates.Delete(ctx, name)
+	return s.Templates.Delete(ctx, name, platform...)
 }
 
 func publicTemplateRecord(entry conchtemplate.Entry) runtimeapi.TemplateRecord {
 	return runtimeapi.TemplateRecord{
 		Name:             entry.Name,
+		Platform:         entry.Platform,
 		TemplateID:       entry.BootIndexDigest,
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),

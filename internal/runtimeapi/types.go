@@ -98,6 +98,7 @@ type SandboxCheckpointResult struct {
 }
 
 type TemplateCreateOptions struct {
+	Platform   string
 	Name       string
 	Source     string
 	KernelPath string
@@ -114,6 +115,7 @@ type TemplateCreateResult struct {
 }
 
 type TemplatePullOptions struct {
+	Platform  string
 	Reference string
 	PlainHTTP bool
 	Username  string
@@ -127,6 +129,7 @@ type TemplatePullResult struct {
 }
 
 type TemplatePushOptions struct {
+	Platform        string
 	Name            string
 	RemoteReference string
 	PlainHTTP       bool
@@ -135,15 +138,18 @@ type TemplatePushOptions struct {
 }
 
 type TemplateUnpackOptions struct {
-	Name string
+	Platform string
+	Name     string
 }
 
 type TemplateListOptions struct {
+	Platform string
 	Origin   string
 	BootMode string
 }
 
 type TemplateRecord struct {
+	Platform         string            `json:"platform,omitempty"`
 	Name             string            `json:"name"`
 	TemplateID       string            `json:"template_id"`
 	Origin           string            `json:"origin"`
@@ -156,6 +162,7 @@ type TemplateRecord struct {
 }
 
 type PullImageOptions struct {
+	Platform  string
 	ImageName string
 	PlainHTTP bool
 	Username  string

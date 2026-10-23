@@ -24,10 +24,12 @@ const (
 )
 
 type TemplateNameRequest struct {
-	Name string `json:"name"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name"`
 }
 
 type TemplateListRequest struct {
+	Platform string `json:"platform,omitempty"`
 	Origin   string `json:"origin,omitempty"`
 	BootMode string `json:"boot_mode,omitempty"`
 }
@@ -39,6 +41,7 @@ type templateListResponse struct {
 }
 
 type TemplatePullRequest struct {
+	Platform  string            `json:"platform,omitempty"`
 	Reference string            `json:"reference"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
@@ -53,6 +56,7 @@ type TemplatePullResponse struct {
 }
 
 type TemplatePushRequest struct {
+	Platform        string `json:"platform,omitempty"`
 	Name            string `json:"name"`
 	RemoteReference string `json:"remote_reference"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
@@ -61,10 +65,12 @@ type TemplatePushRequest struct {
 }
 
 type TemplateUnpackRequest struct {
-	Name string `json:"name"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name"`
 }
 
 type TemplateCreateRequest struct {
+	Platform   string
 	Name       string
 	Source     string
 	KernelPath string
@@ -76,6 +82,7 @@ type TemplateCreateRequest struct {
 }
 
 type TemplateCreateMetadata struct {
+	Platform  string            `json:"platform,omitempty"`
 	Name      string            `json:"name"`
 	Source    string            `json:"source"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
@@ -98,16 +105,16 @@ func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]
 	return resp.Items, nil
 }
 
-func (c *Client) InspectTemplate(ctx context.Context, name string) (TemplateRecord, error) {
+func (c *Client) InspectTemplate(ctx context.Context, name string, platform ...string) (TemplateRecord, error) {
 	var resp TemplateRecord
-	if err := c.postJSON(ctx, inspectTemplate, TemplateNameRequest{Name: name}, &resp); err != nil {
+	if err := c.postJSON(ctx, inspectTemplate, TemplateNameRequest{Name: name, Platform: firstPlatform(platform)}, &resp); err != nil {
 		return TemplateRecord{}, err
 	}
 	return resp, nil
 }
 
-func (c *Client) RemoveTemplate(ctx context.Context, name string) error {
-	return c.postJSON(ctx, removeTemplate, TemplateNameRequest{Name: name}, nil)
+func (c *Client) RemoveTemplate(ctx context.Context, name string, platform ...string) error {
+	return c.postJSON(ctx, removeTemplate, TemplateNameRequest{Name: name, Platform: firstPlatform(platform)}, nil)
 }
 
 func (c *Client) PullTemplate(ctx context.Context, req TemplatePullRequest) (TemplatePullResponse, error) {
@@ -130,6 +137,7 @@ func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) 
 	metadata, err := json.Marshal(TemplateCreateMetadata{
 		Name:      req.Name,
 		Source:    req.Source,
+		Platform:  req.Platform,
 		PlainHTTP: req.PlainHTTP,
 		Username:  req.Username,
 		Password:  req.Password,
@@ -207,4 +215,11 @@ func writeTemplateMultipart(writer *multipart.Writer, kernel, initrd io.Reader, 
 		return err
 	}
 	return writer.Close()
+}
+
+func firstPlatform(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }

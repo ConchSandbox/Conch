@@ -7,6 +7,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/platforms"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 )
@@ -30,6 +31,7 @@ func PublishBootIndex(ctx context.Context, client *containerdclient.Client, req 
 	}
 	indexDesc, err := BuildBootIndexInContent(ctx, client.ContentStore(), BootIndexContentOptions{
 		RootfsDescriptor: rootfsImage.Target,
+		Platform:         req.Platform,
 		KernelPath:       req.KernelPath,
 		InitrdPath:       req.InitrdPath,
 	})
@@ -68,7 +70,7 @@ func PushBootIndex(ctx context.Context, client *containerdclient.Client, req Pus
 				return req.Username, req.Password, nil
 			},
 		})
-		if err := client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
+		if err := client.Push(pushCtx, req.RemoteReference, desc, containerd.WithResolver(resolver), containerd.WithPlatformMatcher(platforms.All), containerd.WithMaxConcurrentUploadedLayers(1)); err != nil {
 			return translateRegistryError(fmt.Errorf("push boot index %s -> %s: %w", desc.Digest, req.RemoteReference, err))
 		}
 		return nil
@@ -116,12 +118,13 @@ func PublishCheckpointBootIndex(
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("source boot index VMM %q does not match capture VMM %q", sourceInfo.VMMName, req.VMMName)
 	}
 
-	memDesc, err := BuildNativeComponentInContent(ctx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot)
+	memDesc, err := BuildNativeComponentInContent(ctx, client.ContentStore(), []string{req.MemRoot}, KindMemSnapshot, sourceInfo.Platform)
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("publish captured mem component: %w", err)
 	}
 	indexDesc, err := BuildBootIndexInContent(ctx, client.ContentStore(), BootIndexContentOptions{
 		RootfsDescriptor:  sourceInfo.RootfsDescriptor,
+		Platform:          sourceInfo.Platform,
 		MemDescriptor:     memDesc,
 		SandboxDescriptor: sourceInfo.SandboxDescriptor,
 		VMMName:           req.VMMName,

@@ -15,6 +15,7 @@ const (
 )
 
 type ConvertRootfsRequest struct {
+	Platform    string   `json:"platform,omitempty"`
 	SourceImage string   `json:"source_image"`
 	TargetImage string   `json:"target_image"`
 	MkfsOptions []string `json:"mkfs_options,omitempty"`

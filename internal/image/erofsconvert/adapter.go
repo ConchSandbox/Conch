@@ -15,6 +15,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/platformutil"
 )
 
 func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req ConvertRootfsRequest) (ConvertRootfsResult, error) {
@@ -26,6 +27,11 @@ func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req Con
 		return ConvertRootfsResult{}, err
 	}
 
+	p, err := platformutil.Parse(req.Platform)
+	if err != nil {
+		return ConvertRootfsResult{}, err
+	}
+	matcher := platforms.OnlyStrict(p)
 	convertCtx := containerdclient.NewNamespaceContext(ctx)
 	converted, err := imageconverter.Convert(
 		convertCtx,
@@ -33,7 +39,7 @@ func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req Con
 		req.TargetImage,
 		req.SourceImage,
 		imageconverter.WithDockerToOCI(true),
-		imageconverter.WithPlatform(platforms.DefaultStrict()),
+		imageconverter.WithPlatform(matcher),
 		imageconverter.WithLayerConvertFunc(toolkit.LayerConvertFunc(toolkitOptions(req.MkfsOptions)...)),
 		imageconverter.WithUpdateManifest(normalizeToolkitErofsManifest),
 	)
@@ -41,7 +47,7 @@ func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req Con
 		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 
-	manifest, err := images.Manifest(convertCtx, client.ContentStore(), converted.Target, platforms.DefaultStrict())
+	manifest, err := images.Manifest(convertCtx, client.ContentStore(), converted.Target, matcher)
 	if err != nil {
 		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
@@ -50,9 +56,11 @@ func ConvertRootfs(ctx context.Context, client *containerdclient.Client, req Con
 		return ConvertRootfsResult{}, fmt.Errorf("convert rootfs to erofs: %w", err)
 	}
 
-	convertedImage := containerd.NewImage(client.Client, *converted)
-	if err := convertedImage.Unpack(convertCtx, "erofs"); err != nil {
-		return ConvertRootfsResult{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
+	convertedImage := containerd.NewImageWithPlatform(client.Client, *converted, matcher)
+	if platforms.DefaultStrict().Match(p) {
+		if err := convertedImage.Unpack(convertCtx, "erofs"); err != nil {
+			return ConvertRootfsResult{}, fmt.Errorf("unpack converted rootfs with erofs snapshotter: %w", err)
+		}
 	}
 	diffIDs, err := convertedImage.RootFS(convertCtx)
 	if err != nil {

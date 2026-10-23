@@ -276,6 +276,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	templateResp, err := c.CreateTemplate(context.Background(), TemplateCreateRequest{
 		Name:       "registry.example/conch/test:latest",
 		Source:     "docker.io/library/busybox:latest",
+		Platform:   "linux/arm64",
 		KernelPath: kernel.Name(),
 		InitrdPath: initrd.Name(),
 		PlainHTTP:  true,
@@ -286,7 +287,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
-	if templateMetadata.Name != "registry.example/conch/test:latest" || templateMetadata.Source != "docker.io/library/busybox:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
+	if templateMetadata.Platform != "linux/arm64" || templateMetadata.Name != "registry.example/conch/test:latest" || templateMetadata.Source != "docker.io/library/busybox:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
 		t.Fatalf("template metadata = %#v", templateMetadata)
 	}
 	if templateKernelBody != "kernel-content" || templateInitrdBody != "initrd-content" {
@@ -416,6 +417,7 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 
 	pulled, err := c.PullTemplate(context.Background(), TemplatePullRequest{
 		Reference: "registry.example.invalid/conch/template:latest",
+		Platform:  "linux/arm64",
 		PlainHTTP: true,
 		Username:  "pull-user",
 		Password:  "pull-pass",
@@ -424,12 +426,13 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullTemplate() error = %v", err)
 	}
-	if pulled.TemplateID == "" || pulled.TemplateName != pullReq.Reference || !pullReq.PlainHTTP {
+	if pullReq.Platform != "linux/arm64" || pulled.TemplateID == "" || pulled.TemplateName != pullReq.Reference || !pullReq.PlainHTTP {
 		t.Fatalf("PullTemplate() response = %#v, request = %#v", pulled, pullReq)
 	}
 
 	if err := c.PushTemplate(context.Background(), TemplatePushRequest{
 		Name:            pulled.TemplateName,
+		Platform:        "linux/arm64",
 		RemoteReference: "mirror.example.invalid/conch/template:copy",
 		PlainHTTP:       true,
 		Username:        "push-user",
@@ -437,14 +440,14 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PushTemplate() error = %v", err)
 	}
-	if pushReq.Name != pulled.TemplateName || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
+	if pushReq.Platform != "linux/arm64" || pushReq.Name != pulled.TemplateName || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 
-	if err := c.UnpackTemplate(context.Background(), TemplateUnpackRequest{Name: pulled.TemplateName}); err != nil {
+	if err := c.UnpackTemplate(context.Background(), TemplateUnpackRequest{Name: pulled.TemplateName, Platform: "linux/arm64"}); err != nil {
 		t.Fatalf("UnpackTemplate() error = %v", err)
 	}
-	if unpackReq.Name != pulled.TemplateName {
+	if unpackReq.Platform != "linux/arm64" || unpackReq.Name != pulled.TemplateName {
 		t.Fatalf("UnpackTemplate() request = %#v", unpackReq)
 	}
 }

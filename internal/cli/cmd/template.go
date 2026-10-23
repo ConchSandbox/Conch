@@ -14,6 +14,7 @@ import (
 )
 
 type templateCreateOptions struct {
+	platform   string
 	name       string
 	source     string
 	kernel     string
@@ -28,6 +29,7 @@ type templateCreateOptions struct {
 }
 
 type templateRegistryOptions struct {
+	platform   string
 	configPath string
 	apiURL     string
 	address    string
@@ -67,6 +69,8 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        mutable logical Template Name (mapped to an internal containerd image record)")
 	fmt.Fprintln(out, "  --source string")
 	fmt.Fprintln(out, "        OCI rootfs image reference; reuse local conchd/containerd image first, pull if missing")
+	fmt.Fprintln(out, "  --platform string")
+	fmt.Fprintln(out, "        target platform: linux/amd64 or linux/arm64 (default: daemon platform)")
 	fmt.Fprintln(out, "  --kernel string")
 	fmt.Fprintln(out, "        kernel file path")
 	fmt.Fprintln(out, "  --initrd string")
@@ -148,6 +152,7 @@ func runTemplatePull(ctx context.Context, args []string) error {
 	}
 	result, err := conchClient.PullTemplate(ctx, client.TemplatePullRequest{
 		Reference: fs.Arg(0),
+		Platform:  opts.platform,
 		PlainHTTP: opts.plainHTTP,
 		Username:  username,
 		Password:  password,
@@ -192,6 +197,7 @@ func runTemplatePush(ctx context.Context, args []string) error {
 	}
 	if err := conchClient.PushTemplate(ctx, client.TemplatePushRequest{
 		Name:            fs.Arg(0),
+		Platform:        opts.platform,
 		RemoteReference: fs.Arg(1),
 		PlainHTTP:       opts.plainHTTP,
 		Username:        username,
@@ -204,6 +210,7 @@ func runTemplatePush(ctx context.Context, args []string) error {
 }
 
 func registerTemplateRegistryFlags(fs *flag.FlagSet, opts *templateRegistryOptions, push bool) {
+	fs.StringVar(&opts.platform, "platform", "", "target platform: linux/amd64 or linux/arm64 (default: daemon platform)")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
 	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
@@ -258,6 +265,7 @@ func parseTemplateCreateArgs(args []string) (templateCreateOptions, error) {
 }
 
 func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) {
+	fs.StringVar(&opts.platform, "platform", "", "target platform: linux/amd64 or linux/arm64 (default: daemon platform)")
 	fs.StringVar(&opts.name, "name", "", "Template Name")
 	fs.StringVar(&opts.source, "source", "", "source rootfs image")
 	fs.StringVar(&opts.kernel, "kernel", "", "kernel file path")
@@ -281,6 +289,7 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 	}
 	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
 		Name:       opts.name,
+		Platform:   opts.platform,
 		Source:     opts.source,
 		KernelPath: opts.kernel,
 		InitrdPath: opts.initrd,
@@ -310,6 +319,7 @@ func runTemplateList(ctx context.Context, args []string) error {
 	origin := fs.String("origin", "", "template origin: image or checkpoint")
 	bootMode := fs.String("boot-mode", "", "boot mode: cold or resume")
 	configPath := fs.String("config", "", "config file path")
+	platform := fs.String("platform", "", "select platform: linux/amd64 or linux/arm64")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -319,6 +329,7 @@ func runTemplateList(ctx context.Context, args []string) error {
 	}
 	items, err := conchClient.ListTemplates(ctx, client.TemplateListRequest{
 		Origin:   *origin,
+		Platform: *platform,
 		BootMode: *bootMode,
 	})
 	if err != nil {
@@ -332,6 +343,7 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("template inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
+	platform := fs.String("platform", "", "select platform: linux/amd64 or linux/arm64")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -342,7 +354,7 @@ func runTemplateInspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template inspect: create API client: %w", err)
 	}
-	item, err := conchClient.InspectTemplate(ctx, fs.Arg(0))
+	item, err := conchClient.InspectTemplate(ctx, fs.Arg(0), *platform)
 	if err != nil {
 		return fmt.Errorf("conch template inspect: %w", err)
 	}
@@ -354,6 +366,7 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("template rm", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
+	platform := fs.String("platform", "", "select platform: linux/amd64 or linux/arm64")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -365,7 +378,7 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template rm: create API client: %w", err)
 	}
-	if err := conchClient.RemoveTemplate(ctx, name); err != nil {
+	if err := conchClient.RemoveTemplate(ctx, name, *platform); err != nil {
 		return fmt.Errorf("conch template rm: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "Removed template: %s\n", name)
@@ -374,10 +387,11 @@ func runTemplateRemove(ctx context.Context, args []string) error {
 
 func printTemplates(out io.Writer, items []client.TemplateRecord) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTEMPLATE_ID\tORIGIN\tBOOT_MODE\tSOURCE_REF\tSOURCE_SANDBOX")
+	fmt.Fprintln(tw, "NAME\tPLATFORM\tTEMPLATE_ID\tORIGIN\tBOOT_MODE\tSOURCE_REF\tSOURCE_SANDBOX")
 	for _, item := range items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			displayTemplateValue(item.Name),
+			displayTemplateValue(item.Platform),
 			displayTemplateValue(item.TemplateID),
 			displayTemplateValue(item.Origin),
 			displayTemplateValue(item.BootMode),

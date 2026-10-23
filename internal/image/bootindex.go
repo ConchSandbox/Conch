@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,9 +19,11 @@ import (
 	"github.com/containerd/containerd/v2/core/leases"
 	continuityfs "github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	ispec "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/openeuler/Conch/internal/platformutil"
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -60,6 +61,7 @@ func withBootIndexLease(ctx context.Context, client *containerdclient.Client, bo
 }
 
 type BootIndexContentOptions struct {
+	Platform          string
 	RootfsDescriptor  ocispec.Descriptor
 	MemDescriptor     ocispec.Descriptor
 	SandboxDescriptor ocispec.Descriptor
@@ -101,7 +103,15 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 		return ocispec.Descriptor{}, fmt.Errorf("memory size requires a mem-snapshot component")
 	}
 
-	rootfsDesc, err := normalizeComponentDescriptor(ctx, store, opts.RootfsDescriptor, KindRootfs, "")
+	platform, err := platformutil.Normalize(opts.Platform)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	rootfsInput, err := resolvePlatformManifest(ctx, store, opts.RootfsDescriptor, platform)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	rootfsDesc, err := normalizeComponentDescriptor(ctx, store, rootfsInput, KindRootfs, "")
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("resolve rootfs manifest: %w", err)
 	}
@@ -122,12 +132,21 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 	if preparedSandbox {
 		sandboxDesc, err = normalizeComponentDescriptor(ctx, store, opts.SandboxDescriptor, KindSandbox, "")
 	} else {
-		sandboxDesc, err = buildKernelComponentInContent(ctx, store, kernelPath, initrdPath)
+		sandboxDesc, err = buildKernelComponentInContent(ctx, store, kernelPath, initrdPath, platform)
 	}
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("resolve sandbox manifest: %w", err)
 	}
 	manifests = append(manifests, sandboxDesc)
+	for _, component := range manifests {
+		actual, err := ComponentPlatform(ctx, store, component)
+		if err != nil {
+			return ocispec.Descriptor{}, err
+		}
+		if actual != platform {
+			return ocispec.Descriptor{}, fmt.Errorf("component %s platform %s does not match requested %s", component.Digest, actual, platform)
+		}
+	}
 
 	indexAnnotations := map[string]string(nil)
 	if vmmName != "" {
@@ -139,7 +158,7 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 	return writeIndexToContent(ctx, store, manifests, indexAnnotations)
 }
 
-func buildKernelComponentInContent(ctx context.Context, store content.Store, kernelPath, initrdPath string) (ocispec.Descriptor, error) {
+func buildKernelComponentInContent(ctx context.Context, store content.Store, kernelPath, initrdPath, platform string) (ocispec.Descriptor, error) {
 	tmpDir, err := os.MkdirTemp("", "conch-kernel-component-*")
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("create kernel component temp dir: %w", err)
@@ -159,16 +178,24 @@ func buildKernelComponentInContent(ctx context.Context, store content.Store, ker
 	if err := continuityfs.CopyFile(filepath.Join(root, "data", "conch.initrd"), initrdPath); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	return BuildNativeComponentInContent(ctx, store, []string{root}, KindSandbox)
+	return BuildNativeComponentInContent(ctx, store, []string{root}, KindSandbox, platform)
 }
 
 // BuildNativeComponentInContent writes regular native EROFS files and/or
 // directories converted to native EROFS layers into store, then publishes the
 // component manifest and config. It accepts only the three supported Conch
 // component kinds and rejects symlink/special-file inputs.
-func BuildNativeComponentInContent(ctx context.Context, store content.Store, paths []string, kind string) (ocispec.Descriptor, error) {
+func BuildNativeComponentInContent(ctx context.Context, store content.Store, paths []string, kind string, platform ...string) (ocispec.Descriptor, error) {
 	if store == nil {
 		return ocispec.Descriptor{}, fmt.Errorf("content store is required")
+	}
+	value := ""
+	if len(platform) > 0 {
+		value = platform[0]
+	}
+	targetPlatform, err := platformutil.Parse(value)
+	if err != nil {
+		return ocispec.Descriptor{}, err
 	}
 	if !isNativeErofsKind(kind) {
 		return ocispec.Descriptor{}, fmt.Errorf("unsupported native component kind %q", kind)
@@ -229,11 +256,8 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 		})
 	}
 	config := ocispec.Image{
-		Created: &now,
-		Platform: ocispec.Platform{
-			Architecture: runtime.GOARCH,
-			OS:           runtime.GOOS,
-		},
+		Created:  &now,
+		Platform: targetPlatform,
 		RootFS: ocispec.RootFS{
 			Type:    "layers",
 			DiffIDs: diffIDs,
@@ -260,6 +284,7 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
+	manifestDesc.Platform = &targetPlatform
 	manifestDesc.Annotations = map[string]string{
 		"io.conch.kind":                     kind,
 		"org.opencontainers.image.ref.name": canonicalComponentRef(kind, manifestDesc.Digest),
@@ -303,6 +328,15 @@ func normalizeComponentDescriptor(
 	if vmmName != "" {
 		annotations[AnnotationVMM] = vmmName
 	}
+	value, err := ComponentPlatform(ctx, store, manifest)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	p, err := platformutil.Parse(value)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	manifest.Platform = &p
 	manifest.Annotations = mergeAnnotations(manifest.Annotations, annotations)
 	return manifest, nil
 }
@@ -515,6 +549,13 @@ func InspectBootIndexContent(ctx context.Context, store content.Store, desc ocis
 	}
 	if err := validateContentClosure(ctx, store, desc); err != nil {
 		return BootIndexInfo{}, fmt.Errorf("validate boot index %s closure: %w", desc.Digest, err)
+	}
+	info.Platform, err = inspectBootIndexPlatform(ctx, store, info)
+	if err != nil {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(err)
+	}
+	if desc.Platform != nil && platforms.Format(platforms.Normalize(*desc.Platform)) != info.Platform {
+		return BootIndexInfo{}, ErrInvalidContent.Wrap(fmt.Errorf("Boot Index descriptor platform does not match components"))
 	}
 	return info, nil
 }

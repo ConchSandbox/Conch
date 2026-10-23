@@ -31,7 +31,7 @@ func (s templateStoreStub) Put(_ context.Context, entry conchtemplate.Entry, _ o
 	return entry, nil
 }
 
-func (s templateStoreStub) Get(_ context.Context, name string) (conchtemplate.Entry, error) {
+func (s templateStoreStub) Get(_ context.Context, name string, _ ...string) (conchtemplate.Entry, error) {
 	entry, ok := s[name]
 	if !ok {
 		return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
@@ -43,7 +43,7 @@ func (s templateStoreStub) List(context.Context, conchtemplate.Filter) ([]concht
 	return nil, nil
 }
 
-func (s templateStoreStub) Delete(_ context.Context, name string) error {
+func (s templateStoreStub) Delete(_ context.Context, name string, _ ...string) error {
 	delete(s, name)
 	return nil
 }
@@ -277,7 +277,7 @@ func (missingTemplateStore) Put(context.Context, conchtemplate.Entry, ocispec.De
 	return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
 }
 
-func (missingTemplateStore) Get(context.Context, string) (conchtemplate.Entry, error) {
+func (missingTemplateStore) Get(context.Context, string, ...string) (conchtemplate.Entry, error) {
 	return conchtemplate.Entry{}, conchtemplate.ErrNotFound.New()
 }
 
@@ -285,4 +285,4 @@ func (missingTemplateStore) List(context.Context, conchtemplate.Filter) ([]conch
 	return nil, nil
 }
 
-func (missingTemplateStore) Delete(context.Context, string) error { return nil }
+func (missingTemplateStore) Delete(context.Context, string, ...string) error { return nil }

@@ -15,6 +15,7 @@ import (
 
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
+	"github.com/openeuler/Conch/internal/platformutil"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -62,6 +63,13 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 		return nil, fmt.Errorf("containerd client is required")
 	}
 
+	p, err := platformutil.Parse(info.Platform)
+	if err != nil {
+		return nil, err
+	}
+	if !platforms.DefaultStrict().Match(p) {
+		return nil, ErrInvalidArgument.Wrap(fmt.Errorf("cannot unpack platform %s on %s", info.Platform, platforms.DefaultString()))
+	}
 	snapshotMap := make(map[string]string)
 
 	components := []ocispec.Descriptor{info.RootfsDescriptor}
