@@ -177,6 +177,19 @@ type templateUnpackRequest struct {
 	Name string `json:"name"`
 }
 
+type templateSaveRequest struct {
+	Names []string `json:"names"`
+}
+
+type templateLoadItem struct {
+	TemplateName string `json:"template_name"`
+	TemplateID   string `json:"template_id"`
+}
+
+type templateLoadResponse struct {
+	Items []templateLoadItem `json:"items"`
+}
+
 type templateRecordResponse = runtimeapi.TemplateRecord
 
 type templateListResponse struct {

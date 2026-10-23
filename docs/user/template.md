@@ -28,7 +28,7 @@ Template ID: sha256:1111...
 
 再次使用相同 `--name` 创建时，会更新现有 Template。
 
-所有 CLI 请求共用 `CONCH_API_TIMEOUT`，默认 2 分钟。首次转换较大镜像时可用：
+除 `template save` 和 `template load` 外，CLI 请求共用 `CONCH_API_TIMEOUT`，默认 2 分钟。`save` / `load` 默认不限时，需要上限时再用 `--timeout` 或 `CONCH_API_TIMEOUT`。首次转换较大镜像时可用：
 
 ```bash
 CONCH_API_TIMEOUT=30m conch template create \
@@ -67,7 +67,18 @@ $ conch template push registry.example.com/conch/openeuler:latest mirror.example
 Pushed template: registry.example.com/conch/openeuler:latest -> mirror.example.com/conch/openeuler:stable
 ```
 
-`template push`、`inspect`、`unpack` 和 `rm` 都以 Template Name 选择当前目标。
+`template push`、`save`、`inspect`、`unpack` 和 `rm` 都以 Template Name 选择当前目标。
+
+没有 registry 时，用 `save` / `load` 离线搬运 Template。这和 `docker save` / `docker load` 一样，归档里是完整 Boot Index，不是容器文件系统的扁平导出。
+
+```bash
+conch template save -o openeuler.tar localhost/conch/openeuler:latest
+conch template load -i openeuler.tar
+```
+
+`-o` 和 `-i` 都必填。路径可以是相对路径。`save` 先把归档写到同一目录的临时文件，成功后再替换 `-o` 指向的文件；失败时原来的文件还在。`save` 不会创建上级目录。
+
+`load` 会按归档里的 Name 创建或更新本地 Template，并打印 `Loaded image: <name>`。已有的同名 Template 会指向归档中的 Template ID。`load` 不会 unpack，也不按本机架构拒绝归档。
 
 ## 4. Sandbox 与 checkpoint
 

@@ -150,6 +150,17 @@ type TemplateUnpackOptions struct {
 	Name string
 }
 
+type TemplateSaveOptions struct {
+	Names []string
+}
+
+type TemplateLoadOptions struct{}
+
+type TemplateLoadResult struct {
+	Name       string
+	TemplateID string
+}
+
 type TemplateListOptions struct {
 	Origin   string
 	BootMode string
