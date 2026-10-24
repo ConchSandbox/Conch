@@ -69,6 +69,8 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	// Retire before cleanup: persistDeleteFailure clears the checkpoint head, so a retry would no longer know it.
+	m.retireMemRecord(cleanupCtx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 	recordExists := err == nil
 	var entry *sandboxEntry
 	if value, ok := m.sandboxes.Load(sandboxID); ok {
@@ -244,16 +246,21 @@ type finalizationOptions struct {
 // finalizeReleased applies the unified terminal rule to a record whose
 // runtime resources are confirmed released: a recoverable checkpoint lineage
 // is written back as PAUSED with its head pinned unless the caller forces the
-// delete branch, and any other record is deleted. Both confirmed branches
-// drop the runtime entry and the capacity reservation; a failed terminal
-// write goes through finalizeTerminalFailure, which strands the record as
-// UNKNOWN for a resume, an explicit delete or startup recovery.
+// delete branch, and any other record is deleted with its mem component
+// record retired. Both confirmed branches drop the runtime entry and the
+// capacity reservation; a failed terminal write goes through
+// finalizeTerminalFailure, which strands the record as UNKNOWN for a resume,
+// an explicit delete or startup recovery — a forced deletion clears the
+// lineage on that write so its retry stays a deletion. Delete and startup
+// recovery stay outside: both always delete, and Delete retires before
+// cleanup so its failure retry still knows the head digest.
 func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finalizationOptions) error {
 	if !opts.skipRecoverableLineage && m.recoverableLineage(rec) {
 		if err := m.writeBackPaused(ctx, rec); err != nil {
 			return m.finalizeTerminalFailure(ctx, rec, err, opts)
 		}
 	} else {
+		m.retireMemRecord(ctx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 		deleteErr := m.store.Delete(ctx, rec.ID)
 		if deleteErr != nil {
 			return m.finalizeTerminalFailure(ctx, rec, deleteErr, opts)

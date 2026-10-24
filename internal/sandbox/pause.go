@@ -144,6 +144,8 @@ func (m *Manager) Pause(parent context.Context, sandboxID string, expiredBefore 
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	// The overwritten parent head is unreachable from the record now; retire its mem component record while its digest is still known.
+	m.retireMemRecord(cleanupCtx, txn.result.ParentBootIndexDigest, rec.SourceTemplateID)
 	if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
 		return m.persistSandboxFailure(cleanupCtx, rec, true, err)
 	}
@@ -453,6 +455,8 @@ func (m *Manager) Expire(parent context.Context, sandboxID string, expiredBefore
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 	defer cleanupCancel()
+	// Retire before cleanup: persistDeleteFailure clears the checkpoint head, so a retry would no longer know it.
+	m.retireMemRecord(cleanupCtx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 	if entry != nil {
 		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
 			return m.persistDeleteFailure(cleanupCtx, rec, true, err)
