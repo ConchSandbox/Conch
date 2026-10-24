@@ -90,7 +90,7 @@ func (m *Manager) Delete(parent context.Context, sandboxID string) error {
 	m.sandboxes.Delete(sandboxID)
 	m.releaseCapacity(rec)
 
-	if recordExists && (entry == nil || !entry.exitNotified) {
+	if recordExists {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
 	}
 	return nil
@@ -234,35 +234,34 @@ func (m *Manager) handleSandboxExit(sandboxID string, entry *sandboxEntry) {
 
 // finalizationOptions carries the caller-specific parts of the unified
 // terminal rule: killReason is the killed-event reason and empty suppresses
-// the event, entry is the runtime entry whose notified exit suppresses a
-// duplicate.
+// the event; skipRecoverableLineage forces the delete branch (every expiry
+// verdict and the TTL kill).
 type finalizationOptions struct {
-	killReason string
-	entry      *sandboxEntry
-	publish    bool
+	killReason             string
+	skipRecoverableLineage bool
 }
 
 // finalizeReleased applies the unified terminal rule to a record whose
 // runtime resources are confirmed released: a recoverable checkpoint lineage
-// is written back as PAUSED with its head pinned, any other record is
-// deleted. Both confirmed branches drop the runtime entry and the capacity
-// reservation; a failed terminal write goes through finalizeTerminalFailure,
-// which strands the record as UNKNOWN for a resume, an explicit delete or
-// startup recovery.
+// is written back as PAUSED with its head pinned unless the caller forces the
+// delete branch, and any other record is deleted. Both confirmed branches
+// drop the runtime entry and the capacity reservation; a failed terminal
+// write goes through finalizeTerminalFailure, which strands the record as
+// UNKNOWN for a resume, an explicit delete or startup recovery.
 func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finalizationOptions) error {
-	if m.recoverableLineage(rec) {
+	if !opts.skipRecoverableLineage && m.recoverableLineage(rec) {
 		if err := m.writeBackPaused(ctx, rec); err != nil {
-			return m.finalizeTerminalFailure(ctx, rec, err)
+			return m.finalizeTerminalFailure(ctx, rec, err, opts)
 		}
 	} else {
 		deleteErr := m.store.Delete(ctx, rec.ID)
 		if deleteErr != nil {
-			return m.finalizeTerminalFailure(ctx, rec, deleteErr)
+			return m.finalizeTerminalFailure(ctx, rec, deleteErr, opts)
 		}
 	}
 	m.sandboxes.Delete(rec.ID)
 	m.releaseCapacity(rec)
-	if opts.killReason != "" && opts.publish && (opts.entry == nil || !opts.entry.exitNotified) {
+	if opts.killReason != "" {
 		m.publishLifecycleEvent(webhook.EventSandboxKilled, rec, opts.killReason)
 	}
 	return nil
@@ -274,9 +273,13 @@ func (m *Manager) finalizeReleased(ctx context.Context, rec Record, opts finaliz
 // recovery can still finish it. The released runtime no longer backs the
 // entry or the capacity reservation, so both go even when the write fails;
 // the write failure itself only logs.
-func (m *Manager) finalizeTerminalFailure(ctx context.Context, rec Record, err error) error {
+func (m *Manager) finalizeTerminalFailure(ctx context.Context, rec Record, err error, opts finalizationOptions) error {
 	rec.State = StateUnknown
 	rec.LastError = err.Error()
+	// A forced deletion keeps its verdict: the retry must not resurrect the lineage as PAUSED.
+	if opts.skipRecoverableLineage {
+		rec.CheckpointHeadTemplateID = rec.SourceTemplateID
+	}
 	rec.IP, rec.VMMPID = "", 0
 	rec.ExpiresAt = 0
 	rec.RuntimeSnapshots = nil

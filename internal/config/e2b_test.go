@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func loadE2BYAML(t *testing.T, data string) (*Config, error) {
@@ -37,6 +38,7 @@ func TestE2BConfigEnvironmentAndStandaloneHeaderRouting(t *testing.T) {
 	cfg, err := loadE2BYAML(t, `e2b:
   listen_addr: ":8000"
   sandbox_proxy_domains: []
+  max_sandbox_ttl: 24h
 `)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +54,7 @@ func TestLoadE2BClusterConfig(t *testing.T) {
 	cfg, err := loadE2BYAML(t, `e2b:
   listen_addr: "10.0.0.1:8000"
   sandbox_proxy_domains: [" Sandboxes.Example.COM. ", ""]
+  max_sandbox_ttl: 24h
 cluster:
   scheduler_addr: "http://scheduler:9090/"
   node_id: " node-a "
@@ -98,12 +101,38 @@ func TestInvalidE2BConfig(t *testing.T) {
 		{"domain url", "e2b:\n  sandbox_proxy_domains: ['https://example.com']\n", "sandbox_proxy_domains"},
 		{"domain label", "e2b:\n  sandbox_proxy_domains: ['-invalid.example.com']\n", "sandbox_proxy_domains"},
 		{"missing Node API", "cluster:\n  scheduler_addr: 'localhost:9090'\n  node_id: a\n  cluster_id: c\n", "requires e2b.listen_addr"},
-		{"missing identity", "e2b:\n  listen_addr: ':8000'\ncluster:\n  scheduler_addr: 'localhost:9090'\n", "cluster.node_id"},
+		{"missing identity", "e2b:\n  listen_addr: ':8000'\n  max_sandbox_ttl: 24h\ncluster:\n  scheduler_addr: 'localhost:9090'\n", "cluster.node_id"},
 		{"TLS scheduler", "cluster:\n  scheduler_addr: 'https://localhost:9090'\n", "scheduler_addr"},
 		{"missing scheduler host", "cluster:\n  scheduler_addr: ':9090'\n", "scheduler_addr"},
 		{"scheduler path", "cluster:\n  scheduler_addr: 'http://localhost:9090/path'\n", "scheduler_addr"},
 	}
 	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := loadE2BYAML(t, tc.yaml); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadConfig() error = %v, want error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaxSandboxTTLConfig(t *testing.T) {
+	t.Setenv("AENV_API_KEY", "test-env-key")
+	cfg, err := loadE2BYAML(t, "e2b:\n  listen_addr: ':8000'\n  max_sandbox_ttl: 72h\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.E2B.MaxSandboxTTL != 72*time.Hour {
+		t.Fatalf("max_sandbox_ttl = %s, want 72h", cfg.E2B.MaxSandboxTTL)
+	}
+	// A bare integer does not decode as a duration.
+	if _, err := loadE2BYAML(t, "e2b:\n  listen_addr: ':8000'\n  max_sandbox_ttl: 30\n"); err == nil {
+		t.Fatal("bare integer max_sandbox_ttl accepted")
+	}
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"sub-second", "e2b:\n  listen_addr: ':8000'\n  max_sandbox_ttl: 500ms\n", "max_sandbox_ttl"},
+		{"negative", "e2b:\n  listen_addr: ':8000'\n  max_sandbox_ttl: -5s\n", "max_sandbox_ttl"},
+		{"required when enabled", "e2b:\n  listen_addr: ':8000'\n", "max_sandbox_ttl is required"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := loadE2BYAML(t, tc.yaml); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("LoadConfig() error = %v, want error mentioning %q", err, tc.want)

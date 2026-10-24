@@ -88,6 +88,24 @@ func (r *Registry) Publish(sandboxID, ip, maskRequestHost string) error {
 	return nil
 }
 
+// Unpublish withdraws a published route's IP while keeping the slot: requests
+// attached to the route stop, and proxy waiters keep waiting for the slot to
+// publish again. An absent or unpublished slot is a no-op.
+func (r *Registry) Unpublish(sandboxID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.entries[sandboxID]
+	if !ok || current.route.IP == "" {
+		return
+	}
+	current.cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	current.route.IP = ""
+	current.route.lifetime = ctx
+	current.cancel = cancel
+	r.entries[sandboxID] = current
+}
+
 // Release cancels every request attached to the route and removes the slot
 // before the sandbox's network resources return to the pool. Releasing an
 // absent slot is a no-op.

@@ -141,7 +141,9 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited driv
 	delay := 2 * time.Millisecond
 	const maxDelay = 100 * time.Millisecond
 	for {
-		if _, err := os.Stat(socketPath); err == nil {
+		// The socket file appears at bind, before the VMM listens: readiness is dialability, not file existence.
+		if conn, err := net.Dial("unix", socketPath); err == nil {
+			conn.Close()
 			logger.Debug("VMM socket ready", ulog.F("socket", socketPath))
 			return nil
 		}
@@ -340,16 +342,23 @@ func stratovirtFileSize(path string) int64 {
 	return size
 }
 
+// qmpTimeout bounds one QMP connection's dial and reads; a var so tests can shorten it.
+var qmpTimeout = 5 * time.Second
+
 func (s *StratovirtClient) connectQMP() (net.Conn, *bufio.Reader, error) {
 	logger := ulog.GetLogger()
 
-	conn, err := net.Dial("unix", s.socketPath)
+	conn, err := net.DialTimeout("unix", s.socketPath, qmpTimeout)
 	if err != nil {
 		logger.Error("Failed to connect to QMP socket",
 			ulog.F("socket", s.socketPath),
 			ulog.F("error", err),
 		)
 		return nil, nil, fmt.Errorf("failed to connect to qmp socket: %w", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(qmpTimeout)); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("failed to set qmp deadline: %w", err)
 	}
 
 	reader := bufio.NewReader(conn)

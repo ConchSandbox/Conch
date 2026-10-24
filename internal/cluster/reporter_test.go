@@ -107,9 +107,11 @@ func newPersistentStore(t *testing.T) sandbox.Store {
 
 func putRecord(t *testing.T, store sandbox.Store, id string, state sandbox.State, cpu, mem int64) {
 	t.Helper()
+	// The lineage-less flavor: no checkpoint head moved past the source, so
+	// even the UNKNOWN record still owns its unconfirmed allocation.
 	_, err := store.Create(context.Background(), sandbox.Record{
 		ID: id, State: state, VCPUNum: cpu, RamMB: mem,
-		SourceTemplateID: "sha256:source", CheckpointHeadTemplateID: "sha256:head",
+		SourceTemplateID: "sha256:source", CheckpointHeadTemplateID: "sha256:source",
 	})
 	if err != nil {
 		t.Fatal(err)
