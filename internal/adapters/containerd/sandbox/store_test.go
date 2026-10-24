@@ -55,6 +55,7 @@ func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 		Metadata:        map[string]string{"team": "core"},
 		ExpiresAt:       1792124506981659043,
 		TimeoutAction:   runtimeapi.TimeoutActionPause,
+		AutoResume:      true,
 		MaskRequestHost: "app-${PORT}.internal",
 		StartedAt:       1792124506981659044,
 		HeadStartedAt:   1792124506981659045,

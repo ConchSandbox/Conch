@@ -38,6 +38,7 @@ type Record struct {
 	Metadata                 map[string]string
 	ExpiresAt                int64
 	TimeoutAction            string
+	AutoResume               bool
 	MaskRequestHost          string
 	StartedAt                int64
 	HeadStartedAt            int64

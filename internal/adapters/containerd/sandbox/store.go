@@ -38,6 +38,7 @@ type metadataV1 struct {
 	Metadata                 map[string]string                `json:"metadata,omitempty"`
 	ExpiresAt                int64                            `json:"expires_at,omitempty"`
 	TimeoutAction            string                           `json:"timeout_action,omitempty"`
+	AutoResume               bool                             `json:"auto_resume,omitempty"`
 	MaskRequestHost          string                           `json:"mask_request_host,omitempty"`
 	StartedAt                int64                            `json:"started_at,omitempty"`
 	HeadStartedAt            int64                            `json:"head_started_at,omitempty"`
@@ -220,8 +221,9 @@ func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
 		CheckpointHeadTemplateID: record.CheckpointHeadTemplateID, IP: record.IP, VCPUNum: record.VCPUNum,
 		RamMB: record.RamMB, Network: record.Network, LastError: record.LastError,
 		E2B: record.E2B, EnvdVersion: record.EnvdVersion, Metadata: record.Metadata,
-		ExpiresAt: record.ExpiresAt, TimeoutAction: record.TimeoutAction, MaskRequestHost: record.MaskRequestHost,
-		StartedAt: record.StartedAt, HeadStartedAt: record.HeadStartedAt, HeadCreatedAt: record.HeadCreatedAt,
+		ExpiresAt: record.ExpiresAt, TimeoutAction: record.TimeoutAction, AutoResume: record.AutoResume,
+		MaskRequestHost: record.MaskRequestHost,
+		StartedAt:       record.StartedAt, HeadStartedAt: record.HeadStartedAt, HeadCreatedAt: record.HeadCreatedAt,
 	}
 }
 
@@ -249,8 +251,9 @@ func recordFromNative(native cdsandbox.Sandbox) (conchsandbox.Record, error) {
 		IP:                       metadata.IP, VCPUNum: metadata.VCPUNum, RamMB: metadata.RamMB, Network: metadata.Network,
 		LastError: metadata.LastError, RuntimeSnapshots: refs,
 		E2B: metadata.E2B, EnvdVersion: metadata.EnvdVersion, Metadata: metadata.Metadata,
-		ExpiresAt: metadata.ExpiresAt, TimeoutAction: metadata.TimeoutAction, MaskRequestHost: metadata.MaskRequestHost,
-		StartedAt: metadata.StartedAt, HeadStartedAt: metadata.HeadStartedAt, HeadCreatedAt: metadata.HeadCreatedAt,
+		ExpiresAt: metadata.ExpiresAt, TimeoutAction: metadata.TimeoutAction, AutoResume: metadata.AutoResume,
+		MaskRequestHost: metadata.MaskRequestHost,
+		StartedAt:       metadata.StartedAt, HeadStartedAt: metadata.HeadStartedAt, HeadCreatedAt: metadata.HeadCreatedAt,
 	}, nil
 }
 

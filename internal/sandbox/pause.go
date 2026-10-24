@@ -267,11 +267,60 @@ func (m *Manager) ResumePaused(parent context.Context, sandboxID string, opts Re
 	if rec.State != StatePaused && !StrandedResume(rec) {
 		return runtimeapi.SandboxCreateResult{}, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", sandboxID, rec.State))
 	}
+	return m.resumePausedLocked(ctx, rec, opts)
+}
+
+// EnsureRunning makes an E2B sandbox serve data-plane traffic. A running
+// sandbox is a no-op that never touches its deadline; a paused sandbox — or a
+// stranded lineage in UNKNOWN or CREATING — is restored from its checkpoint
+// only when it was created with autoResume, granted opts.Timeout as the new
+// run's lifetime. This backs wake-on-traffic: concurrent wakers serialize on
+// the lifecycle lock, so a loser of the race finds the record READY and
+// returns without a second restore.
+func (m *Manager) EnsureRunning(parent context.Context, sandboxID string, opts ResumePausedOptions) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return ErrInvalidArgument.Wrap(fmt.Errorf("sandbox id is required"))
+	}
+	if opts.Timeout <= 0 {
+		return ErrInvalidArgument.Wrap(fmt.Errorf("timeout must be positive"))
+	}
+	ctx, cancel := context.WithTimeout(parent, m.requestTimeout)
+	defer cancel()
+	unlock := m.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	rec, err := m.store.Get(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !rec.E2B {
+		return ErrNotFound.Wrap(fmt.Errorf("sandbox %s is not an E2B sandbox", sandboxID))
+	}
+	switch {
+	case rec.State == StateReady:
+		return nil
+	case (rec.State == StatePaused || StrandedResume(rec)) && rec.AutoResume:
+		if m.Routes == nil || m.Capacity == nil || m.Envd == nil {
+			return fmt.Errorf("E2B runtime dependencies are not configured")
+		}
+		_, err := m.resumePausedLocked(ctx, rec, opts)
+		return err
+	case rec.State == StatePaused || StrandedResume(rec):
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is paused without automatic resume", sandboxID))
+	default:
+		return ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s is %s", sandboxID, rec.State))
+	}
+}
+
+// resumePausedLocked restores a PAUSED record in place through the create
+// kernel. The caller holds the sandbox's lifecycle lock and has validated the
+// record's state.
+func (m *Manager) resumePausedLocked(ctx context.Context, rec Record, opts ResumePausedOptions) (runtimeapi.SandboxCreateResult, error) {
 	head := strings.TrimSpace(rec.CheckpointHeadTemplateID)
 	if head == "" {
-		return runtimeapi.SandboxCreateResult{}, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head", sandboxID))
+		return runtimeapi.SandboxCreateResult{}, ErrFailedPrecondition.Wrap(fmt.Errorf("sandbox %s has no checkpoint head", rec.ID))
 	}
-	if value, exists := m.sandboxes.Load(sandboxID); exists {
+	if value, exists := m.sandboxes.Load(rec.ID); exists {
 		entry := value.(*sandboxEntry)
 		// Any held entry but a stranded pause's belongs to another owner: a
 		// CREATING transition in flight or a stranded resume's remains.
@@ -284,13 +333,13 @@ func (m *Manager) ResumePaused(parent context.Context, sandboxID string, opts Re
 		// or the reservation below answers ErrAlreadyExists forever.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 		defer cleanupCancel()
-		if err := m.cleanupSandbox(cleanupCtx, sandboxID, entry); err != nil {
+		if err := m.cleanupSandbox(cleanupCtx, rec.ID, entry); err != nil {
 			return runtimeapi.SandboxCreateResult{}, err
 		}
-		if err := m.releaseCreateLease(cleanupCtx, sandboxID); err != nil {
+		if err := m.releaseCreateLease(cleanupCtx, rec.ID); err != nil {
 			return runtimeapi.SandboxCreateResult{}, err
 		}
-		m.sandboxes.Delete(sandboxID)
+		m.sandboxes.Delete(rec.ID)
 		m.releaseCapacity(rec)
 	}
 	req := CreateRequest{
