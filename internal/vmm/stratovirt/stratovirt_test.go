@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -144,7 +145,10 @@ func TestBuildStratovirtPmemDevices(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	got := buildStratovirtPmemDevices([]string{pmemPath})
+	got, err := buildStratovirtPmemDevices([]string{pmemPath}, 0)
+	if err != nil {
+		t.Fatalf("buildStratovirtPmemDevices() error = %v", err)
+	}
 	if !strings.Contains(got, "memory-backend-file,size=2M,id=pmem0,mem-path="+pmemPath) {
 		t.Fatalf("pmem object missing: %q", got)
 	}
@@ -167,7 +171,10 @@ func TestBuildStratovirtPmemDevicesSharesSingleIothread(t *testing.T) {
 		pmemPaths = append(pmemPaths, path)
 	}
 
-	got := buildStratovirtPmemDevices(pmemPaths)
+	got, err := buildStratovirtPmemDevices(pmemPaths, 0)
+	if err != nil {
+		t.Fatalf("buildStratovirtPmemDevices() error = %v", err)
+	}
 	if count := strings.Count(got, "-object iothread,id=pmemio"); count != 1 {
 		t.Fatalf("iothread object count = %d, want 1 in %q", count, got)
 	}
@@ -180,12 +187,70 @@ func TestBuildStratovirtPmemDevicesSharesSingleIothread(t *testing.T) {
 }
 
 func TestBuildStratovirtPmemDevicesWithoutUsablePathsIsEmpty(t *testing.T) {
-	if got := buildStratovirtPmemDevices(nil); got != "" {
-		t.Fatalf("buildStratovirtPmemDevices(nil) = %q, want empty", got)
+	got, err := buildStratovirtPmemDevices(nil, 0)
+	if err != nil || got != "" {
+		t.Fatalf("buildStratovirtPmemDevices(nil) = %q, %v; want empty", got, err)
 	}
 	// A missing file has no size, so the iothread object must not be emitted alone.
-	if got := buildStratovirtPmemDevices([]string{filepath.Join(t.TempDir(), "absent.erofs")}); got != "" {
-		t.Fatalf("buildStratovirtPmemDevices(missing) = %q, want empty", got)
+	got, err = buildStratovirtPmemDevices([]string{filepath.Join(t.TempDir(), "absent.erofs")}, 0)
+	if err != nil || got != "" {
+		t.Fatalf("buildStratovirtPmemDevices(missing) = %q, %v; want empty", got, err)
+	}
+}
+
+func TestBuildStratovirtPmemDevicesReusePCIFunctions(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for i := 0; i < 16; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("layer%d.erofs", i))
+		if err := os.WriteFile(path, make([]byte, 2*1024*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	got, err := buildStratovirtPmemDevices(paths, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "addr=0x1f") {
+		t.Fatalf("reserved pcie.0 slot used: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem0pci,memdev=pmem0,bus=pcie.0,addr=0x12,multifunction=on,") {
+		t.Fatalf("first slot missing multifunction: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem1pci,memdev=pmem1,bus=pcie.0,addr=0x12.1,") {
+		t.Fatalf("second layer not placed at 0x12.1: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem7pci,memdev=pmem7,bus=pcie.0,addr=0x12.7,") {
+		t.Fatalf("eighth layer not placed at 0x12.7: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem8pci,memdev=pmem8,bus=pcie.0,addr=0x13,multifunction=on,") {
+		t.Fatalf("ninth layer not placed at 0x13.0: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem13pci,memdev=pmem13,bus=pcie.0,addr=0x13.5,") {
+		t.Fatalf("14th layer not placed at 0x13.5: %s", got)
+	}
+}
+
+func TestBuildStratovirtPmemDevicesKeepOneSlotPerLayer(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for i := 0; i < 2; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("layer%d.erofs", i))
+		if err := os.WriteFile(path, make([]byte, 2*1024*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	got, err := buildStratovirtPmemDevices(paths, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "id=pmem0pci,memdev=pmem0,bus=pcie.0,addr=0x12,multifunction=on,iothread=pmemio") {
+		t.Fatalf("first layer should be 0x12 with multifunction: %s", got)
+	}
+	if !strings.Contains(got, "id=pmem1pci,memdev=pmem1,bus=pcie.0,addr=0x12.1,iothread=pmemio") {
+		t.Fatalf("second layer should be 0x12.1: %s", got)
 	}
 }
 
