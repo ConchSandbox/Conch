@@ -65,9 +65,15 @@ func (s *Server) checkpoint(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusConflict, "sandbox is not running")
 		return
 	}
-	if _, err := s.runtime.CheckpointSandbox(ctx, conchruntime.SandboxCheckpointOptions{
+	opts := conchruntime.SandboxCheckpointOptions{
 		SandboxID: rec.ID, TemplateName: name,
-	}); err != nil {
+	}
+	if request.Name != nil {
+		// The alias label lets the snapshot list report the client-visible
+		// name; auto-named captures list without one.
+		opts.Labels = map[string]string{conchruntime.SnapshotAliasLabel: name}
+	}
+	if _, err := s.runtime.CheckpointSandbox(ctx, opts); err != nil {
 		s.runtimeError(w, err)
 		return
 	}

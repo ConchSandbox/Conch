@@ -150,7 +150,7 @@ func TestRegistryCloseCancelsAndRejectsNewSlots(t *testing.T) {
 		t.Fatalf("closed publication = %v", err)
 	}
 	w := httptest.NewRecorder()
-	NewHandler(r, nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/proxy/health", nil))
+	NewHandler(r, nil, nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/proxy/health", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("closed proxy status = %d", w.Code)
 	}

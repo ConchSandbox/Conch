@@ -233,7 +233,7 @@ func (m *Manager) writeCreatingRecord(ctx context.Context, req CreateRequest, re
 			SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
 			CheckpointHeadTemplateID: req.TemplateID,
 			VCPUNum:                  req.VCPUNum, RamMB: req.RAMMB, Network: req.Network,
-			E2B: req.E2B, TimeoutAction: req.TimeoutAction, MaskRequestHost: req.MaskRequestHost,
+			E2B: req.E2B, TimeoutAction: req.TimeoutAction, AutoResume: req.AutoResume, MaskRequestHost: req.MaskRequestHost,
 			Metadata: cloneStringMap(req.Metadata),
 		})
 		if err != nil {

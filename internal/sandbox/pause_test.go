@@ -1550,6 +1550,133 @@ func TestResumePausedGuards(t *testing.T) {
 	}
 }
 
+// TestEnsureRunning covers the wake dispatch: a READY sandbox is a no-op, a
+// paused sandbox without autoResume is refused, and an armed sandbox is
+// restored under the same lock — concurrent wakers serialize, so exactly one
+// restore runs and the loser returns on the READY record.
+func TestEnsureRunning(t *testing.T) {
+	m, store, _, _, routes, capacity, _ := pauseFixture(t, readyBoot())
+	ctx := context.Background()
+	base := testCreateRequest()
+
+	if err := m.EnsureRunning(ctx, "", ResumePausedOptions{Timeout: time.Minute}); err == nil {
+		t.Fatal("empty id accepted")
+	}
+	if err := m.EnsureRunning(ctx, "sandbox-a", ResumePausedOptions{}); err == nil {
+		t.Fatal("zero timeout accepted")
+	}
+	if err := m.EnsureRunning(ctx, "missing", ResumePausedOptions{Timeout: time.Minute}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown sandbox = %v", err)
+	}
+	if _, err := store.Create(ctx, Record{
+		ID: "native", State: StateReady, E2B: false, CheckpointHeadTemplateID: base.TemplateID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureRunning(ctx, "native", ResumePausedOptions{Timeout: time.Minute}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("native sandbox = %v", err)
+	}
+
+	// A running sandbox is a no-op that never touches its deadline.
+	if err := m.EnsureRunning(ctx, "sandbox-a", ResumePausedOptions{Timeout: time.Minute}); err != nil {
+		t.Fatalf("ready no-op = %v", err)
+	}
+	ready, err := store.Get(ctx, "sandbox-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.ExpiresAt != 999 || len(routes.inserted) != 1 || capacity.releaseCount("sandbox-a") != 0 {
+		t.Fatalf("ready no-op touched the sandbox: %#v", ready)
+	}
+
+	if err := m.Pause(ctx, "sandbox-a", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureRunning(ctx, "sandbox-a", ResumePausedOptions{Timeout: time.Minute}); !errors.Is(err, ErrFailedPrecondition) {
+		t.Fatalf("paused without autoResume = %v", err)
+	}
+	paused, err := store.Get(ctx, "sandbox-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.State != StatePaused {
+		t.Fatalf("refused wake mutated the record: %#v", paused)
+	}
+
+	// Armed with autoResume: the wake restores under the same ID with the
+	// granted TTL, and concurrent wakers run exactly one restore.
+	paused.AutoResume = true
+	if _, err := store.Update(ctx, paused); err != nil {
+		t.Fatal(err)
+	}
+	const wakers = 2
+	errs := make(chan error, wakers)
+	for range wakers {
+		go func() {
+			errs <- m.EnsureRunning(ctx, "sandbox-a", ResumePausedOptions{Timeout: 2 * time.Minute, VMMName: "cloud-hypervisor"})
+		}()
+	}
+	for range wakers {
+		if err := <-errs; err != nil {
+			t.Fatalf("armed wake = %v", err)
+		}
+	}
+	woken, err := store.Get(ctx, "sandbox-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if woken.State != StateReady || !woken.AutoResume {
+		t.Fatalf("woken record = %#v", woken)
+	}
+	if remaining := time.Until(time.Unix(0, woken.ExpiresAt)); remaining < time.Minute || remaining > 2*time.Minute {
+		t.Fatalf("wake timeout = %v", remaining)
+	}
+	// One restore in total: the fixture's create-time insert, then the wake's.
+	if len(routes.inserted) != 2 || routes.releaseCount("sandbox-a") != 1 {
+		t.Fatalf("route inserts = %#v, releases = %d", routes.inserted, routes.releaseCount("sandbox-a"))
+	}
+	if reservation, ok := capacity.holding("sandbox-a"); !ok || reservation != (capacityReservation{cpus: 2, memoryMB: 512}) {
+		t.Fatalf("capacity reservation = %+v, %v", reservation, ok)
+	}
+	value, ok := m.sandboxes.Load("sandbox-a")
+	if !ok || value.(*sandboxEntry).state != StateReady {
+		t.Fatal("woken runtime entry missing or not ready")
+	}
+
+	// A stranded lineage — the residue of a terminal write that failed after
+	// the release was confirmed — follows the same autoResume gate: without
+	// the arming only a manual connect revives it, an armed one restores.
+	stranded := Record{
+		ID: "stranded", State: StateUnknown, E2B: true, LastError: "paused write failure",
+		SourceTemplateID: base.TemplateID, CheckpointHeadTemplateID: digest.FromString("stranded-head").String(),
+		VCPUNum: base.VCPUNum, RamMB: base.RAMMB, HeadStartedAt: 100, HeadCreatedAt: 200,
+	}
+	if _, err := store.Create(ctx, stranded); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureRunning(ctx, "stranded", ResumePausedOptions{Timeout: time.Minute}); !errors.Is(err, ErrFailedPrecondition) {
+		t.Fatalf("stranded without autoResume = %v", err)
+	}
+	got, err := store.Get(ctx, "stranded")
+	if err != nil || got.State != StateUnknown {
+		t.Fatalf("refused stranded wake mutated the record: %#v (%v)", got, err)
+	}
+	stranded.AutoResume = true
+	if _, err := store.Update(ctx, stranded); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureRunning(ctx, "stranded", ResumePausedOptions{Timeout: 2 * time.Minute, VMMName: "cloud-hypervisor"}); err != nil {
+		t.Fatalf("armed stranded wake = %v", err)
+	}
+	revived, err := store.Get(ctx, "stranded")
+	if err != nil || revived.State != StateReady || !revived.AutoResume {
+		t.Fatalf("revived record = %#v (%v)", revived, err)
+	}
+	if remaining := time.Until(time.Unix(0, revived.ExpiresAt)); remaining < time.Minute || remaining > 2*time.Minute {
+		t.Fatalf("stranded wake timeout = %v", remaining)
+	}
+}
+
 func TestApplyTTL(t *testing.T) {
 	m, store, _, _, _, _, _ := pauseFixture(t, readyBoot())
 	m.sandboxes.Delete("sandbox-a")

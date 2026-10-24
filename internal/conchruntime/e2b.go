@@ -58,6 +58,24 @@ func (s *Service) ResumePausedSandbox(ctx context.Context, sandboxID string, opt
 	return s.Sandbox.ResumePaused(ctx, sandboxID, opts)
 }
 
+// EnsureSandboxRunning makes an E2B sandbox serve data-plane traffic. A
+// running sandbox is a no-op that never touches its TTL; a paused sandbox is
+// restored from its checkpoint only when it was created with autoResume,
+// granted the given TTL. This backs wake-on-traffic: the proxy calls it on a
+// route miss before giving up on the sandbox.
+func (s *Service) EnsureSandboxRunning(ctx context.Context, sandboxID string, ttl time.Duration) error {
+	if s == nil || s.Sandbox == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	opts := sandbox.ResumePausedOptions{
+		Timeout: ttl,
+		// The node default names the requested VMM; the checkpoint boot
+		// index decides the actual one.
+		VMMName: s.SandboxDefaults.VMMName,
+	}
+	return s.Sandbox.EnsureRunning(ctx, sandboxID, opts)
+}
+
 // ApplySandboxTTL applies a TTL change to a READY E2B sandbox.
 func (s *Service) ApplySandboxTTL(ctx context.Context, sandboxID string, req sandbox.TTLRequest) (sandbox.Record, error) {
 	if s == nil || s.Sandbox == nil {

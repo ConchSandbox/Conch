@@ -53,7 +53,16 @@ func New(cfg Config, service *conchruntime.Service, routes *sandboxproxy.Registr
 	if cfg.APIKey == "" || cfg.RequestTimeout <= 0 || service == nil || service.Store == nil || routes == nil {
 		return nil, fmt.Errorf("E2B API requires an API key, request timeout, runtime/store and proxy registry")
 	}
-	return &Server{runtime: service, proxy: sandboxproxy.NewHandler(routes, cfg.Domains), config: cfg}, nil
+	// A wake restores a paused sandbox with the upstream minimum TTL floor,
+	// capped by the operator's TTL ceiling.
+	wakeTTL := autoResumeMinTTL
+	if cfg.MaxSandboxTTL < wakeTTL {
+		wakeTTL = cfg.MaxSandboxTTL
+	}
+	wake := func(ctx context.Context, sandboxID string) error {
+		return service.EnsureSandboxRunning(ctx, sandboxID, wakeTTL)
+	}
+	return &Server{runtime: service, proxy: sandboxproxy.NewHandler(routes, cfg.Domains, wake), config: cfg}, nil
 }
 
 func (s *Server) ttlRangeMessage() string {
@@ -74,7 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimRight(r.URL.Path, "/")
-	control := path == "/sandboxes" || path == "/v2/sandboxes" || strings.HasPrefix(path, "/sandboxes/") || path == "/sandboxes-cold"
+	control := path == "/sandboxes" || path == "/v2/sandboxes" || strings.HasPrefix(path, "/sandboxes/") || path == "/sandboxes-cold" || path == "/snapshots"
 	if !control && s.proxy.IsProxyRequest(r) {
 		s.proxy.ServeHTTP(w, r)
 		return
@@ -93,6 +102,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.create(w, r)
 	case (path == "/sandboxes" || path == "/v2/sandboxes") && r.Method == http.MethodGet:
 		s.list(w, r)
+	case path == "/snapshots" && r.Method == http.MethodGet:
+		s.listSnapshots(w, r)
 	case strings.HasPrefix(path, "/sandboxes/"):
 		parts := strings.Split(strings.TrimPrefix(path, "/sandboxes/"), "/")
 		if len(parts) == 1 {
@@ -204,10 +215,6 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		unimplemented(w, "secure envd; explicitly set secure=false")
 		return
 	}
-	if request.AutoResume != nil && request.AutoResume.Enabled {
-		unimplemented(w, "automatic resume")
-		return
-	}
 	if request.AutoPauseMemory != nil && !*request.AutoPauseMemory {
 		writeError(w, 400, "autoPauseMemory=false (disk-only pause) is not supported")
 		return
@@ -227,6 +234,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	opts := runtimeapi.SandboxCreateOptions{
 		SandboxID: uuid.NewString(), E2B: true, Env: request.EnvVars, Metadata: request.Metadata, Timeout: time.Duration(ttl) * time.Second,
 		TimeoutAction: runtimeapi.TimeoutActionDelete,
+		AutoResume:    request.AutoResume != nil && request.AutoResume.Enabled,
 	}
 	if request.AutoPause != nil && *request.AutoPause {
 		opts.TimeoutAction = runtimeapi.TimeoutActionPause
@@ -279,6 +287,11 @@ type sandboxModel struct {
 	Domain      *string `json:"domain,omitempty"`
 }
 
+type sandboxLifecycle struct {
+	AutoResume bool   `json:"autoResume"`
+	OnTimeout  string `json:"onTimeout"`
+}
+
 type sandboxDetail struct {
 	sandboxModel
 	StartedAt  time.Time         `json:"startedAt"`
@@ -288,6 +301,7 @@ type sandboxDetail struct {
 	DiskSizeMB int64             `json:"diskSizeMB"`
 	State      string            `json:"state"`
 	Metadata   map[string]string `json:"metadata"`
+	Lifecycle  *sandboxLifecycle `json:"lifecycle,omitempty"`
 }
 
 func (s *Server) model(rec sandbox.Record) sandboxModel {
@@ -343,8 +357,15 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 	if pausedView(rec) {
 		state = "paused"
 	}
+	// E2B's onTimeout vocabulary is kill/pause; Conch's delete action is the
+	// upstream kill, and an unset action keeps the same default semantics.
+	onTimeout := "kill"
+	if rec.TimeoutAction == runtimeapi.TimeoutActionPause {
+		onTimeout = "pause"
+	}
 	return sandboxDetail{sandboxModel: s.model(rec), StartedAt: runStartedAt(rec), EndAt: viewEndAt(rec),
-		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: state, Metadata: metadata}
+		CPUCount: rec.VCPUNum, MemoryMB: rec.RamMB, State: state, Metadata: metadata,
+		Lifecycle: &sandboxLifecycle{AutoResume: rec.AutoResume, OnTimeout: onTimeout}}
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
@@ -494,8 +515,9 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 	// could only queue on the lifecycle lock; this request waits instead.
 	// The wait also bounds the double-fault orphan — a CREATING lineage whose
 	// entry died with its failed create, so nothing is resuming: connect ends
-	// at a 409 rather than reviving it in-process, and the record waits for
-	// an explicit delete or a restart.
+	// at a 409 rather than reviving it in-process. An autoResume orphan stays
+	// wakeable from the data plane; the rest wait for an explicit delete or
+	// a restart.
 	if pausedView(rec) && rec.State != sandbox.StatePaused {
 		if rec.State == sandbox.StateUnknown {
 			if _, err := s.runtime.ResumePausedSandbox(ctx, rec.ID, sandbox.ResumePausedOptions{Timeout: timeout}); err == nil {

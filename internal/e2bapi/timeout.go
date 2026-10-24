@@ -23,6 +23,10 @@ const refreshMinSeconds = 15
 // maxTTLSeconds caps request TTLs at what an int64 nanosecond duration holds.
 const maxTTLSeconds = math.MaxInt64 / int64(time.Second)
 
+// autoResumeMinTTL is the TTL floor granted to a sandbox restored by
+// wake-on-traffic, matching the upstream minimum sandbox timeout.
+const autoResumeMinTTL = 300 * time.Second
+
 // setTimeout resets the sandbox TTL deadline to now+timeout. Unlike refreshes
 // and connect it may shorten the remaining lifetime; zero and negative values
 // expire the sandbox now. There is no request-level ceiling: the
