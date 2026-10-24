@@ -95,6 +95,10 @@ func (m *Manager) Checkpoint(parent context.Context, sandboxID string, register 
 		_, rollbackErr := m.store.Update(rollbackCtx, rec)
 		return CheckpointResult{}, combineOperationErrors(err, rollbackErr)
 	}
+	retireCtx, cancelRetire := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
+	defer cancelRetire()
+	// The parent head is superseded; the rollback path above restores it as current, so only this path retires.
+	m.retireMemRecord(retireCtx, txn.result.ParentBootIndexDigest, rec.SourceTemplateID)
 	return result, nil
 }
 

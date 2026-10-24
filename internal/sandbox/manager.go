@@ -146,6 +146,7 @@ func (m *Manager) recoverStaleSandbox(ctx context.Context, sandboxID string) err
 	if err := m.releaseCreateLease(ctx, sandboxID); err != nil {
 		return m.persistSandboxFailure(ctx, rec, exists, err)
 	}
+	m.retireMemRecord(ctx, rec.CheckpointHeadTemplateID, rec.SourceTemplateID)
 	if err := m.store.Delete(ctx, sandboxID); err != nil {
 		return m.persistSandboxFailure(ctx, rec, exists, err)
 	}

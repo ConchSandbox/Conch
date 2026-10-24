@@ -260,6 +260,204 @@ func TestStoreDeleteRejectsNonTemplateRecordInReservedKeyspace(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteRetiresComponentRecords(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, contentStore, true)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
+	const name = "registry.example/conch/demo:latest"
+	if _, err := store.Put(ctx, conchtemplate.Entry{
+		Name:            name,
+		Origin:          conchtemplate.OriginCheckpoint,
+		BootMode:        conchtemplate.BootModeResume,
+		BootIndexDigest: target.Digest.String(),
+	}, target); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	info, err := conchimage.InspectBootIndexContent(ctx, contentStore, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedComponentRecords(t, imageStore, info)
+	imageStore.records["registry.example/unrelated:v1"] = images.Image{Name: "registry.example/unrelated:v1", Target: target}
+
+	if err := store.Delete(ctx, name); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if len(imageStore.records) != 1 || imageStore.records["registry.example/unrelated:v1"].Name != "registry.example/unrelated:v1" {
+		t.Fatalf("image records after Delete = %#v, want only the unrelated record", imageStore.records)
+	}
+}
+
+func TestStoreDeleteKeepsSharedComponentContent(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	cold := buildTestBootIndex(t, ctx, contentStore, false)
+	resume := buildTestBootIndex(t, ctx, contentStore, true)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
+	coldEntry := conchtemplate.Entry{
+		Name: "registry.example/conch/cold:latest", Origin: conchtemplate.OriginImage,
+		BootMode: conchtemplate.BootModeCold, BootIndexDigest: cold.Digest.String(),
+	}
+	if _, err := store.Put(ctx, coldEntry, cold); err != nil {
+		t.Fatalf("Put() cold error = %v", err)
+	}
+	resumeEntry := conchtemplate.Entry{
+		Name: "registry.example/conch/resume:latest", Origin: conchtemplate.OriginCheckpoint,
+		BootMode: conchtemplate.BootModeResume, BootIndexDigest: resume.Digest.String(),
+	}
+	if _, err := store.Put(ctx, resumeEntry, resume); err != nil {
+		t.Fatalf("Put() resume error = %v", err)
+	}
+	coldInfo, err := conchimage.InspectBootIndexContent(ctx, contentStore, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeInfo, err := conchimage.InspectBootIndexContent(ctx, contentStore, resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coldInfo.RootfsDescriptor.Digest != resumeInfo.RootfsDescriptor.Digest ||
+		coldInfo.SandboxDescriptor.Digest != resumeInfo.SandboxDescriptor.Digest {
+		t.Fatal("test setup: cold and resume boot indexes do not share rootfs and sandbox components")
+	}
+	seedComponentRecords(t, imageStore, coldInfo)
+	seedComponentRecords(t, imageStore, resumeInfo)
+
+	if err := store.Delete(ctx, coldEntry.Name); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	sharedRootfs := conchimage.ComponentImageName(conchimage.KindRootfs, coldInfo.RootfsDescriptor.Digest)
+	if _, ok := imageStore.records[sharedRootfs]; ok {
+		t.Fatalf("shared component record %s survived Delete()", sharedRootfs)
+	}
+	resumeMem := conchimage.ComponentImageName(conchimage.KindMemSnapshot, resumeInfo.MemDescriptor.Digest)
+	if _, ok := imageStore.records[resumeMem]; !ok {
+		t.Fatal("surviving Template's own mem component record was deleted")
+	}
+	if got, err := store.Get(ctx, resumeEntry.Name); err != nil || got.BootIndexDigest != resume.Digest.String() {
+		t.Fatalf("Get() after Delete = %#v, %v", got, err)
+	}
+	contentInfo, err := contentStore.Info(ctx, coldInfo.RootfsDescriptor.Digest)
+	if err != nil {
+		t.Fatalf("shared rootfs content after Delete: %v", err)
+	}
+	if len(contentInfo.Labels) == 0 {
+		t.Fatal("shared rootfs content lost its GC labels while a Template still references it")
+	}
+}
+
+func TestStoreDeleteToleratesMissingBootIndexContent(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	target := buildTestBootIndex(t, ctx, contentStore, false)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
+	const name = "registry.example/conch/demo:latest"
+	if _, err := store.Put(ctx, conchtemplate.Entry{
+		Name: name, Origin: conchtemplate.OriginImage,
+		BootMode: conchtemplate.BootModeCold, BootIndexDigest: target.Digest.String(),
+	}, target); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	if err := contentStore.Delete(ctx, target.Digest); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(ctx, name); err != nil {
+		t.Fatalf("Delete() error = %v, want success with unavailable content", err)
+	}
+	if _, ok := imageStore.records[conchimage.TemplateRecordName(name)]; ok {
+		t.Fatal("Template record survived Delete()")
+	}
+}
+
+func seedComponentRecords(t *testing.T, imageStore *memoryImageStore, info conchimage.BootIndexInfo) {
+	t.Helper()
+	for _, component := range []struct {
+		kind string
+		desc ocispec.Descriptor
+	}{
+		{conchimage.KindRootfs, info.RootfsDescriptor},
+		{conchimage.KindMemSnapshot, info.MemDescriptor},
+		{conchimage.KindSandbox, info.SandboxDescriptor},
+	} {
+		if component.desc.Digest == "" {
+			continue
+		}
+		name := conchimage.ComponentImageName(component.kind, component.desc.Digest)
+		imageStore.records[name] = images.Image{Name: name, Target: component.desc}
+	}
+}
+
+func TestStorePutRetiresSupersededComponentRecords(t *testing.T) {
+	ctx := context.Background()
+	contentStore := newTestContentStore(t)
+	cold := buildTestBootIndex(t, ctx, contentStore, false)
+	resume := buildTestBootIndex(t, ctx, contentStore, true)
+	imageStore := newMemoryImageStore()
+	store := &Store{images: imageStore, content: contentStore}
+	const name = "registry.example/conch/demo:latest"
+	coldEntry := conchtemplate.Entry{
+		Name: name, Origin: conchtemplate.OriginImage,
+		BootMode: conchtemplate.BootModeCold, BootIndexDigest: cold.Digest.String(),
+	}
+	if _, err := store.Put(ctx, coldEntry, cold); err != nil {
+		t.Fatalf("Put() cold error = %v", err)
+	}
+	coldInfo, err := conchimage.InspectBootIndexContent(ctx, contentStore, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeInfo, err := conchimage.InspectBootIndexContent(ctx, contentStore, resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedComponentRecords(t, imageStore, coldInfo)
+	seedComponentRecords(t, imageStore, resumeInfo)
+
+	resumeEntry := conchtemplate.Entry{
+		Name: name, Origin: conchtemplate.OriginCheckpoint,
+		BootMode: conchtemplate.BootModeResume, BootIndexDigest: resume.Digest.String(),
+	}
+	if _, err := store.Put(ctx, resumeEntry, resume); err != nil {
+		t.Fatalf("Put() overwrite error = %v", err)
+	}
+	if got, err := store.Get(ctx, name); err != nil || got.BootIndexDigest != resume.Digest.String() {
+		t.Fatalf("Get() after overwrite = %#v, %v", got, err)
+	}
+	sharedRootfs := conchimage.ComponentImageName(conchimage.KindRootfs, coldInfo.RootfsDescriptor.Digest)
+	if _, ok := imageStore.records[sharedRootfs]; ok {
+		t.Fatalf("superseded component record %s survived the same-name overwrite", sharedRootfs)
+	}
+	resumeMem := conchimage.ComponentImageName(conchimage.KindMemSnapshot, resumeInfo.MemDescriptor.Digest)
+	if _, ok := imageStore.records[resumeMem]; !ok {
+		t.Fatal("current mem component record was deleted by the same-name overwrite")
+	}
+
+	if _, err := store.Put(ctx, resumeEntry, resume); err != nil {
+		t.Fatalf("Put() same-digest error = %v", err)
+	}
+	if _, ok := imageStore.records[resumeMem]; !ok {
+		t.Fatal("same-digest Put deleted the component records the target still uses")
+	}
+
+	if err := contentStore.Delete(ctx, resume.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, coldEntry, cold); err != nil {
+		t.Fatalf("Put() after losing the old boot index = %v, want success", err)
+	}
+	if got, err := store.Get(ctx, name); err != nil || got.BootIndexDigest != cold.Digest.String() {
+		t.Fatalf("Get() after unreadable old index = %#v, %v", got, err)
+	}
+	if _, ok := imageStore.records[resumeMem]; !ok {
+		t.Fatal("Put with an unreadable old boot index must only skip the retirement")
+	}
+}
+
 type memoryImageStore struct {
 	records map[string]images.Image
 	filters []string

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
@@ -283,7 +284,10 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := containerd.New("", containerd.WithServices(containerd.WithLeasesService(leaseStore), containerd.WithContentStore(contentStore)))
+	client, err := containerd.New("", containerd.WithServices(
+		containerd.WithLeasesService(leaseStore), containerd.WithContentStore(contentStore),
+		containerd.WithImageStore(&recordingImageService{}),
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +312,33 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 		}
 	}
 	return m, store, leaseStore
+}
+
+// recordingImageService records image record deletions for retire tests.
+type recordingImageService struct {
+	images.Store
+	mu        sync.Mutex
+	deleted   []string
+	deleteErr error
+}
+
+func (s *recordingImageService) Delete(ctx context.Context, name string, _ ...images.DeleteOpt) error {
+	if ns, _ := namespaces.Namespace(ctx); ns == "" {
+		return errors.New("namespace is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.deleted = append(s.deleted, name)
+	return nil
+}
+
+func (s *recordingImageService) deletedNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.deleted...)
 }
 
 type testLeases struct {

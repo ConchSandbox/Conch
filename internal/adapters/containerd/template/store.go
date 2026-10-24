@@ -14,6 +14,7 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 const (
@@ -154,10 +155,37 @@ func (s *Store) Delete(ctx context.Context, rawName string) error {
 	if record.Labels[schemaLabel] != schemaVersion {
 		return conchtemplate.ErrNotFound.Wrap(fmt.Errorf("image record %s is not a Template", recordName))
 	}
+	s.retireComponentRecords(nsctx, record.Target)
 	if err := s.images.Delete(nsctx, recordName, images.DeleteTarget(&record.Target)); err != nil {
 		return translateError("delete Template image record", err)
 	}
 	return nil
+}
+
+// retireComponentRecords best-effort deletes the Template's component image records before its record goes: they are pure caches recreated on boot, and a failed Template delete then leaves them recreatable instead of orphaned.
+func (s *Store) retireComponentRecords(ctx context.Context, target ocispec.Descriptor) {
+	info, err := conchimage.InspectBootIndexContent(ctx, s.content, target)
+	if err != nil {
+		ulog.GetLogger().Warn("retire component records: inspect boot index", ulog.F("digest", target.Digest), ulog.F("error", err))
+		return
+	}
+	components := []struct {
+		kind string
+		desc ocispec.Descriptor
+	}{
+		{conchimage.KindRootfs, info.RootfsDescriptor},
+		{conchimage.KindMemSnapshot, info.MemDescriptor},
+		{conchimage.KindSandbox, info.SandboxDescriptor},
+	}
+	for _, component := range components {
+		if component.desc.Digest == "" {
+			continue
+		}
+		name := conchimage.ComponentImageName(component.kind, component.desc.Digest)
+		if err := s.images.Delete(ctx, name); err != nil && !errdefs.IsNotFound(err) {
+			ulog.GetLogger().Warn("retire component record", ulog.F("name", name), ulog.F("error", err))
+		}
+	}
 }
 
 func entryFromRecord(record images.Image) (conchtemplate.Entry, error) {
@@ -233,6 +261,10 @@ func (s *Store) putRecord(ctx context.Context, record images.Image) (images.Imag
 	}
 	if existing.Labels[schemaLabel] != schemaVersion {
 		return images.Image{}, fmt.Errorf("image record %s is not a Template: %w", record.Name, errdefs.ErrAlreadyExists)
+	}
+	if existing.Target.Digest != record.Target.Digest {
+		// Retire the old target's component records while the record still pins the old boot index readable.
+		s.retireComponentRecords(ctx, existing.Target)
 	}
 	updated, err := s.images.Update(ctx, record)
 	if !errdefs.IsNotFound(err) {
