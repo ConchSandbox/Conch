@@ -49,6 +49,39 @@ func TestResourceSnapshotKeepsUnconfirmedRecordAllocated(t *testing.T) {
 	}
 }
 
+// A PAUSED record owns no live runtime: its resources count only into the
+// paused_* metrics and never into the running allocation. Every other record
+// stays in the running totals — a CREATING lineage as an in-flight resume, a
+// stranded UNKNOWN lineage as a possibly released quota that still
+// over-reports there until a resume or a delete retires it, and a lineage-less
+// native UNKNOWN as an unconfirmed allocation.
+func TestResourceSnapshotSeparatesPausedFromRunning(t *testing.T) {
+	snapshot, ids, err := resourceSnapshot([]sandbox.Record{
+		{ID: "a-paused", State: sandbox.StatePaused, E2B: true, VCPUNum: 2, RamMB: 512},
+		{ID: "b-running", State: sandbox.StateReady, VCPUNum: 1, RamMB: 256},
+		{ID: "c-resuming", State: sandbox.StateCreating, E2B: true, VCPUNum: 1, RamMB: 256,
+			SourceTemplateID: "source", CheckpointHeadTemplateID: "head"},
+		{ID: "d-stranded", State: sandbox.StateUnknown, E2B: true, VCPUNum: 2, RamMB: 512,
+			SourceTemplateID: "source", CheckpointHeadTemplateID: "head"},
+		{ID: "e-native", State: sandbox.StateUnknown, VCPUNum: 1, RamMB: 256,
+			SourceTemplateID: "source", CheckpointHeadTemplateID: "head"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 5 {
+		t.Fatalf("roster lost records: %v", ids)
+	}
+	if snapshot.SandboxCount != 1 || snapshot.SandboxStartingCount != 1 ||
+		snapshot.AllocatedCpu != 5 || snapshot.AllocatedMemoryBytes != 1280*1024*1024 {
+		t.Fatalf("running totals = %v", snapshot)
+	}
+	if snapshot.PausedSandboxCount != 1 || snapshot.PausedAllocatedCpu != 2 ||
+		snapshot.PausedAllocatedMemoryBytes != 512*1024*1024 {
+		t.Fatalf("paused metrics = %v", snapshot)
+	}
+}
+
 func TestCPUPercentDoesNotDoubleCountGuestTime(t *testing.T) {
 	before := procfs.CPUStat{User: 100, Idle: 100, Guest: 100}
 	after := procfs.CPUStat{User: 150, Idle: 150, Guest: 150}

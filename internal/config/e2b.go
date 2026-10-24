@@ -7,13 +7,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // E2BConfig enables the TCP Node API; APIKey is resolved from AENV_API_KEY.
 type E2BConfig struct {
-	ListenAddr          string   `yaml:"listen_addr"`
-	SandboxProxyDomains []string `yaml:"sandbox_proxy_domains"`
-	APIKey              string   `yaml:"-"`
+	ListenAddr          string        `yaml:"listen_addr"`
+	SandboxProxyDomains []string      `yaml:"sandbox_proxy_domains"`
+	MaxSandboxTTL       time.Duration `yaml:"max_sandbox_ttl"`
+	APIKey              string        `yaml:"-"`
 }
 
 // ClusterConfig identifies this Node to the Scheduler; an empty
@@ -48,6 +50,9 @@ func validateE2BConfig(cfg *Config) error {
 		domains = append(domains, domain)
 	}
 	e2b.SandboxProxyDomains = domains
+	if e2b.MaxSandboxTTL != 0 && e2b.MaxSandboxTTL < time.Second {
+		return fmt.Errorf("invalid e2b.max_sandbox_ttl=%s: must be at least 1s", e2b.MaxSandboxTTL)
+	}
 	if e2b.ListenAddr != "" {
 		if cfg.Sandbox.RequestTimeout <= 0 {
 			return fmt.Errorf("sandbox.request_timeout must be positive when E2B is enabled")
@@ -60,6 +65,9 @@ func validateE2BConfig(cfg *Config) error {
 		}
 		if strings.ContainsAny(e2b.APIKey, "\r\n") {
 			return fmt.Errorf("AENV_API_KEY must not contain line breaks")
+		}
+		if e2b.MaxSandboxTTL == 0 {
+			return fmt.Errorf("e2b.max_sandbox_ttl is required when the E2B listener is enabled")
 		}
 	}
 	if cluster.SchedulerAddr != "" {

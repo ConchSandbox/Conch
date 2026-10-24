@@ -181,6 +181,22 @@ func (f *fakeSandboxOps) Checkpoint(ctx context.Context, sandboxID string, regis
 	}
 	return f.checkpointResp, register(ctx, f.checkpointResp)
 }
+func (f *fakeSandboxOps) Pause(context.Context, string, time.Time) error { return nil }
+func (f *fakeSandboxOps) ResumePaused(context.Context, string, sandbox.ResumePausedOptions) (runtimeapi.SandboxCreateResult, error) {
+	return runtimeapi.SandboxCreateResult{}, nil
+}
+func (f *fakeSandboxOps) ApplyTTL(ctx context.Context, sandboxID string, req sandbox.TTLRequest) (sandbox.Record, error) {
+	if f.store == nil {
+		return sandbox.Record{}, sandbox.ErrNotFound.New()
+	}
+	rec, err := f.store.Get(ctx, sandboxID)
+	if err != nil {
+		return sandbox.Record{}, err
+	}
+	rec.ExpiresAt = time.Now().Add(req.TTL).UnixNano()
+	return f.store.Update(ctx, rec)
+}
+func (f *fakeSandboxOps) Expire(context.Context, string, time.Time) error { return nil }
 
 func TestHandleHealth(t *testing.T) {
 	store := newMemorySandboxStore()

@@ -21,6 +21,9 @@ type RouteTable interface {
 	Insert(sandboxID string) context.Context
 	// Publish exposes a slot after envd health and init succeeded.
 	Publish(sandboxID, ip, maskRequestHost string) error
+	// Unpublish withdraws a published route's IP while keeping the slot:
+	// attached requests stop and waiters keep waiting for republication.
+	Unpublish(sandboxID string)
 	// Release cancels in-flight requests and removes the slot before the
 	// interaction IP can return to the network pool.
 	Release(sandboxID string)

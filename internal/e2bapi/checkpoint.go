@@ -9,6 +9,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/vmm/driver"
 )
 
 type checkpointRequest struct {
@@ -48,7 +49,8 @@ func (s *Server) checkpoint(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		names = append(names, name)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
+	// The capture can outlast the request budget, and the Manager-side max cannot extend this wrap.
+	ctx, cancel := context.WithTimeout(r.Context(), max(s.config.RequestTimeout, driver.SnapshotCaptureTimeout))
 	defer cancel()
 	rec, err := s.runtime.GetSandbox(ctx, id)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ import (
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
+	"github.com/openeuler/Conch/internal/vmm/driver"
 )
 
 // Only the VMM capture is simulated: the HTTP handler, runtime service,
@@ -235,5 +237,39 @@ func TestCheckpointRequestValidation(t *testing.T) {
 	resp, data := doRequest(t, server, http.MethodPost, "/sandboxes/"+ready.ID+"/snapshots", `{}`, true)
 	if resp.StatusCode != 500 || strings.Contains(string(data), "snapshotID") {
 		t.Fatalf("unconfigured runtime = HTTP %d %s", resp.StatusCode, data)
+	}
+}
+
+// The Manager-side max cannot extend a parent deadline, so the capture handlers must widen their own wrap.
+func TestCaptureBudgetOutlivesRequestTimeout(t *testing.T) {
+	service, routes := testRuntime(t)
+	runtime := &fakeSandboxRuntime{store: service.Store}
+	service.Sandbox = runtime
+	// A non-nil store satisfies CheckpointSandbox; the fake never invokes the register callback.
+	service.Templates = struct{ conchtemplate.Store }{}
+	server := testServer(t, service, routes)
+
+	ready := seedRecord(t, service.Store, true, true, "budget")
+	resp, data := doRequest(t, server, http.MethodPost, "/sandboxes/"+ready.ID+"/pause", `{}`, true)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("pause = %d %s", resp.StatusCode, data)
+	}
+	runtime.mu.Lock()
+	pauseDeadline := runtime.pauseDeadline
+	runtime.mu.Unlock()
+	if remaining := time.Until(pauseDeadline); remaining < driver.SnapshotCaptureTimeout-time.Minute {
+		t.Fatalf("pause budget = %v, want at least %v", remaining, driver.SnapshotCaptureTimeout)
+	}
+
+	other := seedRecord(t, service.Store, true, true, "budget")
+	resp, data = doRequest(t, server, http.MethodPost, "/sandboxes/"+other.ID+"/snapshots", `{"name":"budget:v1"}`, true)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("checkpoint = %d %s", resp.StatusCode, data)
+	}
+	runtime.mu.Lock()
+	checkpointDeadline := runtime.checkpointDeadline
+	runtime.mu.Unlock()
+	if remaining := time.Until(checkpointDeadline); remaining < driver.SnapshotCaptureTimeout-time.Minute {
+		t.Fatalf("checkpoint budget = %v, want at least %v", remaining, driver.SnapshotCaptureTimeout)
 	}
 }

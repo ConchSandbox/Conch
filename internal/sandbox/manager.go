@@ -57,11 +57,10 @@ type Manager struct {
 const createCleanupTimeout = 10 * time.Second
 
 type sandboxEntry struct {
-	state        State
-	sbx          *Sandbox
-	volumes      []volume.Device
-	exitNotified bool
-	ramMB        int64
+	state   State
+	sbx     *Sandbox
+	volumes []volume.Device
+	ramMB   int64
 }
 
 func New(

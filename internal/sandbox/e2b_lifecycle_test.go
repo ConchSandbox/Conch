@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -76,6 +77,30 @@ func (f *fakeRouteTable) Release(id string) {
 	f.released = append(f.released, id)
 }
 
+// Unpublish mirrors the registry: the route's IP withdraws while the slot —
+// and its right to publish the same IP again — stays.
+func (f *fakeRouteTable) Unpublish(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.routes[id]; !ok {
+		return
+	}
+	f.cancels[id]()
+	_, cancel := context.WithCancel(context.Background())
+	f.cancels[id] = cancel
+	delete(f.routes, id)
+}
+
+// unpublished reports whether the slot exists without a published IP: the
+// data-plane view of a capture freezing the VM.
+func (f *fakeRouteTable) unpublished(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, slotted := f.cancels[id]
+	_, published := f.routes[id]
+	return slotted && !published
+}
+
 func (f *fakeRouteTable) routeIP(id string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -110,6 +135,11 @@ func (c *fakeCapacityLedger) Reserve(id string, cpus, memoryMB int64) error {
 	defer c.mu.Unlock()
 	if c.reserved == nil {
 		c.reserved = make(map[string]capacityReservation)
+	}
+	// Mirror the real ledger: a second reservation for a held ID fails
+	// instead of overwriting, so a leaked reservation cannot pass silently.
+	if _, exists := c.reserved[id]; exists {
+		return ErrAlreadyExists.Wrap(fmt.Errorf("sandbox %s already reserves capacity", id))
 	}
 	c.reserved[id] = capacityReservation{cpus: cpus, memoryMB: memoryMB}
 	return nil

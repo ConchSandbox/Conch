@@ -213,6 +213,64 @@ func TestProxyRequestContextCancelsSynchronouslyWithRelease(t *testing.T) {
 	}
 }
 
+// TestUnpublishWithdrawsRouteAndCancelsRequests pins the capture-time view:
+// Unpublish makes Lookup miss while the slot stays unpublished, and the
+// requests already attached to the route stop.
+func TestUnpublishWithdrawsRouteAndCancelsRequests(t *testing.T) {
+	r := NewRegistry()
+	defer r.Close()
+	id := uuid.NewString()
+	if r.Insert(id) == nil {
+		t.Fatal("insert failed")
+	}
+	if err := r.Publish(id, "127.0.0.1", ""); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := r.Lookup(id)
+	if !ok {
+		t.Fatal("published route not resolvable")
+	}
+	proxied, cancel := route.requestContext(t.Context())
+	defer cancel()
+
+	r.Unpublish(id)
+	if !errors.Is(proxied.Err(), context.Canceled) {
+		t.Fatalf("unpublish did not cancel attached requests: %v", proxied.Err())
+	}
+	if _, ok := r.Lookup(id); ok {
+		t.Fatal("withdrawn route still resolvable")
+	}
+	if _, state := r.routeFor(id); state != routeUnpublished {
+		t.Fatal("withdrawn slot not reported as unpublished")
+	}
+}
+
+// TestRepublishAfterUnpublishRestoresRoute pins the recovery view: the same
+// IP publishes back onto the retained slot, so a runtime handed back running
+// reappears in the data plane without a new bootstrap.
+func TestRepublishAfterUnpublishRestoresRoute(t *testing.T) {
+	r := NewRegistry()
+	defer r.Close()
+	id := uuid.NewString()
+	if r.Insert(id) == nil {
+		t.Fatal("insert failed")
+	}
+	if err := r.Publish(id, "127.0.0.1", "app-${PORT}.internal"); err != nil {
+		t.Fatal(err)
+	}
+	r.Unpublish(id)
+	if err := r.Publish(id, "127.0.0.1", "app-${PORT}.internal"); err != nil {
+		t.Fatalf("republishing the withdrawn route failed: %v", err)
+	}
+	route, ok := r.Lookup(id)
+	if !ok || route.IP != "127.0.0.1" || route.MaskRequestHost != "app-${PORT}.internal" {
+		t.Fatalf("restored route = %+v, %v", route, ok)
+	}
+	if route.lifetime.Err() != nil {
+		t.Fatal("restored route carries a dead lifetime")
+	}
+}
+
 func TestProxyRequestContextKeepsClientCancellation(t *testing.T) {
 	r := NewRegistry()
 	defer r.Close()

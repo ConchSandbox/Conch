@@ -15,8 +15,14 @@ import (
 // resourceSnapshot projects one complete store read into both the allocation
 // snapshot and the binding roster. Creating records reserve resources already.
 // Conch's private SUSPENDED state retains its VMM and memory; it is still an
-// active allocation, never AgentENV's resource-releasing paused state. Full E2B
-// pause/resume and the corresponding paused_* metrics are future work.
+// active allocation, never AgentENV's resource-releasing paused state. A
+// PAUSED record has no live runtime, so it counts only into the paused_*
+// metrics. A stranded UNKNOWN lineage — an E2B checkpoint resume that lost
+// its terminal write — may still hold its quota, so it stays in the running
+// totals. Every other record still owns its allocation: a crashed E2B record
+// stays READY with its quota, an in-flight resume holds a fresh reservation,
+// and any other UNKNOWN — native or lineage-less — keeps its unconfirmed
+// release.
 func resourceSnapshot(records []sandbox.Record) (*schedulerv1.NodeSnapshot, []string, error) {
 	snapshot := &schedulerv1.NodeSnapshot{Status: schedulerv1.NodeStatus_NODE_STATUS_READY}
 	ids := make([]string, 0, len(records))
@@ -25,9 +31,24 @@ func resourceSnapshot(records []sandbox.Record) (*schedulerv1.NodeSnapshot, []st
 			return nil, nil, fmt.Errorf("invalid heartbeat resource record %q", record.ID)
 		}
 		ids = append(ids, record.ID)
-		// This fork has no released-but-retained state: Manager retains a
-		// record exactly while its capacity reservation is unconfirmed, so
-		// every persisted record still owns its CPU/memory allocation.
+		// A paused sandbox keeps its record and checkpoint head, but its VM
+		// is gone and its capacity was returned when it paused. The split is
+		// deliberately one-sided: a stranded pause whose quota is still held
+		// under-reports in paused_* until the next connect finishes the
+		// release, while a stranded UNKNOWN lineage whose quota went with it
+		// over-reports as allocated until a resume or a delete retires it.
+		if record.State == sandbox.StatePaused {
+			if uint64(record.VCPUNum) > math.MaxUint32-uint64(snapshot.PausedAllocatedCpu) ||
+				uint64(record.RamMB) > (math.MaxUint64-snapshot.PausedAllocatedMemoryBytes)/(1024*1024) {
+				return nil, nil, fmt.Errorf("heartbeat paused allocation overflow at %q", record.ID)
+			}
+			snapshot.PausedSandboxCount++
+			snapshot.PausedAllocatedCpu += uint32(record.VCPUNum)
+			snapshot.PausedAllocatedMemoryBytes += uint64(record.RamMB) * 1024 * 1024
+			continue
+		}
+		// Every other persisted record still owns its CPU/memory allocation:
+		// Manager retains it exactly while the reservation is unconfirmed.
 		if uint64(record.VCPUNum) > math.MaxUint32-uint64(snapshot.AllocatedCpu) ||
 			uint64(record.RamMB) > (math.MaxUint64-snapshot.AllocatedMemoryBytes)/(1024*1024) {
 			return nil, nil, fmt.Errorf("heartbeat resource allocation overflow at %q", record.ID)
@@ -40,7 +61,8 @@ func resourceSnapshot(records []sandbox.Record) (*schedulerv1.NodeSnapshot, []st
 		case sandbox.StateReady, sandbox.StateSuspended:
 			snapshot.SandboxCount++
 		case sandbox.StateUnknown:
-			// Cleanup has not released this failed runtime's resources yet.
+			// Cleanup has not released this failed runtime's resources yet;
+			// a released lineage lands here over-reported on purpose.
 		default:
 			return nil, nil, fmt.Errorf("invalid heartbeat sandbox state %q", record.State)
 		}

@@ -1,6 +1,12 @@
 package driver
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// SnapshotCaptureTimeout is the floor for any budget wrapping a snapshot capture: writing the full VM state takes minutes.
+const SnapshotCaptureTimeout = 5 * time.Minute
 
 type ProcessExit interface {
 	Done() <-chan struct{}
