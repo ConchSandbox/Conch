@@ -19,7 +19,9 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
@@ -57,7 +59,7 @@ func TestCheckpointCapturesRunningAndSuspendedSandbox(t *testing.T) {
 			capture := &recordingCheckpointCapture{result: want}
 			m, entry, sbx := checkpointTestManager(tt.initialState, capture)
 
-			got, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+			got, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 			if err != nil {
 				t.Fatalf("Checkpoint() error = %v", err)
 			}
@@ -95,7 +97,7 @@ func TestCheckpointCaptureErrorRestoresPreviousLifecycleState(t *testing.T) {
 			capture := &recordingCheckpointCapture{err: errCapture}
 			m, entry, _ := checkpointTestManager(tt.initialState, capture)
 
-			_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+			_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 			if !errors.Is(err, errCapture) {
 				t.Fatalf("Checkpoint() error = %v, want errors.Is(capture error)", err)
 			}
@@ -111,7 +113,7 @@ func TestCheckpointResumeFailureLeavesSandboxSuspended(t *testing.T) {
 	capture := &recordingCheckpointCapture{err: errors.Join(ErrCheckpointResume, errResume)}
 	m, entry, _ := checkpointTestManager(StateReady, capture)
 
-	_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry)
+	_, err := m.captureCheckpoint(context.Background(), "sandbox-a", entry, false)
 	if !errors.Is(err, ErrCheckpointResume) || !errors.Is(err, errResume) {
 		t.Fatalf("Checkpoint() error = %v, want joined resume failure", err)
 	}
@@ -276,11 +278,16 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 	config.WorkDir = t.TempDir()
 	t.Cleanup(func() { config.WorkDir = old })
 	leaseStore := &testLeases{items: make(map[string]leases.Lease), resources: make(map[string][]leases.Resource)}
-	contentStore, err := localcontent.NewStore(filepath.Join(t.TempDir(), "content"))
+	contentStore, err := localcontent.NewLabeledStore(filepath.Join(t.TempDir(), "content"), &memoryLabelStore{
+		labels: make(map[digest.Digest]map[string]string),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := containerd.New("", containerd.WithServices(containerd.WithLeasesService(leaseStore), containerd.WithContentStore(contentStore)))
+	client, err := containerd.New("", containerd.WithServices(
+		containerd.WithLeasesService(leaseStore), containerd.WithContentStore(contentStore),
+		containerd.WithImageStore(&recordingImageService{}),
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,6 +314,33 @@ func newLifecycleTestManager(t *testing.T, boot BootPreparer) (*Manager, *memory
 	return m, store, leaseStore
 }
 
+// recordingImageService records image record deletions for retire tests.
+type recordingImageService struct {
+	images.Store
+	mu        sync.Mutex
+	deleted   []string
+	deleteErr error
+}
+
+func (s *recordingImageService) Delete(ctx context.Context, name string, _ ...images.DeleteOpt) error {
+	if ns, _ := namespaces.Namespace(ctx); ns == "" {
+		return errors.New("namespace is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.deleted = append(s.deleted, name)
+	return nil
+}
+
+func (s *recordingImageService) deletedNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.deleted...)
+}
+
 type testLeases struct {
 	leases.Manager
 	mu        sync.Mutex
@@ -314,6 +348,55 @@ type testLeases struct {
 	resources map[string][]leases.Resource
 	deleteErr error
 	onDelete  func(string)
+}
+
+// memoryLabelStore backs the test content store with mutable blob labels, so
+// label walks (gc.ref.content chains) behave like the daemon's containerd.
+type memoryLabelStore struct {
+	mu     sync.Mutex
+	labels map[digest.Digest]map[string]string
+}
+
+func (s *memoryLabelStore) Get(dgst digest.Digest) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return copyStringMap(s.labels[dgst]), nil
+}
+
+func (s *memoryLabelStore) Set(dgst digest.Digest, labels map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.labels[dgst] = copyStringMap(labels)
+	return nil
+}
+
+func (s *memoryLabelStore) Update(dgst digest.Digest, update map[string]string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	labels := copyStringMap(s.labels[dgst])
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	for key, value := range update {
+		if value == "" {
+			delete(labels, key)
+		} else {
+			labels[key] = value
+		}
+	}
+	s.labels[dgst] = labels
+	return copyStringMap(labels), nil
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *testLeases) Create(ctx context.Context, opts ...leases.Opt) (leases.Lease, error) {
@@ -336,6 +419,10 @@ func (s *testLeases) Create(ctx context.Context, opts ...leases.Opt) (leases.Lea
 }
 func (s *testLeases) Delete(ctx context.Context, lease leases.Lease, _ ...leases.DeleteOpt) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Mirror the bolt lease store: a delete without a namespace fails.
+	if _, err := namespaces.NamespaceRequired(ctx); err != nil {
 		return err
 	}
 	if s.onDelete != nil {
@@ -482,7 +569,7 @@ func TestCreateFailureCleanupAndRetention(t *testing.T) {
 				rec, getErr := store.Get(context.Background(), "sandbox-a")
 				remaining, _ := leaseStore.List(context.Background())
 				if cleanupFails {
-					if getErr != nil || rec.State != StateCreating || !strings.Contains(rec.LastError, cleanupErr.Error()) || len(remaining) != 1 {
+					if getErr != nil || rec.State != StateUnknown || !strings.Contains(rec.LastError, cleanupErr.Error()) || len(remaining) != 1 {
 						t.Fatalf("retained record=%#v leases=%#v err=%v", rec, remaining, getErr)
 					}
 				} else {
@@ -618,7 +705,7 @@ func TestCreateFailureKeepsRecoveryRecordWhenLeaseReleaseFails(t *testing.T) {
 		t.Fatal("Create succeeded")
 	}
 	rec, err := store.Get(context.Background(), "sandbox-a")
-	if err != nil || rec.State != StateCreating {
+	if err != nil || rec.State != StateUnknown {
 		t.Fatalf("recovery record=%#v, %v", rec, err)
 	}
 	ls.deleteErr = nil
@@ -759,21 +846,36 @@ func TestLifecycleEventsFollowPersistence(t *testing.T) {
 	value, _ := m.sandboxes.Load("sandbox-a")
 	entry := value.(*sandboxEntry)
 	m.handleSandboxExit("sandbox-a", entry)
-	m.handleSandboxExit("sandbox-a", entry)
 	select {
 	case event := <-events:
-		if event.EventData.KillReason != "orphaned" {
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" {
 			t.Fatal(event)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("missing exit event")
+		t.Fatal("missing orphaned crash event")
 	}
+	m.handleSandboxExit("sandbox-a", entry)
+	select {
+	case event := <-events:
+		t.Fatalf("second crash published an event = %#v", event)
+	default:
+	}
+	// A confirmed native crash retains the record as UNKNOWN for an explicit
+	// delete or startup recovery; the crash itself already published orphaned.
 	rec, err := store.Get(context.Background(), "sandbox-a")
-	if err != nil || rec.State != StateUnknown || len(rec.RuntimeSnapshots) != 0 {
-		t.Fatalf("exit record = %#v, %v", rec, err)
+	if err != nil || rec.State != StateUnknown || rec.LastError != "" || len(rec.RuntimeSnapshots) != 0 {
+		t.Fatalf("exited record = %#v, %v", rec, err)
 	}
 	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "request" {
+			t.Fatal(event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing delete event")
 	}
 	select {
 	case event := <-events:
@@ -888,7 +990,7 @@ func checkpointFixture(t *testing.T) (*Manager, *memorySandboxStore, *testLeases
 		t.Fatal(err)
 	}
 	req := testCreateRequest()
-	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String()})
+	_, err = store.Create(context.Background(), Record{ID: req.SandboxID, State: StateReady, CheckpointHeadTemplateID: target.Digest.String(), VCPUNum: req.VCPUNum, StartedAt: 111, HeadStartedAt: 222, HeadCreatedAt: 333})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,6 +1014,9 @@ func TestCheckpointPublishesHeadAndProtectsParentDuringRegistration(t *testing.T
 		rec, err := store.Get(ctx, "sandbox-a")
 		if err != nil || rec.CheckpointHeadTemplateID != result.BootIndexDigest {
 			t.Fatalf("checkpoint record=%#v, %v", rec, err)
+		}
+		if rec.HeadStartedAt != 111 || rec.HeadCreatedAt == 0 {
+			t.Fatalf("head run timestamps=%d, %d", rec.HeadStartedAt, rec.HeadCreatedAt)
 		}
 		if result.ParentBootIndexDigest != original.CheckpointHeadTemplateID {
 			t.Fatal(result)
@@ -953,6 +1058,9 @@ func TestCheckpointRegistrationFailureRollsBackHead(t *testing.T) {
 	rec, _ := store.Get(ctx, "sandbox-a")
 	if rec.CheckpointHeadTemplateID != original.CheckpointHeadTemplateID {
 		t.Fatalf("head=%s", rec.CheckpointHeadTemplateID)
+	}
+	if rec.HeadStartedAt != 222 || rec.HeadCreatedAt != 333 {
+		t.Fatalf("rolled back head timestamps=%d, %d", rec.HeadStartedAt, rec.HeadCreatedAt)
 	}
 	if remaining, _ := ls.List(ctx); len(remaining) != 0 {
 		t.Fatal(remaining)
@@ -1046,6 +1154,7 @@ type memorySandboxStore struct {
 	beforeUpdate func()
 	updateHook   func(Record) error
 	deleteHook   func() error
+	getHook      func(string) error
 }
 
 func newMemorySandboxStore() *memorySandboxStore {
@@ -1105,6 +1214,11 @@ func validateMemorySandboxRecord(record Record) error {
 }
 
 func (s *memorySandboxStore) Get(_ context.Context, id string) (Record, error) {
+	if s.getHook != nil {
+		if err := s.getHook(id); err != nil {
+			return Record{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[id]
@@ -1240,7 +1354,7 @@ func TestStartupRecoveryRetriesIdempotentBootCleanup(t *testing.T) {
 	}
 }
 
-func TestCreateRecordDeleteFailureRetainsEntry(t *testing.T) {
+func TestCreateRecordDeleteFailureDropsEntry(t *testing.T) {
 	b := readyBoot()
 	m, store, _ := newLifecycleTestManager(t, b)
 	m.launch = func(context.Context, CreateRequest, VMStartSpec, createRuntimeIDs, bool) (*Sandbox, error) {
@@ -1250,15 +1364,22 @@ func TestCreateRecordDeleteFailureRetainsEntry(t *testing.T) {
 	if _, err := m.Create(context.Background(), testCreateRequest()); err == nil {
 		t.Fatal("Create succeeded")
 	}
-	if _, ok := m.sandboxes.Load("sandbox-a"); !ok {
-		t.Fatal("lost entry")
+	if _, ok := m.sandboxes.Load("sandbox-a"); ok {
+		t.Fatal("entry remains")
+	}
+	rec, err := store.Get(context.Background(), "sandbox-a")
+	if err != nil || rec.State != StateUnknown || !strings.Contains(rec.LastError, "record failure") {
+		t.Fatalf("record=%#v err=%v", rec, err)
 	}
 	store.deleteHook = nil
 	if err := m.Delete(context.Background(), "sandbox-a"); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.released) != 2 {
-		t.Fatal("boot cleanup was not retried")
+	if len(b.released) != 1 {
+		t.Fatal("delete retry repeated boot cleanup")
+	}
+	if _, err := store.Get(context.Background(), "sandbox-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
 	}
 }
 

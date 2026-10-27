@@ -141,7 +141,9 @@ func waitForVmmSocket(ctx context.Context, socketPath string, processExited driv
 	delay := 2 * time.Millisecond
 	const maxDelay = 100 * time.Millisecond
 	for {
-		if _, err := os.Stat(socketPath); err == nil {
+		// The socket file appears at bind, before the VMM listens: readiness is dialability, not file existence.
+		if conn, err := net.Dial("unix", socketPath); err == nil {
+			conn.Close()
 			logger.Debug("VMM socket ready", ulog.F("socket", socketPath))
 			return nil
 		}
@@ -340,16 +342,23 @@ func stratovirtFileSize(path string) int64 {
 	return size
 }
 
+// qmpTimeout bounds one QMP connection's dial and reads; a var so tests can shorten it.
+var qmpTimeout = 5 * time.Second
+
 func (s *StratovirtClient) connectQMP() (net.Conn, *bufio.Reader, error) {
 	logger := ulog.GetLogger()
 
-	conn, err := net.Dial("unix", s.socketPath)
+	conn, err := net.DialTimeout("unix", s.socketPath, qmpTimeout)
 	if err != nil {
 		logger.Error("Failed to connect to QMP socket",
 			ulog.F("socket", s.socketPath),
 			ulog.F("error", err),
 		)
 		return nil, nil, fmt.Errorf("failed to connect to qmp socket: %w", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(qmpTimeout)); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("failed to set qmp deadline: %w", err)
 	}
 
 	reader := bufio.NewReader(conn)
@@ -376,12 +385,12 @@ func (s *StratovirtClient) connectQMP() (net.Conn, *bufio.Reader, error) {
 	return conn, reader, nil
 }
 
-func (s *StratovirtClient) executeQMPCommand(command string, arguments map[string]any) error {
-	_, err := s.executeQMPCommandWithResponse(command, arguments)
+func (s *StratovirtClient) executeQMPCommand(command string, arguments map[string]any, timeout time.Duration) error {
+	_, err := s.executeQMPCommandWithResponse(command, arguments, timeout)
 	return err
 }
 
-func (s *StratovirtClient) executeQMPCommandWithResponse(command string, arguments map[string]any) (map[string]any, error) {
+func (s *StratovirtClient) executeQMPCommandWithResponse(command string, arguments map[string]any, timeout time.Duration) (map[string]any, error) {
 	logger := ulog.GetLogger()
 
 	conn, reader, err := s.connectQMP()
@@ -389,6 +398,12 @@ func (s *StratovirtClient) executeQMPCommandWithResponse(command string, argumen
 		return nil, err
 	}
 	defer conn.Close()
+
+	// The command owns its deadline: connectQMP's covers the handshake only,
+	// and a slow command like migrate must not inherit the leftover seconds.
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("failed to set qmp deadline: %w", err)
+	}
 
 	cmd := map[string]any{
 		"execute": command,
@@ -469,7 +484,7 @@ func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited dr
 			return err
 		}
 
-		response, err := s.executeQMPCommandWithResponse("query-status", nil)
+		response, err := s.executeQMPCommandWithResponse("query-status", nil, qmpTimeout)
 		if err != nil {
 			if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 				return err
@@ -500,7 +515,7 @@ func (s *StratovirtClient) CheckAgentAlive(ctx context.Context, processExited dr
 
 		if status == "paused" {
 			logger.Info("VM is paused, sending cont command")
-			if err := s.executeQMPCommand("cont", nil); err != nil {
+			if err := s.executeQMPCommand("cont", nil, qmpTimeout); err != nil {
 				logger.Warn("Failed to send cont command", ulog.F("error", err))
 				if err := waitForAgentRetry(ctx, processExited, 100*time.Millisecond); err != nil {
 					return err
@@ -537,7 +552,7 @@ func (s *StratovirtClient) PauseVM() error {
 		logger.Debug("VM status before stop", ulog.F("status", status))
 	}
 
-	if err := s.executeQMPCommand("stop", nil); err != nil {
+	if err := s.executeQMPCommand("stop", nil, qmpTimeout); err != nil {
 		return err
 	}
 
@@ -551,21 +566,21 @@ func (s *StratovirtClient) PauseVM() error {
 		}
 	}
 
-	return nil
+	return fmt.Errorf("timeout waiting for VM to enter paused state")
 }
 
 func (s *StratovirtClient) ResumeVM() error {
-	return s.executeQMPCommand("cont", nil)
+	return s.executeQMPCommand("cont", nil, qmpTimeout)
 }
 
 func (s *StratovirtClient) DeleteVM() error {
 	logger := ulog.GetLogger()
 	logger.Debug("Deleting VM (Stratovirt)")
-	return s.executeQMPCommand("quit", nil)
+	return s.executeQMPCommand("quit", nil, qmpTimeout)
 }
 
 func (s *StratovirtClient) queryStatus() (string, error) {
-	response, err := s.executeQMPCommandWithResponse("query-status", nil)
+	response, err := s.executeQMPCommandWithResponse("query-status", nil, qmpTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -584,7 +599,6 @@ func (s *StratovirtClient) queryStatus() (string, error) {
 
 const (
 	stratovirtSnapshotPollInterval = 500 * time.Millisecond
-	stratovirtSnapshotPollTimeout  = 5 * time.Minute
 )
 
 func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
@@ -600,7 +614,7 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 		logger.Debug("VM status before snapshot", ulog.F("status", status))
 		if status != "paused" && status != "stopped" {
 			logger.Warn("VM is not paused, attempting to pause first")
-			if err := s.executeQMPCommand("stop", nil); err != nil {
+			if err := s.executeQMPCommand("stop", nil, qmpTimeout); err != nil {
 				return fmt.Errorf("failed to pause vm: %w", err)
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -610,13 +624,16 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 	args := map[string]any{
 		"uri": "file:" + snapfilePath,
 	}
-	if err := s.executeQMPCommand("migrate", args); err != nil {
+	// StratoVirt answers migrate only after writing the full VM state: the
+	// read must outlive the handshake deadline and span the same budget as
+	// the completion poll below.
+	if err := s.executeQMPCommand("migrate", args, driver.SnapshotCaptureTimeout); err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	deadline := time.Now().Add(stratovirtSnapshotPollTimeout)
+	deadline := time.Now().Add(driver.SnapshotCaptureTimeout)
 	for time.Now().Before(deadline) {
-		response, err := s.executeQMPCommandWithResponse("query-migrate", nil)
+		response, err := s.executeQMPCommandWithResponse("query-migrate", nil, qmpTimeout)
 		if err != nil {
 			time.Sleep(stratovirtSnapshotPollInterval)
 			continue
@@ -645,7 +662,7 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 		time.Sleep(stratovirtSnapshotPollInterval)
 	}
 
-	return fmt.Errorf("snapshot timeout after %v", stratovirtSnapshotPollTimeout)
+	return fmt.Errorf("snapshot timeout after %v", driver.SnapshotCaptureTimeout)
 }
 
 // StratoVirt consumes the snapshot during process launch via "-incoming file:<path>".

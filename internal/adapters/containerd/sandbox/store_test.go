@@ -50,6 +50,16 @@ func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 			{Snapshotter: "erofs", Role: "rootfs", Key: "rootfs-key"},
 			{Snapshotter: "erofs", Role: "memory", Key: "memory-key"},
 		},
+		E2B:             true,
+		EnvdVersion:     "1.2.3",
+		Metadata:        map[string]string{"team": "core"},
+		ExpiresAt:       1792124506981659043,
+		TimeoutAction:   runtimeapi.TimeoutActionPause,
+		AutoResume:      true,
+		MaskRequestHost: "app-${PORT}.internal",
+		StartedAt:       1792124506981659044,
+		HeadStartedAt:   1792124506981659045,
+		HeadCreatedAt:   1792124506981659046,
 	}
 
 	created, err := store.Create(ctx, want)
@@ -113,6 +123,13 @@ func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 		t.Fatalf("stale memory GC label remains: %#v", nativeRecord.Labels)
 	}
 
+	want.State = conchsandbox.StatePaused
+	want.IP, want.VMMPID = "", 0
+	want.ExpiresAt = 0
+	if _, err := store.Update(ctx, want); err != nil {
+		t.Fatalf("Update() paused error = %v", err)
+	}
+
 	got, err := store.Get(ctx, want.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -120,12 +137,31 @@ func TestStoreRoundTripAndPreservesForeignMetadata(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Get() = %#v, want %#v", got, want)
 	}
-	items, err := store.List(ctx, conchsandbox.Filter{State: conchsandbox.StateSuspended})
+	items, err := store.List(ctx, conchsandbox.Filter{State: conchsandbox.StatePaused})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
 	if len(items) != 1 || !reflect.DeepEqual(items[0], want) {
 		t.Fatalf("List() = %#v, want %#v", items, []conchsandbox.Record{want})
+	}
+}
+
+func TestCurrentBootIndexIDPrefersCheckpointHead(t *testing.T) {
+	source := "sha256:source"
+	head := "sha256:head"
+	for _, tc := range []struct {
+		state conchsandbox.State
+		want  string
+	}{
+		{conchsandbox.StateCreating, head},
+		{conchsandbox.StateReady, head},
+	} {
+		if got := currentBootIndexID(conchsandbox.Record{State: tc.state, SourceTemplateID: source, CheckpointHeadTemplateID: head}); got != tc.want {
+			t.Fatalf("currentBootIndexID(%s) = %q, want %q", tc.state, got, tc.want)
+		}
+	}
+	if got := currentBootIndexID(conchsandbox.Record{State: conchsandbox.StateCreating, SourceTemplateID: source}); got != source {
+		t.Fatalf("currentBootIndexID(creating without head) = %q, want source %q", got, source)
 	}
 }
 

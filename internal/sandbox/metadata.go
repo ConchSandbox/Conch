@@ -13,6 +13,7 @@ const (
 	StateCreating  State = "CREATING"
 	StateReady     State = "READY"
 	StateSuspended State = "SUSPENDED"
+	StatePaused    State = "PAUSED"
 	StateUnknown   State = "UNKNOWN"
 )
 
@@ -32,6 +33,16 @@ type Record struct {
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef
+	E2B                      bool
+	EnvdVersion              string
+	Metadata                 map[string]string
+	ExpiresAt                int64
+	TimeoutAction            string
+	AutoResume               bool
+	MaskRequestHost          string
+	StartedAt                int64
+	HeadStartedAt            int64
+	HeadCreatedAt            int64
 }
 
 type Filter struct {
