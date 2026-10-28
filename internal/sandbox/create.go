@@ -268,6 +268,7 @@ func (m *Manager) bootstrapEnvd(ctx context.Context, routeCtx context.Context, i
 	}
 	stop := context.AfterFunc(ctx, cancel)
 	defer func() { stop(); cancel() }()
+	envdCtx = requestid.With(envdCtx, requestid.FromContext(ctx))
 	if err := m.Envd.WaitReady(envdCtx, ip); err != nil {
 		return "", fmt.Errorf("wait for envd: %w", err)
 	}

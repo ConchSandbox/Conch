@@ -89,7 +89,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := s.runtime.ListSandboxes(r.Context())
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	items := make([]sandboxDetail, 0, len(records))

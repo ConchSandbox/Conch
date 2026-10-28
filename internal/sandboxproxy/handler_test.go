@@ -18,6 +18,7 @@ import (
 	pb "github.com/openeuler/Conch/api/go_proto"
 	"github.com/openeuler/Conch/api/go_proto/pbconnect"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"golang.org/x/net/websocket"
 )
 
@@ -296,7 +297,8 @@ func TestWakeOutlivesWakerDisconnect(t *testing.T) {
 	bootstrapWait = 400 * time.Millisecond
 	defer func() { bootstrapWait = oldWait }()
 
-	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Guest-Request-ID", r.Header.Get(requestid.Header))
 		fmt.Fprint(w, "woken guest")
 	}))
 	defer guest.Close()
@@ -319,15 +321,19 @@ func TestWakeOutlivesWakerDisconnect(t *testing.T) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if got := requestid.FromContext(ctx); got != "wake-request-206" {
+			t.Errorf("wake lost source ID after disconnect: %q", got)
+		}
 		return registry.Publish(sandboxID, ip, "")
 	}
-	handler := NewHandler(registry, nil, wake)
+	handler := requestid.Middleware(NewHandler(registry, nil, wake))
 
 	wakerCtx, cancelWaker := context.WithCancel(t.Context())
 	defer cancelWaker()
 	waker, _ := http.NewRequestWithContext(wakerCtx, http.MethodGet, "http://proxy/proxy/health", nil)
 	waker.Header.Set(SandboxIDHeader, id)
 	waker.Header.Set(TargetPortHeader, port)
+	waker.Header.Set(requestid.Header, "wake-request-206")
 	wakerDone := make(chan struct{})
 	go func() {
 		defer close(wakerDone)
@@ -341,6 +347,7 @@ func TestWakeOutlivesWakerDisconnect(t *testing.T) {
 		waiter, _ := http.NewRequest(http.MethodGet, "http://proxy/proxy/health", nil)
 		waiter.Header.Set(SandboxIDHeader, id)
 		waiter.Header.Set(TargetPortHeader, port)
+		waiter.Header.Set(requestid.Header, "waiter-request-206")
 		handler.ServeHTTP(rec, waiter)
 		waiterDone <- rec
 	}()
@@ -351,6 +358,9 @@ func TestWakeOutlivesWakerDisconnect(t *testing.T) {
 	case rec := <-waiterDone:
 		if rec.Code != http.StatusOK || rec.Body.String() != "woken guest" {
 			t.Fatalf("waiter after waker disconnect = %d %q", rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get(requestid.Header) != "waiter-request-206" || rec.Header().Get("X-Guest-Request-ID") != "waiter-request-206" {
+			t.Fatalf("waiter inherited wake identity: %v", rec.Header())
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("waiter never served after the waker disconnected")

@@ -44,7 +44,7 @@ func (s *Server) updateNetwork(w http.ResponseWriter, r *http.Request, id string
 	defer cancel()
 	rec, err := s.runtime.GetSandbox(ctx, id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -59,7 +59,7 @@ func (s *Server) updateNetwork(w http.ResponseWriter, r *http.Request, id string
 		SandboxID: rec.ID,
 		Network:   network,
 	}); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

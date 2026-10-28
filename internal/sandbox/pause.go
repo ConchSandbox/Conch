@@ -92,7 +92,7 @@ func (m *Manager) Pause(parent context.Context, sandboxID string, expiredBefore 
 		if errors.Is(err, ErrCheckpointCaptured) {
 			return errors.Join(err, m.resumeCapturedSandbox(ctx, sandboxID, entry, rec))
 		}
-		m.restoreRoute(rec)
+		m.restoreRoute(ctx, rec)
 		return err
 	}
 	defer txn.release()
@@ -199,7 +199,7 @@ func (m *Manager) undoSuspendedCheckpoint(parent context.Context, sandboxID stri
 	if resumeErr == nil {
 		entry.state = StateReady
 		rec.State, rec.LastError = StateReady, ""
-		m.restoreRoute(rec)
+		m.restoreRoute(saveCtx, rec)
 	} else {
 		entry.state = StateUnknown
 		rec.State, rec.LastError = StateUnknown, resumeErr.Error()
@@ -220,7 +220,7 @@ func (m *Manager) resumeCapturedSandbox(parent context.Context, sandboxID string
 		return m.undoSuspendedCheckpoint(parent, sandboxID, entry, rec)
 	}
 	entry.state = StateReady
-	m.restoreRoute(rec)
+	m.restoreRoute(saveCtx, rec)
 	return nil
 }
 
@@ -235,12 +235,12 @@ func (m *Manager) withdrawRoute(sandboxID string) {
 
 // restoreRoute republishes a runtime that kept running after a failed pause or
 // checkpoint; a record without an IP never had a route to restore.
-func (m *Manager) restoreRoute(rec Record) {
+func (m *Manager) restoreRoute(ctx context.Context, rec Record) {
 	if m.Routes == nil || rec.IP == "" {
 		return
 	}
 	if err := m.Routes.Publish(rec.ID, rec.IP, rec.MaskRequestHost); err != nil {
-		ulog.GetLogger().Warn("failed to restore sandbox route", ulog.F("sandbox", rec.ID), ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("failed to restore sandbox route", ulog.F("sandbox", rec.ID), ulog.F("error", err))
 	}
 }
 

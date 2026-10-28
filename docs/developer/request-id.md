@@ -1,6 +1,6 @@
 # 请求 ID 与日志关联
 
-conchd HTTP API 和 conch-init Agent API 使用同一请求 ID 约定。调用方无需提供请求 ID，已有 CLI 和 SDK 请求可以继续使用。
+conchd 原生 HTTP API、E2B TCP API 和 conch-init Agent API 使用同一请求 ID 约定。调用方无需提供请求 ID，已有 CLI 和 SDK 请求可以继续使用。
 
 ## HTTP 约定
 
@@ -43,7 +43,8 @@ host 到 guest 的 vsock 初始化请求携带可选 `request_id` JSON 字段，
 
 - webhook 投递及重试使用来源 ID，并通过投递请求的 `X-Request-ID` 传给接收方；调用方取消不取消投递。
 - 后台进程的既有告警和清理日志保留启动请求的 ID；之后的 Connect、List、SendSignal 请求各自使用自己的 ID。进程原有超时和取消行为保持不变。
-- 沙箱退出清理沿用创建请求的 ID；由删除请求触发的清理使用删除请求的 ID。关联保存在内存中，daemon 重启后的恢复任务不具有历史请求 ID。
+- 沙箱退出清理沿用本次创建或恢复请求的 ID；由删除请求触发的清理使用删除请求的 ID。关联保存在内存中，daemon 重启后的恢复任务不具有历史请求 ID。
+- E2B 数据流量触发的自动恢复保留发起唤醒请求的 ID，客户端断开不取消恢复；其他等待恢复的代理请求保留各自的 ID。
 - singleflight 共享模板解析使用发起共享工作的请求 ID；其他等待请求保留各自的 ID。解析仍受服务生命周期和原有超时约束。
 
 排障时使用响应中的 ID 搜索 conchd 和 guest 的日志：
@@ -52,7 +53,15 @@ host 到 guest 的 vsock 初始化请求携带可选 `request_id` JSON 字段，
 rg -F 'request_id=client-operation-206' /var/log/conchd /path/to/guest/logs
 ```
 
-该关联覆盖 Conch 中接受请求上下文的处理链路；外部 VMM、containerd 或内核自身输出不自动增加此字段。无来源请求的服务启动、网络池预热等任务不附加请求 ID。
+该关联覆盖 Conch 中接受请求上下文的处理链路；外部 VMM、containerd 或内核自身输出不自动增加此字段。无来源请求的服务启动、网络池预热、TTL 到期处理和调度上报等任务不附加请求 ID。
+
+## E2B 链路
+
+E2B 控制面请求将入口 ID 传入 Conch runtime，既有的 API 失败、快照清理和路由恢复告警附加该 ID。创建或恢复期间，envd 的 `/health` 探测（含重试）与 `/init` 请求通过 `X-Request-ID` 携带同一个来源 ID。
+
+commands/files/PTY 和应用 HTTP 流量经过 sandboxproxy 转发给 guest。代理使用入口校验后的 ID 覆盖出站 `X-Request-ID`，包括服务端生成的 ID；非法或多值输入不会原样转发。客户端响应保留入口 ID，guest 返回的同名 header 不会追加第二个值。路由撤销仍同步取消代理连接，客户端取消和超时行为保持不变。
+
+E2B 命令与文件操作由模板中的官方 envd 处理，不经过 Conch guestd RPC。这里保证 ID 传到 HTTP 边界；envd 和应用是否将其写入内部日志，取决于它们自身的实现。
 
 ## vsock 兼容性
 

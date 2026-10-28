@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 const (
@@ -184,6 +185,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			*pr.Out.URL = upstream
+			// Forward the validated ingress identity, including generated IDs.
+			// Never reuse an unvalidated or ambiguous client header.
+			pr.Out.Header.Del(requestid.Header)
+			if id := requestid.FromContext(pr.In.Context()); id != "" {
+				pr.Out.Header.Set(requestid.Header, id)
+			}
 			for _, header := range []string{SandboxIDHeader, E2BSandboxIDHeader, TargetPortHeader, E2BTargetPortHeader, "X-API-Key", "X-Access-Token", "E2b-Traffic-Access-Token", "Conch-Init-Token"} {
 				pr.Out.Header.Del(header)
 			}
@@ -201,6 +208,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			pr.Out.Header.Set("X-Forwarded-Method", pr.In.Method)
 			pr.Out.Header.Set("X-Forwarded-Uri", upstream.RequestURI())
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			// The ingress middleware already set the response ID. A guest's
+			// header must not append a second, possibly unrelated identity.
+			if requestid.FromContext(ctx) != "" {
+				resp.Header.Del(requestid.Header)
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
@@ -230,6 +245,7 @@ func (route Route) requestContext(request context.Context) (context.Context, con
 	if request.Err() != nil {
 		cancel()
 	}
+	ctx = requestid.With(ctx, requestid.FromContext(request))
 	return ctx, func() {
 		stop()
 		cancel()
@@ -247,7 +263,7 @@ func (h *Handler) wakeSandbox(w http.ResponseWriter, r *http.Request, sandboxID 
 	deadline := time.Now().Add(bootstrapWait)
 	// The restore runs on its own budget, not the waker's connection: a client
 	// disconnect only cancels that waiter's await, never the wake itself.
-	ctx, cancel := context.WithTimeout(context.Background(), bootstrapWait)
+	ctx, cancel := context.WithTimeout(requestid.With(context.Background(), requestid.FromContext(r.Context())), bootstrapWait)
 	defer cancel()
 	if err := h.wake(ctx, sandboxID); err != nil {
 		writeWakeError(w, err)

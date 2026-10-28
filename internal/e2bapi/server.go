@@ -262,7 +262,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	created, err := s.runtime.CreateSandbox(ctx, opts)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	// Build the creation response from its committed result.
@@ -371,7 +371,7 @@ func (s *Server) detail(rec sandbox.Record) sandboxDetail {
 func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 	rec, err := s.runtime.GetSandbox(r.Context(), id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -393,7 +393,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
 	rec, err := s.runtime.GetSandbox(r.Context(), id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -401,7 +401,7 @@ func (s *Server) kill(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if err := s.runtime.RemoveSandbox(r.Context(), id); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -436,7 +436,7 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request, id string) {
 	defer cancel()
 	rec, err := s.runtime.GetSandbox(ctx, id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -446,7 +446,7 @@ func (s *Server) pause(w http.ResponseWriter, r *http.Request, id string) {
 	// The runtime re-checks the state under the lifecycle lock, so a pause
 	// racing a concurrent transition answers the lock-held verdict.
 	if err := s.runtime.PauseSandbox(ctx, rec.ID, time.Time{}); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -494,7 +494,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 	defer resumeCancel()
 	rec, err := s.runtime.GetSandbox(ctx, id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -523,13 +523,13 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 			if _, err := s.runtime.ResumePausedSandbox(ctx, rec.ID, sandbox.ResumePausedOptions{Timeout: timeout}); err == nil {
 				restored, err := s.runtime.GetSandbox(ctx, id)
 				if err != nil {
-					s.runtimeError(w, err)
+					s.runtimeError(r.Context(), w, err)
 					return
 				}
 				writeJSON(w, http.StatusCreated, s.detail(restored))
 				return
 			} else if !errors.Is(err, sandbox.ErrAlreadyExists) {
-				s.runtimeError(w, err)
+				s.runtimeError(r.Context(), w, err)
 				return
 			}
 		}
@@ -541,7 +541,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 			case errors.Is(err, context.Canceled):
 				writeError(w, http.StatusGone, "sandbox request was canceled")
 			default:
-				s.runtimeError(w, err)
+				s.runtimeError(r.Context(), w, err)
 			}
 			return
 		}
@@ -568,7 +568,7 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 		// below instead of surfacing the stale precondition.
 		refreshed, getErr := s.runtime.GetSandbox(ctx, id)
 		if getErr != nil || !pausedView(refreshed) {
-			s.runtimeError(w, err)
+			s.runtimeError(r.Context(), w, err)
 			return
 		}
 		rec = refreshed
@@ -580,12 +580,12 @@ func (s *Server) connect(w http.ResponseWriter, r *http.Request, id string) {
 		// resume race (both reads saw PAUSED) succeeds as the joined request
 		// and returns 201 with the winner's run.
 		if _, err := s.runtime.ResumePausedSandbox(resumeCtx, rec.ID, sandbox.ResumePausedOptions{Timeout: timeout}); err != nil {
-			s.runtimeError(w, err)
+			s.runtimeError(r.Context(), w, err)
 			return
 		}
 		restored, err := s.runtime.GetSandbox(resumeCtx, id)
 		if err != nil {
-			s.runtimeError(w, err)
+			s.runtimeError(r.Context(), w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, s.detail(restored))
@@ -716,7 +716,7 @@ func unimplemented(w http.ResponseWriter, feature string) {
 	writeError(w, 501, "Unimplemented: "+feature+" is not supported in this phase")
 }
 
-func (s *Server) runtimeError(w http.ResponseWriter, err error) {
+func (s *Server) runtimeError(ctx context.Context, w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	message := "internal server error"
 	var app *apperror.Error
@@ -742,7 +742,7 @@ func (s *Server) runtimeError(w http.ResponseWriter, err error) {
 		message = "sandbox operation timed out"
 	}
 	if status >= 500 {
-		ulog.Warn("E2B operation failed", ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("E2B operation failed", ulog.F("error", err))
 	}
 	writeError(w, status, message)
 }

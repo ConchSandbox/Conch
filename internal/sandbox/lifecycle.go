@@ -174,7 +174,7 @@ func (m *Manager) changeState(parent context.Context, sandboxID string, from, to
 		// A resumed E2B runtime serves traffic again: a route withdrawn by a
 		// failed checkpoint republishes from the record's IP. Native sandboxes
 		// never publish one.
-		m.restoreRoute(rec)
+		m.restoreRoute(ctx, rec)
 	}
 	return combineOperationErrors(err, saveErr)
 }

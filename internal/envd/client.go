@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 const DefaultPort = 49983
@@ -72,6 +74,9 @@ func (c *Client) WaitReady(ctx context.Context, ip string) error {
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
 		if err == nil {
+			if id := requestid.FromContext(ctx); id != "" {
+				req.Header.Set(requestid.Header, id)
+			}
 			var resp *http.Response
 			resp, err = c.http.Do(req)
 			if err == nil {
@@ -120,6 +125,9 @@ func (c *Client) Init(ctx context.Context, ip string, options InitOptions) (stri
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if id := requestid.FromContext(ctx); id != "" {
+		req.Header.Set(requestid.Header, id)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("initialize envd: %w", err)
