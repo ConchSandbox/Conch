@@ -1,6 +1,7 @@
 package guestd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -51,7 +53,7 @@ const (
 type VsockHandlerImpl struct {
 	mu           sync.Mutex
 	sandboxID    string
-	healthFunc   func() bool
+	healthFunc   func(context.Context) bool
 	applyNetwork func(netstack.GuestNetworkConfig, bool) error
 	state        initState
 	networkReady chan struct{}
@@ -59,11 +61,15 @@ type VsockHandlerImpl struct {
 }
 
 func NewVsockHandler(healthFunc func() bool, applyNetwork func(netstack.GuestNetworkConfig, bool) error) *VsockHandlerImpl {
+	health := checkSandboxReadyContext
+	if healthFunc != nil {
+		health = func(context.Context) bool { return healthFunc() }
+	}
 	if applyNetwork == nil {
 		applyNetwork = applyGuestNetworkConfig
 	}
 	return &VsockHandlerImpl{
-		healthFunc:   healthFunc,
+		healthFunc:   health,
 		applyNetwork: applyNetwork,
 		networkReady: make(chan struct{}),
 	}
@@ -73,7 +79,16 @@ func (h *VsockHandlerImpl) NetworkReady() <-chan struct{} {
 	return h.networkReady
 }
 
-func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) agentprotocol.InitResponse {
+func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) (response agentprotocol.InitResponse) {
+	// Legacy hosts use a strict JSON decoder, so only echo metadata when sent.
+	correlated := request.RequestID != ""
+	request.RequestID = requestid.Ensure(request.RequestID)
+	ctx := requestid.With(context.Background(), request.RequestID)
+	defer func() {
+		if correlated {
+			response.RequestID = request.RequestID
+		}
+	}()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.terminal != nil {
@@ -108,7 +123,7 @@ func (h *VsockHandlerImpl) HandleRequest(request agentprotocol.InitRequest) agen
 		// A retry waits for the already-started services; it never starts them again.
 	}
 
-	if h.waitForReady(sandboxReadyResponseTimeout) {
+	if h.waitForReady(ctx, sandboxReadyResponseTimeout) {
 		h.state = initReady
 		return agentprotocol.ReadyResponse()
 	}
@@ -155,7 +170,7 @@ func (h *VsockHandlerImpl) applyIdentity(request agentprotocol.InitRequest) erro
 	}
 	rootLogger = baseLogger.ReplaceField("sandboxId", request.SandboxID)
 	ulog.SetLogger(rootLogger)
-	ulog.GetLogger().Info("Updated sandbox_id from vsock", ulog.F("new_sandbox_id", request.SandboxID))
+	ulog.WithContext(requestid.With(context.Background(), request.RequestID)).Info("Updated sandbox_id from vsock", ulog.F("new_sandbox_id", request.SandboxID))
 	return nil
 }
 
@@ -168,8 +183,8 @@ func applyVsockEnv(env map[string]string) error {
 	return nil
 }
 
-func (h *VsockHandlerImpl) waitForReady(timeout time.Duration) bool {
-	if h.healthFunc() {
+func (h *VsockHandlerImpl) waitForReady(ctx context.Context, timeout time.Duration) bool {
+	if h.healthFunc(ctx) {
 		return true
 	}
 
@@ -177,14 +192,14 @@ func (h *VsockHandlerImpl) waitForReady(timeout time.Duration) bool {
 	defer timer.Stop()
 
 	for {
-		if h.healthFunc() {
+		if h.healthFunc(ctx) {
 			return true
 		}
 
 		waitAgentAPI := !agentAPIReady.Load()
 		waitRootfs := rootfsServicesRequired() && !rootfsServicesAreReady()
 		if !waitAgentAPI && !waitRootfs {
-			return h.healthFunc()
+			return h.healthFunc(ctx)
 		}
 
 		switch {
@@ -193,19 +208,19 @@ func (h *VsockHandlerImpl) waitForReady(timeout time.Duration) bool {
 			case <-agentAPIReadyCh:
 			case <-rootfsServicesReadyCh:
 			case <-timer.C:
-				return h.healthFunc()
+				return h.healthFunc(ctx)
 			}
 		case waitAgentAPI:
 			select {
 			case <-agentAPIReadyCh:
 			case <-timer.C:
-				return h.healthFunc()
+				return h.healthFunc(ctx)
 			}
 		case waitRootfs:
 			select {
 			case <-rootfsServicesReadyCh:
 			case <-timer.C:
-				return h.healthFunc()
+				return h.healthFunc(ctx)
 			}
 		}
 	}
@@ -246,8 +261,19 @@ func markRootfsMergeReady() {
 }
 
 func checkAgentAPIHealthEndpoint(url string) bool {
+	return checkAgentAPIHealthEndpointContext(context.Background(), url)
+}
+
+func checkAgentAPIHealthEndpointContext(ctx context.Context, url string) bool {
 	client := http.Client{Timeout: agentAPIHealthTimeout}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	if id := requestid.FromContext(ctx); id != "" {
+		req.Header.Set(requestid.Header, id)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -263,7 +289,11 @@ func checkAgentAPIHealthEndpoint(url string) bool {
 }
 
 func checkSandboxReady() bool {
-	if !checkAgentAPIHealthEndpoint(agentAPIHealthURL) {
+	return checkSandboxReadyContext(context.Background())
+}
+
+func checkSandboxReadyContext(ctx context.Context) bool {
+	if !checkAgentAPIHealthEndpointContext(ctx, agentAPIHealthURL) {
 		return false
 	}
 	if !rootfsMergeReady.Load() {

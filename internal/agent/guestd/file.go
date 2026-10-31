@@ -46,7 +46,7 @@ func fileAccessCode(err error) connect.Code {
 // PostFileStream uploads one file using client-streaming chunks. The first
 // chunk must include filepath; later chunks may omit it.
 func (s *AgentServer) PostFileStream(stream postFileStream) error {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(streamContext(stream))
 	var (
 		targetPath string
 		tempPath   string
@@ -207,7 +207,7 @@ func (s *AgentServer) GetFileStream(req *pb.GetFileRequest, stream getFileStream
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
-			ulog.Info("Successfully streamed file", ulog.F("file", cleanedFilepath), ulog.F("size", info.Size()))
+			ulog.WithContext(streamContext(stream)).Info("Successfully streamed file", ulog.F("file", cleanedFilepath), ulog.F("size", info.Size()))
 			return nil
 		}
 		if readErr != nil {
@@ -223,7 +223,7 @@ func (s *AgentServer) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (
 		requestPath = req.Path
 		requestDepth = req.Depth
 	}
-	ulog.Info("Received list files request",
+	ulog.WithContext(ctx).Info("Received list files request",
 		ulog.F("path", requestPath),
 		ulog.F("depth", requestDepth))
 
@@ -248,7 +248,7 @@ func (s *AgentServer) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (
 	}
 	if !rootInfo.IsDir() {
 		resp := &pb.ListFilesResponse{Entries: []*pb.FileEntry{fileEntryFromInfo(root, rootInfo)}}
-		ulog.Info("Listed files",
+		ulog.WithContext(ctx).Info("Listed files",
 			ulog.F("path", root),
 			ulog.F("depth", depth),
 			ulog.F("count", len(resp.Entries)))
@@ -263,7 +263,7 @@ func (s *AgentServer) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (
 	if err != nil {
 		return nil, connectErrorf(fileAccessCode(err), "failed to list files under %s: %v", root, err)
 	}
-	ulog.Info("Listed files",
+	ulog.WithContext(ctx).Info("Listed files",
 		ulog.F("path", root),
 		ulog.F("depth", depth),
 		ulog.F("count", len(resp.Entries)))
@@ -279,7 +279,7 @@ func (s *AgentServer) SearchFiles(ctx context.Context, req *pb.SearchFilesReques
 		requestPattern = req.Pattern
 		requestExcludes = req.ExcludePatterns
 	}
-	ulog.Info("Received search files request",
+	ulog.WithContext(ctx).Info("Received search files request",
 		ulog.F("path", requestPath),
 		ulog.F("pattern", requestPattern),
 		ulog.F("exclude_patterns", fmt.Sprintf("%v", requestExcludes)))
@@ -339,7 +339,7 @@ func (s *AgentServer) SearchFiles(ctx context.Context, req *pb.SearchFilesReques
 		}
 		return nil, connectErrorf(fileAccessCode(err), "failed to search files under %s: %v", root, err)
 	}
-	ulog.Info("Searched files",
+	ulog.WithContext(ctx).Info("Searched files",
 		ulog.F("path", root),
 		ulog.F("pattern", req.Pattern),
 		ulog.F("count", len(resp.Entries)))

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 func TestE2BListenersStopTogether(t *testing.T) {
@@ -36,10 +37,18 @@ func TestE2BListenersStopTogether(t *testing.T) {
 	client := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		resp, err := client.Get("http://" + addr + "/health")
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(requestid.Header, "e2b-health-request-206")
+		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
+				if got := resp.Header.Get(requestid.Header); got != "e2b-health-request-206" {
+					t.Fatalf("E2B request ID = %q", got)
+				}
 				break
 			}
 		}
@@ -63,6 +72,9 @@ func TestE2BListenersStopTogether(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("Unix API status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get(requestid.Header); !requestid.Valid(got) {
+		t.Fatalf("Unix API request ID = %q", got)
 	}
 	s.Shutdown()
 	select {

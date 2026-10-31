@@ -13,6 +13,7 @@ import (
 
 	"github.com/openeuler/Conch/internal/envd"
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 type fakeRouteTable struct {
@@ -174,6 +175,8 @@ func (c *fakeCapacityLedger) releaseCount(id string) int {
 type fakeEnvdBootstrapper struct {
 	mu        sync.Mutex
 	readyIPs  []string
+	readyIDs  []string
+	initIDs   []string
 	inits     []envd.InitOptions
 	version   string
 	readyErr  error
@@ -185,6 +188,7 @@ func (f *fakeEnvdBootstrapper) WaitReady(ctx context.Context, ip string) error {
 	f.mu.Lock()
 	readyHook := f.readyHook
 	f.readyIPs = append(f.readyIPs, ip)
+	f.readyIDs = append(f.readyIDs, requestid.FromContext(ctx))
 	f.mu.Unlock()
 	if readyHook != nil {
 		return readyHook(ctx, ip)
@@ -195,6 +199,7 @@ func (f *fakeEnvdBootstrapper) WaitReady(ctx context.Context, ip string) error {
 func (f *fakeEnvdBootstrapper) Init(ctx context.Context, ip string, options envd.InitOptions) (string, error) {
 	f.mu.Lock()
 	f.inits = append(f.inits, options)
+	f.initIDs = append(f.initIDs, requestid.FromContext(ctx))
 	version, initErr := f.version, f.initErr
 	f.mu.Unlock()
 	if initErr != nil {
@@ -224,7 +229,7 @@ func e2bCreateRequest() CreateRequest {
 }
 
 func TestE2BCreateBootstrapsEnvdAndPublishesRoute(t *testing.T) {
-	ctx := context.Background()
+	ctx := requestid.With(context.Background(), "e2b-create-request-206")
 	m, store, _ := newLifecycleTestManager(t, readyBoot())
 	routes, capacity := newFakeRouteTable(), &fakeCapacityLedger{}
 	envdClient := &fakeEnvdBootstrapper{version: "1.2.3"}
@@ -255,7 +260,11 @@ func TestE2BCreateBootstrapsEnvdAndPublishesRoute(t *testing.T) {
 	routes.mu.Unlock()
 	envdClient.mu.Lock()
 	readyIPs, inits := append([]string(nil), envdClient.readyIPs...), append([]envd.InitOptions(nil), envdClient.inits...)
+	readyIDs, initIDs := append([]string(nil), envdClient.readyIDs...), append([]string(nil), envdClient.initIDs...)
 	envdClient.mu.Unlock()
+	if len(readyIDs) != 1 || readyIDs[0] != "e2b-create-request-206" || len(initIDs) != 1 || initIDs[0] != "e2b-create-request-206" {
+		t.Fatalf("bootstrap lost creation ID: health=%q init=%q", readyIDs, initIDs)
+	}
 	if len(readyIPs) != 1 || readyIPs[0] != result.IP {
 		t.Fatalf("envd readiness probes = %#v", readyIPs)
 	}

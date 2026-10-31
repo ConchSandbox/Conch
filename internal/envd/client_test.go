@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 // The production endpoints use fixed guest ports. Bind a loopback guest
@@ -35,6 +37,9 @@ func TestNonSecureBootstrap(t *testing.T) {
 		if r.Header.Get("X-Access-Token") != "" {
 			t.Error("non-secure initialization sent access token")
 		}
+		if got := r.Header.Values(requestid.Header); len(got) != 1 || got[0] != "envd-bootstrap-206" {
+			t.Errorf("%s request IDs = %q", r.URL.Path, got)
+		}
 		switch r.URL.Path {
 		case "/health":
 			if probes.Add(1) == 1 {
@@ -56,7 +61,7 @@ func TestNonSecureBootstrap(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(requestid.With(t.Context(), "envd-bootstrap-206"), 3*time.Second)
 	defer cancel()
 	client := NewClient()
 	if err := client.WaitReady(ctx, guestIP); err != nil {

@@ -165,7 +165,7 @@ func runAsInit() {
 		ulog.GetLogger().Warn("Overlay rootfs not found", ulog.F("target", MergeTarget))
 	}
 
-	handler := NewVsockHandler(checkSandboxReady, nil)
+	handler := NewVsockHandler(nil, nil)
 	vsockServerErr, err := startVsockServer(handler)
 	if err != nil {
 		ulog.GetLogger().Error("Failed to start vsock initialization server", ulog.F("error", err))
@@ -330,7 +330,11 @@ func handleVsockConnection(connFd int, handler VsockHandler) error {
 	}
 
 	if response.Status == "ready" {
-		ulog.GetLogger().Info("vsock sent READY response", ulog.F("fd", connFd))
+		fields := []ulog.Field{ulog.F("fd", connFd)}
+		if response.RequestID != "" {
+			fields = append(fields, ulog.F("request_id", response.RequestID))
+		}
+		ulog.GetLogger().Info("vsock sent READY response", fields...)
 	}
 	return nil
 }

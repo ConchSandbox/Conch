@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 func TestCreateValidatesAndDefaultsEvents(t *testing.T) {
@@ -39,6 +41,9 @@ func TestPublishRetriesAndPreservesEventID(t *testing.T) {
 	events := make(chan Event, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if r.Header.Get(requestid.Header) != "webhook-request-206" {
+			t.Errorf("request ID = %q", r.Header.Get(requestid.Header))
+		}
 		if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("conch-webhook-id") == "" {
 			t.Errorf("headers = %#v", r.Header)
 		}
@@ -61,7 +66,9 @@ func TestPublishRetriesAndPreservesEventID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvent: %v", err)
 	}
-	dispatcher.Publish(event)
+	ctx, cancel := context.WithCancel(requestid.With(context.Background(), "webhook-request-206"))
+	cancel() // Delivery must survive an already-canceled API request.
+	dispatcher.PublishContext(ctx, event)
 	for i := 0; i < 3; i++ {
 		select {
 		case received := <-events:

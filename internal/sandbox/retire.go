@@ -19,7 +19,7 @@ func (m *Manager) retireMemRecord(ctx context.Context, head, sourceTemplateID st
 	}
 	info, err := conchimage.InspectBootIndex(ctx, m.client, head)
 	if err != nil {
-		ulog.GetLogger().Warn("retire mem component record: inspect head", ulog.F("head", head), ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("retire mem component record: inspect head", ulog.F("head", head), ulog.F("error", err))
 		return
 	}
 	if info.MemDescriptor.Digest == "" {
@@ -27,6 +27,6 @@ func (m *Manager) retireMemRecord(ctx context.Context, head, sourceTemplateID st
 	}
 	name := conchimage.ComponentImageName(conchimage.KindMemSnapshot, info.MemDescriptor.Digest)
 	if err := m.client.ImageService().Delete(containerdclient.NewNamespaceContext(ctx), name); err != nil && !errdefs.IsNotFound(err) {
-		ulog.GetLogger().Warn("retire mem component record", ulog.F("name", name), ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("retire mem component record", ulog.F("name", name), ulog.F("error", err))
 	}
 }
