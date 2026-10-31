@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 )
 
 const (
@@ -61,6 +62,11 @@ type Slot struct {
 	sandboxID string
 	cniIP     string
 	cniDNS    DNSConfig
+	trustedCA string
+
+	// Lifecycle locking and exclusive pool ownership serialize writers;
+	// authorization reads immutable snapshots concurrently.
+	egressPolicy atomic.Pointer[compiledEgressPolicy]
 
 	tapIP       net.IP
 	tapMask     net.IPMask
@@ -122,6 +128,7 @@ func (s *Slot) assignSandbox(sandboxID string) {
 
 func (s *Slot) clearSandboxAssignment() {
 	s.sandboxID = ""
+	s.trustedCA = ""
 }
 
 func (s *Slot) CNIIP() string {
@@ -135,6 +142,7 @@ func (s *Slot) GuestNetworkConfig() GuestNetworkConfig {
 		PrefixLength: prefixLength,
 		Gateway:      s.tapIP.String(),
 		DNS:          s.cniDNS.Clone(),
+		TrustedCAPEM: s.trustedCA,
 	}
 }
 

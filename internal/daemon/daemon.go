@@ -133,6 +133,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 		return nil, fmt.Errorf("init volume manager: %w", err)
 	}
 
+	egressConfig := cfg.Network.EgressSecurity
+	egressConfig.WorkDir = cfg.Server.WorkDir
 	host, err := containerdhost.Start(ctx, containerdhost.Config{
 		RootDir:  cfg.ContainerdRootDir(),
 		StateDir: cfg.ContainerdStateDir(),
@@ -144,6 +146,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 				WarmPoolSize:    cfg.Network.WarmPoolSize,
 				RefillThreshold: cfg.Network.RefillThreshold,
 				CNI:             cfg.Network.CNI,
+				EgressConfig:    egressConfig,
 			},
 			VMMBinaries:           cfg.Sandbox.BinaryPaths(),
 			VsockSignalRetry:      cfg.Sandbox.VsockSignalRetry,

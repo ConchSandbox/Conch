@@ -62,6 +62,11 @@ network:
   warm_pool_size: 100
   # Refill starts when the number of available warm slots drop below this value. Zero uses half of warm_pool_size.
   refill_threshold: 50
+  egress_security:
+    enabled: false
+    # Used when the Envoy bootstrap omits its listener port; an explicit Envoy port takes precedence.
+    proxy_port: 15001
+    proxy_binary: /usr/bin/envoy
   cni:
     # CNI plugin binary search paths used for outer sandbox networking.
     # These binaries must be installed on the Linux host; libcni does not install them.

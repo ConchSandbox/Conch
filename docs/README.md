@@ -9,6 +9,7 @@
 - [Python SDK](user/python-sdk.md)：使用 Python 创建和操作 Sandbox。
 - [AgentENV 集群接入](user/agentenv.md)：单机 SDK 直连与原版 Gateway/Scheduler 集群两种形态，用官方 E2B SDK 操作 Conch Node。
 - [VSOCK 通信](user/vsock.md)：从 guest 连接 StratoVirt host 上的 VSOCK 服务。
+- [Sandbox 域名出站策略](user/egress-security.md)：配置 Envoy、TLS 信任和每个 Sandbox 的 HTTP/HTTPS allow/deny 规则。
 - [安全说明](user/security.md)：安全模型、信任边界、部署加固要求与需要知悉的既有行为。
 
 ## Conch 开发

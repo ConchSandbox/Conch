@@ -72,13 +72,14 @@ func ValidateSandboxNetworkInputConfig(ctx context.Context, cfg *SandboxNetworkC
 			}
 		}
 	}
-	return nil
+	return validateL7EgressPolicy(cfg)
 }
 
 func isNetworkConfigNonEmpty(cfg *SandboxNetworkConfig) bool {
 	return cfg != nil && (len(cfg.AllowOut) != 0 || len(cfg.DenyOut) != 0 ||
 		len(cfg.AllowIn) != 0 || len(cfg.DenyIn) != 0 ||
-		(cfg.AllowInternetAccess != nil && !*cfg.AllowInternetAccess))
+		(cfg.AllowInternetAccess != nil && !*cfg.AllowInternetAccess) ||
+		hasL7EgressPolicy(cfg))
 }
 
 func writeSandboxNetworkPolicyRules(ctx context.Context, slot *Slot, cfg *SandboxNetworkConfig) error {
