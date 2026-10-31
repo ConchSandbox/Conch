@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/openeuler/Conch/internal/cli/client"
 )
@@ -51,12 +50,9 @@ func RunImagePush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var apiTimeout time.Duration
-	if opts.Timeout != "" {
-		apiTimeout, err = time.ParseDuration(opts.Timeout)
-		if err != nil || apiTimeout <= 0 {
-			return fmt.Errorf("conch image push: invalid --timeout %q", opts.Timeout)
-		}
+	apiTimeout, err := parseTimeoutFlag(opts.Timeout)
+	if err != nil {
+		return fmt.Errorf("conch image push: %w", err)
 	}
 	conchClient, err := client.New(client.Options{ConfigPath: opts.ConfigPath, Timeout: apiTimeout})
 	if err != nil {

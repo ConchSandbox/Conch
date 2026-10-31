@@ -14,3 +14,6 @@ type TemplatePullOptions = runtimeapi.TemplatePullOptions
 type TemplatePullResult = runtimeapi.TemplatePullResult
 type TemplatePushOptions = runtimeapi.TemplatePushOptions
 type TemplateUnpackOptions = runtimeapi.TemplateUnpackOptions
+type TemplateSaveOptions = runtimeapi.TemplateSaveOptions
+type TemplateLoadOptions = runtimeapi.TemplateLoadOptions
+type TemplateLoadResult = runtimeapi.TemplateLoadResult

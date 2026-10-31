@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 func ResolveConchAPIURL(apiURLOverride, addressAlias string) string {
@@ -21,4 +22,16 @@ func ParseRegistryUser(user string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid --user value %q, want username:password", user)
 	}
 	return user[:idx], user[idx+1:], nil
+}
+
+func parseTimeoutFlag(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("invalid --timeout %q", raw)
+	}
+	return timeout, nil
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,25 @@ func TestConchAPITimeoutEnv(t *testing.T) {
 	c = newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063"})
 	if c.httpClient.Timeout != defaultHTTPTimeout {
 		t.Fatalf("timeout = %s, want default %s", c.httpClient.Timeout, defaultHTTPTimeout)
+	}
+}
+
+func TestArchiveClientHasNoDefaultTimeout(t *testing.T) {
+	t.Setenv("CONCH_API_TIMEOUT", "")
+	c := newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063", NoDefaultTimeout: true})
+	if c.httpClient.Timeout != 0 {
+		t.Fatalf("timeout = %s, want no limit", c.httpClient.Timeout)
+	}
+
+	t.Setenv("CONCH_API_TIMEOUT", "30m")
+	c = newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063", NoDefaultTimeout: true})
+	if c.httpClient.Timeout != 30*time.Minute {
+		t.Fatalf("timeout = %s, want 30m", c.httpClient.Timeout)
+	}
+
+	c = newTestClient(t, Options{BaseURL: "http://127.0.0.1:4063", Timeout: 10 * time.Minute, NoDefaultTimeout: true})
+	if c.httpClient.Timeout != 10*time.Minute {
+		t.Fatalf("timeout = %s, want explicit 10m", c.httpClient.Timeout)
 	}
 }
 
@@ -353,6 +373,56 @@ func TestCheckpointSandboxRequest(t *testing.T) {
 	}
 	if got.TemplateName != "registry.example/conch/checkpoint:latest" {
 		t.Fatalf("template_name = %q", got.TemplateName)
+	}
+}
+
+func TestTemplateSaveLoadClientStreamsTar(t *testing.T) {
+	const archiveBody = "template-archive"
+	var savedNames []string
+	var loadedBody string
+	var loadedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case saveTemplate:
+			var req TemplateSaveRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode save request: %v", err)
+			}
+			savedNames = req.Names
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.Header().Set("Content-Length", strconv.Itoa(len(archiveBody)))
+			_, _ = io.WriteString(w, archiveBody)
+		case loadTemplate:
+			loadedQuery = r.URL.RawQuery
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read load body: %v", err)
+			}
+			loadedBody = string(body)
+			_ = json.NewEncoder(w).Encode(templateLoadResponse{Items: []TemplateLoadResult{{
+				TemplateName: "localhost/conch/demo:latest",
+				TemplateID:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	c := newTestClient(t, Options{BaseURL: server.URL})
+
+	var saved bytes.Buffer
+	if err := c.SaveTemplate(context.Background(), []string{"localhost/conch/demo:latest"}, &saved); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+	if saved.String() != archiveBody || len(savedNames) != 1 || savedNames[0] != "localhost/conch/demo:latest" {
+		t.Fatalf("saved %q names %#v", saved.String(), savedNames)
+	}
+	loaded, err := c.LoadTemplate(context.Background(), strings.NewReader(archiveBody))
+	if err != nil {
+		t.Fatalf("LoadTemplate: %v", err)
+	}
+	if loadedQuery != "" || loadedBody != archiveBody || len(loaded) != 1 || loaded[0].TemplateName != "localhost/conch/demo:latest" {
+		t.Fatalf("loaded query %q body %q results %#v", loadedQuery, loadedBody, loaded)
 	}
 }
 

@@ -68,7 +68,7 @@ func TestPrintHelpAlignsCommandDescriptions(t *testing.T) {
 	for _, want := range []string{
 		"  image     Pull, push, unpack, list, or remove images.",
 		"  sandbox   Create, checkpoint, or control sandboxes from Template Names.",
-		"  template  Build, list, inspect, or remove templates.",
+		"  template  Build, list, inspect, save, load, or remove templates.",
 		"  debug     Low-level inspection and repair commands.",
 	} {
 		if !strings.Contains(buf.String(), want) {

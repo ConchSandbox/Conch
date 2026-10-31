@@ -205,7 +205,7 @@ LimitCORE=0
 
 ### 镜像来源
 
-`conch image pull` 和 `conch template pull` 拉取的内容会进入 Guest 运行，应只使用可信仓库。
+`conch image pull`、`conch template pull` 和 `conch template load` 拉取的内容会进入 Guest 运行，应只使用可信仓库或可信归档。
 
 OCI 镜像用 `conch image pull` 拉取，Boot Index 必须用 `conch template pull`。
 

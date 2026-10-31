@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
+	"github.com/openeuler/Conch/internal/apperror"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
@@ -427,6 +430,182 @@ func (s *Service) PushTemplate(ctx context.Context, opts TemplatePushOptions) er
 		Username:        opts.Username,
 		Password:        opts.Password,
 	})
+}
+
+// SaveTemplate writes an offline OCI layout archive for the named Templates.
+// The archive contains each Boot Index closure and can be loaded without a registry.
+func (s *Service) SaveTemplate(ctx context.Context, opts TemplateSaveOptions, w io.Writer) (err error) {
+	if s == nil {
+		return fmt.Errorf("runtime service is not configured")
+	}
+	names, err := normalizeTemplateSaveNames(opts.Names)
+	if err != nil {
+		return err
+	}
+	if s.Containerd == nil || s.Containerd.Client == nil {
+		return fmt.Errorf("containerd client is required")
+	}
+	if s.Templates == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	records := make([]conchimage.TemplateArchiveRecord, 0, len(names))
+	for _, name := range names {
+		entry, err := s.Templates.Get(ctx, name)
+		if err != nil {
+			return err
+		}
+		records = append(records, conchimage.TemplateArchiveRecord{
+			Name:                  entry.Name,
+			Origin:                string(entry.Origin),
+			BootIndexDigest:       entry.BootIndexDigest,
+			ParentBootIndexDigest: entry.ParentBootIndexDigest,
+			SourceSandboxID:       entry.SourceSandboxID,
+			SourceRef:             entry.SourceRef,
+			Labels:                entry.Labels,
+		})
+	}
+	nsctx, err := s.Containerd.WithNamespace(ctx)
+	if err != nil {
+		return err
+	}
+	leaseCtx, done, err := s.Containerd.WithLease(nsctx)
+	if err != nil {
+		return fmt.Errorf("create template archive lease: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(containerdclient.NewNamespaceContext(context.WithoutCancel(ctx)), 10*time.Second)
+		defer cancel()
+		if leaseErr := done(cleanupCtx); leaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("delete template archive lease: %w", leaseErr))
+		}
+	}()
+	if err = retainTemplateArchiveContent(leaseCtx, s.Containerd, records); err != nil {
+		return err
+	}
+	return asTemplateArchiveError(conchimage.ExportTemplateArchive(leaseCtx, s.Containerd.ContentStore(), w, records))
+}
+
+func retainTemplateArchiveContent(ctx context.Context, client *containerdclient.Client, records []conchimage.TemplateArchiveRecord) error {
+	leaseID, ok := leases.FromContext(ctx)
+	if !ok {
+		return fmt.Errorf("template archive lease is missing from context")
+	}
+	lease := leases.Lease{ID: leaseID}
+	seen := make(map[string]struct{}, len(records))
+	for _, rec := range records {
+		if _, ok := seen[rec.BootIndexDigest]; ok {
+			continue
+		}
+		seen[rec.BootIndexDigest] = struct{}{}
+		if err := client.LeasesService().AddResource(ctx, lease, leases.Resource{
+			Type: "content",
+			ID:   rec.BootIndexDigest,
+		}); err != nil {
+			return fmt.Errorf("retain template %s boot index: %w", rec.Name, err)
+		}
+	}
+	return nil
+}
+
+// LoadTemplate imports an offline archive and creates or updates the named
+// Template records from the names stored in the archive.
+func (s *Service) LoadTemplate(ctx context.Context, _ TemplateLoadOptions, r io.Reader) (_ []TemplateLoadResult, err error) {
+	if s == nil {
+		return nil, fmt.Errorf("runtime service is not configured")
+	}
+	if s.Containerd == nil || s.Containerd.Client == nil {
+		return nil, fmt.Errorf("containerd client is required")
+	}
+	if s.Templates == nil {
+		return nil, fmt.Errorf("template store is not configured")
+	}
+	nsctx, err := s.Containerd.WithNamespace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	leaseCtx, done, err := s.Containerd.WithLease(nsctx)
+	if err != nil {
+		return nil, fmt.Errorf("create template archive lease: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(containerdclient.NewNamespaceContext(context.WithoutCancel(ctx)), 10*time.Second)
+		defer cancel()
+		if leaseErr := done(cleanupCtx); leaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("delete template archive lease: %w", leaseErr))
+		}
+	}()
+	records, err := conchimage.ImportTemplateArchive(leaseCtx, s.Containerd.ContentStore(), r)
+	if err != nil {
+		return nil, asTemplateArchiveError(err)
+	}
+	results := make([]TemplateLoadResult, 0, len(records))
+	for _, rec := range records {
+		bootMode := conchtemplate.BootModeCold
+		if rec.Resume {
+			bootMode = conchtemplate.BootModeResume
+		}
+		entry, err := s.Templates.Put(leaseCtx, conchtemplate.Entry{
+			Name:                  rec.Name,
+			Origin:                conchtemplate.Origin(rec.Origin),
+			BootMode:              bootMode,
+			BootIndexDigest:       rec.BootIndexDigest,
+			ParentBootIndexDigest: rec.ParentBootIndexDigest,
+			SourceSandboxID:       rec.SourceSandboxID,
+			SourceRef:             rec.SourceRef,
+			Labels:                rec.Labels,
+		}, rec.Target)
+		if err != nil {
+			return nil, fmt.Errorf("load template %s: %w", rec.Name, err)
+		}
+		results = append(results, TemplateLoadResult{Name: entry.Name, TemplateID: entry.BootIndexDigest})
+	}
+	return results, nil
+}
+
+func normalizeTemplateSaveNames(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, conchtemplate.ErrInvalidArgument.WrapMessage(
+			fmt.Errorf("at least one template name is required"),
+			"at least one template name is required",
+		)
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, conchtemplate.ErrInvalidArgument.WrapMessage(
+				fmt.Errorf("template name is required"),
+				"template name is required",
+			)
+		}
+		if _, ok := seen[name]; ok {
+			return nil, conchtemplate.ErrInvalidArgument.WrapMessage(
+				fmt.Errorf("duplicate template name %s", name),
+				fmt.Sprintf("duplicate template name %s", name),
+			)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+func asTemplateArchiveError(err error) error {
+	var appErr *apperror.Error
+	if !errors.As(err, &appErr) {
+		return err
+	}
+	switch appErr.Code() {
+	case conchimage.ErrInvalidArgument.Code():
+		return conchtemplate.ErrInvalidArgument.WrapMessage(err, appErr.PublicMessage())
+	case conchimage.ErrInvalidContent.Code():
+		return conchtemplate.ErrInvalidArtifact.WrapMessage(err, appErr.PublicMessage())
+	case conchimage.ErrNotFound.Code():
+		return conchtemplate.ErrFailedPrecondition.WrapMessage(err, appErr.PublicMessage())
+	default:
+		return err
+	}
 }
 
 func (s *Service) UnpackTemplate(ctx context.Context, opts TemplateUnpackOptions) error {

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,8 @@ const (
 	createTemplate  = "/api/template/create"
 	pullTemplate    = "/api/template/pull"
 	pushTemplate    = "/api/template/push"
+	saveTemplate    = "/api/template/save"
+	loadTemplate    = "/api/template/load"
 	unpackTemplate  = "/api/template/unpack"
 	listTemplates   = "/api/template/list"
 	inspectTemplate = "/api/template/inspect"
@@ -62,6 +65,19 @@ type TemplatePushRequest struct {
 
 type TemplateUnpackRequest struct {
 	Name string `json:"name"`
+}
+
+type TemplateSaveRequest struct {
+	Names []string `json:"names"`
+}
+
+type TemplateLoadResult struct {
+	TemplateName string `json:"template_name"`
+	TemplateID   string `json:"template_id"`
+}
+
+type templateLoadResponse struct {
+	Items []TemplateLoadResult `json:"items"`
 }
 
 type TemplateCreateRequest struct {
@@ -124,6 +140,48 @@ func (c *Client) PushTemplate(ctx context.Context, req TemplatePushRequest) erro
 
 func (c *Client) UnpackTemplate(ctx context.Context, req TemplateUnpackRequest) error {
 	return c.postJSON(ctx, unpackTemplate, req, nil)
+}
+
+func (c *Client) SaveTemplate(ctx context.Context, names []string, w io.Writer) error {
+	body, err := json.Marshal(TemplateSaveRequest{Names: names})
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+saveTemplate, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request %s: %w", saveTemplate, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", saveTemplate, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return decodeResponse(resp, saveTemplate, nil)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("read %s response: %w", saveTemplate, err)
+	}
+	return nil
+}
+
+func (c *Client) LoadTemplate(ctx context.Context, r io.Reader) ([]TemplateLoadResult, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+loadTemplate, r)
+	if err != nil {
+		return nil, fmt.Errorf("create request %s: %w", loadTemplate, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-tar")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", loadTemplate, err)
+	}
+	defer resp.Body.Close()
+	var out templateLoadResponse
+	if err := decodeResponse(resp, loadTemplate, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }
 
 func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {

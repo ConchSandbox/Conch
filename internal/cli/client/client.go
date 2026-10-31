@@ -21,10 +21,13 @@ const (
 )
 
 // Options controls conchd API endpoint discovery and request timeout.
+// NoDefaultTimeout makes a zero Timeout mean no limit. CONCH_API_TIMEOUT still
+// applies. Other commands keep the 120s default.
 type Options struct {
-	BaseURL    string
-	ConfigPath string
-	Timeout    time.Duration
+	BaseURL          string
+	ConfigPath       string
+	Timeout          time.Duration
+	NoDefaultTimeout bool
 }
 
 // Client communicates with the conchd HTTP API.
@@ -67,7 +70,7 @@ func New(opts Options) (*Client, error) {
 func resolveTransport(opts Options) (string, *http.Client, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
-		timeout = resolveHTTPTimeout()
+		timeout = resolveHTTPTimeout(opts.NoDefaultTimeout)
 	}
 	configPath := opts.ConfigPath
 	if configPath == "" {
@@ -94,9 +97,12 @@ func normalizeBaseURL(value string) string {
 	return strings.TrimRight(strings.TrimSpace(value), "/")
 }
 
-func resolveHTTPTimeout() time.Duration {
+func resolveHTTPTimeout(noDefault bool) time.Duration {
 	raw := strings.TrimSpace(os.Getenv("CONCH_API_TIMEOUT"))
 	if raw == "" {
+		if noDefault {
+			return 0
+		}
 		return defaultHTTPTimeout
 	}
 	timeout, err := time.ParseDuration(raw)
