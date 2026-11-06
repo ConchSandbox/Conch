@@ -95,6 +95,7 @@ func TestJSONHandlersRejectUnknownFields(t *testing.T) {
 		"/api/sandbox/checkpoint",
 		"/api/template/pull",
 		"/api/template/push",
+		"/api/template/save",
 		"/api/template/unpack",
 		"/api/template/list",
 		"/api/template/inspect",

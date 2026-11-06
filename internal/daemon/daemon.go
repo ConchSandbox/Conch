@@ -251,6 +251,8 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("/api/template/create", s.handleCreateTemplate)
 	s.router.HandleFunc("/api/template/pull", s.handlePullTemplate)
 	s.router.HandleFunc("/api/template/push", s.handlePushTemplate)
+	s.router.HandleFunc("/api/template/save", s.handleSaveTemplate)
+	s.router.HandleFunc("/api/template/load", s.handleLoadTemplate)
 	s.router.HandleFunc("/api/template/unpack", s.handleUnpackTemplate)
 	s.router.HandleFunc("/api/template/list", s.handleListTemplate)
 	s.router.HandleFunc("/api/template/inspect", s.handleInspectTemplate)
@@ -961,6 +963,76 @@ func (s *Daemon) handlePushTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Daemon) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
+	var req templateSaveRequest
+	if !decodePostJSON(w, r, &req) {
+		return
+	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	opts := runtimeapi.TemplateSaveOptions{Names: req.Names}
+	if err := writeTemplateSaveResponse(w, func(out io.Writer) error {
+		return s.runtimeService.SaveTemplate(r.Context(), opts, out)
+	}); err != nil {
+		writeAPIError(w, err, ulog.F("operation", "template.save"))
+	}
+}
+
+func (s *Daemon) handleLoadTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if s.runtimeService == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	results, err := s.runtimeService.LoadTemplate(r.Context(), runtimeapi.TemplateLoadOptions{}, r.Body)
+	if err != nil {
+		writeAPIError(w, err, ulog.F("operation", "template.load"))
+		return
+	}
+	items := make([]templateLoadItem, 0, len(results))
+	for _, result := range results {
+		items = append(items, templateLoadItem{
+			TemplateName: result.Name,
+			TemplateID:   result.TemplateID,
+		})
+	}
+	writeJSON(w, templateLoadResponse{Items: items})
+}
+
+// writeTemplateSaveResponse writes the archive once. A failure before the first
+// byte stays a JSON error. A failure after the tar has started aborts the
+// connection so the client does not keep a truncated file.
+func writeTemplateSaveResponse(w http.ResponseWriter, save func(io.Writer) error) error {
+	w.Header().Set("Content-Type", "application/x-tar")
+	written := &countingWriter{w: w}
+	err := save(written)
+	if err != nil && written.n == 0 {
+		w.Header().Del("Content-Type")
+		return err
+	}
+	if err != nil {
+		ulog.GetLogger().Error("template save failed after the response started", ulog.F("error", err))
+		panic(http.ErrAbortHandler)
+	}
+	return nil
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
 }
 
 func (s *Daemon) handleUnpackTemplate(w http.ResponseWriter, r *http.Request) {

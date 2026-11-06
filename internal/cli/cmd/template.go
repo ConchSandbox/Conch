@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/openeuler/Conch/internal/cli/client"
 )
@@ -46,6 +45,8 @@ func printTemplateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  create   Build a template from an OCI image, kernel, and initrd.")
 	fmt.Fprintln(out, "  pull     Pull a registry Boot Index into a local Template.")
 	fmt.Fprintln(out, "  push     Push a Template Boot Index to a registry.")
+	fmt.Fprintln(out, "  save     Save templates to a tar archive for offline transfer.")
+	fmt.Fprintln(out, "  load     Load templates from a tar archive.")
 	fmt.Fprintln(out, "  unpack   Unpack a Template's Boot Index into snapshots.")
 	fmt.Fprintln(out, "  ls       List templates.")
 	fmt.Fprintln(out, "  inspect  Inspect a template.")
@@ -106,6 +107,18 @@ func RunTemplate(ctx context.Context, args []string) error {
 		return runTemplatePull(ctx, args[1:])
 	case "push":
 		return runTemplatePush(ctx, args[1:])
+	case "save":
+		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
+			PrintTemplateSaveHelp(os.Stdout)
+			return nil
+		}
+		return runTemplateSave(ctx, args[1:])
+	case "load":
+		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
+			PrintTemplateLoadHelp(os.Stdout)
+			return nil
+		}
+		return runTemplateLoad(ctx, args[1:])
 	case "unpack":
 		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
 			PrintTemplateUnpackHelp(os.Stdout)
@@ -175,12 +188,9 @@ func runTemplatePush(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("conch template push: %w", err)
 	}
-	var apiTimeout time.Duration
-	if opts.timeout != "" {
-		apiTimeout, err = time.ParseDuration(opts.timeout)
-		if err != nil || apiTimeout <= 0 {
-			return fmt.Errorf("conch template push: invalid --timeout %q", opts.timeout)
-		}
+	apiTimeout, err := parseTimeoutFlag(opts.timeout)
+	if err != nil {
+		return fmt.Errorf("conch template push: %w", err)
 	}
 	conchClient, err := client.New(client.Options{
 		BaseURL:    ResolveConchAPIURL(opts.apiURL, opts.address),

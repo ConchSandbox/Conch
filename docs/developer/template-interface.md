@@ -79,3 +79,11 @@ and metadata labels, and returns the current Entry.
 `Delete` removes the named image record. It returns `ErrNotFound` when the Name
 does not exist or when the record's target changes concurrently. Content
 reclamation is asynchronous and follows normal containerd GC rules.
+
+## Offline archive
+
+`template save` writes an OCI image layout tar of the Boot Index closure.
+Template name, origin, lineage, and labels are annotations on the layout index.
+They are not part of the Boot Index blob, so the Template ID is unchanged.
+`template load` imports that tar and creates or updates the named record.
+Existing pull, push, create, and sandbox APIs are unchanged.

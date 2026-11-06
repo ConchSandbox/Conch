@@ -3,6 +3,7 @@ package conchruntime
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/leases"
+	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -359,6 +363,17 @@ func TestRemoveSandboxRejectsEmptyID(t *testing.T) {
 	}
 }
 
+func TestSaveTemplateRejectsInvalidNames(t *testing.T) {
+	svc := New(nil, nil)
+	if err := svc.SaveTemplate(context.Background(), TemplateSaveOptions{}, io.Discard); !errors.Is(err, conchtemplate.ErrInvalidArgument) {
+		t.Fatalf("empty save error = %v", err)
+	}
+	err := svc.SaveTemplate(context.Background(), TemplateSaveOptions{Names: []string{"localhost/conch/demo:latest", "localhost/conch/demo:latest"}}, io.Discard)
+	if !errors.Is(err, conchtemplate.ErrInvalidArgument) {
+		t.Fatalf("duplicate save error = %v", err)
+	}
+}
+
 func TestCreateTemplateRequiresContainerdClient(t *testing.T) {
 	svc := New(nil, nil)
 
@@ -664,4 +679,84 @@ func TestColdTemplateKeepsRequestResources(t *testing.T) {
 	if ops.req.VCPUNum != 4 || ops.req.RAMMB != 4096 {
 		t.Fatalf("runtime allocation=%+v", ops.req)
 	}
+}
+
+func TestSaveTemplateRetainsBootIndexForExport(t *testing.T) {
+	ctx := context.Background()
+	digestA := digest.FromString("boot-index-a").String()
+	digestB := digest.FromString("boot-index-b").String()
+	store := &fakeTemplateStore{entries: map[string]conchtemplate.Entry{
+		"localhost/conch/a:latest": {Name: "localhost/conch/a:latest", Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: digestA},
+		"localhost/conch/b:latest": {Name: "localhost/conch/b:latest", Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: digestA},
+		"localhost/conch/c:latest": {Name: "localhost/conch/c:latest", Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume, BootIndexDigest: digestB},
+	}}
+	leaseManager := &recordingLeaseManager{}
+	contentStore, err := localcontent.NewStore(filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawClient, err := containerd.New("", containerd.WithServices(
+		containerd.WithContentStore(contentStore),
+		containerd.WithLeasesService(leaseManager),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rawClient.Close() })
+	svc := New(nil, &containerdclient.Client{Client: rawClient})
+	svc.Templates = store
+
+	err = svc.SaveTemplate(ctx, TemplateSaveOptions{Names: []string{
+		"localhost/conch/a:latest",
+		"localhost/conch/b:latest",
+		"localhost/conch/c:latest",
+	}}, io.Discard)
+	if err == nil {
+		t.Fatal("save unexpectedly succeeded without Boot Index content")
+	}
+	if !leaseManager.deleted {
+		t.Fatal("save lease was not deleted")
+	}
+	got := map[string]struct{}{}
+	for _, resource := range leaseManager.added {
+		if resource.Type != "content" {
+			t.Fatalf("retained resource = %#v", resource)
+		}
+		got[resource.ID] = struct{}{}
+	}
+	if _, ok := got[digestA]; !ok {
+		t.Fatalf("boot index %s was not retained", digestA)
+	}
+	if _, ok := got[digestB]; !ok {
+		t.Fatalf("boot index %s was not retained", digestB)
+	}
+	if len(got) != 2 {
+		t.Fatalf("retained %d boot indexes, want 2", len(got))
+	}
+}
+
+type recordingLeaseManager struct {
+	leases.Manager
+	added   []leases.Resource
+	deleted bool
+}
+
+func (m *recordingLeaseManager) Create(_ context.Context, opts ...leases.Opt) (leases.Lease, error) {
+	lease := leases.Lease{ID: "save-lease"}
+	for _, opt := range opts {
+		if err := opt(&lease); err != nil {
+			return leases.Lease{}, err
+		}
+	}
+	return lease, nil
+}
+
+func (m *recordingLeaseManager) Delete(context.Context, leases.Lease, ...leases.DeleteOpt) error {
+	m.deleted = true
+	return nil
+}
+
+func (m *recordingLeaseManager) AddResource(_ context.Context, _ leases.Lease, resource leases.Resource) error {
+	m.added = append(m.added, resource)
+	return nil
 }

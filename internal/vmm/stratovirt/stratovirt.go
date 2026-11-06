@@ -207,11 +207,21 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 		SnapfilePath:    args.SnapfilePath,
 		SandboxId:       args.SandboxId,
 		VsockCID:        args.VsockCID,
-		PmemDevices:     buildStratovirtPmemDevices(args.PmemPaths),
-		VirtioFSDevices: buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths)),
+		PmemDevices:     "",
+		VirtioFSDevices: "",
 		SharefsCmdline:  buildSharefsCmdline(args.VirtioFS),
 		MachineOpts:     stratovirtMachineOpts(args.VirtioFS),
 	}
+	pmemDevices, err := buildStratovirtPmemDevices(args.PmemPaths, len(args.VirtioFS))
+	if err != nil {
+		return "", err
+	}
+	virtioFSDevices, err := buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths))
+	if err != nil {
+		return "", err
+	}
+	stArgs.PmemDevices = pmemDevices
+	stArgs.VirtioFSDevices = virtioFSDevices
 
 	if _, err = os.Stat(stArgs.VmmBinaryPath); err != nil {
 		logger.Error("Error stating Stratovirt binary",
@@ -244,25 +254,26 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 // virtiofs mount. Two StratoVirt requirements drove this shape:
 //   - vhost-user-fs-pci MUST carry an explicit bus=pcie.0,addr=...; StratoVirt
 //     rejects the device with "Should set bus"/"Should set addr" otherwise.
-//   - The address must not collide with virtio-pmem devices, which occupy the
-//     0x12.. range (one per rootfs layer). fs devices are therefore placed
-//     right above the pmem range.
-func buildStratovirtVirtioFSDevices(devices []driver.VirtioFSDevice, pmemCount int) string {
+//   - Addresses come from stratovirtPCIAddr so they do not collide with pmem.
+func buildStratovirtVirtioFSDevices(devices []driver.VirtioFSDevice, pmemCount int) (string, error) {
 	var args []string
-	baseAddr := 0x12 + pmemCount
+	total := pmemCount + len(devices)
 	for i, device := range devices {
 		if strings.TrimSpace(device.Socket) == "" || strings.TrimSpace(device.Tag) == "" {
 			continue
 		}
+		addr, multifunction, err := stratovirtPCIAddr(pmemCount+i, total)
+		if err != nil {
+			return "", err
+		}
 		charID := fmt.Sprintf("charfs%d", i)
 		devID := fmt.Sprintf("fs%d", i)
-		addr := fmt.Sprintf("0x%x", baseAddr+i)
 		args = append(args,
 			fmt.Sprintf("-chardev socket,id=%s,path=%s", charID, device.Socket),
-			fmt.Sprintf("-device vhost-user-fs-pci,id=%s,chardev=%s,tag=%s,bus=pcie.0,addr=%s", devID, charID, device.Tag, addr),
+			fmt.Sprintf("-device vhost-user-fs-pci,id=%s,chardev=%s,tag=%s,bus=pcie.0,addr=%s%s", devID, charID, device.Tag, addr, multifunction),
 		)
 	}
-	return strings.Join(args, " \\\n")
+	return strings.Join(args, " \\\n"), nil
 }
 
 // stratovirtMachineOpts returns machine-level options appended to -machine.
@@ -294,12 +305,13 @@ const stratovirtPmemIothreadID = "pmemio"
 // sync_all behind a flush on the main event loop, so a slow fsync stalls every
 // other device; the layers share one iothread since their flushes are rare.
 // Requires StratoVirt >= f66399e0, which added the option.
-func buildStratovirtPmemDevices(pmemPaths []string) string {
+func buildStratovirtPmemDevices(pmemPaths []string, virtioFSCount int) (string, error) {
 	if len(pmemPaths) == 0 {
-		return ""
+		return "", nil
 	}
 
 	devices := []string{fmt.Sprintf("-object iothread,id=%s", stratovirtPmemIothreadID)}
+	total := len(pmemPaths) + virtioFSCount
 	for i, path := range pmemPaths {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -311,23 +323,48 @@ func buildStratovirtPmemDevices(pmemPaths []string) string {
 			continue
 		}
 
+		addr, multifunction, err := stratovirtPCIAddr(i, total)
+		if err != nil {
+			return "", err
+		}
 		memID := fmt.Sprintf("pmem%d", i)
 		devID := fmt.Sprintf("pmem%dpci", i)
-		addr := fmt.Sprintf("0x%x", 0x12+i)
 		sizeStr := fmt.Sprintf("%dM", size/(1024*1024))
 
 		object := fmt.Sprintf("-object memory-backend-file,size=%s,id=%s,mem-path=%s,share=off", sizeStr, memID, path)
-		device := fmt.Sprintf("-device virtio-pmem-pci,id=%s,memdev=%s,bus=pcie.0,addr=%s,iothread=%s",
-			devID, memID, addr, stratovirtPmemIothreadID)
+		device := fmt.Sprintf("-device virtio-pmem-pci,id=%s,memdev=%s,bus=pcie.0,addr=%s%s,iothread=%s",
+			devID, memID, addr, multifunction, stratovirtPmemIothreadID)
 		devices = append(devices, object, device)
 	}
 
 	// Only the iothread object was rendered: no usable pmem path.
 	if len(devices) == 1 {
-		return ""
+		return "", nil
 	}
 
-	return strings.Join(devices, " \\\n")
+	return strings.Join(devices, " \\\n"), nil
+}
+
+// stratovirtPCISlotCount is the number of free device numbers on pcie.0 after
+// the net (0x10) and vsock (0x11) devices. 0x1f is reserved by the bus.
+const stratovirtPCISlotCount = 0x1e - 0x12 + 1
+
+func stratovirtPCIAddr(index, total int) (string, string, error) {
+	const funcCount = 8
+	if index < 0 || index >= stratovirtPCISlotCount*funcCount {
+		return "", "", fmt.Errorf("too many StratoVirt PCI devices: index %d exceeds %d", index, stratovirtPCISlotCount*funcCount-1)
+	}
+	slot := 0x12 + index/funcCount
+	fn := index % funcCount
+	addr := fmt.Sprintf("0x%x", slot)
+	if fn != 0 {
+		addr = fmt.Sprintf("0x%x.%d", slot, fn)
+	}
+	multifunction := ""
+	if fn == 0 && total > index+1 {
+		multifunction = ",multifunction=on"
+	}
+	return addr, multifunction, nil
 }
 
 func stratovirtFileSize(path string) int64 {

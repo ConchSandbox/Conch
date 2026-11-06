@@ -2,7 +2,12 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +25,8 @@ Commands:
   create   Build a template from an OCI image, kernel, and initrd.
   pull     Pull a registry Boot Index into a local Template.
   push     Push a Template Boot Index to a registry.
+  save     Save templates to a tar archive for offline transfer.
+  load     Load templates from a tar archive.
   unpack   Unpack a Template's Boot Index into snapshots.
   ls       List templates.
   inspect  Inspect a template.
@@ -56,6 +63,79 @@ func TestTemplateRegistryFlags(t *testing.T) {
 	}
 	if push.username != "bob" || push.password != "token" || push.timeout != "5m" || len(pushFlags.Args()) != 2 {
 		t.Fatalf("push options = %#v, args = %#v", push, pushFlags.Args())
+	}
+}
+
+func TestTemplateArchiveFileReplacesOnlyAfterCommit(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "openeuler.tar")
+	const original = "previous-archive"
+	if err := os.WriteFile(dst, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveTemplateArchive(dst, func(w io.Writer) error {
+		if _, err := io.WriteString(w, "partial"); err != nil {
+			return err
+		}
+		return fmt.Errorf("save failed")
+	}); err == nil {
+		t.Fatal("expected save failure")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("archive after abort = %q, want %q", got, original)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".openeuler.tar.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary files left behind: %v", matches)
+	}
+
+	if err := saveTemplateArchive(dst, func(w io.Writer) error {
+		_, err := io.WriteString(w, "new-archive")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new-archive" {
+		t.Fatalf("archive after commit = %q", got)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("archive mode = %#o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestTemplateSaveLoadRejectsBadArgsBeforeAPI(t *testing.T) {
+	if err := runTemplateSave(context.Background(), []string{"localhost/conch/demo:latest"}); err == nil || !strings.Contains(err.Error(), "-o or --output is required") {
+		t.Fatalf("save without output: %v", err)
+	}
+	if err := runTemplateSave(context.Background(), []string{"-o", "out.tar"}); err == nil || !strings.Contains(err.Error(), "at least one Template Name") {
+		t.Fatalf("save with no name: %v", err)
+	}
+	if err := runTemplateSave(context.Background(), []string{"-o", "out.tar", "--timeout", "nope", "localhost/conch/demo:latest"}); err == nil || !strings.Contains(err.Error(), "invalid --timeout") {
+		t.Fatalf("save timeout: %v", err)
+	}
+	if err := runTemplateLoad(context.Background(), []string{"extra"}); err == nil || !strings.Contains(err.Error(), "unexpected positional") {
+		t.Fatalf("load positional: %v", err)
+	}
+	if err := runTemplateLoad(context.Background(), []string{"--name", "other:latest"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("load --name: %v", err)
+	}
+	if err := runTemplateLoad(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "-i or --input is required") {
+		t.Fatalf("load without input: %v", err)
 	}
 }
 
