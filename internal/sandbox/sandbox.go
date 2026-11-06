@@ -36,6 +36,7 @@ type Execution struct {
 
 type VMStartSpec struct {
 	MemorySizeMB int64
+	EnableBalloon bool
 
 	MemoryPath   string
 	KernelPath   string
@@ -51,6 +52,8 @@ type Sandbox struct {
 	vmmName     string
 	sandboxID   string
 	slot        *netstack.Slot
+	// Accessed only while holding the manager's lifecycle lock.
+	balloonTargetMB *int64
 }
 
 // launchSandbox returns acquired resources even on failure. Manager owns
@@ -59,6 +62,10 @@ func launchSandbox(ctx context.Context, req CreateRequest, spec VMStartSpec, vmm
 	pool *netstack.Pool, runtimeIDs createRuntimeIDs, readyOpts *hostconn.ReadyOptions, restore bool,
 ) (*Sandbox, error) {
 	sbx := &Sandbox{vmStartSpec: spec, vmmName: req.VMMName, sandboxID: req.SandboxID}
+	if spec.EnableBalloon && !restore {
+		target := spec.MemorySizeMB
+		sbx.balloonTargetMB = &target
+	}
 	slot, err := pool.Get(ctx, req.SandboxID, req.Network)
 	if err != nil {
 		return sbx, fmt.Errorf("prepare network: %w", err)
@@ -70,6 +77,7 @@ func launchSandbox(ctx context.Context, req CreateRequest, spec VMStartSpec, vmm
 	}
 	resources := &vmm.ResourceArgs{
 		CPUBoot: req.VCPUNum, CPUMax: req.VCPUMax, MemorySize: spec.MemorySizeMB, MemoryPath: spec.MemoryPath,
+		EnableBalloon: spec.EnableBalloon,
 		NetNSPath: slot.NetNSPath(), TapName: slot.TapName(), KernelPath: spec.KernelPath, InitrdPath: spec.InitrdPath,
 		PmemPaths: append([]string(nil), spec.PmemPaths...), VirtioFS: append([]driver.VirtioFSDevice(nil), spec.VirtioFS...),
 		VsockCID: runtimeIDs.vsockCID, VsockSocketPath: runtimeIDs.vsockSocketPath, SandboxId: req.SandboxID,

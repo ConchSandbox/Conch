@@ -41,6 +41,7 @@ type BootIndexInfo struct {
 	VMMName           string             `json:"vmm_name,omitempty"`
 	MemorySizeMB      int64              `json:"memory_size_mb,omitempty"`
 	CPUCount          int64              `json:"cpu_count,omitempty"`
+	EnableBalloon     bool               `json:"enable_balloon,omitempty"`
 }
 
 // PublishCheckpointBootIndexOptions publishes captured memory and VMM state as
@@ -53,6 +54,7 @@ type PublishCheckpointBootIndexOptions struct {
 	VMMName               string `json:"vmm_name"`
 	MemorySizeMB          int64  `json:"memory_size_mb"`
 	CPUCount              int64  `json:"cpu_count"`
+	EnableBalloon         bool   `json:"enable_balloon,omitempty"`
 }
 
 // PublishCheckpointBootIndexResult deliberately contains no snapshot keys:

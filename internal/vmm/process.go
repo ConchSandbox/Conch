@@ -392,3 +392,11 @@ func (p *Process) recordExit(err error) {
 	p.exitErr = err
 	close(p.exitDone)
 }
+
+func (p *Process) SetMemoryTarget(ctx context.Context, targetMB int64) error {
+	return p.adapter.SetMemoryTarget(ctx, targetMB)
+}
+
+func (p *Process) BalloonActual(ctx context.Context) (uint64, error) {
+	return p.adapter.BalloonActual(ctx)
+}

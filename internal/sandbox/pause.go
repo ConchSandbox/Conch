@@ -387,6 +387,7 @@ func (m *Manager) resumePausedLocked(ctx context.Context, rec Record, opts Resum
 		VCPUNum:         rec.VCPUNum,
 		VCPUMax:         max(opts.VCPUMax, rec.VCPUNum),
 		RAMMB:           rec.RamMB,
+		EnableBalloon:   rec.EnableBalloon,
 		Network:         rec.Network,
 		E2B:             true,
 		Timeout:         opts.Timeout,

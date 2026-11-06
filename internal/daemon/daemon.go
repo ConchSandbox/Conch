@@ -243,6 +243,8 @@ func (s *Daemon) routes() {
 	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}", s.handleGetSandbox)
 	s.router.HandleFunc("DELETE /api/v1/sandboxes/{sandboxID}", s.handleDeleteSandbox)
 	s.router.HandleFunc("PUT /api/v1/sandboxes/{sandboxID}/network", s.handleUpdateSandboxNetwork)
+	s.router.HandleFunc("PUT /api/v1/sandboxes/{sandboxID}/balloon", s.handleSandboxBalloon)
+	s.router.HandleFunc("GET /api/v1/sandboxes/{sandboxID}/balloon", s.handleSandboxBalloon)
 	s.router.HandleFunc("/health", s.handleHealth)
 	s.router.HandleFunc("/api/sandbox/suspend", s.handleSuspendSandbox)
 	s.router.HandleFunc("/api/sandbox/resume", s.handleResumeSandbox)
@@ -435,16 +437,17 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.runtimeService.CreateSandbox(r.Context(), runtimeapi.SandboxCreateOptions{
-		SandboxID:    req.SandboxID,
-		TemplateName: req.TemplateName,
-		TemplateID:   req.TemplateID,
-		VMMName:      req.VMMName,
-		VCPUNum:      req.VCPUNum,
-		VCPUMax:      req.VCPUMax,
-		RamMB:        req.RAMMB,
-		VolumeMounts: req.VolumeMounts,
-		Env:          req.Env,
-		Network:      req.Network,
+		SandboxID:     req.SandboxID,
+		TemplateName:  req.TemplateName,
+		TemplateID:    req.TemplateID,
+		VMMName:       req.VMMName,
+		VCPUNum:       req.VCPUNum,
+		VCPUMax:       req.VCPUMax,
+		RamMB:         req.RAMMB,
+		EnableBalloon: req.EnableBalloon,
+		VolumeMounts:  req.VolumeMounts,
+		Env:           req.Env,
+		Network:       req.Network,
 	})
 	if err != nil {
 		writeAPIError(w, err, ulog.F("operation", "sandbox.create"), ulog.F("sandbox_id", req.SandboxID))
@@ -696,17 +699,18 @@ func matchesSandboxState(record conchsandbox.Record, states map[string]bool) boo
 
 func sandboxResponseFromRecord(record conchsandbox.Record, detailed bool) sandboxInspectResponse {
 	response := sandboxInspectResponse{
-		TemplateName: record.SourceTemplateName,
-		TemplateID:   record.SourceTemplateID,
-		ImageName:    "",
-		SnapshotID:   "",
-		SandboxID:    record.ID,
-		StartedAt:    formatUnixNanoRFC3339(record.CreatedAt),
-		CPUCount:     record.VCPUNum,
-		MemoryMB:     record.RamMB,
-		Alias:        "",
-		Metadata:     map[string]string{},
-		VolumeMounts: []sandboxVolumeMountResponse{},
+		EnableBalloon: record.EnableBalloon,
+		TemplateName:  record.SourceTemplateName,
+		TemplateID:    record.SourceTemplateID,
+		ImageName:     "",
+		SnapshotID:    "",
+		SandboxID:     record.ID,
+		StartedAt:     formatUnixNanoRFC3339(record.CreatedAt),
+		CPUCount:      record.VCPUNum,
+		MemoryMB:      record.RamMB,
+		Alias:         "",
+		Metadata:      map[string]string{},
+		VolumeMounts:  []sandboxVolumeMountResponse{},
 	}
 	if response.Metadata == nil {
 		response.Metadata = map[string]string{}
@@ -723,6 +727,7 @@ func sandboxResponseFromRecord(record conchsandbox.Record, detailed bool) sandbo
 func sandboxResponseFromCreate(result runtimeapi.SandboxCreateResult) createSandboxResponse {
 	// TODO: populate conchInitVersion and alias when runtime support is available.
 	return createSandboxResponse{
+		EnableBalloon:        result.EnableBalloon,
 		TemplateName:         result.TemplateName,
 		TemplateID:           result.TemplateID,
 		SandboxID:            result.SandboxID,
@@ -1338,4 +1343,39 @@ func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(removeSnapshotResponse{Status: "ok"})
+}
+
+func (s *Daemon) handleSandboxBalloon(w http.ResponseWriter, r *http.Request) {
+	if s.runtimeService == nil || s.runtimeService.Sandbox == nil {
+		writeAPIError(w, errServiceUnavailable.New())
+		return
+	}
+	var target *int64
+	timeout := 20 * time.Second
+	if r.Method == http.MethodPut {
+		var request struct {
+			TargetMB       *int64 `json:"target_mb"`
+			TimeoutSeconds *int64 `json:"timeout_seconds"`
+		}
+		if !decodeJSONBody(w, r, &request) {
+			return
+		}
+		if request.TargetMB == nil || (request.TimeoutSeconds != nil && (*request.TimeoutSeconds <= 0 || *request.TimeoutSeconds > 60)) {
+			writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(nil, "target_mb is required; timeout_seconds must be in [1, 60]"))
+			return
+		}
+		target = request.TargetMB
+		if request.TimeoutSeconds != nil {
+			timeout = time.Duration(*request.TimeoutSeconds) * time.Second
+		}
+	}
+	info, err := s.runtimeService.SandboxBalloon(r.Context(), r.PathValue("sandboxID"), target, timeout)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = errRequestDeadlineExceeded.WrapMessage(err, "balloon operation timed out while submitting the target or querying memory; the target may remain active")
+		}
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, info)
 }

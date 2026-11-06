@@ -168,6 +168,7 @@ func (m *Manager) beginCheckpoint(ctx context.Context, sandboxID string, entry *
 		VMMName:               captured.VMMName,
 		MemorySizeMB:          captured.MemorySizeMB,
 		CPUCount:              rec.VCPUNum,
+		EnableBalloon:         rec.EnableBalloon,
 	})
 	if err != nil {
 		return fail(err)

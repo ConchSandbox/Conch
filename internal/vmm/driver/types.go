@@ -21,6 +21,7 @@ type ResourceArgs struct {
 	// Memory
 	MemorySize int64
 	MemoryPath string
+	EnableBalloon bool
 
 	// Net
 	NetNSPath string
@@ -62,6 +63,9 @@ type Adapter interface {
 	CheckAgentAlive(ctx context.Context, processExited ProcessExit) error
 	PauseVM() error
 	ResumeVM() error
+	SetMemoryTarget(context.Context, int64) error
+	// Actual memory is configured RAM minus balloon-held bytes, not host RSS.
+	BalloonActual(context.Context) (uint64, error)
 	DeleteVM() error
 	CreateSnapshot(snapfilePath string) error
 	LoadSnapshot(snapfilePath string, preferVNC bool) error

@@ -30,7 +30,7 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	client := NewStratovirtClient(1, "/tmp/conch-qmp.sock", binPath)
-	script, err := client.BuildStartCmd(&driver.ResourceArgs{
+	args := &driver.ResourceArgs{
 		CPUBoot:    2,
 		CPUMax:     4,
 		MemorySize: 1024,
@@ -41,7 +41,8 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 		InitrdPath: "/tmp/initrd",
 		VsockCID:   42,
 		SandboxId:  "sandbox-test",
-	}, false)
+	}
+	script, err := client.BuildStartCmd(args, false)
 	if err != nil {
 		t.Fatalf("BuildStartCmd() error = %v", err)
 	}
@@ -62,9 +63,16 @@ func TestStratovirtBuildStartCmd(t *testing.T) {
 	if strings.Contains(script, pathBinary) {
 		t.Fatalf("script used PATH binary %q instead of configured binary:\n%s", pathBinary, script)
 	}
-	for _, unwanted := range []string{"/must/not/be/used/mem.img", "-incoming", "memory-backend-file"} {
+	for _, unwanted := range []string{"/must/not/be/used/mem.img", "-incoming", "memory-backend-file", "virtio-balloon"} {
 		if strings.Contains(script, unwanted) {
 			t.Fatalf("cold script unexpectedly contains %q:\n%s", unwanted, script)
+		}
+	}
+	args.EnableBalloon = true
+	for _, restore := range []bool{false, true} {
+		script, err := client.BuildStartCmd(args, restore)
+		if err != nil || !strings.Contains(script, "-device virtio-balloon-pci,id=balloon0,") {
+			t.Fatalf("balloon startup (restore=%v): script=%s error=%v", restore, script, err)
 		}
 	}
 }
@@ -455,4 +463,120 @@ func serveQMPCommand(conn net.Conn) {
 			return
 		}
 	}
+}
+
+func TestStratovirtBalloonCommands(t *testing.T) {
+	for _, tt := range []struct {
+		name, command, response string
+		target                  int64
+		wantErr                 bool
+	}{
+		{name: "set target", command: "balloon", response: `{"return":{}}`, target: 1024},
+		{name: "query actual", command: "query-balloon", response: `{"return":{"actual":3221225472}}`},
+		{name: "command rejected", command: "balloon", response: `{"error":{"desc":"device unavailable"}}`, target: 1024, wantErr: true},
+		{name: "missing actual", command: "query-balloon", response: `{"return":{}}`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			socket := balloonQMPSocket(t, func(conn net.Conn) {
+				encoder, decoder := json.NewEncoder(conn), json.NewDecoder(conn)
+				if err := encoder.Encode(map[string]any{"QMP": map[string]any{}}); err != nil {
+					t.Error(err)
+					return
+				}
+				var command struct {
+					Execute   string            `json:"execute"`
+					Arguments map[string]uint64 `json:"arguments"`
+				}
+				if err := decoder.Decode(&command); err != nil {
+					t.Error(err)
+					return
+				}
+				if command.Execute != "qmp_capabilities" {
+					t.Errorf("first command = %q", command.Execute)
+				}
+				if err := encoder.Encode(map[string]any{"return": map[string]any{}}); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := decoder.Decode(&command); err != nil {
+					t.Error(err)
+					return
+				}
+				if command.Execute != tt.command || (tt.target != 0 && command.Arguments["value"] != uint64(tt.target)<<20) {
+					t.Errorf("unexpected balloon command: %+v", command)
+				}
+				// Events must not be mistaken for command responses.
+				if err := encoder.Encode(map[string]any{"event": "BALLOON_CHANGE"}); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := encoder.Encode(json.RawMessage(tt.response)); err != nil {
+					t.Error(err)
+				}
+			})
+			client := NewStratovirtClient(1, socket, "/unused/stratovirt")
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			var actual uint64
+			var err error
+			if tt.target != 0 {
+				err = client.SetMemoryTarget(ctx, tt.target)
+			} else {
+				actual, err = client.BalloonActual(ctx)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && tt.target == 0 && actual != 3072<<20 {
+				t.Fatalf("actual = %d, want 3 GiB", actual)
+			}
+		})
+	}
+}
+
+func TestStratovirtBalloonCommunicationTimeout(t *testing.T) {
+	socket := balloonQMPSocket(t, func(conn net.Conn) {
+		// Withhold the greeting until the client cancels and closes the socket.
+		var b [1]byte
+		_, _ = conn.Read(b[:])
+	})
+	client := NewStratovirtClient(1, socket, "/unused/stratovirt")
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := client.BalloonActual(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("balloon query returned %v after %v", err, time.Since(start))
+	}
+}
+
+func balloonQMPSocket(t *testing.T, serve func(net.Conn)) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "balloon.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(accepted)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- conn
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		serve(conn)
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		if conn, ok := <-accepted; ok {
+			_ = conn.Close()
+		}
+		<-done
+	})
+	return path
 }

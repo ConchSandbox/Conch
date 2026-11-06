@@ -1422,3 +1422,110 @@ func TestCleanupRetainsProcessUntilSocketsAreRemoved(t *testing.T) {
 		t.Fatal("cleanup did not finish")
 	}
 }
+
+func TestBalloonRequiresReadyAndEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		state   State
+		enabled bool
+		noVM    bool
+		target  int64
+		want    error
+		message string
+	}{
+		{name: "suspended", state: StateSuspended, enabled: true, want: ErrFailedPrecondition, message: "READY"},
+		{name: "paused", state: StatePaused, enabled: true, want: ErrFailedPrecondition, message: "READY"},
+		{name: "missing process", state: StateReady, noVM: true, want: ErrFailedPrecondition, message: "no VMM process"},
+		{name: "device disabled", state: StateReady, want: ErrFailedPrecondition, message: "not enabled"},
+		{name: "negative target", state: StateReady, enabled: true, target: -1, want: ErrInvalidArgument, message: "target_mb"},
+		{name: "zero target", state: StateReady, enabled: true, want: ErrInvalidArgument, message: "target_mb"},
+		{name: "target above configured RAM", state: StateReady, enabled: true, target: 4097, want: ErrInvalidArgument, message: "target_mb"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// An empty Process cannot execute VMM commands; validation must return first.
+			sbx := &Sandbox{
+				process:     &vmm.Process{},
+				vmStartSpec: VMStartSpec{MemorySizeMB: 4096, EnableBalloon: tt.enabled},
+			}
+			if tt.noVM {
+				sbx.process = nil
+			}
+			m := &Manager{}
+			m.sandboxes.Store("sandbox-a", &sandboxEntry{state: tt.state, sbx: sbx})
+			_, err := m.Balloon(t.Context(), "sandbox-a", &tt.target, time.Second)
+			if !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("Balloon() = %v, want %v containing %q", err, tt.want, tt.message)
+			}
+		})
+	}
+}
+
+func TestBalloonReturnsWithoutWaitingForTarget(t *testing.T) {
+	m, store, _ := newLifecycleTestManager(t, readyBoot())
+	entry := seedRuntime(t, m, store, func(context.Context) error { return nil })
+	payload := filepath.Join(t.TempDir(), "kernel")
+	if err := os.WriteFile(payload, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := &vmm.ResourceArgs{KernelPath: payload, InitrdPath: payload, MemorySize: 4096, EnableBalloon: true}
+	process, err := vmm.NewProcess(vmm.CloudHypervisorName, "/bin/true", "sandbox-a", args, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Stop(context.Background()) })
+	fd, err := unix.Dup(args.ApiSocketFd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(fd), "balloon-api")
+	listener, err := net.FileListener(file)
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sets, queries atomic.Int32
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/vm.resize":
+			sets.Add(1)
+			var body struct {
+				Size uint64 `json:"desired_balloon"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Size != 3072<<20 {
+				t.Errorf("resize size=%d error=%v", body.Size, err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/vm.balloon":
+			queries.Add(1)
+			// No memory has been surrendered yet, despite accepting the target.
+			_, _ = w.Write([]byte(`{"balloon_actual":0}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close(); _ = listener.Close() })
+	entry.sbx = &Sandbox{
+		process:     process,
+		vmmName:     vmm.CloudHypervisorName,
+		vmStartSpec: VMStartSpec{MemorySizeMB: 4096, EnableBalloon: true},
+	}
+	target := int64(1024)
+	info, err := m.Balloon(t.Context(), "sandbox-a", &target, 2*time.Second)
+	if err != nil || info.TargetMB == nil || *info.TargetMB != target || info.ActualMB != 4096 {
+		t.Fatalf("PUT returned %+v, %v; want target=1024 and actual=4096", info, err)
+	}
+	if sets.Load() != 1 || queries.Load() != 1 {
+		t.Fatalf("PUT made %d submissions and %d queries", sets.Load(), queries.Load())
+	}
+	info, err = m.Balloon(t.Context(), "sandbox-a", nil, 2*time.Second)
+	if err != nil || info.TargetMB == nil || *info.TargetMB != target || info.ActualMB != 4096 {
+		t.Fatalf("GET returned %+v, %v", info, err)
+	}
+	if sets.Load() != 1 || queries.Load() != 2 {
+		t.Fatalf("GET changed target or polled: submissions=%d queries=%d", sets.Load(), queries.Load())
+	}
+}

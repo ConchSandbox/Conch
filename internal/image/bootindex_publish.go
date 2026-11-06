@@ -130,6 +130,7 @@ func PublishCheckpointBootIndex(
 		VMMName:           req.VMMName,
 		MemorySizeMB:      req.MemorySizeMB,
 		CPUCount:          req.CPUCount,
+		EnableBalloon:     req.EnableBalloon,
 	})
 	if err != nil {
 		return PublishCheckpointBootIndexResult{}, fmt.Errorf("build checkpoint boot index: %w", err)

@@ -32,6 +32,7 @@ const (
 	AnnotationVMM          = "io.conch.vmm"
 	AnnotationMemorySizeMB = "io.conch.memory-size-mb"
 	AnnotationCPUCount     = "io.conch.cpu-count"
+	AnnotationBalloon      = "io.conch.enable-balloon"
 )
 
 func withBootIndexLease(ctx context.Context, client *containerdclient.Client, bootIndexDigest string, operation func(context.Context) error) (retErr error) {
@@ -69,6 +70,7 @@ type BootIndexContentOptions struct {
 	VMMName           string
 	MemorySizeMB      int64
 	CPUCount          int64
+	EnableBalloon     bool
 }
 
 func BuildBootIndexInContent(ctx context.Context, store content.Store, opts BootIndexContentOptions) (ocispec.Descriptor, error) {
@@ -89,6 +91,9 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 		return ocispec.Descriptor{}, fmt.Errorf("kernel and initrd paths must be provided together")
 	}
 	hasMem := descriptorProvided(opts.MemDescriptor)
+	if opts.EnableBalloon && !hasMem {
+		return ocispec.Descriptor{}, fmt.Errorf("balloon metadata requires a mem-snapshot component")
+	}
 	vmmName := strings.TrimSpace(opts.VMMName)
 	if hasMem && vmmName == "" {
 		return ocispec.Descriptor{}, fmt.Errorf("VMM name is required for a mem-snapshot component")
@@ -145,6 +150,9 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 		}
 		if opts.CPUCount > 0 {
 			indexAnnotations[AnnotationCPUCount] = strconv.FormatInt(opts.CPUCount, 10)
+		}
+		if opts.EnableBalloon {
+			indexAnnotations[AnnotationBalloon] = "true"
 		}
 	}
 	return writeIndexToContent(ctx, store, manifests, indexAnnotations)
@@ -544,6 +552,12 @@ func inspectBootIndexMetadata(desc ocispec.Descriptor, index ocispec.Index) (Boo
 		SandboxDescriptor: components[KindSandbox],
 	}
 	info.Resume = info.MemDescriptor.Digest != ""
+	if value := index.Annotations[AnnotationBalloon]; value != "" {
+		if !info.Resume || (value != "true" && value != "false") {
+			return BootIndexInfo{}, fmt.Errorf("invalid %s metadata", AnnotationBalloon)
+		}
+		info.EnableBalloon = value == "true"
+	}
 	indexVMM := strings.TrimSpace(index.Annotations[AnnotationVMM])
 	memVMM := strings.TrimSpace(info.MemDescriptor.Annotations[AnnotationVMM])
 	indexMemorySize := strings.TrimSpace(index.Annotations[AnnotationMemorySizeMB])

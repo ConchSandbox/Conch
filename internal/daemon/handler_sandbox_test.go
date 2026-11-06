@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openeuler/Conch/internal/conchruntime"
@@ -286,3 +288,90 @@ func (missingTemplateStore) List(context.Context, conchtemplate.Filter) ([]conch
 }
 
 func (missingTemplateStore) Delete(context.Context, string) error { return nil }
+
+type balloonSandboxOps struct {
+	fakeSandboxOps
+	calls   int
+	id      string
+	target  *int64
+	timeout time.Duration
+	err     error
+}
+
+func (f *balloonSandboxOps) Balloon(_ context.Context, id string, target *int64, timeout time.Duration) (runtimeapi.BalloonInfo, error) {
+	f.calls++
+	f.id, f.target, f.timeout = id, target, timeout
+	return runtimeapi.BalloonInfo{ConfiguredMB: 4096, TargetMB: target, ActualMB: 4096}, f.err
+}
+
+func TestHandleSandboxBalloon(t *testing.T) {
+	for _, tt := range []struct {
+		name, method, body, code string
+		err                      error
+		status                   int
+		wantCall                 bool
+	}{
+		{name: "query", method: http.MethodGet, status: 200, wantCall: true},
+		{name: "set target", method: http.MethodPut, body: `{"target_mb":1024,"timeout_seconds":3}`, status: 200, wantCall: true},
+		{name: "default timeout", method: http.MethodPut, body: `{"target_mb":1024}`, status: 200, wantCall: true},
+		{name: "missing target", method: http.MethodPut, body: `{}`, status: 400, code: "sandbox.invalid_argument"},
+		{name: "zero timeout", method: http.MethodPut, body: `{"target_mb":1024,"timeout_seconds":0}`, status: 400, code: "sandbox.invalid_argument"},
+		{name: "timeout too long", method: http.MethodPut, body: `{"target_mb":1024,"timeout_seconds":61}`, status: 400, code: "sandbox.invalid_argument"},
+		{name: "malformed body", method: http.MethodPut, body: "{", status: 400, code: "request.invalid_body"},
+		{name: "not found", method: http.MethodGet, err: sandbox.ErrNotFound.New(), status: 404, code: "sandbox.not_found", wantCall: true},
+		{name: "runtime dead", method: http.MethodGet, err: sandbox.ErrRuntimeDead.New(), status: 409, code: "sandbox.runtime_dead", wantCall: true},
+		{name: "VMM failure", method: http.MethodGet, err: errors.New("private QMP error"), status: 500, code: "internal", wantCall: true},
+		{name: "deadline", method: http.MethodGet, err: context.DeadlineExceeded, status: 504, code: "request.deadline_exceeded", wantCall: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &balloonSandboxOps{err: tt.err}
+			server := &Daemon{router: http.NewServeMux(), runtimeService: newHandlerRuntime(ops, nil, nil)}
+			server.routes()
+			recorder := httptest.NewRecorder()
+			server.router.ServeHTTP(recorder, httptest.NewRequest(tt.method, "/api/v1/sandboxes/sandbox-a/balloon", bytes.NewBufferString(tt.body)))
+			if recorder.Code != tt.status {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if (ops.calls == 1) != tt.wantCall {
+				t.Fatalf("balloon calls = %d, wantCall = %v", ops.calls, tt.wantCall)
+			}
+			if tt.status != 200 {
+				var response apiErrorResponse
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if string(response.Code) != tt.code {
+					t.Fatalf("error response = %+v", response)
+				}
+				if tt.status == 500 && response.Error != "internal server error" {
+					t.Fatalf("private VMM error exposed: %s", response.Error)
+				}
+				if tt.status == 504 && response.Error != "balloon operation timed out while submitting the target or querying memory; the target may remain active" {
+					t.Fatalf("unexpected timeout message: %s", response.Error)
+				}
+				return
+			}
+			wantTimeout := 20 * time.Second
+			if tt.name == "set target" {
+				wantTimeout = 3 * time.Second
+			}
+			if ops.id != "sandbox-a" || ops.timeout != wantTimeout {
+				t.Fatalf("forwarded id=%q timeout=%v", ops.id, ops.timeout)
+			}
+			var info runtimeapi.BalloonInfo
+			if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
+				t.Fatal(err)
+			}
+			if info.ConfiguredMB != 4096 || info.ActualMB != 4096 {
+				t.Fatalf("response = %+v", info)
+			}
+			if tt.method == http.MethodGet {
+				if ops.target != nil || info.TargetMB != nil {
+					t.Fatal("GET unexpectedly submitted a target")
+				}
+			} else if ops.target == nil || *ops.target != 1024 || info.TargetMB == nil || *info.TargetMB != 1024 {
+				t.Fatalf("PUT target not preserved: %+v", info)
+			}
+		})
+	}
+}

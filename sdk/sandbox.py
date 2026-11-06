@@ -38,6 +38,7 @@ SANDBOX_LIST_PATH = SANDBOX_COLLECTION_PATH
 SANDBOX_GET_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
 SANDBOX_DELETE_PATH_TEMPLATE = SANDBOX_INSTANCE_PATH_TEMPLATE
 SANDBOX_NETWORK_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}/network"
+SANDBOX_BALLOON_PATH_TEMPLATE = "/api/v1/sandboxes/{sandbox_id}/balloon"
 SANDBOX_SUSPEND_PATH = "/api/sandbox/suspend"
 SANDBOX_RESUME_PATH = "/api/sandbox/resume"
 SANDBOX_CHECKPOINT_PATH = "/api/sandbox/checkpoint"
@@ -664,6 +665,7 @@ class Sandbox:
             env: Optional[Dict[str, str]] = None,
             network: Optional[Dict[str, Any]] = None,
             vmm_name: Optional[str] = None,
+            enable_balloon: bool = False,
     ):
         warn_onproxy()
 
@@ -684,6 +686,9 @@ class Sandbox:
         self.vcpu_num = vcpu_num
         self.vcpu_max = vcpu_max
         self.ram_mb = ram_mb
+        if not isinstance(enable_balloon, bool):
+            raise ValueError("enable_balloon must be a bool")
+        self.enable_balloon = enable_balloon
         # Empty means conchd picks its configured sandbox.backend.
         self.vmm_name = vmm_name
         self.image_name = None
@@ -763,6 +768,8 @@ class Sandbox:
             payload["vcpu_max"] = self.vcpu_max
         if self.ram_mb:
             payload["ram_mb"] = self.ram_mb
+        if self.enable_balloon:
+            payload["enable_balloon"] = True
         has_template_name = bool(self.template_name and self.template_name.strip())
         has_template_id = bool(self.template_id and self.template_id.strip())
         if has_template_name and has_template_id:
@@ -793,6 +800,7 @@ class Sandbox:
             self.agent_token = record["conchInitAccessToken"]
         self.vcpu_num = record.get("cpuCount") or self.vcpu_num
         self.ram_mb = record.get("memoryMB") or self.ram_mb
+        self.enable_balloon = bool(record.get("enableBalloon", False))
         for attribute, field_name in {
             "image_name": "imageName",
             "snapshot_id": "snapshotID",
@@ -862,6 +870,7 @@ class Sandbox:
         self.vcpu_num = None
         self.vcpu_max = None
         self.ram_mb = None
+        self.enable_balloon = False
         self.vmm_name = None
         self.image_name = None
         self.snapshot_id = None
@@ -998,6 +1007,38 @@ class Sandbox:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(_request_exception_message(e))
 
+    def set_memory_target(self, target_mb: int, timeout: int = 20) -> Dict[str, Any]:
+        """Submit a guest-memory target and return one current memory reading.
+
+        Success does not mean that actual memory has reached the target.
+        Timeout does not cancel or roll back an accepted VMM target.
+        """
+        if isinstance(target_mb, bool) or not isinstance(target_mb, int) or target_mb <= 0:
+            raise ValueError("target_mb must be a positive integer")
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 60:
+            raise ValueError("timeout must be an integer in [1, 60] seconds")
+        path = SANDBOX_BALLOON_PATH_TEMPLATE.format(sandbox_id=quote(str(self.sandbox_id), safe=""))
+        try:
+            response = self._session.put(
+                self._build_control_plane_url(path),
+                json={"target_mb": target_mb, "timeout_seconds": timeout},
+                timeout=timeout + 5,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+
+    def get_balloon_info(self) -> Dict[str, Any]:
+        """Read configured RAM, last known target, and effective guest memory."""
+        path = SANDBOX_BALLOON_PATH_TEMPLATE.format(sandbox_id=quote(str(self.sandbox_id), safe=""))
+        try:
+            response = self._session.get(self._build_control_plane_url(path), timeout=25)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(_request_exception_message(e))
+
     def _lifecycle(self, path: str) -> bool:
         payload = {
             SANDBOX_ID_KEY: self.sandbox_id,
@@ -1021,6 +1062,7 @@ class Sandbox:
             env: Optional[Dict[str, str]] = None,
             network: Optional[Dict[str, Any]] = None,
             vmm_name: Optional[str] = None,
+            enable_balloon: bool = False,
     ) -> "Sandbox":
         sbx = cls(
             sandbox_id=sandbox_id,
@@ -1033,6 +1075,7 @@ class Sandbox:
             env=env,
             network=network,
             vmm_name=vmm_name,
+            enable_balloon=enable_balloon,
         )
         return sbx._do_create()
 

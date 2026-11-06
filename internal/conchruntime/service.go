@@ -127,6 +127,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		TemplateID: selection.ID, TemplateName: selection.Name,
 		SandboxID: opts.SandboxID, VMMName: opts.VMMName,
 		VCPUNum: opts.VCPUNum, VCPUMax: opts.VCPUMax, RAMMB: opts.RamMB,
+		EnableBalloon: opts.EnableBalloon,
 		Env: copyMap(opts.Env), VolumeMounts: opts.VolumeMounts, Network: opts.Network,
 		E2B: opts.E2B, Timeout: opts.Timeout, TimeoutAction: opts.TimeoutAction,
 		AutoResume: opts.AutoResume, MaskRequestHost: opts.MaskRequestHost, Metadata: copyMap(opts.Metadata),
@@ -144,6 +145,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:        opts.RamMB,
 		CreatedAt:    createResult.CreatedAt,
 		EnvdVersion:  createResult.EnvdVersion,
+		EnableBalloon: createResult.EnableBalloon,
 	}, nil
 }
 
@@ -659,4 +661,17 @@ func copyMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Optional capability keeps unrelated SandboxOps implementations unchanged.
+type balloonOps interface {
+	Balloon(context.Context, string, *int64, time.Duration) (runtimeapi.BalloonInfo, error)
+}
+
+func (s *Service) SandboxBalloon(ctx context.Context, id string, target *int64, timeout time.Duration) (runtimeapi.BalloonInfo, error) {
+	ops, ok := s.Sandbox.(balloonOps)
+	if !ok {
+		return runtimeapi.BalloonInfo{}, sandbox.ErrFailedPrecondition.WrapMessage(nil, "balloon operations are unavailable")
+	}
+	return ops.Balloon(ctx, id, target, timeout)
 }

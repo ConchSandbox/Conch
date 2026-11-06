@@ -85,6 +85,7 @@ type sandboxCreateRequest struct {
 	VCPUNum      int64                            `json:"vcpu_num"`
 	VCPUMax      int64                            `json:"vcpu_max"`
 	RAMMB        int64                            `json:"ram_mb"`
+	EnableBalloon bool                            `json:"enable_balloon,omitempty"`
 	VolumeMounts []volume.Mount                   `json:"volumeMounts,omitempty"`
 	Env          map[string]string                `json:"env,omitempty"`
 	Network      *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
@@ -100,6 +101,7 @@ type sandboxLifecycleResponse struct {
 }
 
 type createSandboxResponse struct {
+	EnableBalloon        bool   `json:"enableBalloon,omitempty"`
 	TemplateName         string `json:"templateName"`
 	TemplateID           string `json:"templateID"`
 	SandboxID            string `json:"sandboxID"`
@@ -110,6 +112,7 @@ type createSandboxResponse struct {
 }
 
 type sandboxInspectResponse struct {
+	EnableBalloon    bool                             `json:"enableBalloon,omitempty"`
 	TemplateName     string                           `json:"templateName"`
 	TemplateID       string                           `json:"templateID"`
 	ImageName        string                           `json:"imageName"`

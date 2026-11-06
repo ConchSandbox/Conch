@@ -30,6 +30,7 @@ type Record struct {
 	IP                       string
 	VCPUNum                  int64
 	RamMB                    int64
+	EnableBalloon            bool
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef

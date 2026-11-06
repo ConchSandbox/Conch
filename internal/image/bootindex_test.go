@@ -105,6 +105,7 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 		VMMName:           "cloud-hypervisor",
 		MemorySizeMB:      512,
 		CPUCount:          8,
+		EnableBalloon:     true,
 	})
 	if err != nil {
 		t.Fatalf("BuildBootIndexInContent: %v", err)
@@ -157,6 +158,14 @@ func TestBuildBootIndexInContentUsesPreparedCheckpointComponentsInStableOrder(t 
 	}
 	if !info.Resume || info.VMMName != "cloud-hypervisor" || info.MemorySizeMB != 512 || info.CPUCount != 8 {
 		t.Fatalf("boot index info = %#v", info)
+	}
+	if index.Annotations[AnnotationBalloon] != "true" || !info.EnableBalloon {
+		t.Fatal("checkpoint did not preserve the balloon device setting")
+	}
+	delete(index.Annotations, AnnotationBalloon)
+	legacy, err := inspectBootIndexMetadata(indexDesc, index)
+	if err != nil || legacy.EnableBalloon {
+		t.Fatalf("legacy balloon setting = %v, error = %v; want disabled", legacy.EnableBalloon, err)
 	}
 	if info.RootfsDescriptor.Digest != rootfsDesc.Digest {
 		t.Fatalf("inspected rootfs digest = %s, want %s", info.RootfsDescriptor.Digest, rootfsDesc.Digest)
@@ -242,12 +251,15 @@ func TestInspectBootIndexCPUCountMetadata(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, indexCPU, memCPU string
-		cold                   bool
-		want                   int64
-		wantError              bool
+		balloon               string
+		cold                  bool
+		want                  int64
+		wantError             bool
 	}{
 		{name: "captured CPUs", indexCPU: "8", memCPU: "8", want: 8},
 		{name: "legacy unknown remains zero", want: 0},
+		{name: "balloon enabled", indexCPU: "8", memCPU: "8", balloon: "true", want: 8},
+		{name: "invalid balloon metadata", balloon: "invalid", wantError: true},
 		{name: "missing memory annotation", indexCPU: "8", wantError: true},
 		{name: "missing index annotation", memCPU: "8", wantError: true},
 		{name: "mismatched component", indexCPU: "8", memCPU: "2", wantError: true},
@@ -260,6 +272,9 @@ func TestInspectBootIndexCPUCountMetadata(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			index := ocispec.Index{Manifests: []ocispec.Descriptor{descriptor(KindRootfs), descriptor(KindSandbox)}, Annotations: map[string]string{}}
+			if test.balloon != "" {
+				index.Annotations[AnnotationBalloon] = test.balloon
+			}
 			if test.indexCPU != "" {
 				index.Annotations[AnnotationCPUCount] = test.indexCPU
 			}
@@ -283,6 +298,9 @@ func TestInspectBootIndexCPUCountMetadata(t *testing.T) {
 			}
 			if err != nil || info.CPUCount != test.want {
 				t.Fatalf("CPUCount=%d want=%d error=%v", info.CPUCount, test.want, err)
+			}
+			if info.EnableBalloon != (test.balloon == "true") {
+				t.Fatalf("EnableBalloon=%v, metadata=%q", info.EnableBalloon, test.balloon)
 			}
 		})
 	}

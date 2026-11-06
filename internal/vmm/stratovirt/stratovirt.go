@@ -56,7 +56,8 @@ const startScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VirtioFSDevices }} \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
--disable-seccomp`
+{{ if .BalloonDevice }}{{ .BalloonDevice }} \
+{{ end }}-disable-seccomp`
 
 const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .VmmBinaryPath }} \
@@ -72,7 +73,8 @@ const restoreScriptStratovirt = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 -device virtio-net-pci,netdev=net0,id=net0,bus=pcie.0,addr=0x10 \
 {{ .PmemDevices }} \
 -device vhost-vsock-pci,id=vsock0,guest-cid={{ .VsockCID }},bus=pcie.0,addr=0x11 \
--disable-seccomp \
+{{ if .BalloonDevice }}{{ .BalloonDevice }} \
+{{ end }}-disable-seccomp \
 -incoming file:{{ .SnapfilePath }},mapped=true`
 
 type StartScriptStratovirtArgs struct {
@@ -99,6 +101,7 @@ type StartScriptStratovirtArgs struct {
 	// mounts are present, since vhost-user-fs needs guest memory shared with
 	// the userspace virtiofsd backend).
 	MachineOpts string
+	BalloonDevice string
 }
 
 type StratovirtClient struct {
@@ -211,6 +214,13 @@ func (s *StratovirtClient) BuildStartCmd(args *driver.ResourceArgs, restore bool
 		VirtioFSDevices: buildStratovirtVirtioFSDevices(args.VirtioFS, len(args.PmemPaths)),
 		SharefsCmdline:  buildSharefsCmdline(args.VirtioFS),
 		MachineOpts:     stratovirtMachineOpts(args.VirtioFS),
+	}
+	if args.EnableBalloon {
+		addr := 0x12 + len(args.PmemPaths) + len(args.VirtioFS)
+		if addr > 0x1f {
+			return "", fmt.Errorf("no PCI slot available for balloon device")
+		}
+		stArgs.BalloonDevice = fmt.Sprintf("-device virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x%x", addr)
 	}
 
 	if _, err = os.Stat(stArgs.VmmBinaryPath); err != nil {
@@ -669,4 +679,93 @@ func (s *StratovirtClient) CreateSnapshot(snapfilePath string) error {
 // There is no separate QMP load-snapshot step here.
 func (s *StratovirtClient) LoadSnapshot(snapfilePath string, preferVNC bool) error {
 	return nil
+}
+
+func (s *StratovirtClient) SetMemoryTarget(ctx context.Context, targetMB int64) error {
+	if targetMB <= 0 {
+		return fmt.Errorf("invalid balloon target")
+	}
+	_, err := s.balloonCommand(ctx, "balloon", map[string]any{"value": uint64(targetMB) << 20})
+	return err
+}
+
+func (s *StratovirtClient) BalloonActual(ctx context.Context) (uint64, error) {
+	data, err := s.balloonCommand(ctx, "query-balloon", nil)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		Actual *uint64 `json:"actual"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, fmt.Errorf("decode query-balloon: %w", err)
+	}
+	if result.Actual == nil {
+		return 0, fmt.Errorf("query-balloon returned no actual memory")
+	}
+	return *result.Actual, nil
+}
+
+// Balloon operations share the caller's budget, including the QMP handshake.
+func (s *StratovirtClient) balloonCommand(parent context.Context, command string, args map[string]any) (result json.RawMessage, retErr error) {
+	ctx, cancel := context.WithTimeout(parent, qmpTimeout)
+	defer cancel()
+	defer func() {
+		if retErr != nil && ctx.Err() != nil {
+			retErr = ctx.Err()
+		} else if timeout, ok := retErr.(net.Error); ok && timeout.Timeout() {
+			// The socket deadline may fire just before the context timer.
+			retErr = fmt.Errorf("QMP balloon deadline: %w", context.DeadlineExceeded)
+		}
+	}()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", s.socketPath)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+	var greeting map[string]json.RawMessage
+	if err := decoder.Decode(&greeting); err != nil {
+		return nil, err
+	}
+	if greeting["QMP"] == nil {
+		return nil, fmt.Errorf("missing QMP greeting")
+	}
+	for _, cmd := range []string{"qmp_capabilities", command} {
+		request := map[string]any{"execute": cmd}
+		if cmd == command && args != nil {
+			request["arguments"] = args
+		}
+		if err := encoder.Encode(request); err != nil {
+			return nil, err
+		}
+		for {
+			var response struct {
+				Return json.RawMessage `json:"return"`
+				Error  json.RawMessage `json:"error"`
+				Event  string          `json:"event"`
+			}
+			if err := decoder.Decode(&response); err != nil {
+				return nil, err
+			}
+			if response.Event != "" {
+				continue
+			}
+			if len(response.Error) != 0 {
+				return nil, fmt.Errorf("QMP %s failed: %s", cmd, response.Error)
+			}
+			if len(response.Return) == 0 {
+				return nil, fmt.Errorf("QMP %s returned no result", cmd)
+			}
+			result = response.Return
+			break
+		}
+	}
+	return result, nil
 }

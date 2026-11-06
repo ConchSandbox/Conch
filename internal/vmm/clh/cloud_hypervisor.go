@@ -39,7 +39,8 @@ const startScriptCLH = `{{ .NSenterPath }} --net={{ .NetNSPath }} -- \
 {{ .PmemArgs }} \
 --memory "size=0" \
 --memory-zone "id=mem0,size={{ .MemorySize }},file={{ .MemoryPath }},shared=on" \
---cmdline "console=hvc0 root=/dev/ram0 rw debug ipv6.disable=1 conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
+{{ if .EnableBalloon }}--balloon size=0 \
+{{ end }}--cmdline "console=hvc0 root=/dev/ram0 rw debug ipv6.disable=1 conch.sandbox_id={{ .SandboxId }}{{ .SharefsCmdline }}" \
 --api-socket fd={{ .ApiSocketFd }} \
 --console null \
 --net "tap={{ .TapName }}" \
@@ -63,6 +64,7 @@ type StartScriptCLHArgs struct {
 	CPUMax          int64
 	MemorySize      string
 	MemoryPath      string
+	EnableBalloon   bool
 	KernelPath      string
 	InitrdPath      string
 	PlatformArgs    string
@@ -83,6 +85,7 @@ type CLHClient struct {
 	socketPath string
 	vmmBinary  string
 	fds        *VmmFds
+	memoryMB   int64
 }
 
 func NewCLHClient(vmmType int, socketPath, vmmBinary string) *CLHClient {
@@ -176,6 +179,7 @@ func createVmmFds(vmmSocketPath string) (*VmmFds, error) {
 }
 
 func (c *CLHClient) PrepareLaunch(args *driver.ResourceArgs, restore bool) error {
+	c.memoryMB = args.MemorySize
 	if restore {
 		pmemPaths, err := PrepareRestore(RestoreResources{
 			SnapshotPath:    args.SnapfilePath,
@@ -399,6 +403,7 @@ func (clh *CLHClient) BuildStartCmd(args *driver.ResourceArgs, restore bool) (st
 		CPUMax:          args.CPUMax,
 		MemorySize:      strconv.FormatInt(args.MemorySize, 10) + "M",
 		MemoryPath:      args.MemoryPath,
+		EnableBalloon:   args.EnableBalloon,
 		KernelPath:      args.KernelPath,
 		InitrdPath:      args.InitrdPath,
 		PlatformArgs:    buildPlatformArgs(args.PmemPaths),
@@ -621,4 +626,60 @@ func (c *CLHClient) LoadSnapshot(snapfilePath string, preferVNC bool) error {
 	}
 
 	return c.requestApi("PUT", "restore", string(jsonBody))
+}
+
+func (c *CLHClient) SetMemoryTarget(ctx context.Context, targetMB int64) error {
+	if targetMB <= 0 || targetMB > c.memoryMB {
+		return fmt.Errorf("invalid balloon target")
+	}
+	body, err := json.Marshal(map[string]uint64{"desired_balloon": uint64(c.memoryMB-targetMB) << 20})
+	if err != nil {
+		return err
+	}
+	_, err = c.balloonRequest(ctx, http.MethodPut, "resize", body)
+	return err
+}
+
+func (c *CLHClient) BalloonActual(ctx context.Context) (uint64, error) {
+	data, err := c.balloonRequest(ctx, http.MethodGet, "balloon", nil)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		Actual *uint64 `json:"balloon_actual"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, err
+	}
+	configured := uint64(c.memoryMB) << 20
+	if result.Actual == nil || *result.Actual > configured {
+		return 0, fmt.Errorf("invalid balloon_actual response")
+	}
+	return configured - *result.Actual, nil
+}
+
+func (c *CLHClient) balloonRequest(ctx context.Context, method, command string, body []byte) ([]byte, error) {
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", c.socketPath)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	request, err := http.NewRequestWithContext(ctx, method, "http://vmm/api/v1/vm."+command, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("CLH %s returned %s: %s", command, response.Status, data)
+	}
+	return data, nil
 }

@@ -31,6 +31,7 @@ type metadataV1 struct {
 	IP                       string                           `json:"ip,omitempty"`
 	VCPUNum                  int64                            `json:"vcpu_num,omitempty"`
 	RamMB                    int64                            `json:"ram_mb,omitempty"`
+	EnableBalloon            bool                             `json:"enable_balloon,omitempty"`
 	Network                  *runtimeapi.SandboxNetworkConfig `json:"network,omitempty"`
 	LastError                string                           `json:"last_error,omitempty"`
 	E2B                      bool                             `json:"e2b,omitempty"`
@@ -220,6 +221,7 @@ func metadataFromRecord(record conchsandbox.Record) *metadataV1 {
 		SourceTemplateID:         record.SourceTemplateID,
 		CheckpointHeadTemplateID: record.CheckpointHeadTemplateID, IP: record.IP, VCPUNum: record.VCPUNum,
 		RamMB: record.RamMB, Network: record.Network, LastError: record.LastError,
+		EnableBalloon: record.EnableBalloon,
 		E2B: record.E2B, EnvdVersion: record.EnvdVersion, Metadata: record.Metadata,
 		ExpiresAt: record.ExpiresAt, TimeoutAction: record.TimeoutAction, AutoResume: record.AutoResume,
 		MaskRequestHost: record.MaskRequestHost,
@@ -250,6 +252,7 @@ func recordFromNative(native cdsandbox.Sandbox) (conchsandbox.Record, error) {
 		CheckpointHeadTemplateID: metadata.CheckpointHeadTemplateID,
 		IP:                       metadata.IP, VCPUNum: metadata.VCPUNum, RamMB: metadata.RamMB, Network: metadata.Network,
 		LastError: metadata.LastError, RuntimeSnapshots: refs,
+		EnableBalloon: metadata.EnableBalloon,
 		E2B: metadata.E2B, EnvdVersion: metadata.EnvdVersion, Metadata: metadata.Metadata,
 		ExpiresAt: metadata.ExpiresAt, TimeoutAction: metadata.TimeoutAction, AutoResume: metadata.AutoResume,
 		MaskRequestHost: metadata.MaskRequestHost,

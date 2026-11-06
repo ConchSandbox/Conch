@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
+	"github.com/openeuler/Conch/internal/vmm"
 	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
@@ -471,4 +473,100 @@ func (m *Manager) cleanupSandbox(ctx context.Context, sandboxID string, entry *s
 		return err
 	}
 	return m.ReleaseCID(sandboxID)
+}
+
+// Balloon serializes adjustment with pause, checkpoint, and deletion.
+// A nil target only queries the device; a non-nil target is submitted before
+// querying once. Success does not imply that the guest has reached the target.
+func (m *Manager) Balloon(parent context.Context, sandboxID string, target *int64, timeout time.Duration) (runtimeapi.BalloonInfo, error) {
+	var info runtimeapi.BalloonInfo
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || timeout <= 0 || timeout > time.Minute {
+		return info, ErrInvalidArgument.WrapMessage(nil, "sandbox id and a timeout in (0, 60] seconds are required")
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	unlock := m.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return info, err
+	}
+	entry, err := m.loadSandboxEntry(sandboxID)
+	if err != nil {
+		return info, err
+	}
+	if entry.state != StateReady || entry.sbx == nil {
+		return info, ErrFailedPrecondition.WrapMessage(nil, "balloon operations require a READY sandbox")
+	}
+	sbx := entry.sbx
+	if sbx.process == nil {
+		return info, ErrFailedPrecondition.WrapMessage(nil, "sandbox has no VMM process")
+	}
+	if !sbx.vmStartSpec.EnableBalloon {
+		return info, ErrFailedPrecondition.WrapMessage(nil, "balloon device was not enabled at creation")
+	}
+	info.ConfiguredMB = sbx.MemorySizeMB()
+	if target != nil && (*target <= 0 || *target > info.ConfiguredMB) {
+		return info, ErrInvalidArgument.WrapMessage(nil, "target_mb must be positive and no greater than configured RAM")
+	}
+	maxActual := uint64(info.ConfiguredMB) << 20
+	if sbx.vmmName == vmm.StratovirtName {
+		// StratoVirt can include pmem mappings in query-balloon's actual.
+		// Match the whole-MiB sizes rendered by buildStratovirtPmemDevices.
+		for _, path := range sbx.vmStartSpec.PmemPaths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			file, err := os.Stat(path)
+			if err != nil {
+				return info, fmt.Errorf("inspect balloon pmem mapping: %w", err)
+			}
+			size := uint64(file.Size()) >> 20 << 20
+			if size > ^uint64(0)-maxActual {
+				return info, fmt.Errorf("balloon memory limit overflow")
+			}
+			maxActual += size
+		}
+	}
+	if target != nil {
+		// A transport failure can hide an accepted command; do not retain a
+		// previous target as if it were still known to be the current one.
+		sbx.balloonTargetMB = nil
+		if err := sbx.process.SetMemoryTarget(ctx, *target); err != nil {
+			select {
+			case <-sbx.process.Done():
+				return info, ErrRuntimeDead.Wrap(err)
+			default:
+			}
+			return info, fmt.Errorf("balloon command failed; target acceptance may be unknown: %w", err)
+		}
+		requested := *target
+		sbx.balloonTargetMB = &requested
+	}
+	info.TargetMB = sbx.balloonTargetMB
+	select {
+	case <-sbx.process.Done():
+		return info, ErrRuntimeDead.WrapMessage(sbx.process.Err(), "VMM exited during balloon operation")
+	case <-ctx.Done():
+		return info, fmt.Errorf("balloon operation canceled; target may remain active: %w", ctx.Err())
+	default:
+	}
+	actual, err := sbx.process.BalloonActual(ctx)
+	if err != nil {
+		select {
+		case <-sbx.process.Done():
+			return info, ErrRuntimeDead.Wrap(err)
+		default:
+		}
+		return info, fmt.Errorf("observe balloon memory; target may remain active: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return info, fmt.Errorf("balloon operation canceled; target may remain active: %w", err)
+	}
+	if actual > maxActual {
+		return info, fmt.Errorf("VMM reported memory exceeds allowed limit: actual=%d bytes, limit=%d bytes", actual, maxActual)
+	}
+	info.ActualMB = float64(actual) / (1 << 20)
+	return info, nil
 }

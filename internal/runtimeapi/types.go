@@ -29,6 +29,12 @@ type SandboxNetworkUpdateOptions struct {
 	Network   *SandboxNetworkConfig
 }
 
+type BalloonInfo struct {
+	ConfiguredMB int64   `json:"configured_mb"`
+	TargetMB     *int64  `json:"target_mb"`
+	ActualMB     float64 `json:"actual_mb"`
+}
+
 // WebhookCreateOptions describes a Webhook registration for this conchd instance.
 type WebhookCreateOptions struct {
 	Name   string
@@ -65,6 +71,7 @@ type SandboxCreateOptions struct {
 	VCPUNum         int64
 	VCPUMax         int64
 	RamMB           int64
+	EnableBalloon   bool
 	VolumeMounts    []volume.Mount
 	Env             map[string]string
 	Network         *SandboxNetworkConfig
@@ -105,6 +112,7 @@ type SandboxCreateResult struct {
 	TemplateID   string
 	VCPUNum      int64
 	RamMB        int64
+	EnableBalloon bool
 	CreatedAt    int64
 	EnvdVersion  string
 }

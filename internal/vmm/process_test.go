@@ -143,6 +143,14 @@ func (c *blockingDaemonClient) WaitForRestoreReady(context.Context, driver.Proce
 }
 func (c *blockingDaemonClient) Cleanup() { c.cleanupCalls.Add(1) }
 
+func (c *blockingDaemonClient) SetMemoryTarget(context.Context, int64) error {
+	return errors.New("unexpected balloon operation in process lifecycle test")
+}
+
+func (c *blockingDaemonClient) BalloonActual(context.Context) (uint64, error) {
+	return 0, errors.New("unexpected balloon operation in process lifecycle test")
+}
+
 func TestStopIgnoresProcessDoneWhenProcessAlreadyFinished(t *testing.T) {
 	cmd := exec.Command("true")
 	if err := cmd.Start(); err != nil {

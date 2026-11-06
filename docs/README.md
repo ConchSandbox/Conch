@@ -7,6 +7,7 @@
 - [RPM 安装与服务管理](user/rpm-install.md)：通过 RPM 安装并使用 systemd 管理 Conch。
 - [Template 与镜像](user/template.md)：使用 CLI 创建、发布和管理 Template 与镜像。
 - [Python SDK](user/python-sdk.md)：使用 Python 创建和操作 Sandbox。
+- [内存 Balloon](user/balloon.md)：启用 balloon 设备，提交 guest 目标内存并查询当前内存。
 - [AgentENV 集群接入](user/agentenv.md)：单机 SDK 直连与原版 Gateway/Scheduler 集群两种形态，用官方 E2B SDK 操作 Conch Node。
 - [VSOCK 通信](user/vsock.md)：从 guest 连接 StratoVirt host 上的 VSOCK 服务。
 - [Sandbox 域名出站策略](user/egress-security.md)：配置 Envoy、TLS 信任和每个 Sandbox 的 HTTP/HTTPS allow/deny 规则。

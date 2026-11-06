@@ -188,6 +188,7 @@ type CreateRequest struct {
 	VCPUNum         int64
 	VCPUMax         int64
 	RAMMB           int64
+	EnableBalloon   bool
 	AgentToken      string
 	Env             map[string]string
 	VolumeMounts    []volume.Mount

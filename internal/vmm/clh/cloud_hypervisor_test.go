@@ -2,6 +2,11 @@ package clh
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +31,7 @@ func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	client := NewCLHClient(1, "/tmp/conch-clh.sock", binPath)
-	script, err := client.BuildStartCmd(&driver.ResourceArgs{
+	args := &driver.ResourceArgs{
 		CPUBoot:         2,
 		CPUMax:          4,
 		MemorySize:      1024,
@@ -40,7 +45,8 @@ func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
 		SandboxId:       "sandbox-test",
 		EventMonitorFd:  10,
 		ApiSocketFd:     11,
-	}, false)
+	}
+	script, err := client.BuildStartCmd(args, false)
 	if err != nil {
 		t.Fatalf("BuildStartCmd() error = %v", err)
 	}
@@ -58,6 +64,14 @@ func TestBuildStartCmdUsesConchNetNSPath(t *testing.T) {
 	}
 	if strings.Contains(script, pathBinary) {
 		t.Fatalf("script used PATH binary %q instead of configured binary:\n%s", pathBinary, script)
+	}
+	if strings.Contains(script, "--balloon") {
+		t.Fatal("balloon device enabled by default")
+	}
+	args.EnableBalloon = true
+	script, err = client.BuildStartCmd(args, false)
+	if err != nil || !strings.Contains(script, "--balloon size=0") {
+		t.Fatalf("balloon startup: script=%s error=%v", script, err)
 	}
 }
 
@@ -197,4 +211,93 @@ func TestCreateVmmFdsCleanupRemovesSocket(t *testing.T) {
 func TestVmmFdsCleanupNilSafe(t *testing.T) {
 	var fds *VmmFds
 	fds.cleanup()
+}
+
+func TestCLHBalloonCommands(t *testing.T) {
+	resizes := make(chan uint64, 2)
+	socket := balloonHTTPSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/vm.resize":
+			var body struct {
+				Size uint64 `json:"desired_balloon"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			resizes <- body.Size
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/vm.balloon":
+			_, _ = w.Write([]byte(`{"balloon_actual":1073741824}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	client := NewCLHClient(1, socket, "/unused/cloud-hypervisor")
+	client.memoryMB = 4096
+	for _, target := range []int64{1024, 4096} {
+		if err := client.SetMemoryTarget(t.Context(), target); err != nil {
+			t.Fatal(err)
+		}
+		if size := <-resizes; size != uint64(4096-target)<<20 {
+			t.Fatalf("target %d produced balloon size %d", target, size)
+		}
+	}
+	actual, err := client.BalloonActual(t.Context())
+	if err != nil || actual != 3072<<20 {
+		t.Fatalf("actual = %d, error = %v; want 3 GiB", actual, err)
+	}
+}
+
+func TestCLHBalloonRejectsInvalidResponses(t *testing.T) {
+	for _, body := range []string{`{}`, `{"balloon_actual":5368709120}`, "invalid JSON", "device unavailable"} {
+		t.Run(body, func(t *testing.T) {
+			socket := balloonHTTPSocket(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if body == "device unavailable" {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			client := NewCLHClient(1, socket, "/unused/cloud-hypervisor")
+			client.memoryMB = 4096
+			if _, err := client.BalloonActual(t.Context()); err == nil {
+				t.Fatal("accepted an invalid balloon response")
+			} else if body == "device unavailable" && !strings.Contains(err.Error(), body) {
+				t.Fatalf("VMM error detail lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestCLHBalloonCommunicationTimeout(t *testing.T) {
+	release := make(chan struct{})
+	socket := balloonHTTPSocket(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() { close(release) })
+	client := NewCLHClient(1, socket, "/unused/cloud-hypervisor")
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := client.BalloonActual(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("balloon query returned %v after %v", err, time.Since(start))
+	}
+}
+
+func balloonHTTPSocket(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "balloon.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	_ = server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	return path
 }

@@ -160,6 +160,14 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx 
 	rec.RuntimeSnapshots = append([]SnapshotRef(nil), boot.RuntimeSnapshots...)
 	rec.RamMB = boot.Spec.MemorySizeMB
 	vmSpec := boot.Spec
+	if boot.Resume {
+		if req.EnableBalloon && !vmSpec.EnableBalloon {
+			return runtimeapi.SandboxCreateResult{}, ErrFailedPrecondition.WrapMessage(nil, "snapshot has no balloon device")
+		}
+	} else {
+		vmSpec.EnableBalloon = req.EnableBalloon
+	}
+	rec.EnableBalloon = vmSpec.EnableBalloon
 	if m.memOvercommitRatio > 0 {
 		if err = m.reserveRAM(vmSpec.MemorySizeMB); err != nil {
 			return runtimeapi.SandboxCreateResult{}, err
@@ -220,6 +228,7 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest, routeCtx 
 		TemplateName: req.TemplateName, TemplateID: req.TemplateID,
 		VCPUNum: rec.VCPUNum, RamMB: rec.RamMB, CreatedAt: rec.CreatedAt,
 		EnvdVersion: envdVersion,
+		EnableBalloon: rec.EnableBalloon,
 	}, nil
 }
 
@@ -233,6 +242,7 @@ func (m *Manager) writeCreatingRecord(ctx context.Context, req CreateRequest, re
 			SourceTemplateName: req.TemplateName, SourceTemplateID: req.TemplateID,
 			CheckpointHeadTemplateID: req.TemplateID,
 			VCPUNum:                  req.VCPUNum, RamMB: req.RAMMB, Network: req.Network,
+			EnableBalloon: req.EnableBalloon,
 			E2B: req.E2B, TimeoutAction: req.TimeoutAction, AutoResume: req.AutoResume, MaskRequestHost: req.MaskRequestHost,
 			Metadata: cloneStringMap(req.Metadata),
 		})

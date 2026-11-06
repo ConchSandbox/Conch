@@ -185,8 +185,10 @@ func (p *bootPreparer) prepareResolvedBoot(
 	if err != nil {
 		return PreparedBoot{}, fmt.Errorf("failed to prepare boot layout: %w", err)
 	}
+	spec := vmStartSpecFromLayout(layout)
+	spec.EnableBalloon = resolved.EnableBalloon
 	return PreparedBoot{
-		Spec: vmStartSpecFromLayout(layout), Resume: resume,
+		Spec: spec, Resume: resume,
 		RuntimeSnapshots: append([]SnapshotRef(nil), layout.RuntimeSnapshots...),
 	}, nil
 }
