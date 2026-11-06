@@ -48,7 +48,7 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshots, err := s.runtime.ListSandboxSnapshots(r.Context(), query.Get("sandboxID"), query.Get("name"))
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	page := make([]snapshotModel, 0, len(snapshots))

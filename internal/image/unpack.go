@@ -75,7 +75,7 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 		components = append(components, info.MemDescriptor)
 	}
 	components = append(components, info.SandboxDescriptor)
-	ulog.Info("Found components in Boot Index, starting unpack",
+	ulog.WithContext(ctx).Info("Found components in Boot Index, starting unpack",
 		ulog.F("count", len(components)))
 
 	for _, manifestDesc := range components {
@@ -92,7 +92,7 @@ func unpackBootIndexComponents(ctx context.Context, client *containerd.Client, i
 			return nil, err
 		}
 		snapshotMap[kind] = snapshotID
-		ulog.Info("Generated SnapshotID",
+		ulog.WithContext(ctx).Info("Generated SnapshotID",
 			ulog.F("kind", kind),
 			ulog.F("snapshot_id", snapshotID))
 	}

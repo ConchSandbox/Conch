@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	pb "github.com/openeuler/Conch/api/go_proto"
 	agentconnect "github.com/openeuler/Conch/api/go_proto/pbconnect"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -55,11 +56,11 @@ func newAgentHTTPHandler() http.Handler {
 	filePath, fileHandler := agentconnect.NewFileServiceHandler(handler, opts...)
 	mux.Handle(processPath, processHandler)
 	mux.Handle(filePath, fileHandler)
-	return mux
+	return requestid.Middleware(mux)
 }
 
 func handleAgentHealth(w http.ResponseWriter, r *http.Request) {
-	ulog.Info("Received agent health check request")
+	ulog.WithContext(r.Context()).Info("Received agent health check request")
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -135,7 +136,7 @@ func (h *agentConnectHandler) PostFileStream(ctx context.Context, stream *connec
 	if err := verifyConnectAuth(stream.RequestHeader()); err != nil {
 		return nil, err
 	}
-	adapter := &connectPostFileStream{stream: stream}
+	adapter := &connectPostFileStream{ctx: ctx, stream: stream}
 	if err := h.server.PostFileStream(adapter); err != nil {
 		return nil, toConnectError(err)
 	}
@@ -149,7 +150,7 @@ func (h *agentConnectHandler) GetFileStream(ctx context.Context, req *connect.Re
 	if err := verifyConnectAuth(req.Header()); err != nil {
 		return err
 	}
-	return toConnectError(h.server.GetFileStream(req.Msg, &connectFileStream{stream: stream}))
+	return toConnectError(h.server.GetFileStream(req.Msg, &connectFileStream{ctx: ctx, stream: stream}))
 }
 
 func (h *agentConnectHandler) ListFiles(ctx context.Context, req *connect.Request[pb.ListFilesRequest]) (*connect.Response[pb.ListFilesResponse], error) {
@@ -188,9 +189,12 @@ func (s *connectProcessStream) Context() context.Context {
 }
 
 type connectPostFileStream struct {
+	ctx      context.Context
 	stream   *connect.ClientStream[pb.FileChunk]
 	response *pb.PostFilesResponse
 }
+
+func (s *connectPostFileStream) Context() context.Context { return s.ctx }
 
 func (s *connectPostFileStream) Recv() (*pb.FileChunk, error) {
 	if s.stream.Receive() {
@@ -208,8 +212,11 @@ func (s *connectPostFileStream) SendAndClose(resp *pb.PostFilesResponse) error {
 }
 
 type connectFileStream struct {
+	ctx    context.Context
 	stream *connect.ServerStream[pb.FileChunk]
 }
+
+func (s *connectFileStream) Context() context.Context { return s.ctx }
 
 func (s *connectFileStream) Send(chunk *pb.FileChunk) error {
 	return s.stream.Send(chunk)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openeuler/Conch/pkg/requestid"
 )
 
 func TestRegistrySlotLifecycle(t *testing.T) {
@@ -195,10 +196,14 @@ func TestProxyRequestContextCancelsSynchronouslyWithRelease(t *testing.T) {
 	deadline := time.Now().Add(time.Minute)
 	request, cancelRequest := context.WithDeadline(t.Context(), deadline)
 	defer cancelRequest()
+	request = requestid.With(request, "proxy-request-206")
 	proxied, cancel := route.requestContext(request)
 	defer cancel()
 	if got, ok := proxied.Deadline(); !ok || !got.Equal(deadline) {
 		t.Fatalf("request deadline lost: %v, %v", got, ok)
+	}
+	if got := requestid.FromContext(proxied); got != "proxy-request-206" {
+		t.Fatalf("proxy request ID = %q", got)
 	}
 	r.Release(id)
 	// No wait or scheduling yield: removal must return only after the

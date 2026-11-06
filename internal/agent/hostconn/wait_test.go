@@ -13,6 +13,7 @@ import (
 
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 	"golang.org/x/sys/unix"
 )
@@ -118,7 +119,7 @@ func TestWaitReadySendsEnvironmentAndNetwork(t *testing.T) {
 		serverErrCh <- nil
 	}()
 
-	err = WaitReady(context.Background(), ReadyOptions{
+	err = WaitReady(requestid.With(context.Background(), "vsock-request-206"), ReadyOptions{
 		SandboxID:       "sandbox-1",
 		AgentToken:      "token",
 		Env:             map[string]string{"SOME_RANDOM_KEY": "key123"},
@@ -135,6 +136,9 @@ func TestWaitReadySendsEnvironmentAndNetwork(t *testing.T) {
 	}
 
 	request := <-requestCh
+	if request.RequestID != "vsock-request-206" {
+		t.Fatalf("request ID = %q", request.RequestID)
+	}
 	if request.Version != agentprotocol.ProtocolVersion || request.Env["SOME_RANDOM_KEY"] != "key123" {
 		t.Fatalf("initialization request = %#v", request)
 	}

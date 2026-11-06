@@ -57,7 +57,7 @@ func (s *Server) setTimeout(w http.ResponseWriter, r *http.Request, id string) {
 	if _, err := s.runtime.ApplySandboxTTL(ctx, id, sandbox.TTLRequest{
 		TTL: time.Duration(seconds) * time.Second, MaxLifetime: s.config.MaxSandboxTTL,
 	}); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -83,7 +83,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, id string) {
 	if _, err := s.runtime.ApplySandboxTTL(ctx, id, sandbox.TTLRequest{
 		TTL: time.Duration(duration) * time.Second, ExtendOnly: true, MaxLifetime: s.config.MaxSandboxTTL,
 	}); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

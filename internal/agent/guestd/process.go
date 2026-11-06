@@ -20,10 +20,12 @@ import (
 	"connectrpc.com/connect"
 	"github.com/creack/pty"
 	pb "github.com/openeuler/Conch/api/go_proto"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
 type managedProcess struct {
+	ctx        context.Context
 	mu         sync.Mutex
 	cmd        *exec.Cmd
 	cancel     context.CancelFunc
@@ -309,7 +311,7 @@ func (p *managedProcess) finish(exitCode int32, errMsg string) {
 	p.endEvents.Source <- endEvent
 	close(p.endEvents.Source)
 	if droppedOut > 0 {
-		ulog.Warn("dropped process output events because stream subscribers were not draining",
+		ulog.WithContext(p.ctx).Warn("dropped process output events because stream subscribers were not draining",
 			ulog.F("pid", pid),
 			ulog.F("tag", tag),
 			ulog.F("dropped", droppedOut))
@@ -408,12 +410,12 @@ func (s *AgentServer) removeProcess(process *managedProcess) {
 	}
 }
 
-func cleanupTempScript(path string) {
+func cleanupTempScript(ctx context.Context, path string) {
 	if path == "" {
 		return
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		ulog.Warn("failed to remove temporary script", ulog.F("path", path), ulog.F("error", err))
+		ulog.WithContext(ctx).Warn("failed to remove temporary script", ulog.F("path", path), ulog.F("error", err))
 	}
 }
 
@@ -459,7 +461,7 @@ func (s *AgentServer) prepareWorkDir(cwd string) (string, error) {
 }
 
 // Write script file and return script path (if content exists).
-func (s *AgentServer) writeScript(workDir, cmd, content string) (string, error) {
+func (s *AgentServer) writeScript(ctx context.Context, workDir, cmd, content string) (string, error) {
 	if content == "" {
 		return "", nil
 	}
@@ -497,7 +499,7 @@ func (s *AgentServer) writeScript(workDir, cmd, content string) (string, error) 
 			_ = scriptFile.Close()
 		}
 		if !committed {
-			cleanupTempScript(scriptPath)
+			cleanupTempScript(ctx, scriptPath)
 		}
 	}()
 
@@ -701,7 +703,7 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 		return connectError(connect.CodeInvalidArgument, "start process request is required")
 	}
 
-	ulog.Info("Received start process request",
+	ulog.WithContext(ctx).Info("Received start process request",
 		ulog.F("cmd", req.Cmd),
 		ulog.F("args", fmt.Sprintf("%v", req.Args)),
 		ulog.F("cwd", req.Cwd),
@@ -725,14 +727,14 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 
 	// Write script file
-	scriptPath, err := s.writeScript(workDir, req.Cmd, req.Content)
+	scriptPath, err := s.writeScript(ctx, workDir, req.Cmd, req.Content)
 	if err != nil {
 		errMsg := "failed to write script file: " + err.Error()
 		return connectError(connect.CodeInternal, errMsg)
 	}
 	if scriptPath != "" {
 		if !req.Background {
-			defer cleanupTempScript(scriptPath)
+			defer cleanupTempScript(ctx, scriptPath)
 		}
 	}
 
@@ -743,10 +745,10 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 	}
 
 	if req.Background {
-		return s.startBackgroundProcess(req, args, workDir, scriptPath, stream, requestTimeout)
+		return s.startBackgroundProcess(ctx, req, args, workDir, scriptPath, stream, requestTimeout)
 	}
 
-	procCtx, cancelProc := processContext(requestTimeout)
+	procCtx, cancelProc := processContext(ctx, requestTimeout)
 	defer cancelProc()
 
 	// Execute command
@@ -768,13 +770,13 @@ func (s *AgentServer) startProcess(ctx context.Context, req *pb.StartProcessRequ
 	return sendForegroundEnd(stream, int32(exitCode), errMsg)
 }
 
-func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream, requestTimeout time.Duration) error {
+func (s *AgentServer) startBackgroundProcess(ctx context.Context, req *pb.StartProcessRequest, args []string, workDir, scriptPath string, stream processConnectStream, requestTimeout time.Duration) error {
 	if req.Cmd == "" {
-		cleanupTempScript(scriptPath)
+		cleanupTempScript(ctx, scriptPath)
 		return connectError(connect.CodeInvalidArgument, "command is required")
 	}
 
-	procCtx, cancelProc := processContext(requestTimeout)
+	procCtx, cancelProc := processContext(ctx, requestTimeout)
 	cmd := exec.CommandContext(procCtx, req.Cmd, args...)
 	applyCommandEnvAndDir(cmd, workDir, req.Env)
 	configureCommandProcessGroup(cmd, req.Pty != nil)
@@ -783,6 +785,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 	}
 
 	process := &managedProcess{
+		ctx:    procCtx,
 		cmd:    cmd,
 		cancel: cancelProc,
 		info: &pb.ProcessInfo{
@@ -819,7 +822,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 				dataCancel()
 				endCancel()
 				cancelProc()
-				cleanupTempScript(scriptPath)
+				cleanupTempScript(ctx, scriptPath)
 				return connectError(connect.CodeAlreadyExists, "background process tag already exists: "+req.Tag)
 			}
 		}
@@ -828,7 +831,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 			dataCancel()
 			endCancel()
 			cancelProc()
-			cleanupTempScript(scriptPath)
+			cleanupTempScript(ctx, scriptPath)
 			return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 		}
 		process.info.Pid = int32(cmd.Process.Pid)
@@ -844,7 +847,7 @@ func (s *AgentServer) startBackgroundProcess(req *pb.StartProcessRequest, args [
 		dataCancel()
 		endCancel()
 		cancelProc()
-		cleanupTempScript(scriptPath)
+		cleanupTempScript(ctx, scriptPath)
 		return connectErrorf(connect.CodeInvalidArgument, "failed to start background process: %v", err)
 	}
 	process.info.Pid = int32(cmd.Process.Pid)
@@ -878,12 +881,14 @@ func determineTimeoutFromHeader(header http.Header) (time.Duration, error) {
 	return time.Duration(timeout) * time.Millisecond, nil
 }
 
-func processContext(requestTimeout time.Duration) (context.Context, context.CancelFunc) {
+func processContext(parent context.Context, requestTimeout time.Duration) (context.Context, context.CancelFunc) {
 	// Keep process lifetime independent from RPC cancellation, matching E2B behavior.
+	// Retain only source identity so background work does not retain the HTTP request.
+	ctx := requestid.With(context.Background(), requestid.FromContext(parent))
 	if requestTimeout > 0 {
-		return context.WithTimeout(context.Background(), requestTimeout)
+		return context.WithTimeout(ctx, requestTimeout)
 	}
-	return context.WithCancel(context.Background())
+	return context.WithCancel(ctx)
 }
 
 func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
@@ -915,7 +920,7 @@ func startManagedProcess(process *managedProcess, ptyConfig *pb.PTY) error {
 				return
 			}
 			if readErr != nil {
-				ulog.Warn("failed to read process pty", ulog.F("error", readErr))
+				ulog.WithContext(process.ctx).Warn("failed to read process pty", ulog.F("error", readErr))
 				return
 			}
 		}
@@ -932,7 +937,7 @@ func (s *AgentServer) waitManagedProcess(p *managedProcess) {
 		select {
 		case <-p.outputDone:
 		case <-time.After(500 * time.Millisecond):
-			ulog.Warn("timed out waiting for process output reader",
+			ulog.WithContext(p.ctx).Warn("timed out waiting for process output reader",
 				ulog.F("pid", p.info.Pid),
 				ulog.F("tag", p.info.Tag))
 			if p.tty != nil {
@@ -954,7 +959,7 @@ func (s *AgentServer) waitManagedProcess(p *managedProcess) {
 		errMsg = waitErr.Error()
 	}
 	if p.tempScript != "" {
-		cleanupTempScript(p.tempScript)
+		cleanupTempScript(p.ctx, p.tempScript)
 	}
 	s.removeProcess(p)
 	p.finish(exitCode, errMsg)
@@ -990,7 +995,7 @@ func (s *AgentServer) findProcess(selector *pb.ProcessSelector) (*managedProcess
 
 func (s *AgentServer) Connect(req *pb.ConnectProcessRequest, stream processConnectStream) error {
 	selector := req.GetProcess()
-	ulog.Info("Received connect process request",
+	ulog.WithContext(stream.Context()).Info("Received connect process request",
 		ulog.F("pid", selector.GetPid()),
 		ulog.F("tag", selector.GetTag()))
 
@@ -1024,7 +1029,7 @@ func (s *AgentServer) streamManagedProcessEvents(
 	tag := process.info.Tag
 	process.mu.Unlock()
 
-	ulog.Info("Connected to background process",
+	ulog.WithContext(stream.Context()).Info("Connected to background process",
 		ulog.F("pid", pid),
 		ulog.F("tag", tag))
 
@@ -1062,7 +1067,7 @@ dataLoop:
 }
 
 func (s *AgentServer) List(ctx context.Context, req *pb.ListProcessesRequest) (*pb.ListProcessesResponse, error) {
-	ulog.Info("Received list processes request")
+	ulog.WithContext(ctx).Info("Received list processes request")
 
 	s.processMu.Lock()
 	defer s.processMu.Unlock()
@@ -1073,7 +1078,7 @@ func (s *AgentServer) List(ctx context.Context, req *pb.ListProcessesRequest) (*
 		info := process.snapshot()
 		resp.Processes = append(resp.Processes, info)
 	}
-	ulog.Info("Listed background processes",
+	ulog.WithContext(ctx).Info("Listed background processes",
 		ulog.F("count", len(resp.Processes)))
 	return resp, nil
 }
@@ -1084,7 +1089,7 @@ func (s *AgentServer) SendSignal(ctx context.Context, req *pb.SendSignalRequest)
 	}
 
 	selector := req.GetProcess()
-	ulog.Info("Received send signal request",
+	ulog.WithContext(ctx).Info("Received send signal request",
 		ulog.F("pid", selector.GetPid()),
 		ulog.F("tag", selector.GetTag()),
 		ulog.F("signal", req.GetSignal()))
@@ -1115,7 +1120,7 @@ func (s *AgentServer) SendSignal(ctx context.Context, req *pb.SendSignalRequest)
 		}
 		return nil, connectErrorf(connect.CodeInternal, "failed to signal process: %v", err)
 	}
-	ulog.Info("Sent signal to background process",
+	ulog.WithContext(ctx).Info("Sent signal to background process",
 		ulog.F("pid", pid),
 		ulog.F("tag", tag),
 		ulog.F("signal", sig))

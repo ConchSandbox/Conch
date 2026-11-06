@@ -69,14 +69,14 @@ func (m *Manager) Checkpoint(parent context.Context, sandboxID string, register 
 		if errors.Is(err, ErrCheckpointResume) {
 			return CheckpointResult{}, errors.Join(err, m.undoSuspendedCheckpoint(ctx, sandboxID, entry, rec))
 		}
-		m.restoreRoute(rec)
+		m.restoreRoute(ctx, rec)
 		return CheckpointResult{}, err
 	}
 	defer txn.release()
 	defer os.RemoveAll(txn.captured.MemRootPath)
 	// The capture already resumed the runtime: serve traffic again while the
 	// head move and the registration proceed.
-	m.restoreRoute(rec)
+	m.restoreRoute(ctx, rec)
 
 	previousHeadStartedAt, previousHeadCreatedAt := rec.HeadStartedAt, rec.HeadCreatedAt
 	rec.CheckpointHeadTemplateID = txn.result.BootIndexDigest
@@ -140,7 +140,7 @@ func (m *Manager) beginCheckpoint(ctx context.Context, sandboxID string, entry *
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
 			defer cancel()
 			if err := done(containerdclient.NewNamespaceContext(cleanupCtx)); err != nil {
-				ulog.GetLogger().Warn("failed to release checkpoint lease", ulog.F("error", err))
+				ulog.WithContext(cleanupCtx).Warn("failed to release checkpoint lease", ulog.F("error", err))
 			}
 		},
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/openeuler/Conch/internal/apperror"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -116,6 +117,9 @@ func writeErrorResponse(w http.ResponseWriter, status int, response apiErrorResp
 func writeAPIError(w http.ResponseWriter, err error, fields ...ulog.Field) {
 	status, response := classifyAPIError(err)
 	if status >= http.StatusInternalServerError {
+		if id := w.Header().Get(requestid.Header); requestid.Valid(id) {
+			fields = append(fields, ulog.F("request_id", id))
+		}
 		fields = append([]ulog.Field{
 			ulog.F("status_code", status),
 			ulog.F("error_code", response.Code),

@@ -54,7 +54,7 @@ func (s *Server) checkpoint(w http.ResponseWriter, r *http.Request, id string) {
 	defer cancel()
 	rec, err := s.runtime.GetSandbox(ctx, id)
 	if err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	if !rec.E2B {
@@ -74,7 +74,7 @@ func (s *Server) checkpoint(w http.ResponseWriter, r *http.Request, id string) {
 		opts.Labels = map[string]string{conchruntime.SnapshotAliasLabel: name}
 	}
 	if _, err := s.runtime.CheckpointSandbox(ctx, opts); err != nil {
-		s.runtimeError(w, err)
+		s.runtimeError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, checkpointResponse{SnapshotID: name, Names: names})

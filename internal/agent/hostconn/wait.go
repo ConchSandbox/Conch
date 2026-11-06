@@ -14,6 +14,7 @@ import (
 
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -24,6 +25,7 @@ const (
 )
 
 type ReadyOptions struct {
+	RequestID       string
 	SandboxID       string
 	AgentToken      string
 	Env             map[string]string
@@ -42,8 +44,9 @@ type initConn interface {
 }
 
 func WaitReady(ctx context.Context, opts ReadyOptions) error {
-	defer ulog.TraceCost(ulog.TraceStart(), opts.SandboxID, "WaitReady()")
-	logger := ulog.GetLogger()
+	defer ulog.TraceCostContext(ctx, ulog.TraceStart(), opts.SandboxID, "WaitReady()")
+	logger := ulog.WithContext(ctx)
+	opts.RequestID = requestid.FromContext(ctx)
 	request, err := ValidateReadyRequest(opts)
 	if err != nil {
 		return err
@@ -62,6 +65,9 @@ func WaitReady(ctx context.Context, opts ReadyOptions) error {
 
 // ValidateReadyPreflight checks initialization data available before sandbox creation.
 func ValidateReadyPreflight(opts ReadyOptions) error {
+	if opts.RequestID != "" && !requestid.Valid(opts.RequestID) {
+		return fmt.Errorf("invalid request ID")
+	}
 	if opts.SandboxID == "" {
 		return fmt.Errorf("sandbox ID is required")
 	}
@@ -72,6 +78,7 @@ func ValidateReadyPreflight(opts ReadyOptions) error {
 		return err
 	}
 	request := agentprotocol.InitRequest{
+		RequestID:  opts.RequestID,
 		Version:    agentprotocol.ProtocolVersion,
 		SandboxID:  opts.SandboxID,
 		AgentToken: opts.AgentToken,
@@ -93,6 +100,7 @@ func ValidateReadyRequest(opts ReadyOptions) (agentprotocol.InitRequest, error) 
 		return agentprotocol.InitRequest{}, fmt.Errorf("invalid guest network config: %w", err)
 	}
 	request := agentprotocol.InitRequest{
+		RequestID:  opts.RequestID,
 		Version:    agentprotocol.ProtocolVersion,
 		SandboxID:  opts.SandboxID,
 		AgentToken: opts.AgentToken,
@@ -140,6 +148,11 @@ func waitReady(ctx context.Context, opts ReadyOptions, request agentprotocol.Ini
 			}
 			if errors.Is(err, errInitRejected) {
 				return err
+			}
+			if errors.Is(err, errInitMetadataUnsupported) {
+				// Older guests reject unknown JSON fields and close the connection
+				// before returning a frame. Use the legacy message on later retries.
+				request.RequestID = ""
 			}
 			lastErr = err
 			time.Sleep(opts.Retry)
@@ -261,6 +274,9 @@ func exchangeInit(conn initConn, request agentprotocol.InitRequest, sandboxID st
 	_ = conn.SetReadDeadline(time.Now().Add(vsockReadTimeout))
 	var response agentprotocol.InitResponse
 	if err := agentprotocol.ReadFrame(conn, &response); err != nil {
+		if request.RequestID != "" && errors.Is(err, io.EOF) {
+			return fmt.Errorf("%w: %v", errInitMetadataUnsupported, err)
+		}
 		return fmt.Errorf("read initialization response: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -281,6 +297,7 @@ func exchangeInit(conn initConn, request agentprotocol.InitRequest, sandboxID st
 
 var errVsockUnsupported = errors.New("AF_VSOCK unsupported on host")
 var errInitRejected = errors.New("agent initialization rejected")
+var errInitMetadataUnsupported = errors.New("guest closed initialization before accepting metadata")
 
 func isVsockUnsupported(err error) bool {
 	return errors.Is(err, unix.EAFNOSUPPORT) ||

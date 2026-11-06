@@ -35,6 +35,15 @@ type getFileStream interface {
 	Send(*pb.FileChunk) error
 }
 
+// streamContext also supports in-process stream implementations that predate
+// context propagation. The Connect adapters always supply the RPC context.
+func streamContext(stream any) context.Context {
+	if s, ok := stream.(interface{ Context() context.Context }); ok {
+		return s.Context()
+	}
+	return context.Background()
+}
+
 func connectError(code connect.Code, msg string) error {
 	return connect.NewError(code, errors.New(msg))
 }

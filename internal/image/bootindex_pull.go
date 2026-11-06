@@ -48,7 +48,7 @@ func WithPulledBootIndex(
 		)
 		defer cancel()
 		if err := done(cleanupCtx); err != nil {
-			ulog.GetLogger().Warn("failed to remove Boot Index pull lease", ulog.F("error", err))
+			ulog.WithContext(ctx).Warn("failed to remove Boot Index pull lease", ulog.F("error", err))
 		}
 	}()
 	resolver := docker.NewResolver(docker.ResolverOptions{
@@ -105,7 +105,7 @@ func WithPulledBootIndex(
 			retErr = errors.Join(retErr, cleanupErr)
 			return
 		}
-		ulog.GetLogger().Warn("failed to remove temporary Boot Index pull image record",
+		ulog.WithContext(ctx).Warn("failed to remove temporary Boot Index pull image record",
 			ulog.F("image", fetched.Name),
 			ulog.F("error", cleanupErr))
 	}()

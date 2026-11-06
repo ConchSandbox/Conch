@@ -25,6 +25,7 @@ import (
 	"github.com/openeuler/Conch/internal/cluster"
 	"github.com/openeuler/Conch/internal/conchruntime"
 	"github.com/openeuler/Conch/internal/config"
+	"github.com/openeuler/Conch/internal/e2bapi"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
@@ -34,6 +35,7 @@ import (
 	"github.com/openeuler/Conch/internal/util"
 	"github.com/openeuler/Conch/internal/volume"
 	"github.com/openeuler/Conch/internal/webhook"
+	"github.com/openeuler/Conch/pkg/requestid"
 	"github.com/openeuler/Conch/pkg/ulog"
 )
 
@@ -60,6 +62,7 @@ type Daemon struct {
 	cleanupOnce       sync.Once
 	proxyRoutes       *sandboxproxy.Registry
 	e2bServer         *http.Server
+	e2bHandler        *e2bapi.Server
 	e2bListenAddr     string
 	reporter          *cluster.Reporter
 	e2bLifecycleMu    sync.Mutex
@@ -270,7 +273,7 @@ func (s *Daemon) routes() {
 
 func newHTTPServer(h http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           h,
+		Handler:           requestid.Middleware(h),
 		ReadHeaderTimeout: serverReadHeaderTimeout,
 		IdleTimeout:       serverIdleTimeout,
 		MaxHeaderBytes:    serverMaxHeaderBytes,
@@ -414,7 +417,7 @@ func (s *Daemon) controlPlaneReady() bool {
 }
 
 func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling create sandbox request")
 
 	if r.Method != http.MethodPost {
@@ -426,7 +429,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	defer ulog.TraceCost(ulog.TraceStart(), req.SandboxID, "handleCreateSandbox()")
+	defer ulog.TraceCostContext(r.Context(), ulog.TraceStart(), req.SandboxID, "handleCreateSandbox()")
 	if req.RAMMB != 0 && req.RAMMB < minimumSandboxRAMMB {
 		message := fmt.Sprintf("ram_mb must be at least %d, got %d", minimumSandboxRAMMB, req.RAMMB)
 		writeAPIError(w, conchsandbox.ErrInvalidArgument.WrapMessage(errors.New(message), message))
@@ -464,7 +467,7 @@ func (s *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 // Webhook management handlers configure the daemon-local in-memory dispatcher.
 func (s *Daemon) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling create webhook request")
 
 	if s.webhookDispatcher == nil {
@@ -489,7 +492,7 @@ func (s *Daemon) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling list webhooks request")
 
 	if s.webhookDispatcher == nil {
@@ -515,7 +518,7 @@ func webhookResponseFromRecord(record runtimeapi.WebhookRecord) webhookResponse 
 }
 
 func (s *Daemon) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	webhookID := strings.TrimSpace(r.PathValue("webhookID"))
 	logger.Debug("Handling delete webhook request", ulog.F("webhook_id", webhookID))
 
@@ -567,7 +570,7 @@ func (s *Daemon) handleUpdateSandboxNetwork(w http.ResponseWriter, r *http.Reque
 
 func (s *Daemon) handleDeleteSandbox(w http.ResponseWriter, r *http.Request) {
 	sandboxID := r.PathValue("sandboxID")
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling delete sandbox request", ulog.F("sandbox_id", sandboxID))
 
 	if r.Method != http.MethodDelete {
@@ -741,7 +744,7 @@ func formatUnixNanoRFC3339(timestamp int64) string {
 }
 
 func (s *Daemon) handleSuspendSandbox(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling suspend sandbox request")
 
 	if r.Method != http.MethodPost {
@@ -1107,7 +1110,7 @@ func (s *Daemon) handleRemoveTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling pull image request")
 
 	if r.Method != http.MethodPost {
@@ -1140,7 +1143,7 @@ func (s *Daemon) handlePullImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling push image request")
 
 	if r.Method != http.MethodPost {
@@ -1180,7 +1183,7 @@ func (s *Daemon) handlePushImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling list image request")
 
 	if r.Method != http.MethodPost {
@@ -1208,7 +1211,7 @@ func (s *Daemon) handleListImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling remove image request")
 
 	if r.Method != http.MethodPost {
@@ -1353,7 +1356,7 @@ func (s *Daemon) handleSnapshotInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling list snapshot request")
 
 	if r.Method != http.MethodPost {
@@ -1381,7 +1384,7 @@ func (s *Daemon) handleListSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Daemon) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
-	logger := ulog.GetLogger()
+	logger := ulog.WithContext(r.Context())
 	logger.Debug("Handling remove snapshot request")
 
 	if r.Method != http.MethodPost {
