@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -516,6 +517,35 @@ func TestConnectCancelDuringResume(t *testing.T) {
 	}
 }
 
+// pausedConnectBarrierStore holds the initial reads until every competing
+// handler has observed PAUSED. Launching goroutines alone does not guarantee
+// that precondition: a late request may legitimately observe READY and get 200.
+type pausedConnectBarrierStore struct {
+	sandbox.Store
+	id    string
+	want  int32
+	reads atomic.Int32
+	ready chan struct{}
+}
+
+func (s *pausedConnectBarrierStore) Get(ctx context.Context, id string) (sandbox.Record, error) {
+	rec, err := s.Store.Get(ctx, id)
+	if err != nil || id != s.id || rec.State != sandbox.StatePaused {
+		return rec, err
+	}
+	if n := s.reads.Add(1); n <= s.want {
+		if n == s.want {
+			close(s.ready)
+		}
+		select {
+		case <-s.ready:
+		case <-ctx.Done():
+			return sandbox.Record{}, ctx.Err()
+		}
+	}
+	return rec, nil
+}
+
 // TestConcurrentConnectOnPausedSandbox covers the connect race: two requests
 // that both read the PAUSED record both dispatch a resume, the winner restores
 // it, and the loser succeeds as the joined request — both answer 201 and the
@@ -524,10 +554,13 @@ func TestConcurrentConnectOnPausedSandbox(t *testing.T) {
 	service, routes := testRuntime(t)
 	runtime := &fakeSandboxRuntime{store: service.Store}
 	service.Sandbox = runtime
-	server := testServer(t, service, routes)
 
 	paused := seedPausedRecord(t, service.Store, digest.FromString("head-race").String())
 	const requests = 2
+	service.Store = &pausedConnectBarrierStore{
+		Store: service.Store, id: paused.ID, want: requests, ready: make(chan struct{}),
+	}
+	server := testServer(t, service, routes)
 	type response struct {
 		status int
 		body   []byte
