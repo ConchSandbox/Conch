@@ -24,8 +24,8 @@ const guestEgressCAPath = "/etc/conch/egress-ca.crt"
 
 var guestTrustBundlePaths = []string{
 	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // CentOS/RHEL-family extracted bundle.
-	"/etc/pki/tls/certs/ca-bundle.crt",                 // Fedora/RHEL-family bundle or compatibility link.
-	"/etc/ssl/certs/ca-certificates.crt",              // Debian/Ubuntu-family bundle.
+	"/etc/pki/tls/certs/ca-bundle.crt",                  // Fedora/RHEL-family bundle or compatibility link.
+	"/etc/ssl/certs/ca-certificates.crt",                // Debian/Ubuntu-family bundle.
 }
 
 // applyGuestNetworkConfig configures a cold guest or validates restored state.
