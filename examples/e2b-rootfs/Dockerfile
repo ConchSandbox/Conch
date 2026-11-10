@@ -99,6 +99,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         shadow \
         sudo \
         which \
+        zeromq-devel \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -141,7 +142,9 @@ RUN chmod +x /root/.jupyter/jupyter-healthcheck.sh \
     fi \
     && /root/.server/.venv/bin/pip install --no-cache-dir -r /root/.server/requirements.txt \
     && /root/.server/.venv/bin/python -m ipykernel install --name python3 --display-name "Python 3 (ipykernel)" \
-    && npm install -g ijavascript@5.2.1 \
+    && npm_config_zmq_external=true npm install -g ijavascript@5.2.1 \
+    && NODE_PATH="$(npm root -g)/ijavascript/node_modules" \
+        node -e "const zmq = require('zeromq'); console.log('libzmq', zmq.version)" \
     && ijsinstall --install=global \
     && chown -R root:root /root/.server /root/.jupyter /root/.config /root/.ipython \
     && chown -R user:user /home/user \
