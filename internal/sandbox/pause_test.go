@@ -419,13 +419,22 @@ func vmmResumeEntry(t *testing.T, status *atomic.Int32) (*sandboxEntry, *atomic.
 func vmmStopFailureEntry(t *testing.T, ignoreTerm bool, deleteStatus, resumeStatus int) (*sandboxEntry, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\nexec sleep 60\n"
+	// This fixture exercises process-stop recovery, not network namespace entry.
+	// Keep the real process and control socket without requiring CAP_SYS_ADMIN
+	// on hosted runners, even when entering the caller's own namespace.
+	nsenter := "#!/bin/sh\nset -eu\n[ \"$1\" = \"--net=/proc/self/ns/net\" ]\n[ \"$2\" = \"--\" ]\nshift 2\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "nsenter"), []byte(nsenter), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ready := filepath.Join(dir, "ready")
+	script := "#!/bin/sh\nprintf ready > \"" + ready + "\"\nexec sleep 60\n"
 	if ignoreTerm {
 		fifo := filepath.Join(dir, "hold.fifo")
 		if err := unix.Mkfifo(fifo, 0600); err != nil {
 			t.Fatal(err)
 		}
-		script = "#!/bin/sh\ntrap '' TERM\nread x < \"" + fifo + "\"\n"
+		script = "#!/bin/sh\ntrap '' TERM\nprintf ready > \"" + ready + "\"\nread x < \"" + fifo + "\"\n"
 	}
 	scriptPath := filepath.Join(dir, "vmm.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
@@ -440,7 +449,11 @@ func vmmStopFailureEntry(t *testing.T, ignoreTerm bool, deleteStatus, resumeStat
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = unix.Kill(process.Pid(), unix.SIGKILL) })
+	t.Cleanup(func() {
+		if pid := process.Pid(); pid > 0 {
+			_ = unix.Kill(pid, unix.SIGKILL)
+		}
+	})
 	// The booted event is buffered into the event socket before Create closes
 	// the parent's copy of the child side.
 	if _, err := unix.Write(args.EventMonitorFd, []byte(`{"source":"vm","event":"booted"}`+"\n")); err != nil {
@@ -475,6 +488,20 @@ func vmmStopFailureEntry(t *testing.T, ignoreTerm bool, deleteStatus, resumeStat
 	defer cancel()
 	if err := process.Create(createCtx); err != nil {
 		t.Fatal(err)
+	}
+	// The synthetic boot event may arrive before the child installs its TERM
+	// handler. Wait for the child itself before testing the stop-failure window.
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		select {
+		case <-createCtx.Done():
+			t.Fatal("fake VMM did not become ready: ", createCtx.Err())
+		case <-time.After(time.Millisecond):
+		}
 	}
 	return &sandboxEntry{state: StateReady, sbx: &Sandbox{process: process}}, resumeHits, deleteHits
 }
@@ -795,7 +822,7 @@ func TestPauseCommitFailureDegradesWhenResumeFails(t *testing.T) {
 	ctx := context.Background()
 
 	err := m.Pause(ctx, "sandbox-a", time.Time{})
-	if !strings.Contains(err.Error(), "failed to stop VMM") {
+	if err == nil || !strings.Contains(err.Error(), "failed to stop VMM") {
 		t.Fatalf("Pause() error = %v, want the stop failure", err)
 	}
 	if !strings.Contains(err.Error(), "failed to resume VM") {
